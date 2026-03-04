@@ -21,9 +21,9 @@ jobs:
           node-version: "20"
 
       - name: Install ClawHub CLI
-        run: npm i -g @openclaw/clawhub
+        run: npm i -g clawhub
 
       - name: Publish skills
         env:
           CLAWHUB_TOKEN: ${{ secrets.CLAWHUB_TOKEN }}
-        run: clawhub sync --dir skills --yes
+        run: clawhub sync --root skills --all
