@@ -6,7 +6,16 @@ on:
     paths:
       - "skills/**"
       - ".github/workflows/publish-skills.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "skills/**"
+      - ".github/workflows/publish-skills.yml"
   workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
 
 jobs:
   publish:
@@ -21,9 +30,18 @@ jobs:
           node-version: "20"
 
       - name: Install ClawHub CLI
-        run: npm i -g clawhub
+        run: npm i -g clawhub@0.7.0
 
       - name: Publish skills
         env:
           CLAWHUB_TOKEN: ${{ secrets.CLAWHUB_TOKEN }}
-        run: clawhub sync --root skills --all
+        run: |
+          if [ -z "$CLAWHUB_TOKEN" ]; then
+            echo "::error::CLAWHUB_TOKEN secret is not set"
+            exit 1
+          fi
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            clawhub sync --root skills --all --dry-run
+          else
+            clawhub sync --root skills --all
+          fi
