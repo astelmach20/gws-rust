@@ -52,6 +52,10 @@ Shortcut commands for common operations.
 | [gws-docs-write](../skills/gws-docs-write/SKILL.md) | Google Docs: Append text to a document. |
 | [gws-chat-send](../skills/gws-chat-send/SKILL.md) | Google Chat: Send a message to a space. |
 | [gws-apps-script-push](../skills/gws-apps-script-push/SKILL.md) | Google Apps Script: Upload local files to an Apps Script project. |
+| [gws-apps-script-pull](../skills/gws-apps-script-pull/SKILL.md) | Google Apps Script: Download project files to local directory. |
+| [gws-apps-script-open](../skills/gws-apps-script-open/SKILL.md) | Google Apps Script: Open the script editor in your browser. |
+| [gws-apps-script-run](../skills/gws-apps-script-run/SKILL.md) | Google Apps Script: Execute a function in the script. |
+| [gws-apps-script-logs](../skills/gws-apps-script-logs/SKILL.md) | Google Apps Script: View execution logs for the script. |
 | [gws-events-subscribe](../skills/gws-events-subscribe/SKILL.md) | Google Workspace Events: Subscribe to Workspace events and stream them as NDJSON. |
 | [gws-events-renew](../skills/gws-events-renew/SKILL.md) | Google Workspace Events: Renew/reactivate Workspace Events subscriptions. |
 | [gws-modelarmor-sanitize-prompt](../skills/gws-modelarmor-sanitize-prompt/SKILL.md) | Google Model Armor: Sanitize a user prompt through a Model Armor template. |

@@ -23,6 +23,10 @@ gws apps-script <resource> <method> [flags]
 | Command | Description |
 |---------|-------------|
 | [`+push`](../gws-apps-script-push/SKILL.md) | Upload local files to an Apps Script project |
+| [`+pull`](../gws-apps-script-pull/SKILL.md) | Download project files to local directory |
+| [`+open`](../gws-apps-script-open/SKILL.md) | Open the script editor in your browser |
+| [`+run`](../gws-apps-script-run/SKILL.md) | Execute a function in the script |
+| [`+logs`](../gws-apps-script-logs/SKILL.md) | View execution logs for the script |
 
 ## API Resources
 

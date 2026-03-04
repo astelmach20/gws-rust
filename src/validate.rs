@@ -207,6 +207,67 @@ pub fn validate_resource_name(s: &str) -> Result<&str, GwsError> {
     Ok(s)
 }
 
+/// Validates an Apps Script file name from the API for safe use as a local filename.
+///
+/// This is critical for `+pull` — the API returns `name` fields that become
+/// filenames on disk. A malicious script project could set names like
+/// `../../.ssh/authorized_keys` to escape the target directory.
+///
+/// Rejects:
+/// - Empty names
+/// - Names containing `/` or `\` (directory separators)
+/// - Names containing `..` (path traversal)
+/// - Names starting with `.` (hidden files)
+/// - Names with null bytes or control characters
+/// - Names with characters outside `[a-zA-Z0-9_-]`
+pub fn validate_script_filename(name: &str) -> Result<&str, GwsError> {
+    if name.is_empty() {
+        return Err(GwsError::Validation(
+            "Script file name must not be empty".to_string(),
+        ));
+    }
+
+    // Reject control characters and null bytes
+    if name.bytes().any(|b| b < 0x20) {
+        return Err(GwsError::Validation(format!(
+            "Script file name contains invalid control characters: {name}"
+        )));
+    }
+
+    // Reject directory separators
+    if name.contains('/') || name.contains('\\') {
+        return Err(GwsError::Validation(format!(
+            "Script file name must not contain directory separators: {name}"
+        )));
+    }
+
+    // Reject path traversal
+    if name.contains("..") {
+        return Err(GwsError::Validation(format!(
+            "Script file name must not contain '..': {name}"
+        )));
+    }
+
+    // Reject hidden files
+    if name.starts_with('.') {
+        return Err(GwsError::Validation(format!(
+            "Script file name must not start with '.': {name}"
+        )));
+    }
+
+    // Allowlist: only alphanumeric, underscore, hyphen
+    if !name
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    {
+        return Err(GwsError::Validation(format!(
+            "Script file name contains invalid characters (allowed: a-z, A-Z, 0-9, _, -): {name}"
+        )));
+    }
+
+    Ok(name)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -470,5 +531,53 @@ mod tests {
         assert!(validate_resource_name("spaces/%2e%2e/etc").is_err());
         // Just % should be rejected too
         assert!(validate_resource_name("spaces/100%").is_err());
+    }
+
+    // -- validate_script_filename ---------------------------------------------
+
+    #[test]
+    fn test_validate_script_filename_clean() {
+        assert!(validate_script_filename("Code").is_ok());
+        assert!(validate_script_filename("Utils").is_ok());
+        assert!(validate_script_filename("appsscript").is_ok());
+        assert!(validate_script_filename("my-lib").is_ok());
+        assert!(validate_script_filename("helper_2").is_ok());
+    }
+
+    #[test]
+    fn test_validate_script_filename_traversal() {
+        assert!(validate_script_filename("../evil").is_err());
+        assert!(validate_script_filename("..").is_err());
+        assert!(validate_script_filename("foo..bar").is_err());
+    }
+
+    #[test]
+    fn test_validate_script_filename_hidden() {
+        assert!(validate_script_filename(".evil").is_err());
+        assert!(validate_script_filename(".ssh").is_err());
+    }
+
+    #[test]
+    fn test_validate_script_filename_slashes() {
+        assert!(validate_script_filename("foo/bar").is_err());
+        assert!(validate_script_filename("foo\\bar").is_err());
+    }
+
+    #[test]
+    fn test_validate_script_filename_control_chars() {
+        assert!(validate_script_filename("foo\0bar").is_err());
+        assert!(validate_script_filename("foo\nbar").is_err());
+    }
+
+    #[test]
+    fn test_validate_script_filename_empty() {
+        assert!(validate_script_filename("").is_err());
+    }
+
+    #[test]
+    fn test_validate_script_filename_special_chars() {
+        assert!(validate_script_filename("foo bar").is_err()); // space
+        assert!(validate_script_filename("foo@bar").is_err()); // @
+        assert!(validate_script_filename("foo.bar").is_err()); // dot (not start)
     }
 }

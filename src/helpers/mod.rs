@@ -18,6 +18,7 @@ use std::future::Future;
 use std::pin::Pin;
 pub mod calendar;
 pub mod chat;
+pub mod clasp_config;
 pub mod docs;
 pub mod drive;
 pub mod events;

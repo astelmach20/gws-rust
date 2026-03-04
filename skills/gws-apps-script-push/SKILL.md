@@ -19,21 +19,22 @@ Upload local files to an Apps Script project
 ## Usage
 
 ```bash
-gws apps-script +push --script <ID>
+gws apps-script +push
 ```
 
 ## Flags
 
 | Flag | Required | Default | Description |
 |------|----------|---------|-------------|
-| `--script` | ✓ | — | Script Project ID |
-| `--dir` | — | — | Directory containing script files (defaults to current dir) |
+| `--script` | — | — | Script Project ID (reads .clasp.json if omitted) |
+| `--dir` | — | — | Directory containing script files (reads .clasp.json rootDir, or defaults to current dir) |
 
 ## Examples
 
 ```bash
 gws script +push --script SCRIPT_ID
 gws script +push --script SCRIPT_ID --dir ./src
+gws script +push                        # uses .clasp.json
 ```
 
 ## Tips
