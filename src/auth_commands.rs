@@ -213,24 +213,27 @@ impl yup_oauth2::authenticator_delegate::InstalledFlowDelegate for CliFlowDelega
                     .read_line(&mut user_input)
                     .map_err(|e| format!("Failed to read code: {e}"))?;
 
-                let input = user_input.trim();
-
-                // If they pasted a full URL (e.g. http://localhost/?code=4/0Aea...&scope=...)
-                if let Ok(parsed_url) = reqwest::Url::parse(input) {
-                    for (k, v) in parsed_url.query_pairs() {
-                        if k == "code" {
-                            return Ok(v.to_string());
-                        }
-                    }
-                }
-
-                // Otherwise, assume they pasted just the code
-                Ok(input.to_string())
+                Ok(extract_code_from_input(&user_input))
             } else {
                 Ok(String::new())
             }
         })
     }
+}
+
+/// Extracts the authorization code from user input. If the input is a full URL,
+/// it parses the URL and extracts the `code` query parameter. Otherwise, it
+/// assumes the entire input (trimmed) is the authorization code.
+fn extract_code_from_input(input: &str) -> String {
+    let input = input.trim();
+    if let Ok(parsed_url) = reqwest::Url::parse(input) {
+        for (k, v) in parsed_url.query_pairs() {
+            if k == "code" {
+                return v.to_string();
+            }
+        }
+    }
+    input.to_string()
 }
 
 async fn handle_login(args: &[String]) -> Result<(), GwsError> {
@@ -2227,5 +2230,31 @@ mod tests {
     fn mask_secret_boundary() {
         // Exactly 9 chars — first 4 + last 4 with "..." in between
         assert_eq!(mask_secret("123456789"), "1234...6789");
+    }
+
+    #[test]
+    fn test_extract_code_from_input_raw_code() {
+        assert_eq!(extract_code_from_input("4/0Aea..."), "4/0Aea...");
+        assert_eq!(extract_code_from_input("  4/0Aea...  \n"), "4/0Aea...");
+    }
+
+    #[test]
+    fn test_extract_code_from_input_url() {
+        assert_eq!(
+            extract_code_from_input("http://localhost/?code=4/0Aea...&scope=email"),
+            "4/0Aea..."
+        );
+        assert_eq!(
+            extract_code_from_input("urn:ietf:wg:oauth:2.0:oob?code=my-secret-code"),
+            "my-secret-code"
+        );
+    }
+
+    #[test]
+    fn test_extract_code_from_input_url_no_code() {
+        assert_eq!(
+            extract_code_from_input("http://localhost/?error=access_denied"),
+            "http://localhost/?error=access_denied"
+        );
     }
 }
