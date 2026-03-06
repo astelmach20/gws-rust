@@ -184,7 +184,7 @@ impl yup_oauth2::authenticator_delegate::InstalledFlowDelegate for CliFlowDelega
     fn present_user_url<'a>(
         &'a self,
         url: &'a str,
-        _need_code: bool,
+        need_code: bool,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String, String>> + Send + 'a>>
     {
         Box::pin(async move {
@@ -205,7 +205,30 @@ impl yup_oauth2::authenticator_delegate::InstalledFlowDelegate for CliFlowDelega
             };
             eprintln!("Open this URL in your browser to authenticate:\n");
             eprintln!("  {display_url}\n");
-            Ok(String::new())
+
+            if need_code {
+                eprintln!("Enter the authorization code (or paste the full redirect URL):");
+                let mut user_input = String::new();
+                std::io::stdin()
+                    .read_line(&mut user_input)
+                    .map_err(|e| format!("Failed to read code: {e}"))?;
+
+                let input = user_input.trim();
+
+                // If they pasted a full URL (e.g. http://localhost/?code=4/0Aea...&scope=...)
+                if let Ok(parsed_url) = reqwest::Url::parse(input) {
+                    for (k, v) in parsed_url.query_pairs() {
+                        if k == "code" {
+                            return Ok(v.to_string());
+                        }
+                    }
+                }
+
+                // Otherwise, assume they pasted just the code
+                Ok(input.to_string())
+            } else {
+                Ok(String::new())
+            }
         })
     }
 }
@@ -285,9 +308,15 @@ async fn handle_login(args: &[String]) -> Result<(), GwsError> {
     let mut scopes = filter_redundant_restrictive_scopes(scopes);
 
     let redirect_uris = if no_localhost {
-        vec!["urn:ietf:wg:oauth:2.0:oob".to_string(), "http://localhost".to_string()]
+        vec![
+            "urn:ietf:wg:oauth:2.0:oob".to_string(),
+            "http://localhost".to_string(),
+        ]
     } else {
-        vec!["http://localhost".to_string(), "urn:ietf:wg:oauth:2.0:oob".to_string()]
+        vec![
+            "http://localhost".to_string(),
+            "urn:ietf:wg:oauth:2.0:oob".to_string(),
+        ]
     };
 
     let secret = yup_oauth2::ApplicationSecret {
@@ -328,20 +357,17 @@ async fn handle_login(args: &[String]) -> Result<(), GwsError> {
         yup_oauth2::InstalledFlowReturnMethod::HTTPRedirect
     };
 
-    let auth = yup_oauth2::InstalledFlowAuthenticator::builder(
-        secret,
-        return_method,
-    )
-    .with_storage(Box::new(crate::token_storage::EncryptedTokenStorage::new(
-        temp_path.clone(),
-    )))
-    .force_account_selection(true) // Adds prompt=consent so Google always returns a refresh_token
-    .flow_delegate(Box::new(CliFlowDelegate {
-        login_hint: account_email.clone(),
-    }))
-    .build()
-    .await
-    .map_err(|e| GwsError::Auth(format!("Failed to build authenticator: {e}")))?;
+    let auth = yup_oauth2::InstalledFlowAuthenticator::builder(secret, return_method)
+        .with_storage(Box::new(crate::token_storage::EncryptedTokenStorage::new(
+            temp_path.clone(),
+        )))
+        .force_account_selection(true) // Adds prompt=consent so Google always returns a refresh_token
+        .flow_delegate(Box::new(CliFlowDelegate {
+            login_hint: account_email.clone(),
+        }))
+        .build()
+        .await
+        .map_err(|e| GwsError::Auth(format!("Failed to build authenticator: {e}")))?;
 
     // Request a token — this triggers the browser OAuth flow
     let scope_refs: Vec<&str> = scopes.iter().map(|s| s.as_str()).collect();
