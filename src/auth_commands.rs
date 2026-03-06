@@ -2281,7 +2281,11 @@ mod tests {
 
     #[test]
     fn test_parse_login_args_no_localhost() {
-        let args = vec!["--no-localhost".to_string(), "--scopes".to_string(), "drive".to_string()];
+        let args = vec![
+            "--no-localhost".to_string(),
+            "--scopes".to_string(),
+            "drive".to_string(),
+        ];
         let parsed = parse_login_args(&args);
         assert!(parsed.no_localhost);
         assert_eq!(parsed.filtered_args, vec!["--scopes", "drive"]);
@@ -2289,7 +2293,11 @@ mod tests {
 
     #[test]
     fn test_parse_login_args_account() {
-        let args = vec!["--account".to_string(), "test@example.com".to_string(), "--no-localhost".to_string()];
+        let args = vec![
+            "--account".to_string(),
+            "test@example.com".to_string(),
+            "--no-localhost".to_string(),
+        ];
         let parsed = parse_login_args(&args);
         assert_eq!(parsed.account_email.unwrap(), "test@example.com");
         assert!(parsed.no_localhost);
