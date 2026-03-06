@@ -313,10 +313,10 @@ async fn handle_login(args: &[String]) -> Result<(), GwsError> {
             "http://localhost".to_string(),
         ]
     } else {
-        vec![
-            "http://localhost".to_string(),
-            "urn:ietf:wg:oauth:2.0:oob".to_string(),
-        ]
+    let redirect_uris = if no_localhost {
+        vec!["urn:ietf:wg:oauth:2.0:oob".to_string()]
+    } else {
+        vec!["http://localhost".to_string()]
     };
 
     let secret = yup_oauth2::ApplicationSecret {
