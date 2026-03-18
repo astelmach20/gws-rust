@@ -424,10 +424,18 @@ fn build_insert_request(
     matches: &ArgMatches,
     doc: &crate::discovery::RestDescription,
 ) -> Result<(String, String, Vec<String>), GwsError> {
-    let calendar_id = matches.get_one::<String>("calendar").unwrap();
-    let summary = matches.get_one::<String>("summary").unwrap();
-    let start = matches.get_one::<String>("start").unwrap();
-    let end = matches.get_one::<String>("end").unwrap();
+    let calendar_id = matches
+        .get_one::<String>("calendar")
+        .ok_or_else(|| GwsError::Validation("Missing required argument: calendar".to_string()))?;
+    let summary = matches
+        .get_one::<String>("summary")
+        .ok_or_else(|| GwsError::Validation("Missing required argument: summary".to_string()))?;
+    let start = matches
+        .get_one::<String>("start")
+        .ok_or_else(|| GwsError::Validation("Missing required argument: start".to_string()))?;
+    let end = matches
+        .get_one::<String>("end")
+        .ok_or_else(|| GwsError::Validation("Missing required argument: end".to_string()))?;
     let location = matches.get_one::<String>("location");
     let description = matches.get_one::<String>("description");
     let attendees_vals = matches.get_many::<String>("attendee");
