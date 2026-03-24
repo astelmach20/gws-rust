@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Syncs the version from package.json into Cargo.toml, updates Cargo.lock, and regenerates skills.
+# Syncs the version from package.json into all workspace Cargo.toml files,
+# updates Cargo.lock, and regenerates skills.
 # Used by changesets/action as a custom version command.
 set -euo pipefail
 
@@ -9,14 +10,17 @@ pnpm changeset version
 # Read the new version from package.json
 VERSION=$(node -p "require('./package.json').version")
 
-# Update Cargo.toml version field
+# Update version in all workspace crate Cargo.toml files
 # Uses awk to only change the version under [package], not other sections
-awk -v ver="$VERSION" '
-  /^\[package\]/ { in_pkg=1 }
-  /^\[/ && !/^\[package\]/ { in_pkg=0 }
-  in_pkg && /^version = / { $0 = "version = \"" ver "\"" }
-  { print }
-' Cargo.toml > Cargo.toml.tmp && mv Cargo.toml.tmp Cargo.toml
+for cargo_toml in crates/*/Cargo.toml; do
+  tmp=$(mktemp)
+  awk -v ver="$VERSION" '
+    /^\[package\]/ { in_pkg=1 }
+    /^\[/ && !/^\[package\]/ { in_pkg=0 }
+    in_pkg && /^version = / { $0 = "version = \"" ver "\"" }
+    { print }
+  ' "$cargo_toml" > "$tmp" && mv "$tmp" "$cargo_toml"
+done
 
 # Update Cargo.lock to match
 cargo generate-lockfile
@@ -30,4 +34,5 @@ fi
 cargo run -- generate-skills --output-dir skills
 
 # Stage the changed files so changesets/action commits them
-git add Cargo.toml Cargo.lock flake.nix flake.lock skills/
+git add crates/*/Cargo.toml Cargo.lock flake.nix flake.lock skills/
+
