@@ -181,7 +181,7 @@ async fn fetch_user_email(client: &reqwest::Client, token: &str) -> Result<Strin
             .bearer_auth(token)
     })
     .await
-    .map_err(|e| GwsError::Other(anyhow::anyhow!("Failed to fetch user profile: {e}")))?;
+    .map_err(|e| GwsError::other(anyhow::anyhow!("Failed to fetch user profile: {e}")))?;
 
     if !resp.status().is_success() {
         let status = resp.status().as_u16();
@@ -199,13 +199,13 @@ async fn fetch_user_email(client: &reqwest::Client, token: &str) -> Result<Strin
     let profile: Value = resp
         .json()
         .await
-        .map_err(|e| GwsError::Other(anyhow::anyhow!("Failed to parse profile: {e}")))?;
+        .map_err(|e| GwsError::other(anyhow::anyhow!("Failed to parse profile: {e}")))?;
 
     profile
         .get("emailAddress")
         .and_then(|v| v.as_str())
         .map(|s| s.to_string())
-        .ok_or_else(|| GwsError::Other(anyhow::anyhow!("Profile missing emailAddress")))
+        .ok_or_else(|| GwsError::other(anyhow::anyhow!("Profile missing emailAddress")))
 }
 
 // --- Message construction ---
@@ -427,7 +427,7 @@ fn parse_reply_args(matches: &ArgMatches) -> Result<ReplyConfig, GwsError> {
             .filter(|v| !v.is_empty()),
         Err(clap::parser::MatchesError::UnknownArgument { .. }) => None,
         Err(e) => {
-            return Err(GwsError::Other(anyhow::anyhow!(
+            return Err(GwsError::other(anyhow::anyhow!(
                 "Unexpected error reading --remove argument: {e}"
             )));
         }

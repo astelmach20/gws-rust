@@ -174,7 +174,7 @@ async fn build_http_request(
         "PATCH" => client.patch(&input.full_url),
         "DELETE" => client.delete(&input.full_url),
         other => {
-            return Err(GwsError::Other(anyhow::anyhow!(
+            return Err(GwsError::other(anyhow::anyhow!(
                 "Unsupported HTTP method: {other}"
             )));
         }
@@ -276,7 +276,7 @@ async fn handle_json_response(
                             "{}",
                             serde_json::to_string_pretty(&blocked).unwrap_or_default()
                         );
-                        return Err(GwsError::Other(anyhow::anyhow!(
+                        return Err(GwsError::other(anyhow::anyhow!(
                             "Content blocked by Model Armor"
                         )));
                     }
@@ -1837,6 +1837,7 @@ mod tests {
                         path: "/upload/drive/v3/files/{fileId}".to_string(),
                         multipart: Some(true),
                     }),
+                    resumable: None,
                 }),
                 ..Default::default()
             }),

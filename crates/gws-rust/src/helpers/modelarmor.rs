@@ -271,7 +271,7 @@ pub async fn sanitize_text(template: &str, text: &str) -> Result<SanitizationRes
         .context("Failed to read Model Armor response")?;
 
     if !status.is_success() {
-        return Err(GwsError::Other(anyhow::anyhow!(
+        return Err(GwsError::other(anyhow::anyhow!(
             "Model Armor API returned status {status}: {resp_text}"
         )));
     }
@@ -299,7 +299,7 @@ async fn model_armor_post(url: &str, body: &str) -> Result<(), GwsError> {
     let text = resp.text().await.context("Failed to read response")?;
 
     if !status.is_success() {
-        return Err(GwsError::Other(anyhow::anyhow!(
+        return Err(GwsError::other(anyhow::anyhow!(
             "API returned status {status}: {text}"
         )));
     }
@@ -596,7 +596,7 @@ pub fn parse_sanitize_response(resp_text: &str) -> Result<SanitizationResult, Gw
         serde_json::from_str(resp_text).context("Failed to parse Model Armor response")?;
 
     let result = parsed.get("sanitizationResult").ok_or_else(|| {
-        GwsError::Other(anyhow::anyhow!(
+        GwsError::other(anyhow::anyhow!(
             "No sanitizationResult in Model Armor response"
         ))
     })?;

@@ -17,8 +17,17 @@
 use serde_json::json;
 use thiserror::Error;
 
+/// Boxed error type carried by [`GwsError::Other`].
+pub type BoxError = Box<dyn std::error::Error + Send + Sync + 'static>;
+
+/// Top-level error type for Google Workspace operations.
+///
+/// Each variant maps to a stable process exit code via [`GwsError::exit_code`]
+/// and to a machine-readable JSON envelope via [`GwsError::to_json`].
 #[derive(Error, Debug)]
+#[non_exhaustive]
 pub enum GwsError {
+    /// The Google API returned an error response.
     #[error("{message}")]
     Api {
         code: u16,
@@ -28,21 +37,42 @@ pub enum GwsError {
         enable_url: Option<String>,
     },
 
+    /// Invalid user input (arguments, paths, identifiers).
     #[error("{0}")]
     Validation(String),
 
+    /// Authentication or authorization failure.
     #[error("{0}")]
     Auth(String),
 
+    /// Discovery Document could not be fetched, parsed, or trusted.
     #[error("{0}")]
     Discovery(String),
 
-    #[error(transparent)]
-    Other(#[from] anyhow::Error),
+    /// Any other unexpected failure. The source chain is preserved.
+    #[error("{}", format_chain(.0.as_ref()))]
+    Other(BoxError),
+}
+
+/// Render an error and its `source()` chain as `outer: inner: root`.
+fn format_chain(err: &(dyn std::error::Error + 'static)) -> String {
+    let mut out = err.to_string();
+    let mut current = err.source();
+    while let Some(src) = current {
+        let text = src.to_string();
+        // anyhow-originated errors already render their chain in Display;
+        // avoid repeating a cause that is already part of the message.
+        if !out.contains(&text) {
+            out.push_str(": ");
+            out.push_str(&text);
+        }
+        current = src.source();
+    }
+    out
 }
 
 impl GwsError {
-    /// Exit code for [`GwsError::Api`] variants.
+    /// Exit code for non-retryable [`GwsError::Api`] errors.
     pub const EXIT_CODE_API: i32 = 1;
     /// Exit code for [`GwsError::Auth`] variants.
     pub const EXIT_CODE_AUTH: i32 = 2;
@@ -52,10 +82,38 @@ impl GwsError {
     pub const EXIT_CODE_DISCOVERY: i32 = 4;
     /// Exit code for [`GwsError::Other`] variants.
     pub const EXIT_CODE_OTHER: i32 = 5;
+    /// Exit code for retryable [`GwsError::Api`] errors (HTTP 429, 5xx, or
+    /// 403 rate-limit reasons). See [`GwsError::is_retryable`].
+    pub const EXIT_CODE_API_RETRYABLE: i32 = 6;
+
+    /// Wrap any error (or message) as [`GwsError::Other`].
+    pub fn other(err: impl Into<BoxError>) -> Self {
+        GwsError::Other(err.into())
+    }
+
+    /// Whether retrying the same request later may succeed.
+    ///
+    /// True for API errors with HTTP 429, any 5xx, or HTTP 403 with reason
+    /// `rateLimitExceeded` / `userRateLimitExceeded`.
+    pub fn is_retryable(&self) -> bool {
+        match self {
+            GwsError::Api { code, reason, .. } => {
+                *code == 429
+                    || *code >= 500
+                    || (*code == 403
+                        && matches!(
+                            reason.as_str(),
+                            "rateLimitExceeded" | "userRateLimitExceeded"
+                        ))
+            }
+            _ => false,
+        }
+    }
 
     /// Map each error variant to a stable, documented exit code.
     pub fn exit_code(&self) -> i32 {
         match self {
+            GwsError::Api { .. } if self.is_retryable() => Self::EXIT_CODE_API_RETRYABLE,
             GwsError::Api { .. } => Self::EXIT_CODE_API,
             GwsError::Auth(_) => Self::EXIT_CODE_AUTH,
             GwsError::Validation(_) => Self::EXIT_CODE_VALIDATION,
@@ -64,6 +122,7 @@ impl GwsError {
         }
     }
 
+    /// Machine-readable JSON envelope: `{"error": {"code", "message", "reason", ...}}`.
     pub fn to_json(&self) -> serde_json::Value {
         match self {
             GwsError::Api {
@@ -103,14 +162,22 @@ impl GwsError {
                     "reason": "discoveryError",
                 }
             }),
-            GwsError::Other(e) => json!({
+            GwsError::Other(_) => json!({
                 "error": {
                     "code": 500,
-                    "message": format!("{e:#}"),
+                    "message": self.to_string(),
                     "reason": "internalError",
                 }
             }),
         }
+    }
+}
+
+#[cfg(feature = "anyhow")]
+impl From<anyhow::Error> for GwsError {
+    fn from(err: anyhow::Error) -> Self {
+        // `{:#}` renders the full anyhow context chain in one line.
+        GwsError::Other(format!("{err:#}").into())
     }
 }
 
@@ -156,7 +223,7 @@ mod tests {
     #[test]
     fn test_exit_code_other() {
         assert_eq!(
-            GwsError::Other(anyhow::anyhow!("oops")).exit_code(),
+            GwsError::other("oops").exit_code(),
             GwsError::EXIT_CODE_OTHER
         );
     }
@@ -169,6 +236,7 @@ mod tests {
             GwsError::EXIT_CODE_VALIDATION,
             GwsError::EXIT_CODE_DISCOVERY,
             GwsError::EXIT_CODE_OTHER,
+            GwsError::EXIT_CODE_API_RETRYABLE,
         ];
         let unique: std::collections::HashSet<i32> = codes.iter().copied().collect();
         assert_eq!(
@@ -222,7 +290,7 @@ mod tests {
 
     #[test]
     fn test_error_to_json_other() {
-        let err = GwsError::Other(anyhow::anyhow!("Something went wrong"));
+        let err = GwsError::other("Something went wrong");
         let json = err.to_json();
         assert_eq!(json["error"]["code"], 500);
         assert_eq!(json["error"]["message"], "Something went wrong");
@@ -258,5 +326,65 @@ mod tests {
         assert_eq!(json["error"]["code"], 403);
         assert_eq!(json["error"]["reason"], "accessNotConfigured");
         assert!(json["error"]["enable_url"].is_null());
+    }
+
+    fn api(code: u16, reason: &str) -> GwsError {
+        GwsError::Api {
+            code,
+            message: "m".to_string(),
+            reason: reason.to_string(),
+            enable_url: None,
+        }
+    }
+
+    #[test]
+    fn retryable_api_errors_get_distinct_exit_code() {
+        for err in [
+            api(429, "rateLimitExceeded"),
+            api(500, "backendError"),
+            api(503, "unavailable"),
+            api(403, "rateLimitExceeded"),
+            api(403, "userRateLimitExceeded"),
+        ] {
+            assert!(err.is_retryable(), "{err:?}");
+            assert_eq!(err.exit_code(), GwsError::EXIT_CODE_API_RETRYABLE);
+        }
+    }
+
+    #[test]
+    fn permanent_api_errors_are_not_retryable() {
+        for err in [
+            api(400, "badRequest"),
+            api(403, "forbidden"),
+            api(404, "notFound"),
+        ] {
+            assert!(!err.is_retryable(), "{err:?}");
+            assert_eq!(err.exit_code(), GwsError::EXIT_CODE_API);
+        }
+        assert!(!GwsError::Validation("x".into()).is_retryable());
+    }
+
+    #[derive(Debug, thiserror::Error)]
+    #[error("outer failure")]
+    struct Outer(#[source] std::io::Error);
+
+    #[test]
+    fn other_renders_source_chain() {
+        let err = GwsError::other(Outer(std::io::Error::other("disk full")));
+        assert_eq!(err.to_string(), "outer failure: disk full");
+        assert_eq!(
+            err.to_json()["error"]["message"],
+            "outer failure: disk full"
+        );
+    }
+
+    #[cfg(feature = "anyhow")]
+    #[test]
+    fn anyhow_conversion_keeps_context_chain() {
+        use anyhow::Context;
+        let res: Result<(), std::io::Error> = Err(std::io::Error::other("root cause"));
+        let err: GwsError = res.context("while loading").unwrap_err().into();
+        assert_eq!(err.to_string(), "while loading: root cause");
+        assert_eq!(err.exit_code(), GwsError::EXIT_CODE_OTHER);
     }
 }
