@@ -123,6 +123,12 @@ async fn run() -> Result<(), GwsError> {
         return schema::handle_schema_command(path, resolve_refs).await;
     }
 
+    // Handle the `batch` command
+    if first_arg == "batch" {
+        let batch_args: Vec<String> = args.iter().skip(2).cloned().collect();
+        return executor::batch::handle_batch_command(&batch_args).await;
+    }
+
     // Handle the `generate-skills` command
     if first_arg == "generate-skills" {
         let gen_args: Vec<String> = args.iter().skip(2).cloned().collect();
@@ -207,93 +213,14 @@ async fn run() -> Result<(), GwsError> {
     // Walk the subcommand tree to find the target method
     let (method, matched_args) = resolve_method_from_matches(&doc, &matches)?;
 
-    let params_json = matched_args.get_one::<String>("params").map(|s| s.as_str());
-    let body_json = matched_args
-        .try_get_one::<String>("json")
-        .ok()
-        .flatten()
-        .map(|s| s.as_str());
-    let upload_path = matched_args
-        .try_get_one::<String>("upload")
-        .ok()
-        .flatten()
-        .map(|s| s.as_str());
-    let output_path = matched_args.get_one::<String>("output").map(|s| s.as_str());
-
-    // Validate file paths against traversal before any I/O.
-    // Use the returned canonical paths so the validated path is the one
-    // actually used for I/O (closes TOCTOU gap).
-    let upload_path_buf = if let Some(p) = upload_path {
-        Some(crate::validate::validate_safe_file_path(p, "--upload")?)
-    } else {
-        None
-    };
-    let output_path_buf = if let Some(p) = output_path {
-        Some(crate::validate::validate_safe_file_path(p, "--output")?)
-    } else {
-        None
-    };
-    let upload_path = upload_path_buf.as_deref().and_then(|p| p.to_str());
-    let output_path = output_path_buf.as_deref().and_then(|p| p.to_str());
-
-    let upload = {
-        let upload_content_type = matched_args
-            .try_get_one::<String>("upload-content-type")
-            .ok()
-            .flatten()
-            .map(|s| s.as_str());
-        upload_path.map(|path| executor::UploadSource::File {
-            path,
-            content_type: upload_content_type,
-        })
-    };
-
-    let dry_run = matched_args.get_flag("dry-run");
-
-    // Build pagination config from flags
-    let pagination = parse_pagination_config(matched_args);
-
-    // Select the best scope for the method. Discovery Documents list scopes as
-    // alternatives (any one grants access). We pick the first (broadest) scope
-    // to avoid restrictive scopes like gmail.metadata that block query parameters.
-    let scopes: Vec<&str> = select_scope(&method.scopes).into_iter().collect();
-
-    // Authenticate: try OAuth, fail with error if credentials exist but are broken
-    let (token, auth_method) = match auth::get_token(&scopes).await {
-        Ok(t) => (Some(t), executor::AuthMethod::OAuth),
-        Err(e) => {
-            // If credentials were found but failed (e.g. decryption error, invalid token),
-            // propagate the error instead of silently falling back to unauthenticated.
-            // Only fall back to None if no credentials exist at all.
-            let err_msg = format!("{e:#}");
-            // NB: matches the bail!() message in auth::load_credentials_inner
-            if err_msg.starts_with("No credentials found") {
-                (None, executor::AuthMethod::None)
-            } else {
-                return Err(GwsError::Auth(format!("Authentication failed: {err_msg}")));
-            }
-        }
-    };
-
-    // Execute
-    executor::execute_method(
+    executor::options::run_from_matches(
         &doc,
         method,
-        params_json,
-        body_json,
-        token.as_deref(),
-        auth_method,
-        output_path,
-        upload,
-        dry_run,
-        &pagination,
-        sanitize_config.template.as_deref(),
-        &sanitize_config.mode,
+        matched_args,
+        &sanitize_config,
         &output_format,
-        false,
     )
     .await
-    .map(|_| ())
 }
 
 /// Select the best scope from a method's scope list.
@@ -305,14 +232,6 @@ async fn run() -> Result<(), GwsError> {
 /// also present.
 pub(crate) fn select_scope(scopes: &[String]) -> Option<&str> {
     scopes.first().map(|s| s.as_str())
-}
-
-fn parse_pagination_config(matches: &clap::ArgMatches) -> executor::PaginationConfig {
-    executor::PaginationConfig {
-        page_all: matches.get_flag("page-all"),
-        page_limit: matches.get_one::<u32>("page-limit").copied().unwrap_or(10),
-        page_delay_ms: matches.get_one::<u64>("page-delay").copied().unwrap_or(100),
-    }
 }
 
 pub fn parse_service_and_version(
@@ -440,6 +359,7 @@ fn print_usage() {
     println!("USAGE:");
     println!("    gwsr <service> <resource> [sub-resource] <method> [flags]");
     println!("    gwsr schema <service.resource.method> [--resolve-refs]");
+    println!("    gwsr batch <service> [--input FILE]   (NDJSON calls in, NDJSON results out)");
     println!();
     println!("EXAMPLES:");
     println!("    gwsr drive files list --params '{{\"pageSize\": 10}}'");
@@ -448,19 +368,28 @@ fn print_usage() {
     println!("    gwsr gmail users messages list --params '{{\"userId\": \"me\"}}'");
     println!("    gwsr schema drive.files.list");
     println!();
-    println!("FLAGS:");
-    println!("    --params <JSON>       URL/Query parameters as JSON");
-    println!("    --json <JSON>         Request body as JSON (POST/PATCH/PUT)");
-    println!("    --upload <PATH>       Local file to upload as media content (multipart)");
+    println!("FLAGS (per method; see `gwsr <service> <resource> <method> --help`):");
+    println!("    --params <JSON>       URL/query parameters as JSON (@FILE or - for stdin)");
+    println!("    --json <JSON>         Request body as JSON (@FILE or - for stdin)");
+    println!("    --fields <MASK>       Partial-response field mask");
+    println!(
+        "    --upload <PATH>       Local file to upload (resumable above 5 MiB when supported)"
+    );
     println!(
         "    --upload-content-type <MIME>  MIME type of the uploaded file (auto-detected from extension if omitted)"
     );
-    println!("    --output <PATH>       Output file path for binary responses");
+    println!(
+        "    -o, --output <PATH>   Write the response to a file (binary to stdout when piped)"
+    );
     println!("    --format <FMT>        Output format: json (default), table, yaml, csv");
     println!("    --api-version <VER>   Override the API version (e.g., v2, v3)");
-    println!("    --page-all            Auto-paginate, one JSON line per page (NDJSON)");
-    println!("    --page-limit <N>      Max pages to fetch with --page-all (default: 10)");
+    println!("    --page-all            Fetch every page, one JSON line per page (NDJSON)");
+    println!("    --page-items[=FIELD]  Fetch every page, one JSON line per item");
+    println!("    --page-limit <N>      Stop after N pages (default: 0 = unlimited)");
     println!("    --page-delay <MS>     Delay between pages in ms (default: 100)");
+    println!("    --wait                Poll a returned long-running operation until done");
+    println!("    --timeout <SECS>      Response/read timeout (default: 60, 0 disables)");
+    println!("    --yes                 Confirm destructive operations without prompting");
     println!();
     println!("SERVICES:");
     for entry in services::SERVICES {
@@ -483,6 +412,16 @@ fn print_usage() {
     println!("    GWSR_SANITIZE_TEMPLATE   Default Model Armor template");
     println!("    GWSR_SANITIZE_MODE       Sanitization mode: warn (default) or block");
     println!("    GWSR_PROJECT_ID              Override the GCP project ID for quota and billing");
+    println!(
+        "    GWSR_TIMEOUT             Response/read timeout in seconds (default: 60, 0 disables)"
+    );
+    println!(
+        "    GWSR_API_BASE_URL        Send API requests to this base URL instead of Discovery rootUrl"
+    );
+    println!("    GWSR_NO_QUOTA_PROJECT    Set to 1 to never send x-goog-user-project");
+    println!(
+        "    GWSR_CONFIRM_DESTRUCTIVE 1: require --yes for destructive calls even when unattended; 0: never ask"
+    );
     println!("    GWSR_LOG                 Log level for stderr (e.g., gwsr=debug)");
     println!("    GWSR_LOG_FILE            Directory for JSON log files (daily rotation)");
     println!();
@@ -511,65 +450,6 @@ fn is_version_flag(arg: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_parse_pagination_config_defaults() {
-        let matches = clap::Command::new("test")
-            .arg(
-                clap::Arg::new("page-all")
-                    .long("page-all")
-                    .action(clap::ArgAction::SetTrue),
-            )
-            .arg(
-                clap::Arg::new("page-limit")
-                    .long("page-limit")
-                    .value_parser(clap::value_parser!(u32)),
-            )
-            .arg(
-                clap::Arg::new("page-delay")
-                    .long("page-delay")
-                    .value_parser(clap::value_parser!(u64)),
-            )
-            .get_matches_from(vec!["test"]);
-
-        let config = parse_pagination_config(&matches);
-        assert!(!config.page_all);
-        assert_eq!(config.page_limit, 10);
-        assert_eq!(config.page_delay_ms, 100);
-    }
-
-    #[test]
-    fn test_parse_pagination_config_custom() {
-        let matches = clap::Command::new("test")
-            .arg(
-                clap::Arg::new("page-all")
-                    .long("page-all")
-                    .action(clap::ArgAction::SetTrue),
-            )
-            .arg(
-                clap::Arg::new("page-limit")
-                    .long("page-limit")
-                    .value_parser(clap::value_parser!(u32)),
-            )
-            .arg(
-                clap::Arg::new("page-delay")
-                    .long("page-delay")
-                    .value_parser(clap::value_parser!(u64)),
-            )
-            .get_matches_from(vec![
-                "test",
-                "--page-all",
-                "--page-limit",
-                "20",
-                "--page-delay",
-                "500",
-            ]);
-
-        let config = parse_pagination_config(&matches);
-        assert!(config.page_all);
-        assert_eq!(config.page_limit, 20);
-        assert_eq!(config.page_delay_ms, 500);
-    }
 
     #[test]
     fn test_parse_sanitize_config_valid() {

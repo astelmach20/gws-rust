@@ -566,7 +566,9 @@ impl EndpointPolicy {
     /// proxies and tests), and must not carry credentials, a query or a fragment.
     pub fn with_override(base: &str) -> Result<Self, GwsError> {
         let mut url = Url::parse(base.trim()).map_err(|e| {
-            GwsError::Validation(format!("{API_BASE_URL_ENV} is not a valid URL ({base:?}): {e}"))
+            GwsError::Validation(format!(
+                "{API_BASE_URL_ENV} is not a valid URL ({base:?}): {e}"
+            ))
         })?;
         let loopback = is_loopback(&url);
         match url.scheme() {
@@ -631,7 +633,9 @@ impl EndpointPolicy {
     /// Validate that `url` may receive a bearer token. Returns the parsed URL.
     pub fn check(&self, url: &str) -> Result<Url, GwsError> {
         let parsed = Url::parse(url).map_err(|e| {
-            GwsError::Validation(format!("Refusing to send credentials to invalid URL {url:?}: {e}"))
+            GwsError::Validation(format!(
+                "Refusing to send credentials to invalid URL {url:?}: {e}"
+            ))
         })?;
         if let Some(base) = &self.override_base
             && same_origin(base, &parsed)
@@ -748,7 +752,10 @@ mod tests {
         let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
         assert_eq!(parse_retry_after("7", now), Some(Duration::from_secs(7)));
         let later = httpdate::fmt_http_date(now + Duration::from_secs(30));
-        assert_eq!(parse_retry_after(&later, now), Some(Duration::from_secs(30)));
+        assert_eq!(
+            parse_retry_after(&later, now),
+            Some(Duration::from_secs(30))
+        );
         let earlier = httpdate::fmt_http_date(now - Duration::from_secs(30));
         assert_eq!(parse_retry_after(&earlier, now), Some(Duration::ZERO));
         assert_eq!(parse_retry_after("soon", now), None);
@@ -822,7 +829,10 @@ mod tests {
         assert_eq!(sent.attempts, 4);
         assert_eq!(calls.load(Ordering::SeqCst), 4);
         assert_eq!(sent.response.status(), 502);
-        assert_eq!(sent.retry_note().as_deref(), Some("gave up after 4 attempts"));
+        assert_eq!(
+            sent.retry_note().as_deref(),
+            Some("gave up after 4 attempts")
+        );
         assert_eq!(sent.response.text().await.unwrap(), "final");
     }
 
@@ -849,7 +859,10 @@ mod tests {
         assert_eq!(calls.load(Ordering::SeqCst), 2);
         assert_eq!(sent.response.status(), 403);
         let body: serde_json::Value = sent.response.json().await.unwrap();
-        assert_eq!(body["error"]["errors"][0]["reason"], "insufficientPermissions");
+        assert_eq!(
+            body["error"]["errors"][0]["reason"],
+            "insufficientPermissions"
+        );
     }
 
     #[tokio::test]
@@ -858,9 +871,11 @@ mod tests {
         let calls = mount_sequence(&server, "POST", vec![ResponseTemplate::new(503)]).await;
         let client = shared_client().unwrap();
         let url = format!("{}/r", server.uri());
-        let sent = send(&fast_policy(), Idempotency::FromMethod, || client.post(&url))
-            .await
-            .unwrap();
+        let sent = send(&fast_policy(), Idempotency::FromMethod, || {
+            client.post(&url)
+        })
+        .await
+        .unwrap();
         assert_eq!(sent.response.status(), 503);
         assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
@@ -883,7 +898,10 @@ mod tests {
         let err = send(&policy, Idempotency::FromMethod, || client.post(&url))
             .await
             .unwrap_err();
-        assert!(matches!(err, SendError::Timeout { attempts: 1, .. }), "{err}");
+        assert!(
+            matches!(err, SendError::Timeout { attempts: 1, .. }),
+            "{err}"
+        );
         assert!(err.to_string().contains("not idempotent"));
         assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
@@ -899,9 +917,11 @@ mod tests {
         .await;
         let client = shared_client().unwrap();
         let url = format!("{}/r", server.uri());
-        let sent = send(&fast_policy(), Idempotency::Idempotent, || client.post(&url))
-            .await
-            .unwrap();
+        let sent = send(&fast_policy(), Idempotency::Idempotent, || {
+            client.post(&url)
+        })
+        .await
+        .unwrap();
         assert_eq!(sent.response.status(), 200);
         assert_eq!(calls.load(Ordering::SeqCst), 2);
     }
@@ -960,9 +980,11 @@ mod tests {
         };
         let client = shared_client().unwrap();
         let url = format!("http://127.0.0.1:{port}/r");
-        let err = send(&fast_policy(), Idempotency::FromMethod, || client.post(&url))
-            .await
-            .unwrap_err();
+        let err = send(&fast_policy(), Idempotency::FromMethod, || {
+            client.post(&url)
+        })
+        .await
+        .unwrap_err();
         match err {
             SendError::Transport { attempts, .. } => assert_eq!(attempts, 4),
             other => panic!("unexpected error: {other}"),
@@ -1015,9 +1037,18 @@ mod tests {
     #[test]
     fn endpoint_policy_override() {
         let p = EndpointPolicy::with_override("https://proxy.corp.example/api").unwrap();
-        assert_eq!(p.override_base().unwrap().as_str(), "https://proxy.corp.example/api/");
-        assert_eq!(p.root_url("https://www.googleapis.com/"), "https://proxy.corp.example/api/");
-        assert!(p.check("https://proxy.corp.example/api/drive/v3/files").is_ok());
+        assert_eq!(
+            p.override_base().unwrap().as_str(),
+            "https://proxy.corp.example/api/"
+        );
+        assert_eq!(
+            p.root_url("https://www.googleapis.com/"),
+            "https://proxy.corp.example/api/"
+        );
+        assert!(
+            p.check("https://proxy.corp.example/api/drive/v3/files")
+                .is_ok()
+        );
         assert!(p.check("https://other.example/").is_err());
         assert!(p.check("https://www.googleapis.com/x").is_ok());
 
