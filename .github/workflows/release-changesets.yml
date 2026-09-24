@@ -1,72 +1,79 @@
-# Copyright 2026 Google LLC
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-
 name: Release (Changeset)
 
+# On every push to main: if changesets are pending, open/update the "chore: release versions" PR
+# (version bumps via scripts/version-sync.sh). When that PR merges, tag vX.Y.Z via
+# scripts/tag-release.sh, which also dispatches release.yml because tags pushed with
+# GITHUB_TOKEN do not trigger workflows on their own.
+#
+# PRs opened with GITHUB_TOKEN do not trigger CI. Configure a GitHub App (repository variable
+# BOT_APP_ID + secret BOT_APP_PRIVATE_KEY, with contents and pull-requests write) to get checks
+# on the release PR.
 on:
-  workflow_dispatch:
   push:
-    branches:
-      - main
+    branches: [main]
+  workflow_dispatch:
+
+permissions: {}
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}
   cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
 
 jobs:
   release:
-    name: Release
-    runs-on: ubuntu-latest
+    name: Version PR or tag
+    runs-on: ubuntu-24.04
     permissions:
-      contents: write
-      pull-requests: write
+      contents: write # push the release branch and the vX.Y.Z tag
+      pull-requests: write # open or update the release PR
+      actions: write # dispatch release.yml on the new tag
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - id: app-token
+        if: vars.BOT_APP_ID != ''
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
-          token: ${{ secrets.GOOGLEWORKSPACE_BOT_TOKEN }}
+          app-id: ${{ vars.BOT_APP_ID }}
+          private-key: ${{ secrets.BOT_APP_PRIVATE_KEY }}
+          permission-contents: write
+          permission-pull-requests: write
+      - if: vars.BOT_APP_ID == ''
+        run: echo "::warning::BOT_APP_ID is not configured; the release PR is opened with GITHUB_TOKEN and CI will not run on it until it is closed and reopened."
 
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
-
-      - name: Install Nix
-        uses: cachix/install-nix-action@08dcb3a5e62fa31e2da3d490afc4176ef55ecd72 # v30
+      # Credentials are needed: changesets/action pushes the release branch and tag-release.sh
+      # pushes the tag with this token.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          github_access_token: ${{ secrets.GOOGLEWORKSPACE_BOT_TOKEN }}
-
-      - uses: pnpm/action-setup@c5ba7f7862a0f64c1b1a05fbac13e0b8e86ba08c # v4
-
-      - name: Setup Node.js
-        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+          token: ${{ steps.app-token.outputs.token || github.token }}
+          persist-credentials: true # zizmor: ignore[artipacked] no artifacts are uploaded from this job
+      - uses: ./.github/actions/setup-rust
         with:
-          node-version: '22'
-          cache: 'pnpm'
-
-      - name: Install Dependencies
-        run: pnpm install
-
-      - run: |
-          git config --global user.name "googleworkspace-bot"
-          git config --global user.email "googleworkspace-bot@google.com"
-
-      - name: Create Release Pull Request or Tag
-        id: changesets
-        uses: changesets/action@6a0a831ff30acef54f2c6aa1cbbc1096b066edaf # v1
+          components: ""
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          version: pnpm run version-sync
-          publish: pnpm run tag-release
-          commit: 'chore: release versions'
-          title: 'chore: release versions'
-          setupGitUser: false
+          node-version: 24
+          package-manager-cache: false
+      - run: pnpm install --frozen-lockfile --ignore-scripts
+
+      - name: Configure git identity
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - uses: changesets/action@ae32849d5ba541f9ae29e40e22a623bc13562f51 # v2.1.2
+        with:
+          github-token: ${{ steps.app-token.outputs.token || github.token }}
+          version-script: pnpm run version-sync
+          publish-script: pnpm run tag-release
+          commit-message: "chore: release versions"
+          pr-title: "chore: release versions"
+          create-github-releases: false
+          push-git-tags: false
         env:
-          GITHUB_TOKEN: ${{ secrets.GOOGLEWORKSPACE_BOT_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
+          # With an App token the tag push itself triggers release.yml; only dispatch without one.
+          GWSR_DISPATCH_RELEASE: ${{ steps.app-token.outputs.token == '' && '1' || '0' }}

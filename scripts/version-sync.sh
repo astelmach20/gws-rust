@@ -1,49 +1,71 @@
 #!/usr/bin/env bash
-# Syncs the version from package.json into all workspace Cargo.toml files,
-# updates Cargo.lock, and regenerates skills.
-# Used by changesets/action as a custom version command.
+# Changesets "version" command: bumps package.json via `changeset version`, then propagates the
+# new version to every other place that carries it, refreshes Cargo.lock for the workspace
+# crates only, regenerates skills, and stages the result for the release PR.
+#
+# Files updated:
+#   Cargo.toml                      [workspace.package] version
+#   crates/gws-rust/Cargo.toml      gws-rust-core dependency version
+#   npm/package.json                version + optionalDependencies
+#   gemini-extension.json           version
 set -euo pipefail
 
-# Run the standard changeset version command first
+cd "$(git rev-parse --show-toplevel)"
+
 pnpm changeset version
 
-# Read the new version from package.json
-VERSION=$(node -p "require('./package.json').version")
-
-# Update version in all workspace crate Cargo.toml files
-# Uses awk to only change the version under [package], not other sections
-for cargo_toml in crates/*/Cargo.toml; do
-  tmp=$(mktemp)
-  awk -v ver="$VERSION" '
-    /^\[package\]/ { in_pkg=1 }
-    /^\[/ && !/^\[package\]/ { in_pkg=0 }
-    in_pkg && /^version = / { $0 = "version = \"" ver "\"" }
-    { print }
-  ' "$cargo_toml" > "$tmp" && mv "$tmp" "$cargo_toml"
-done
-
-# Update inter-crate dependency versions (e.g. gws-rust-core = { version = "X.Y.Z", path = "..." })
-sed -i.bak -E "s/(gws-rust-core = \{ version = \")[^\"]+/\1${VERSION}/" crates/gws-rust/Cargo.toml
-rm -f crates/gws-rust/Cargo.toml.bak
-
-# Update npm installer package.json version
-node -e "
-  const pkg = require('./npm/package.json');
-  pkg.version = '${VERSION}';
-  require('fs').writeFileSync('./npm/package.json', JSON.stringify(pkg, null, 2) + '\n');
-"
-
-# Update Cargo.lock to match
-cargo generate-lockfile
-
-# Update flake.lock if nix is available
-if command -v nix > /dev/null 2>&1; then
-  nix flake lock --update-input nixpkgs
+version="$(node -p "require('./package.json').version")"
+if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+  echo "error: package.json version '${version}' is not a semver version" >&2
+  exit 1
 fi
+echo "Syncing version ${version}"
 
-# Regenerate skills so metadata.version tracks the CLI version
-cargo run -- generate-skills --output-dir skills
+# Replace `version = "..."` only inside the [workspace.package] table.
+tmp="$(mktemp)"
+trap 'rm -f "$tmp"' EXIT
+awk -v ver="$version" '
+  /^\[/ { in_table = ($0 == "[workspace.package]") }
+  in_table && /^version[[:space:]]*=/ { $0 = "version = \"" ver "\""; replaced = 1 }
+  { print }
+  END { if (!replaced) exit 3 }
+' Cargo.toml >"$tmp" || {
+  echo "error: no version key found under [workspace.package] in Cargo.toml" >&2
+  exit 1
+}
+cp "$tmp" Cargo.toml
 
-# Stage the changed files so changesets/action commits them
-git add crates/*/Cargo.toml Cargo.lock flake.nix flake.lock skills/ npm/package.json
+# The CLI crate pins the core crate by version for crates.io; keep it identical.
+core_dep_re='^(gws-rust-core = \{ version = ")[^"]+(".*)$'
+if ! grep -Eq "$core_dep_re" crates/gws-rust/Cargo.toml; then
+  echo "error: could not find the gws-rust-core dependency line in crates/gws-rust/Cargo.toml" >&2
+  exit 1
+fi
+sed -E "s/${core_dep_re}/\\1${version}\\2/" crates/gws-rust/Cargo.toml >"$tmp"
+cp "$tmp" crates/gws-rust/Cargo.toml
 
+# shellcheck disable=SC2016 # the single-quoted program is JavaScript, not shell
+VERSION="$version" node --input-type=module -e '
+  import fs from "node:fs";
+  const version = process.env.VERSION;
+  const write = (file, data) => fs.writeFileSync(file, `${JSON.stringify(data, null, 2)}\n`);
+
+  const npmPkg = JSON.parse(fs.readFileSync("npm/package.json", "utf8"));
+  const { platforms } = JSON.parse(fs.readFileSync("npm/platforms.json", "utf8"));
+  npmPkg.version = version;
+  npmPkg.optionalDependencies = Object.fromEntries(platforms.map((p) => [p.package, version]));
+  write("npm/package.json", npmPkg);
+
+  const ext = JSON.parse(fs.readFileSync("gemini-extension.json", "utf8"));
+  ext.version = version;
+  write("gemini-extension.json", ext);
+'
+
+# Only the workspace members change; do not float third-party dependencies in a release PR.
+cargo update --workspace
+
+# Skills embed the CLI version in their metadata.
+cargo run --locked -- generate-skills --output-dir skills
+
+git add Cargo.toml Cargo.lock crates/gws-rust/Cargo.toml npm/package.json gemini-extension.json skills/ docs/skills.md
+echo "Version ${version} synced."

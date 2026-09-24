@@ -1,0 +1,89 @@
+name: Build release binaries
+
+# Reusable workflow: builds `gwsr` for every shipped target and uploads one `bin-<target>`
+# artifact per target. Called by release.yml (tags) and release-check.yml (PRs). It holds no
+# secrets and only reads the repository, so it is safe to run on pull requests.
+on:
+  workflow_call:
+    outputs:
+      source-date-epoch:
+        description: Commit timestamp used for reproducible archives.
+        value: ${{ jobs.meta.outputs.source-date-epoch }}
+
+permissions: {}
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  meta:
+    name: Build metadata
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    outputs:
+      source-date-epoch: ${{ steps.epoch.outputs.value }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - id: epoch
+        run: echo "value=$(git log -1 --format=%ct)" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: ${{ matrix.target }}
+    needs: meta
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            os: macos-15
+          - target: x86_64-apple-darwin
+            os: macos-15
+          - target: x86_64-pc-windows-msvc
+            os: windows-2025
+          # Linux builds use cross (images pinned by digest) so gnu binaries link against an old
+          # glibc and musl binaries are fully static. Keep digests in sync with release-check.yml.
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-24.04
+            cross-image: ghcr.io/cross-rs/x86_64-unknown-linux-gnu@sha256:584b0cd23a08c53986eebc75c76ac1df7184a7e2cc711fc1b5882f0cfc3d0f35
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-24.04
+            cross-image: ghcr.io/cross-rs/aarch64-unknown-linux-gnu@sha256:8bab77e51e2445c184e428ca340354a3cc0055fc1bdadd2765a106f0f5dd9140
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-24.04
+            cross-image: ghcr.io/cross-rs/x86_64-unknown-linux-musl@sha256:d54fdde7f1b680901a0bb21a2952e4921172b94c17e48603ccbbaeca8b5ef7e8
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-24.04
+            cross-image: ghcr.io/cross-rs/aarch64-unknown-linux-musl@sha256:749dab9d1520382d3971c022b419f417779ff8fd04294fdca63473ce23e586e7
+    env:
+      SOURCE_DATE_EPOCH: ${{ needs.meta.outputs.source-date-epoch }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-rust
+        with:
+          components: ""
+          targets: ${{ matrix.target }}
+      - id: build
+        uses: ./.github/actions/build-gwsr
+        with:
+          target: ${{ matrix.target }}
+          cross-image: ${{ matrix.cross-image }}
+      - name: Stage binary
+        shell: bash
+        env:
+          BINARY: ${{ steps.build.outputs.binary }}
+        run: mkdir -p staged && cp "$BINARY" staged/
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: bin-${{ matrix.target }}
+          path: staged/
+          if-no-files-found: error
+          retention-days: 7

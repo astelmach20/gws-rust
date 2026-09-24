@@ -1,0 +1,91 @@
+name: API smoketest
+
+# Exercises a release build against the live Google APIs. Opt-in: set the repository variable
+# GWSR_SMOKETEST=true and add the GWSR_SMOKETEST_CREDENTIALS secret (base64 of an authorized-user
+# credentials JSON for a dedicated test account) to the `smoketest` environment. Never runs on
+# pull requests, so the secret is not exposed to PR code.
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "5 7 * * *"
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  smoketest:
+    name: Live API smoketest
+    if: vars.GWSR_SMOKETEST == 'true'
+    runs-on: ubuntu-24.04
+    environment: smoketest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-rust
+        with:
+          components: ""
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - run: cargo build --release --locked --bin gwsr
+
+      - name: Write credentials
+        env:
+          CREDENTIALS_B64: ${{ secrets.GWSR_SMOKETEST_CREDENTIALS }}
+        run: |
+          if [[ -z "$CREDENTIALS_B64" ]]; then
+            echo "::error::GWSR_SMOKETEST=true but the GWSR_SMOKETEST_CREDENTIALS secret is not set in the smoketest environment."
+            exit 1
+          fi
+          umask 077
+          base64 --decode <<<"$CREDENTIALS_B64" > "$RUNNER_TEMP/credentials.json"
+          echo "GWSR_CREDENTIALS_FILE=$RUNNER_TEMP/credentials.json" >> "$GITHUB_ENV"
+
+      - name: Help and schema introspection
+        run: |
+          target/release/gwsr --help >/dev/null
+          target/release/gwsr schema drive.files.list | jq -e '.httpMethod'
+
+      - name: Drive files list
+        run: |
+          target/release/gwsr drive files list --params '{"pageSize": 1, "fields": "files(id,mimeType)"}' | jq -e '.files'
+
+      - name: Gmail messages list
+        run: |
+          target/release/gwsr gmail users messages list --params '{"userId": "me", "maxResults": 1, "fields": "messages(id)"}' | jq -e '.messages'
+
+      - name: Calendar events list
+        run: |
+          target/release/gwsr calendar events list --params '{"calendarId": "primary", "maxResults": 1, "fields": "kind,items(id,status)"}' | jq -e '.kind'
+
+      - name: Pagination
+        run: |
+          lines="$(target/release/gwsr drive files list \
+            --params '{"pageSize": 1, "fields": "nextPageToken,files(id)"}' \
+            --page-all --page-limit 2 | wc -l)"
+          if [[ "$lines" -lt 2 ]]; then
+            echo "::error::Expected at least 2 NDJSON lines from pagination, got ${lines}"
+            exit 1
+          fi
+
+      - name: Unknown service fails
+        run: |
+          if target/release/gwsr fakeservice list; then
+            echo "::error::Expected a non-zero exit code for an unknown service"
+            exit 1
+          fi
+
+      - name: Remove credentials
+        if: always()
+        run: rm -f "$RUNNER_TEMP/credentials.json"
