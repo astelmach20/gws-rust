@@ -253,6 +253,7 @@ pub(crate) struct Api {
     /// `rootUrl`, always ending in `/`.
     root: String,
     planned: Mutex<Vec<Value>>,
+    sanitize: crate::helpers::modelarmor::SanitizeConfig,
 }
 
 fn with_slash(s: &str) -> String {
@@ -270,6 +271,7 @@ impl Api {
         doc: &crate::discovery::RestDescription,
         scopes: &[&str],
         dry_run: bool,
+        sanitize: &crate::helpers::modelarmor::SanitizeConfig,
     ) -> Result<Self, GwsError> {
         let token = if dry_run {
             None
@@ -282,7 +284,9 @@ impl Api {
                 ))
             })?)
         };
-        Self::with_token(doc, token, dry_run)
+        let mut api = Self::with_token(doc, token, dry_run)?;
+        api.sanitize = sanitize.clone();
+        Ok(api)
     }
 
     /// Build a client with an explicit token (used by tests and callers that
@@ -312,6 +316,7 @@ impl Api {
             base,
             root,
             planned: Mutex::new(Vec::new()),
+            sanitize: crate::helpers::modelarmor::SanitizeConfig::default(),
         })
     }
 
@@ -490,8 +495,9 @@ impl Api {
     }
 
     /// Output the helper's result: the dry-run plan in dry-run mode, else
-    /// `value` in the requested `--format`.
-    pub fn emit(&self, matches: &ArgMatches, value: &Value) -> Result<(), GwsError> {
+    /// `value` in the requested `--format`, after Model Armor screening when
+    /// `--sanitize` is configured.
+    pub async fn emit(&self, matches: &ArgMatches, value: &Value) -> Result<(), GwsError> {
         if self.dry_run {
             let planned = self
                 .planned
@@ -500,7 +506,27 @@ impl Api {
                 .clone();
             return print_value(matches, &json!({ "dry_run": true, "requests": planned }));
         }
-        print_value(matches, value)
+        let mut value = value.clone();
+        if let Some(template) = self.sanitize.template.as_deref() {
+            let text = serde_json::to_string(&value).map_err(other_err)?;
+            let verdict = screen(template, &self.sanitize.mode, &text).await?;
+            if let Some(obj) = value.as_object_mut() {
+                obj.insert("_sanitization".into(), verdict);
+            }
+        }
+        print_value(matches, &value)
+    }
+
+    /// Output plain text (e.g. a rendered document), screened like [`Api::emit`].
+    /// Text output cannot carry an annotation, so warn-mode findings go to stderr.
+    pub async fn emit_text(&self, matches: &ArgMatches, text: &str) -> Result<(), GwsError> {
+        if self.dry_run {
+            return self.emit(matches, &Value::Null).await;
+        }
+        if let Some(template) = self.sanitize.template.as_deref() {
+            screen(template, &self.sanitize.mode, text).await?;
+        }
+        print_text(text)
     }
 
     /// Dry-run plan recorded so far (tests).
@@ -595,6 +621,41 @@ impl Api {
             return serde_json::from_str(&text).map_err(|e| {
                 other_err(anyhow::anyhow!("Upload response was not valid JSON: {e}"))
             });
+        }
+    }
+}
+
+/// Screen `text` through Model Armor. Fails closed in block mode (a match or
+/// a failed screening is an error); in warn mode findings and failures are
+/// reported on stderr and returned as the `_sanitization` annotation.
+async fn screen(
+    template: &str,
+    mode: &crate::helpers::modelarmor::SanitizeMode,
+    text: &str,
+) -> Result<Value, GwsError> {
+    use crate::helpers::modelarmor::{SanitizeMode, sanitize_text};
+    match sanitize_text(template, text).await {
+        Ok(result) => {
+            let matched = result.filter_match_state == "MATCH_FOUND";
+            let verdict = serde_json::to_value(&result).map_err(other_err)?;
+            if matched {
+                if *mode == SanitizeMode::Block {
+                    return Err(other_err(anyhow::anyhow!(
+                        "Content blocked by Model Armor (filterMatchState: MATCH_FOUND)"
+                    )));
+                }
+                eprintln!("warning: Model Armor flagged this content (filterMatchState: MATCH_FOUND)");
+            }
+            Ok(verdict)
+        }
+        Err(e) => {
+            if *mode == SanitizeMode::Block {
+                return Err(other_err(anyhow::anyhow!(
+                    "Model Armor screening failed and --sanitize is in block mode; output suppressed: {e}"
+                )));
+            }
+            eprintln!("warning: Model Armor screening failed; output is unscreened: {e}");
+            Ok(json!({ "error": e.to_string() }))
         }
     }
 }

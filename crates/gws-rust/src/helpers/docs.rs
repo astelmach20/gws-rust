@@ -179,7 +179,7 @@ TIPS:
         &'a self,
         doc: &'a crate::discovery::RestDescription,
         matches: &'a ArgMatches,
-        _sanitize_config: &'a crate::helpers::modelarmor::SanitizeConfig,
+        sanitize: &'a crate::helpers::modelarmor::SanitizeConfig,
     ) -> Pin<Box<dyn Future<Output = Result<bool, GwsError>> + Send + 'a>> {
         Box::pin(async move {
             let Some((name, m)) = matches.subcommand() else {
@@ -189,31 +189,31 @@ TIPS:
             match name {
                 "+create" => {
                     let content = Content::parse(m)?;
-                    let api = Api::new(doc, &[SCOPE_DOCS], dry).await?;
+                    let api = Api::new(doc, &[SCOPE_DOCS], dry, sanitize).await?;
                     let v = create(&api, required(m, "title")?, content.as_ref()).await?;
-                    api.emit(m, &v)?;
+                    api.emit(m, &v).await?;
                 }
                 "+read" => {
-                    let api = Api::new(doc, &[SCOPE_DOCS_READONLY], dry).await?;
+                    let api = Api::new(doc, &[SCOPE_DOCS_READONLY], dry, sanitize).await?;
                     let format = required(m, "body-format")?;
                     let document = get_document(&api, required(m, "document-id")?).await?;
                     if api.is_dry_run() || format == "json" {
-                        api.emit(m, &document)?;
+                        api.emit(m, &document).await?;
                     } else {
                         let text = reader::render(&document, format == "markdown");
-                        http::print_text(text.trim_end_matches('\n'))?;
+                        api.emit_text(m, text.trim_end_matches('\n')).await?;
                     }
                 }
                 "+write" => {
                     let content = Content::parse(m)?.ok_or_else(|| {
                         GwsError::Validation("--text or --text-file is required".into())
                     })?;
-                    let api = Api::new(doc, &[SCOPE_DOCS], dry).await?;
+                    let api = Api::new(doc, &[SCOPE_DOCS], dry, sanitize).await?;
                     let v = write(&api, required(m, "document-id")?, &content).await?;
-                    api.emit(m, &v)?;
+                    api.emit(m, &v).await?;
                 }
                 "+replace" => {
-                    let api = Api::new(doc, &[SCOPE_DOCS], dry).await?;
+                    let api = Api::new(doc, &[SCOPE_DOCS], dry, sanitize).await?;
                     let v = replace(
                         &api,
                         required(m, "document-id")?,
@@ -222,7 +222,7 @@ TIPS:
                         flag(m, "match-case"),
                     )
                     .await?;
-                    api.emit(m, &v)?;
+                    api.emit(m, &v).await?;
                 }
                 _ => return Ok(false),
             }
