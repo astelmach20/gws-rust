@@ -1,29 +1,18 @@
-# Copyright 2026 Google LLC
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-
 name: Generate Skills
 
+# Regenerates skills from the live Discovery documents and opens (or updates) a PR when Google's
+# API surface changed. PRs opened with the default GITHUB_TOKEN do not trigger CI; configure a
+# GitHub App (repository variable BOT_APP_ID + secret BOT_APP_PRIVATE_KEY, with contents and
+# pull-requests write) so the sync PR gets checks.
 on:
   schedule:
-    - cron: "0 * * * *" # Hourly — keeps skills in sync with Discovery API changes
-  workflow_dispatch: # Manual trigger
-  push:
-    branches-ignore:
-      - main # main is kept up to date by PR merges
+    - cron: "11 5 * * *"
+  workflow_dispatch:
+
+permissions: {}
 
 concurrency:
-  group: generate-skills-${{ github.ref_name }}
+  group: ${{ github.workflow }}
   cancel-in-progress: true
 
 env:
@@ -31,89 +20,69 @@ env:
 
 jobs:
   generate:
-    name: Generate and commit skills
-    runs-on: ubuntu-latest
+    name: Regenerate skills
+    runs-on: ubuntu-24.04
     permissions:
-      contents: write
-      pull-requests: write
-
+      contents: write # push the chore/sync-skills branch (when no GitHub App is configured)
+      pull-requests: write # open or update the sync PR
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          # For cron/dispatch: check out main. For push: check out the branch.
-          ref: ${{ github.head_ref || github.ref_name }}
-          token: ${{ secrets.GOOGLEWORKSPACE_BOT_TOKEN }}
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
-
-      - name: Setup sccache
-        uses: mozilla-actions/sccache-action@2df7dbab909c49ab7d3382d05da469f3f975c2d6 # v0.0.7
-
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@ad397744b0d591a723ab90405b7247fac0e6b8db # v2
+          persist-credentials: false
+      - uses: ./.github/actions/setup-rust
         with:
-          key: generate-skills-ubuntu
+          components: ""
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - run: cargo run --locked -- dev generate-skills --output-dir skills --index docs/skills.md
 
-      - name: Generate skills
-        run: cargo run -- generate-skills
-
-      - name: Check for changes
-        id: diff
+      - id: diff
         run: |
-          if git diff --quiet skills/ docs/skills.md; then
+          # `git status` sees new (untracked) and pruned skills as well as edits.
+          if [ -z "$(git status --porcelain -- skills/ docs/skills.md)" ]; then
             echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "Skills are up to date."
           else
             echo "changed=true" >> "$GITHUB_OUTPUT"
+            git status --short -- skills/ docs/skills.md
           fi
 
-      # --- Cron / workflow_dispatch: open a PR against main ---
-      - name: Create changeset for sync PR
-        if: >-
-          steps.diff.outputs.changed == 'true' &&
-          (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+      - name: Add changeset
+        if: steps.diff.outputs.changed == 'true'
         run: |
-          mkdir -p .changeset
-          cat > .changeset/sync-skills.md << 'EOF'
+          cat > .changeset/sync-skills.md <<'CHANGESET'
           ---
-          "@googleworkspace/cli": patch
+          "gws-rust": patch
           ---
 
-          Sync generated skills with latest Google Discovery API specs
-          EOF
+          Sync generated skills with the latest Google Discovery documents
+          CHANGESET
 
-      - name: Create or update sync PR
-        if: >-
-          steps.diff.outputs.changed == 'true' &&
-          (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
-        uses: peter-evans/create-pull-request@22a9089034f40e5a961c8808d113e2c98fb63676 # v7
+      - id: app-token
+        if: steps.diff.outputs.changed == 'true' && vars.BOT_APP_ID != ''
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
-          token: ${{ secrets.GOOGLEWORKSPACE_BOT_TOKEN }}
+          app-id: ${{ vars.BOT_APP_ID }}
+          private-key: ${{ secrets.BOT_APP_PRIVATE_KEY }}
+          permission-contents: write
+          permission-pull-requests: write
+
+      - name: Warn when CI will not run on the PR
+        if: steps.diff.outputs.changed == 'true' && vars.BOT_APP_ID == ''
+        run: echo "::warning::BOT_APP_ID is not configured; the sync PR is opened with GITHUB_TOKEN and CI will not run on it until it is closed and reopened."
+
+      - uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1 # v8.1.1
+        if: steps.diff.outputs.changed == 'true'
+        with:
+          token: ${{ steps.app-token.outputs.token || github.token }}
           branch: chore/sync-skills
           title: "chore: sync skills with Discovery API"
           body: |
-            Automated PR — the Google Discovery API specs have changed and the
-            generated skill files are out of date.
+            Automated PR: the Google Discovery documents changed and the generated skills are out of date.
 
-            Created by the **Generate Skills** workflow (`generate-skills.yml`).
+            Created by the Generate Skills workflow (`.github/workflows/generate-skills.yml`).
           commit-message: "chore: regenerate skills from Discovery API"
           add-paths: |
             skills/
             docs/skills.md
             .changeset/sync-skills.md
           delete-branch: true
-
-      # --- Push events (non-main branches): commit directly ---
-      - name: Commit and push if changed
-        if: >-
-          steps.diff.outputs.changed == 'true' &&
-          github.event_name == 'push'
-        env:
-          GITHUB_TOKEN: ${{ secrets.GOOGLEWORKSPACE_BOT_TOKEN }}
-        run: |
-          git config user.name  "googleworkspace-bot"
-          git config user.email "googleworkspace-bot@users.noreply.github.com"
-
-          git add skills/ docs/skills.md
-          git commit -m "chore: regenerate skills [skip ci]"
-          git push

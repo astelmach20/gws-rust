@@ -1,4 +1,5 @@
-# GWS CLI — README Demo
+# gwsr: README demo
+# Records against a real (test) account. Use a throwaway account.
 # Run: vhs docs/demo.tape
 #
 # All cosmetic sleeps minimized. API sleeps kept for responses.
@@ -23,14 +24,16 @@ Type "export -f gemini" Enter
 Type "export PATH=$PWD/target/release:$PWD/target/debug:$PATH" Enter
 Type "set -e" Enter
 Sleep 1s
-Type `DEMO=$(gws drive files create --json '{"name":"gws-demo","mimeType":"application/vnd.google-apps.folder"}' | jq -r '.id')` Enter
+Type `DEMO=$(gwsr drive files create --json '{"name":"gwsr-demo","mimeType":"application/vnd.google-apps.folder"}' | jq -r '.id')` Enter
 Sleep 3s
-Type `gws drive files create --json "{\"name\":\"meeting-notes.md\",\"mimeType\":\"text/markdown\",\"parents\":[\"$DEMO\"]}" > /dev/null` Enter
+Type `gwsr drive files create --json "{\"name\":\"meeting-notes.md\",\"mimeType\":\"text/markdown\",\"parents\":[\"$DEMO\"]}" > /dev/null` Enter
 Sleep 2s
-Type `gws drive files create --json "{\"name\":\"quarterly-report.csv\",\"mimeType\":\"text/csv\",\"parents\":[\"$DEMO\"]}" > /dev/null` Enter
+Type `gwsr drive files create --json "{\"name\":\"quarterly-report.csv\",\"mimeType\":\"text/csv\",\"parents\":[\"$DEMO\"]}" > /dev/null` Enter
 Sleep 2s
-Type `gws drive files create --json "{\"name\":\"project-roadmap.md\",\"mimeType\":\"text/markdown\",\"parents\":[\"$DEMO\"]}" > /dev/null` Enter
+Type `gwsr drive files create --json "{\"name\":\"project-roadmap.md\",\"mimeType\":\"text/markdown\",\"parents\":[\"$DEMO\"]}" > /dev/null` Enter
 Sleep 2s
+Type `SHEET=$(gwsr sheets +create --title gwsr-demo | jq -r '.spreadsheetId')` Enter
+Sleep 3s
 Type `Q="'$DEMO' in parents"` Enter
 Sleep 500ms
 Type "clear" Enter
@@ -47,7 +50,7 @@ Sleep 1s
 Show
 Sleep 1s
 
-# ── Scene 1: What is gws? ──
+# ── Scene 1: What is gwsr? ──
 Hide
 Type "./scripts/show-art.sh art/scene1.txt" Enter
 Sleep 1s
@@ -61,7 +64,7 @@ Sleep 1s
 Show
 Sleep 1s
 
-Type "gws --help 2>&1 | head -40" Enter
+Type "gwsr --help 2>&1 | head -40" Enter
 Sleep 4s
 
 # ── Scene 2b: Inspect Drive resources ──
@@ -71,7 +74,7 @@ Sleep 1s
 Show
 Sleep 1s
 
-Type "gws drive --help 2>&1 | head -40" Enter
+Type "gwsr drive --help 2>&1 | head -40" Enter
 Sleep 4s
 
 # ── Scene 3: Schema introspection ──
@@ -81,7 +84,7 @@ Sleep 1s
 Show
 Sleep 1s
 
-Type "gws schema drive.files.list | head -15" Enter
+Type "gwsr schema drive.files.list | head -15" Enter
 Sleep 3s
 
 # ── Scene 3b: Inspect JSON Schemas ──
@@ -91,10 +94,10 @@ Sleep 1s
 Show
 Sleep 1s
 
-Type "gws schema drive.File | head -20" Enter
+Type "gwsr schema drive.File | head -20" Enter
 Sleep 3s
 
-Type "gws schema drive.File --resolve-refs | head -30" Enter
+Type "gwsr schema drive.File --resolve-refs | head -30" Enter
 Sleep 5s
 
 # ── Scene 4: List files in a folder ──
@@ -104,7 +107,7 @@ Sleep 1s
 Show
 Sleep 1s
 
-Type "gws drive files list" 
+Type "gwsr drive files list" 
 Type ` --params "{\"q\":\"$Q\",\"fields\":\"files(name,mimeType)\"}"` Enter
 Sleep 3s
 
@@ -118,7 +121,7 @@ Sleep 1s
 Type "echo '# Notes' > /tmp/notes.md" Enter
 Sleep 500ms
 
-Type "gws drive files create" 
+Type "gwsr drive files create" 
 Type ` --json '{"name":"notes.md","mimeType":"text/markdown"}'` 
 Type " --upload /tmp/notes.md" Enter
 Sleep 3s
@@ -133,12 +136,8 @@ Sleep 1s
 Type "JOKE=$(gemini 'tell me a joke')" Enter
 Sleep 1s
 
-Type `MSG=$(echo -e "To: justin@example.com\nSubject: joke of the day\n\n$JOKE" | base64 | tr -d '\n' | tr '+/' '-_' | tr -d '=')` Enter
-
-Type "gws gmail users messages send" 
-Type ` --params '{"userId":"me"}'` 
-Type ` --json "{\"raw\":\"$MSG\"}"` 
-Type " | jq ." Enter
+Type "gwsr gmail +send --to justin@example.com --subject 'joke of the day'" 
+Type ` --body "$JOKE" --draft` Enter
 Sleep 3s
 
 # ── Scene 7: Calendar event ──
@@ -148,9 +147,9 @@ Sleep 1s
 Show
 Sleep 1s
 
-Type "gws calendar events insert" 
+Type "gwsr calendar events insert" 
 Type ` --params '{"calendarId":"primary"}'` 
-Type ` --json '{"summary":"Ship v1.0 🚀","start":{"dateTime":"2024-06-17T10:00:00-07:00"},"end":{"dateTime":"2024-06-17T10:30:00-07:00"}}'` 
+Type ` --json '{"summary":"Ship v1.0","start":{"dateTime":"2024-06-17T10:00:00-07:00"},"end":{"dateTime":"2024-06-17T10:30:00-07:00"}}'` 
 Type " | jq . | head -15" Enter
 Sleep 3s
 
@@ -161,8 +160,8 @@ Sleep 1s
 Show
 Sleep 1s
 
-Type "gws sheets spreadsheets values append" 
-Type ` --params '{"spreadsheetId":"1izmtvgBC4NuxHhABFX6descuB6-SXTm3g7c6LYBngJQ","range":"Sheet1!A1","valueInputOption":"USER_ENTERED"}'` 
+Type "gwsr sheets spreadsheets values append" 
+Type ` --params "{\"spreadsheetId\":\"$SHEET\",\"range\":\"Sheet1!A1\",\"valueInputOption\":\"USER_ENTERED\"}"` 
 Type ` --json '{"values":[["Deploy","v1.0","=NOW()"]]}'` Enter
 Sleep 3s
 
@@ -173,7 +172,7 @@ Sleep 1s
 Show
 Sleep 1s
 
-Type "gws drive files list" 
+Type "gwsr drive files list" 
 Type " --params '" Sleep 50ms
 Type@30ms '{"pageSize":2,"fields":"nextPageToken,files(id)"}' Sleep 50ms
 Type "'" 
@@ -193,5 +192,6 @@ Sleep 1s
 
 # ── Cleanup (hidden) ──
 Hide
-Type `gws drive files delete --params "{\"fileId\":\"$DEMO\"}" > /dev/null 2>&1` Enter
+Type `gwsr drive files delete --params "{\"fileId\":\"$DEMO\"}" --yes > /dev/null 2>&1` Enter
+Type `gwsr drive files delete --params "{\"fileId\":\"$SHEET\"}" --yes > /dev/null 2>&1` Enter
 Sleep 3s

@@ -1,57 +1,30 @@
 {
-  "name": "@googleworkspace/cli",
+  "name": "gws-rust",
   "version": "0.22.5",
   "private": true,
-  "description": "Google Workspace CLI — dynamic command surface from Discovery Service",
+  "description": "Development tooling for gws-rust (versioning, git hooks). The published npm package lives in npm/.",
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
-    "url": "https://github.com/googleworkspace/cli.git"
+    "url": "git+https://github.com/astelmach20/gws-rust.git"
   },
-  "author": {
-    "name": "Justin Poehnelt",
-    "email": "justin.poehnelt@gmail.com"
-  },
-  "homepage": "https://github.com/googleworkspace/cli",
+  "homepage": "https://github.com/astelmach20/gws-rust",
   "bugs": {
-    "url": "https://github.com/googleworkspace/cli/issues"
+    "url": "https://github.com/astelmach20/gws-rust/issues"
   },
+  "type": "module",
   "scripts": {
-    "test": "cargo test",
-    "prepare": "lefthook install",
+    "test": "node --test \"npm/test/*.test.mjs\" \"scripts/test/*.test.mjs\"",
     "version-sync": "bash scripts/version-sync.sh",
-    "tag-release": "bash scripts/tag-release.sh"
-  },
-  "publishConfig": {
-    "provenance": true,
-    "registry": "https://wombat-dressing-room.appspot.com"
+    "tag-release": "bash scripts/tag-release.sh",
+    "hooks": "bash scripts/install-hooks.sh"
   },
   "engines": {
-    "node": ">=18"
+    "node": "^22.11 || ^24 || >=26"
   },
-  "packageManager": "pnpm@10.0.0",
-  "keywords": [
-    "cli",
-    "google-workspace",
-    "google",
-    "google-api",
-    "google-drive",
-    "google-gmail",
-    "google-sheets",
-    "google-calendar",
-    "google-docs",
-    "google-chat",
-    "google-admin",
-    "gsuite",
-    "discovery-api",
-    "ai-agent",
-    "agent-skills",
-    "automation",
-    "oauth2",
-    "rust"
-  ],
+  "packageManager": "pnpm@11.27.1+sha512.a81d4c21b9b09a4b0aebf90ef5e527d4262bdda322d26082978cb549023ac6d9cafc98b19fffaa5c71db438a65f70224edb78d7311187861ff96480d1cdca23c",
   "devDependencies": {
-    "@changesets/cli": "^2.29.8",
-    "lefthook": "^2.1.2"
+    "@changesets/cli": "3.0.3",
+    "lefthook": "2.1.14"
   }
 }

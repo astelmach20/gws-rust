@@ -1,93 +1,66 @@
-# How to contribute
+# Contributing
 
-We'd love to accept your patches and contributions to this project.
+Thanks for helping improve `gwsr`. Everyone who takes part is expected to follow the [Code of Conduct](CODE_OF_CONDUCT.md).
 
-## Before you begin
+Before you write code, read [AGENTS.md](../AGENTS.md). It has the architecture, the project rules (fail loudly, no compatibility shims, JSON by default, tests for every behavior change) and the input-validation checklist that reviews enforce.
 
-### Sign our Contributor License Agreement
+## Setup
 
-Contributions to this project must be accompanied by a
-[Contributor License Agreement](https://cla.developers.google.com/about) (CLA).
-You (or your employer) retain the copyright to your contribution; this simply
-gives us permission to use and redistribute your contributions as part of the
-project.
+```bash
+git clone https://github.com/astelmach20/gws-rust && cd gws-rust
+nix develop      # optional: the pinned Rust toolchain and every tool below
+pnpm install     # changesets CLI and lefthook (pnpm 11.27.1, pinned in package.json)
+pnpm run hooks   # optional: install the lefthook git hooks (primary checkout only)
+just             # list recipes
+```
 
-If you or your current employer have already signed the Google CLA (even if it
-was for a different project), you probably don't need to do it again.
+Without Nix, install [rustup](https://rustup.rs) (it picks up `rust-toolchain.toml`), [just](https://just.systems), pnpm and, as needed, `cargo-deny`, `cargo-audit`, `cargo-llvm-cov`, `cargo-machete`, `cargo-insta`, `shellcheck`, `actionlint` and `zizmor`.
 
-Visit <https://cla.developers.google.com/> to see your current agreements or to
-sign a new one.
+## Making a change
 
-### Review our community guidelines
-
-This project follows
-[Google's Open Source Community Guidelines](https://opensource.google/conduct/).
-
-## Contribution process
-
-### Code reviews
-
-All submissions, including submissions by project members, require review. We
-use GitHub pull requests for this purpose. Consult
-[GitHub Help](https://help.github.com/articles/about-pull-requests/) for more
-information on using pull requests.
-
-### Updating CI Smoketest Credentials
-
-If the OAuth refresh token used in the GitHub Actions smoketest expires or needs additional scopes, you can generate a new one and update the repository secret using the GitHub CLI (`gh`).
-
-1. **Set the credentials file path to output plaintext JSON**:
-   ```bash
-   export GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE=smoketest-creds.json
-   ```
-
-2. **Authenticate with the required scopes**:
-   ```bash
-   cargo run -- auth login --scopes https://www.googleapis.com/auth/drive,https://www.googleapis.com/auth/gmail.readonly,https://www.googleapis.com/auth/calendar.readonly,https://www.googleapis.com/auth/presentations.readonly,https://www.googleapis.com/auth/tasks.readonly
-   ```
-
-3. **Export and set the GitHub actions secret**:
-   ```bash
-   cargo run --quiet -- auth export --unmasked | base64 | gh secret set GOOGLE_CREDENTIALS_JSON
-   ```
-
-4. **Clean up**:
-   ```bash
-   rm smoketest-creds.json
-   unset GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE
-   ```
-
-## Development Patterns
+1. Branch from `main`.
+2. Make the change, with focused tests. Validation logic needs a test for both the accept path and the reject path.
+3. Run `just ci`: fmt, clippy, machete, shellcheck, actionlint/zizmor, the Rust and npm tests, and `cargo deny` + `cargo audit`. If you installed the hooks (`pnpm run hooks`), they run the fast subset on commit and push.
+4. Run `just coverage` if you touched a lot of code. CI fails when line coverage falls below the floor in `scripts/coverage.sh`.
+5. If you changed help text, helper flags, `registry/*.toml` or the skill generator, run `just skills` and commit the regenerated `skills/` and `docs/skills.md`, including new and deleted skill directories. Never edit a generated `SKILL.md` by hand. A full run deletes generated skills that are no longer produced; a directory reported as `unmanaged` has no generator marker, so delete it by hand if it is stale.
+6. If CLI output or help changed, update the snapshots: `cargo insta review` (or `INSTA_UPDATE=always cargo test`).
+7. Add a changeset (below) and open a pull request. All changes, including maintainers', go through review.
 
 ### Changesets
 
-Every PR must include a changeset file at `.changeset/<descriptive-name>.md`:
+Every PR that changes Rust code or a Cargo manifest needs a changeset. Run `pnpm changeset`, or create `.changeset/<descriptive-name>.md`:
 
 ```markdown
 ---
-"@googleworkspace/cli": patch
+"gws-rust": patch
 ---
 
-Brief description of the change
+What changed, from the user's point of view.
 ```
 
-Use `patch` for fixes/chores, `minor` for new features, `major` for breaking changes.
+Before 1.0, use `minor` for new features and breaking changes (and say which parts are breaking), and `patch` for fixes. `gws-rust` is the only package name CI accepts.
 
-### Input Validation & URL Safety
+### Testing notes
 
-This CLI is designed to be invoked by AI/LLM agents, so all user-supplied inputs must be treated as potentially adversarial. See [AGENTS.md](../AGENTS.md#input-validation--url-safety) for the full reference. The key rules are:
+- Never use real Google accounts or credentials in tests. Mock HTTP with `wiremock`, and use the stripped Discovery fixtures in `crates/gws-rust/tests/fixtures/discovery/`.
+- Tests that change the process working directory or environment must be `#[serial]` (`serial_test`).
+- Canonicalize temp-dir paths before comparing them (macOS `/var` is a symlink to `/private/var`).
 
-| What you're doing | What to use |
-|---|---|
-| Accepting a file path (`--output-dir`, `--dir`) | `validate::validate_safe_output_dir()` or `validate_safe_dir_path()` |
-| Embedding a value in a URL path segment | `helpers::encode_path_segment()` |
-| Passing query parameters | reqwest `.query()` builder (never string interpolation) |
-| Using a resource name in a URL (`--project`, `--space`) | `helpers::validate_resource_name()` |
-| Accepting an enum flag (`--msg-format`) | clap `value_parser` (see `gmail/mod.rs`) |
+## Live API smoketest (maintainers)
 
-### Testing Expectations
+`.github/workflows/smoketest.yml` runs a release build against the live APIs on pushes to `main` and nightly. It is opt-in: it runs only when the repository variable `GWSR_SMOKETEST` is `true`, and it reads the `GWSR_SMOKETEST_CREDENTIALS` secret from the `smoketest` environment. Use a dedicated test account, never a personal one.
 
-- All new validation logic must include **both happy-path and error-path tests**
-- Tests that modify the process CWD must use `#[serial]` from `serial_test`
-- Tempdir paths should be canonicalized before use to handle macOS `/var` → `/private/var` symlinks
-- Run the full suite before submitting: `cargo test && cargo clippy -- -D warnings`
+To create or rotate the credential:
+
+```bash
+export GWSR_CONFIG_DIR="$(mktemp -d)"          # keep it out of your own profile
+cargo run -- auth login --scopes drive.readonly,gmail.readonly,calendar.readonly
+cargo run -- auth export --unmasked --output smoketest-creds.json
+base64 < smoketest-creds.json | gh secret set GWSR_SMOKETEST_CREDENTIALS --env smoketest
+rm smoketest-creds.json && cargo run -- auth logout --no-revoke && rm -rf "$GWSR_CONFIG_DIR"
+gh variable set GWSR_SMOKETEST --body true
+```
+
+## Reporting security issues
+
+Do not open a public issue. Follow [SECURITY.md](../SECURITY.md).

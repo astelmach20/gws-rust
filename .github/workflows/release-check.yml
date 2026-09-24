@@ -1,0 +1,167 @@
+name: Release check
+
+# Build-only rehearsal of release.yml for pull requests that touch the release machinery (and
+# weekly): builds every target, packages the archives, renders the Homebrew formula, builds the
+# npm packages and installs them without install scripts, dry-runs `cargo publish`, and rebuilds
+# one target from a different directory to prove the build is reproducible. Read-only: no
+# secrets, no OIDC, no publishing.
+on:
+  pull_request:
+    paths:
+      - .github/workflows/release.yml
+      - .github/workflows/release-check.yml
+      - .github/workflows/build-binaries.yml
+      - .github/actions/**
+      - scripts/**
+      - npm/**
+      - Cargo.toml
+      - Cargo.lock
+      - crates/*/Cargo.toml
+      - rust-toolchain.toml
+  schedule:
+    - cron: "37 3 * * 0"
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Build
+    permissions:
+      contents: read
+    uses: ./.github/workflows/build-binaries.yml
+
+  package:
+    name: Package and install rehearsal
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    env:
+      SOURCE_DATE_EPOCH: ${{ needs.build.outputs.source-date-epoch }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          package-manager-cache: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: bin-*
+          path: bins
+      - name: Package archives
+        run: |
+          set -euo pipefail
+          version="$(node -p "require('./npm/package.json').version")"
+          echo "VERSION=${version}" >> "$GITHUB_ENV"
+          for dir in bins/bin-*; do
+            target="${dir#bins/bin-}"
+            case "$target" in *windows*) bin="${dir}/gwsr.exe" ;; *) bin="${dir}/gwsr" ;; esac
+            scripts/package-release.sh "$version" "$target" "$bin" dist
+          done
+          (cd dist && find . -maxdepth 1 -type f -printf '%f\n' | LC_ALL=C sort | xargs sha256sum > SHA256SUMS)
+          cat dist/SHA256SUMS
+      - name: Render Homebrew formula
+        run: |
+          set -euo pipefail
+          scripts/homebrew-formula.sh "$VERSION" dist/SHA256SUMS | tee "$RUNNER_TEMP/gws-rust.rb"
+          ruby -c "$RUNNER_TEMP/gws-rust.rb"
+      - name: Build npm packages
+        run: node npm/scripts/build-packages.mjs --version "$VERSION" --artifacts dist --out "$RUNNER_TEMP/npm-packages"
+      - name: Install the npm package with --ignore-scripts and run gwsr
+        run: |
+          set -euo pipefail
+          pkgs="$RUNNER_TEMP/npm-packages"
+          tarballs="$RUNNER_TEMP/tarballs"
+          mkdir -p "$tarballs"
+          while IFS= read -r name; do
+            npm pack "$pkgs/$name" --pack-destination "$tarballs" >/dev/null
+          done < "$pkgs/publish-order.txt"
+          # shellcheck disable=SC2016 # the single-quoted program is JavaScript
+          # The platform packages are not on the registry yet, so point the main package's
+          # optional dependency for this host at the local tarball.
+          node -e '
+            const fs = require("node:fs");
+            const [pkgDir, tarballs, version] = process.argv.slice(1);
+            const manifest = JSON.parse(fs.readFileSync(`${pkgDir}/gws-rust/package.json`, "utf8"));
+            manifest.optionalDependencies = { "gws-rust-linux-x64": `file:${tarballs}/gws-rust-linux-x64-${version}.tgz` };
+            fs.writeFileSync(`${pkgDir}/gws-rust/package.json`, JSON.stringify(manifest, null, 2));
+          ' "$pkgs" "$tarballs" "$VERSION"
+          npm pack "$pkgs/gws-rust" --pack-destination "$RUNNER_TEMP" >/dev/null
+          project="$RUNNER_TEMP/install-test"
+          mkdir -p "$project"
+          cd "$project"
+          npm init -y >/dev/null
+          # Installing our own freshly built tarball is the thing under test.
+          npm install --ignore-scripts --no-audit --no-fund "$RUNNER_TEMP/gws-rust-${VERSION}.tgz"
+          out="$(npx --no-install gwsr --version)"
+          echo "$out"
+          grep -F "$VERSION" <<<"$out"
+
+  crates-dry-run:
+    name: cargo publish --dry-run
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-rust
+        with:
+          components: ""
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          save-if: false
+      - run: cargo publish --workspace --dry-run --locked
+
+  reproducible:
+    name: Reproducible build
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    env:
+      TARGET: x86_64-unknown-linux-musl
+      SOURCE_DATE_EPOCH: ${{ needs.build.outputs.source-date-epoch }}
+    steps:
+      # A different checkout location than the matrix build; path remapping must hide it.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: elsewhere/gws-rust
+          persist-credentials: false
+      - uses: ./elsewhere/gws-rust/.github/actions/setup-rust
+        with:
+          components: ""
+          targets: x86_64-unknown-linux-musl
+          working-directory: elsewhere/gws-rust
+      - id: rebuild
+        uses: ./elsewhere/gws-rust/.github/actions/build-gwsr
+        with:
+          target: x86_64-unknown-linux-musl
+          cross-image: ghcr.io/cross-rs/x86_64-unknown-linux-musl@sha256:d54fdde7f1b680901a0bb21a2952e4921172b94c17e48603ccbbaeca8b5ef7e8
+          working-directory: elsewhere/gws-rust
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: bin-x86_64-unknown-linux-musl
+          path: original
+      - name: Compare
+        env:
+          REBUILT: ${{ steps.rebuild.outputs.binary }}
+        run: |
+          set -euo pipefail
+          sha256sum original/gwsr "$REBUILT"
+          if ! cmp original/gwsr "$REBUILT"; then
+            echo "::error::The rebuilt ${TARGET} binary differs from the release-matrix build; the build is not reproducible."
+            exit 1
+          fi
+          echo "Reproducible: identical ${TARGET} binaries from two checkout locations."

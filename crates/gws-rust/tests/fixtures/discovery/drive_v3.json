@@ -1,0 +1,1659 @@
+{
+ "_note": "Stripped Discovery document used only by the registry validation test. Regenerate from https://www.googleapis.com/discovery/v1/apis/drive/v3/rest",
+ "name": "drive",
+ "parameters": {
+  "$.xgafv": {
+   "location": "query",
+   "type": "string"
+  },
+  "access_token": {
+   "location": "query",
+   "type": "string"
+  },
+  "alt": {
+   "location": "query",
+   "type": "string"
+  },
+  "callback": {
+   "location": "query",
+   "type": "string"
+  },
+  "fields": {
+   "location": "query",
+   "type": "string"
+  },
+  "key": {
+   "location": "query",
+   "type": "string"
+  },
+  "oauth_token": {
+   "location": "query",
+   "type": "string"
+  },
+  "prettyPrint": {
+   "location": "query",
+   "type": "boolean"
+  },
+  "quotaUser": {
+   "location": "query",
+   "type": "string"
+  },
+  "uploadType": {
+   "location": "query",
+   "type": "string"
+  },
+  "upload_protocol": {
+   "location": "query",
+   "type": "string"
+  }
+ },
+ "resources": {
+  "about": {
+   "methods": {
+    "get": {
+     "httpMethod": "GET",
+     "id": "drive.about.get",
+     "path": "about"
+    }
+   }
+  },
+  "accessproposals": {
+   "methods": {
+    "get": {
+     "httpMethod": "GET",
+     "id": "drive.accessproposals.get",
+     "parameters": {
+      "fileId": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      },
+      "proposalId": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      }
+     },
+     "path": "files/{fileId}/accessproposals/{proposalId}"
+    },
+    "list": {
+     "httpMethod": "GET",
+     "id": "drive.accessproposals.list",
+     "parameters": {
+      "fileId": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      },
+      "pageSize": {
+       "location": "query",
+       "type": "integer"
+      },
+      "pageToken": {
+       "location": "query",
+       "type": "string"
+      }
+     },
+     "path": "files/{fileId}/accessproposals"
+    },
+    "resolve": {
+     "httpMethod": "POST",
+     "id": "drive.accessproposals.resolve",
+     "parameters": {
+      "fileId": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      },
+      "proposalId": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      }
+     },
+     "path": "files/{fileId}/accessproposals/{proposalId}:resolve",
+     "request": {
+      "$ref": "ResolveAccessProposalRequest"
+     }
+    }
+   }
+  },
+  "approvals": {
+   "methods": {
+    "approve": {
+     "httpMethod": "POST",
+     "id": "drive.approvals.approve",
+     "parameters": {
+      "approvalId": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      },
+      "fileId": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      }
+     },
+     "path": "files/{fileId}/approvals/{approvalId}:approve",
+     "request": {
+      "$ref": "ApproveApprovalRequest"
+     }
+    },
+    "cancel": {
+     "httpMethod": "POST",
+     "id": "drive.approvals.cancel",
+     "parameters": {
+      "approvalId": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      },
+      "fileId": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      }
+     },
+     "path": "files/{fileId}/approvals/{approvalId}:cancel",
+     "request": {
+      "$ref": "CancelApprovalRequest"
+     }
+    },
+    "comment": {
+     "httpMethod": "POST",
+     "id": "drive.approvals.comment",
+     "parameters": {
+      "approvalId": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      },
+      "fileId": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      }
+     },
+     "path": "files/{fileId}/approvals/{approvalId}:comment",
+     "request": {
+      "$ref": "CommentApprovalRequest"
+     }
+    },
+    "decline": {
+     "httpMethod": "POST",
+     "id": "drive.approvals.decline",
+     "parameters": {
+      "approvalId": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      },
+      "fileId": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      }
+     },
+     "path": "files/{fileId}/approvals/{approvalId}:decline",
+     "request": {
+      "$ref": "DeclineApprovalRequest"
+     }
+    },
+    "get": {
+     "httpMethod": "GET",
+     "id": "drive.approvals.get",
+     "parameters": {
+      "approvalId": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      },
+      "fileId": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      }
+     },
+     "path": "files/{fileId}/approvals/{approvalId}"
+    },
+    "list": {
+     "httpMethod": "GET",
+     "id": "drive.approvals.list",
+     "parameters": {
+      "fileId": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      },
+      "pageSize": {
+       "location": "query",
+       "type": "integer"
+      },
+      "pageToken": {
+       "location": "query",
+       "type": "string"
+      }
+     },
+     "path": "files/{fileId}/approvals"
+    },
+    "reassign": {
+     "httpMethod": "POST",
+     "id": "drive.approvals.reassign",
+     "parameters": {
+      "approvalId": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      },
+      "fileId": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      }
+     },
+     "path": "files/{fileId}/approvals/{approvalId}:reassign",
+     "request": {
+      "$ref": "ReassignApprovalRequest"
+     }
+    },
+    "start": {
+     "httpMethod": "POST",
+     "id": "drive.approvals.start",
+     "parameters": {
+      "fileId": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      }
+     },
+     "path": "files/{fileId}/approvals:start",
+     "request": {
+      "$ref": "StartApprovalRequest"
+     }
+    }
+   }
+  },
+  "apps": {
+   "methods": {
+    "get": {
+     "httpMethod": "GET",
+     "id": "drive.apps.get",
+     "parameters": {
+      "appId": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      }
+     },
+     "path": "apps/{appId}"
+    },
+    "list": {
+     "httpMethod": "GET",
+     "id": "drive.apps.list",
+     "parameters": {
+      "appFilterExtensions": {
+       "location": "query",
+       "type": "string"
+      },
+      "appFilterMimeTypes": {
+       "location": "query",
+       "type": "string"
+      },
+      "languageCode": {
+       "location": "query",
+       "type": "string"
+      }
+     },
+     "path": "apps"
+    }
+   }
+  },
+  "changes": {
+   "methods": {
+    "getStartPageToken": {
+     "httpMethod": "GET",
+     "id": "drive.changes.getStartPageToken",
+     "parameters": {
+      "driveId": {
+       "location": "query",
+       "type": "string"
+      },
+      "supportsAllDrives": {
+       "location": "query",
+       "type": "boolean"
+      },
+      "supportsTeamDrives": {
+       "location": "query",
+       "type": "boolean"
+      },
+      "teamDriveId": {
+       "location": "query",
+       "type": "string"
+      }
+     },
+     "path": "changes/startPageToken"
+    },
+    "list": {
+     "httpMethod": "GET",
+     "id": "drive.changes.list",
+     "parameters": {
+      "driveId": {
+       "location": "query",
+       "type": "string"
+      },
+      "includeCorpusRemovals": {
+       "location": "query",
+       "type": "boolean"
+      },
+      "includeItemsFromAllDrives": {
+       "location": "query",
+       "type": "boolean"
+      },
+      "includeLabels": {
+       "location": "query",
+       "type": "string"
+      },
+      "includePermissionsForView": {
+       "location": "query",
+       "type": "string"
+      },
+      "includeRemoved": {
+       "location": "query",
+       "type": "boolean"
+      },
+      "includeTeamDriveItems": {
+       "location": "query",
+       "type": "boolean"
+      },
+      "pageSize": {
+       "location": "query",
+       "type": "integer"
+      },
+      "pageToken": {
+       "location": "query",
+       "required": true,
+       "type": "string"
+      },
+      "restrictToMyDrive": {
+       "location": "query",
+       "type": "boolean"
+      },
+      "spaces": {
+       "location": "query",
+       "type": "string"
+      },
+      "supportsAllDrives": {
+       "location": "query",
+       "type": "boolean"
+      },
+      "supportsTeamDrives": {
+       "location": "query",
+       "type": "boolean"
+      },
+      "teamDriveId": {
+       "location": "query",
+       "type": "string"
+      }
+     },
+     "path": "changes"
+    },
+    "watch": {
+     "httpMethod": "POST",
+     "id": "drive.changes.watch",
+     "parameters": {
+      "driveId": {
+       "location": "query",
+       "type": "string"
+      },
+      "includeCorpusRemovals": {
+       "location": "query",
+       "type": "boolean"
+      },
+      "includeItemsFromAllDrives": {
+       "location": "query",
+       "type": "boolean"
+      },
+      "includeLabels": {
+       "location": "query",
+       "type": "string"
+      },
+      "includePermissionsForView": {
+       "location": "query",
+       "type": "string"
+      },
+      "includeRemoved": {
+       "location": "query",
+       "type": "boolean"
+      },
+      "includeTeamDriveItems": {
+       "location": "query",
+       "type": "boolean"
+      },
+      "pageSize": {
+       "location": "query",
+       "type": "integer"
+      },
+      "pageToken": {
+       "location": "query",
+       "required": true,
+       "type": "string"
+      },
+      "restrictToMyDrive": {
+       "location": "query",
+       "type": "boolean"
+      },
+      "spaces": {
+       "location": "query",
+       "type": "string"
+      },
+      "supportsAllDrives": {
+       "location": "query",
+       "type": "boolean"
+      },
+      "supportsTeamDrives": {
+       "location": "query",
+       "type": "boolean"
+      },
+      "teamDriveId": {
+       "location": "query",
+       "type": "string"
+      }
+     },
+     "path": "changes/watch",
+     "request": {
+      "$ref": "Channel"
+     }
+    }
+   }
+  },
+  "channels": {
+   "methods": {
+    "stop": {
+     "httpMethod": "POST",
+     "id": "drive.channels.stop",
+     "path": "channels/stop",
+     "request": {
+      "$ref": "Channel"
+     }
+    }
+   }
+  },
+  "comments": {
+   "methods": {
+    "create": {
+     "httpMethod": "POST",
+     "id": "drive.comments.create",
+     "parameters": {
+      "fileId": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      }
+     },
+     "path": "files/{fileId}/comments",
+     "request": {
+      "$ref": "Comment"
+     }
+    },
+    "delete": {
+     "httpMethod": "DELETE",
+     "id": "drive.comments.delete",
+     "parameters": {
+      "commentId": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      },
+      "fileId": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      }
+     },
+     "path": "files/{fileId}/comments/{commentId}"
+    },
+    "get": {
+     "httpMethod": "GET",
+     "id": "drive.comments.get",
+     "parameters": {
+      "commentId": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      },
+      "fileId": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      },
+      "includeDeleted": {
+       "location": "query",
+       "type": "boolean"
+      }
+     },
+     "path": "files/{fileId}/comments/{commentId}"
+    },
+    "list": {
+     "httpMethod": "GET",
+     "id": "drive.comments.list",
+     "parameters": {
+      "fileId": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      },
+      "includeDeleted": {
+       "location": "query",
+       "type": "boolean"
+      },
+      "pageSize": {
+       "location": "query",
+       "type": "integer"
+      },
+      "pageToken": {
+       "location": "query",
+       "type": "string"
+      },
+      "startModifiedTime": {
+       "location": "query",
+       "type": "string"
+      }
+     },
+     "path": "files/{fileId}/comments"
+    },
+    "update": {
+     "httpMethod": "PATCH",
+     "id": "drive.comments.update",
+     "parameters": {
+      "commentId": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      },
+      "fileId": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      }
+     },
+     "path": "files/{fileId}/comments/{commentId}",
+     "request": {
+      "$ref": "Comment"
+     }
+    }
+   }
+  },
+  "drives": {
+   "methods": {
+    "create": {
+     "httpMethod": "POST",
+     "id": "drive.drives.create",
+     "parameters": {
+      "requestId": {
+       "location": "query",
+       "required": true,
+       "type": "string"
+      }
+     },
+     "path": "drives",
+     "request": {
+      "$ref": "Drive"
+     }
+    },
+    "delete": {
+     "httpMethod": "DELETE",
+     "id": "drive.drives.delete",
+     "parameters": {
+      "allowItemDeletion": {
+       "location": "query",
+       "type": "boolean"
+      },
+      "driveId": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      },
+      "useDomainAdminAccess": {
+       "location": "query",
+       "type": "boolean"
+      }
+     },
+     "path": "drives/{driveId}"
+    },
+    "get": {
+     "httpMethod": "GET",
+     "id": "drive.drives.get",
+     "parameters": {
+      "driveId": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      },
+      "useDomainAdminAccess": {
+       "location": "query",
+       "type": "boolean"
+      }
+     },
+     "path": "drives/{driveId}"
+    },
+    "hide": {
+     "httpMethod": "POST",
+     "id": "drive.drives.hide",
+     "parameters": {
+      "driveId": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      }
+     },
+     "path": "drives/{driveId}/hide"
+    },
+    "list": {
+     "httpMethod": "GET",
+     "id": "drive.drives.list",
+     "parameters": {
+      "pageSize": {
+       "location": "query",
+       "type": "integer"
+      },
+      "pageToken": {
+       "location": "query",
+       "type": "string"
+      },
+      "q": {
+       "location": "query",
+       "type": "string"
+      },
+      "useDomainAdminAccess": {
+       "location": "query",
+       "type": "boolean"
+      }
+     },
+     "path": "drives"
+    },
+    "unhide": {
+     "httpMethod": "POST",
+     "id": "drive.drives.unhide",
+     "parameters": {
+      "driveId": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      }
+     },
+     "path": "drives/{driveId}/unhide"
+    },
+    "update": {
+     "httpMethod": "PATCH",
+     "id": "drive.drives.update",
+     "parameters": {
+      "driveId": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      },
+      "useDomainAdminAccess": {
+       "location": "query",
+       "type": "boolean"
+      }
+     },
+     "path": "drives/{driveId}",
+     "request": {
+      "$ref": "Drive"
+     }
+    }
+   }
+  },
+  "files": {
+   "methods": {
+    "copy": {
+     "httpMethod": "POST",
+     "id": "drive.files.copy",
+     "parameters": {
+      "copyComments": {
+       "location": "query",
+       "type": "boolean"
+      },
+      "enforceSingleParent": {
+       "location": "query",
+       "type": "boolean"
+      },
+      "fileId": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      },
+      "ignoreDefaultVisibility": {
+       "location": "query",
+       "type": "boolean"
+      },
+      "includeLabels": {
+       "location": "query",
+       "type": "string"
+      },
+      "includePermissionsForView": {
+       "location": "query",
+       "type": "string"
+      },
+      "keepRevisionForever": {
+       "location": "query",
+       "type": "boolean"
+      },
+      "ocrLanguage": {
+       "location": "query",
+       "type": "string"
+      },
+      "supportsAllDrives": {
+       "location": "query",
+       "type": "boolean"
+      },
+      "supportsTeamDrives": {
+       "location": "query",
+       "type": "boolean"
+      }
+     },
+     "path": "files/{fileId}/copy",
+     "request": {
+      "$ref": "File"
+     }
+    },
+    "create": {
+     "httpMethod": "POST",
+     "id": "drive.files.create",
+     "parameters": {
+      "enforceSingleParent": {
+       "location": "query",
+       "type": "boolean"
+      },
+      "ignoreDefaultVisibility": {
+       "location": "query",
+       "type": "boolean"
+      },
+      "includeLabels": {
+       "location": "query",
+       "type": "string"
+      },
+      "includePermissionsForView": {
+       "location": "query",
+       "type": "string"
+      },
+      "keepRevisionForever": {
+       "location": "query",
+       "type": "boolean"
+      },
+      "ocrLanguage": {
+       "location": "query",
+       "type": "string"
+      },
+      "supportsAllDrives": {
+       "location": "query",
+       "type": "boolean"
+      },
+      "supportsTeamDrives": {
+       "location": "query",
+       "type": "boolean"
+      },
+      "useContentAsIndexableText": {
+       "location": "query",
+       "type": "boolean"
+      }
+     },
+     "path": "files",
+     "request": {
+      "$ref": "File"
+     },
+     "supportsMediaUpload": true
+    },
+    "delete": {
+     "httpMethod": "DELETE",
+     "id": "drive.files.delete",
+     "parameters": {
+      "enforceSingleParent": {
+       "location": "query",
+       "type": "boolean"
+      },
+      "fileId": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      },
+      "supportsAllDrives": {
+       "location": "query",
+       "type": "boolean"
+      },
+      "supportsTeamDrives": {
+       "location": "query",
+       "type": "boolean"
+      }
+     },
+     "path": "files/{fileId}"
+    },
+    "download": {
+     "httpMethod": "POST",
+     "id": "drive.files.download",
+     "parameters": {
+      "fileId": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      },
+      "mimeType": {
+       "location": "query",
+       "type": "string"
+      },
+      "revisionId": {
+       "location": "query",
+       "type": "string"
+      }
+     },
+     "path": "files/{fileId}/download"
+    },
+    "emptyTrash": {
+     "httpMethod": "DELETE",
+     "id": "drive.files.emptyTrash",
+     "parameters": {
+      "driveId": {
+       "location": "query",
+       "type": "string"
+      },
+      "enforceSingleParent": {
+       "location": "query",
+       "type": "boolean"
+      }
+     },
+     "path": "files/trash"
+    },
+    "export": {
+     "httpMethod": "GET",
+     "id": "drive.files.export",
+     "parameters": {
+      "fileId": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      },
+      "mimeType": {
+       "location": "query",
+       "required": true,
+       "type": "string"
+      }
+     },
+     "path": "files/{fileId}/export"
+    },
+    "generateCseToken": {
+     "httpMethod": "GET",
+     "id": "drive.files.generateCseToken",
+     "parameters": {
+      "fileId": {
+       "location": "query",
+       "type": "string"
+      },
+      "parent": {
+       "location": "query",
+       "type": "string"
+      }
+     },
+     "path": "files/generateCseToken"
+    },
+    "generateIds": {
+     "httpMethod": "GET",
+     "id": "drive.files.generateIds",
+     "parameters": {
+      "count": {
+       "location": "query",
+       "type": "integer"
+      },
+      "space": {
+       "location": "query",
+       "type": "string"
+      },
+      "type": {
+       "location": "query",
+       "type": "string"
+      }
+     },
+     "path": "files/generateIds"
+    },
+    "get": {
+     "httpMethod": "GET",
+     "id": "drive.files.get",
+     "parameters": {
+      "acknowledgeAbuse": {
+       "location": "query",
+       "type": "boolean"
+      },
+      "fileId": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      },
+      "includeLabels": {
+       "location": "query",
+       "type": "string"
+      },
+      "includePermissionsForView": {
+       "location": "query",
+       "type": "string"
+      },
+      "supportsAllDrives": {
+       "location": "query",
+       "type": "boolean"
+      },
+      "supportsTeamDrives": {
+       "location": "query",
+       "type": "boolean"
+      }
+     },
+     "path": "files/{fileId}"
+    },
+    "list": {
+     "httpMethod": "GET",
+     "id": "drive.files.list",
+     "parameters": {
+      "corpora": {
+       "location": "query",
+       "type": "string"
+      },
+      "corpus": {
+       "location": "query",
+       "type": "string"
+      },
+      "driveId": {
+       "location": "query",
+       "type": "string"
+      },
+      "includeItemsFromAllDrives": {
+       "location": "query",
+       "type": "boolean"
+      },
+      "includeLabels": {
+       "location": "query",
+       "type": "string"
+      },
+      "includePermissionsForView": {
+       "location": "query",
+       "type": "string"
+      },
+      "includeTeamDriveItems": {
+       "location": "query",
+       "type": "boolean"
+      },
+      "orderBy": {
+       "location": "query",
+       "type": "string"
+      },
+      "pageSize": {
+       "location": "query",
+       "type": "integer"
+      },
+      "pageToken": {
+       "location": "query",
+       "type": "string"
+      },
+      "q": {
+       "location": "query",
+       "type": "string"
+      },
+      "spaces": {
+       "location": "query",
+       "type": "string"
+      },
+      "supportsAllDrives": {
+       "location": "query",
+       "type": "boolean"
+      },
+      "supportsTeamDrives": {
+       "location": "query",
+       "type": "boolean"
+      },
+      "teamDriveId": {
+       "location": "query",
+       "type": "string"
+      }
+     },
+     "path": "files"
+    },
+    "listLabels": {
+     "httpMethod": "GET",
+     "id": "drive.files.listLabels",
+     "parameters": {
+      "fileId": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      },
+      "maxResults": {
+       "location": "query",
+       "type": "integer"
+      },
+      "pageToken": {
+       "location": "query",
+       "type": "string"
+      }
+     },
+     "path": "files/{fileId}/listLabels"
+    },
+    "modifyLabels": {
+     "httpMethod": "POST",
+     "id": "drive.files.modifyLabels",
+     "parameters": {
+      "fileId": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      }
+     },
+     "path": "files/{fileId}/modifyLabels",
+     "request": {
+      "$ref": "ModifyLabelsRequest"
+     }
+    },
+    "update": {
+     "httpMethod": "PATCH",
+     "id": "drive.files.update",
+     "parameters": {
+      "addParents": {
+       "location": "query",
+       "type": "string"
+      },
+      "enforceSingleParent": {
+       "location": "query",
+       "type": "boolean"
+      },
+      "fileId": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      },
+      "includeLabels": {
+       "location": "query",
+       "type": "string"
+      },
+      "includePermissionsForView": {
+       "location": "query",
+       "type": "string"
+      },
+      "keepRevisionForever": {
+       "location": "query",
+       "type": "boolean"
+      },
+      "ocrLanguage": {
+       "location": "query",
+       "type": "string"
+      },
+      "removeParents": {
+       "location": "query",
+       "type": "string"
+      },
+      "supportsAllDrives": {
+       "location": "query",
+       "type": "boolean"
+      },
+      "supportsTeamDrives": {
+       "location": "query",
+       "type": "boolean"
+      },
+      "useContentAsIndexableText": {
+       "location": "query",
+       "type": "boolean"
+      }
+     },
+     "path": "files/{fileId}",
+     "request": {
+      "$ref": "File"
+     },
+     "supportsMediaUpload": true
+    },
+    "watch": {
+     "httpMethod": "POST",
+     "id": "drive.files.watch",
+     "parameters": {
+      "acknowledgeAbuse": {
+       "location": "query",
+       "type": "boolean"
+      },
+      "fileId": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      },
+      "includeLabels": {
+       "location": "query",
+       "type": "string"
+      },
+      "includePermissionsForView": {
+       "location": "query",
+       "type": "string"
+      },
+      "supportsAllDrives": {
+       "location": "query",
+       "type": "boolean"
+      },
+      "supportsTeamDrives": {
+       "location": "query",
+       "type": "boolean"
+      }
+     },
+     "path": "files/{fileId}/watch",
+     "request": {
+      "$ref": "Channel"
+     }
+    }
+   }
+  },
+  "operations": {
+   "methods": {
+    "get": {
+     "httpMethod": "GET",
+     "id": "drive.operations.get",
+     "parameters": {
+      "name": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      }
+     },
+     "path": "operations/{name}"
+    }
+   }
+  },
+  "permissions": {
+   "methods": {
+    "create": {
+     "httpMethod": "POST",
+     "id": "drive.permissions.create",
+     "parameters": {
+      "emailMessage": {
+       "location": "query",
+       "type": "string"
+      },
+      "enforceExpansiveAccess": {
+       "location": "query",
+       "type": "boolean"
+      },
+      "enforceSingleParent": {
+       "location": "query",
+       "type": "boolean"
+      },
+      "fileId": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      },
+      "moveToNewOwnersRoot": {
+       "location": "query",
+       "type": "boolean"
+      },
+      "sendNotificationEmail": {
+       "location": "query",
+       "type": "boolean"
+      },
+      "supportsAllDrives": {
+       "location": "query",
+       "type": "boolean"
+      },
+      "supportsTeamDrives": {
+       "location": "query",
+       "type": "boolean"
+      },
+      "transferOwnership": {
+       "location": "query",
+       "type": "boolean"
+      },
+      "useDomainAdminAccess": {
+       "location": "query",
+       "type": "boolean"
+      }
+     },
+     "path": "files/{fileId}/permissions",
+     "request": {
+      "$ref": "Permission"
+     }
+    },
+    "delete": {
+     "httpMethod": "DELETE",
+     "id": "drive.permissions.delete",
+     "parameters": {
+      "enforceExpansiveAccess": {
+       "location": "query",
+       "type": "boolean"
+      },
+      "fileId": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      },
+      "permissionId": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      },
+      "supportsAllDrives": {
+       "location": "query",
+       "type": "boolean"
+      },
+      "supportsTeamDrives": {
+       "location": "query",
+       "type": "boolean"
+      },
+      "useDomainAdminAccess": {
+       "location": "query",
+       "type": "boolean"
+      }
+     },
+     "path": "files/{fileId}/permissions/{permissionId}"
+    },
+    "get": {
+     "httpMethod": "GET",
+     "id": "drive.permissions.get",
+     "parameters": {
+      "fileId": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      },
+      "permissionId": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      },
+      "supportsAllDrives": {
+       "location": "query",
+       "type": "boolean"
+      },
+      "supportsTeamDrives": {
+       "location": "query",
+       "type": "boolean"
+      },
+      "useDomainAdminAccess": {
+       "location": "query",
+       "type": "boolean"
+      }
+     },
+     "path": "files/{fileId}/permissions/{permissionId}"
+    },
+    "list": {
+     "httpMethod": "GET",
+     "id": "drive.permissions.list",
+     "parameters": {
+      "fileId": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      },
+      "includePermissionsForView": {
+       "location": "query",
+       "type": "string"
+      },
+      "pageSize": {
+       "location": "query",
+       "type": "integer"
+      },
+      "pageToken": {
+       "location": "query",
+       "type": "string"
+      },
+      "supportsAllDrives": {
+       "location": "query",
+       "type": "boolean"
+      },
+      "supportsTeamDrives": {
+       "location": "query",
+       "type": "boolean"
+      },
+      "useDomainAdminAccess": {
+       "location": "query",
+       "type": "boolean"
+      }
+     },
+     "path": "files/{fileId}/permissions"
+    },
+    "update": {
+     "httpMethod": "PATCH",
+     "id": "drive.permissions.update",
+     "parameters": {
+      "enforceExpansiveAccess": {
+       "location": "query",
+       "type": "boolean"
+      },
+      "fileId": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      },
+      "permissionId": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      },
+      "removeExpiration": {
+       "location": "query",
+       "type": "boolean"
+      },
+      "supportsAllDrives": {
+       "location": "query",
+       "type": "boolean"
+      },
+      "supportsTeamDrives": {
+       "location": "query",
+       "type": "boolean"
+      },
+      "transferOwnership": {
+       "location": "query",
+       "type": "boolean"
+      },
+      "useDomainAdminAccess": {
+       "location": "query",
+       "type": "boolean"
+      }
+     },
+     "path": "files/{fileId}/permissions/{permissionId}",
+     "request": {
+      "$ref": "Permission"
+     }
+    }
+   }
+  },
+  "replies": {
+   "methods": {
+    "create": {
+     "httpMethod": "POST",
+     "id": "drive.replies.create",
+     "parameters": {
+      "commentId": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      },
+      "fileId": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      }
+     },
+     "path": "files/{fileId}/comments/{commentId}/replies",
+     "request": {
+      "$ref": "Reply"
+     }
+    },
+    "delete": {
+     "httpMethod": "DELETE",
+     "id": "drive.replies.delete",
+     "parameters": {
+      "commentId": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      },
+      "fileId": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      },
+      "replyId": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      }
+     },
+     "path": "files/{fileId}/comments/{commentId}/replies/{replyId}"
+    },
+    "get": {
+     "httpMethod": "GET",
+     "id": "drive.replies.get",
+     "parameters": {
+      "commentId": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      },
+      "fileId": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      },
+      "includeDeleted": {
+       "location": "query",
+       "type": "boolean"
+      },
+      "replyId": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      }
+     },
+     "path": "files/{fileId}/comments/{commentId}/replies/{replyId}"
+    },
+    "list": {
+     "httpMethod": "GET",
+     "id": "drive.replies.list",
+     "parameters": {
+      "commentId": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      },
+      "fileId": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      },
+      "includeDeleted": {
+       "location": "query",
+       "type": "boolean"
+      },
+      "pageSize": {
+       "location": "query",
+       "type": "integer"
+      },
+      "pageToken": {
+       "location": "query",
+       "type": "string"
+      }
+     },
+     "path": "files/{fileId}/comments/{commentId}/replies"
+    },
+    "update": {
+     "httpMethod": "PATCH",
+     "id": "drive.replies.update",
+     "parameters": {
+      "commentId": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      },
+      "fileId": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      },
+      "replyId": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      }
+     },
+     "path": "files/{fileId}/comments/{commentId}/replies/{replyId}",
+     "request": {
+      "$ref": "Reply"
+     }
+    }
+   }
+  },
+  "revisions": {
+   "methods": {
+    "delete": {
+     "httpMethod": "DELETE",
+     "id": "drive.revisions.delete",
+     "parameters": {
+      "fileId": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      },
+      "revisionId": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      }
+     },
+     "path": "files/{fileId}/revisions/{revisionId}"
+    },
+    "get": {
+     "httpMethod": "GET",
+     "id": "drive.revisions.get",
+     "parameters": {
+      "acknowledgeAbuse": {
+       "location": "query",
+       "type": "boolean"
+      },
+      "fileId": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      },
+      "revisionId": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      }
+     },
+     "path": "files/{fileId}/revisions/{revisionId}"
+    },
+    "list": {
+     "httpMethod": "GET",
+     "id": "drive.revisions.list",
+     "parameters": {
+      "fileId": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      },
+      "pageSize": {
+       "location": "query",
+       "type": "integer"
+      },
+      "pageToken": {
+       "location": "query",
+       "type": "string"
+      }
+     },
+     "path": "files/{fileId}/revisions"
+    },
+    "update": {
+     "httpMethod": "PATCH",
+     "id": "drive.revisions.update",
+     "parameters": {
+      "fileId": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      },
+      "revisionId": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      }
+     },
+     "path": "files/{fileId}/revisions/{revisionId}",
+     "request": {
+      "$ref": "Revision"
+     }
+    }
+   }
+  },
+  "teamdrives": {
+   "methods": {
+    "create": {
+     "httpMethod": "POST",
+     "id": "drive.teamdrives.create",
+     "parameters": {
+      "requestId": {
+       "location": "query",
+       "required": true,
+       "type": "string"
+      }
+     },
+     "path": "teamdrives",
+     "request": {
+      "$ref": "TeamDrive"
+     }
+    },
+    "delete": {
+     "httpMethod": "DELETE",
+     "id": "drive.teamdrives.delete",
+     "parameters": {
+      "teamDriveId": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      }
+     },
+     "path": "teamdrives/{teamDriveId}"
+    },
+    "get": {
+     "httpMethod": "GET",
+     "id": "drive.teamdrives.get",
+     "parameters": {
+      "teamDriveId": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      },
+      "useDomainAdminAccess": {
+       "location": "query",
+       "type": "boolean"
+      }
+     },
+     "path": "teamdrives/{teamDriveId}"
+    },
+    "list": {
+     "httpMethod": "GET",
+     "id": "drive.teamdrives.list",
+     "parameters": {
+      "pageSize": {
+       "location": "query",
+       "type": "integer"
+      },
+      "pageToken": {
+       "location": "query",
+       "type": "string"
+      },
+      "q": {
+       "location": "query",
+       "type": "string"
+      },
+      "useDomainAdminAccess": {
+       "location": "query",
+       "type": "boolean"
+      }
+     },
+     "path": "teamdrives"
+    },
+    "update": {
+     "httpMethod": "PATCH",
+     "id": "drive.teamdrives.update",
+     "parameters": {
+      "teamDriveId": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      },
+      "useDomainAdminAccess": {
+       "location": "query",
+       "type": "boolean"
+      }
+     },
+     "path": "teamdrives/{teamDriveId}",
+     "request": {
+      "$ref": "TeamDrive"
+     }
+    }
+   }
+  }
+ },
+ "rootUrl": "https://www.googleapis.com/",
+ "servicePath": "drive/v3/",
+ "version": "v3"
+}

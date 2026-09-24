@@ -1,0 +1,339 @@
+{
+ "_note": "Stripped Discovery document used only by the registry validation test. Regenerate from https://www.googleapis.com/discovery/v1/apis/admin/reports_v1/rest",
+ "name": "admin",
+ "parameters": {
+  "$.xgafv": {
+   "location": "query",
+   "type": "string"
+  },
+  "access_token": {
+   "location": "query",
+   "type": "string"
+  },
+  "alt": {
+   "location": "query",
+   "type": "string"
+  },
+  "callback": {
+   "location": "query",
+   "type": "string"
+  },
+  "fields": {
+   "location": "query",
+   "type": "string"
+  },
+  "key": {
+   "location": "query",
+   "type": "string"
+  },
+  "oauth_token": {
+   "location": "query",
+   "type": "string"
+  },
+  "prettyPrint": {
+   "location": "query",
+   "type": "boolean"
+  },
+  "quotaUser": {
+   "location": "query",
+   "type": "string"
+  },
+  "uploadType": {
+   "location": "query",
+   "type": "string"
+  },
+  "upload_protocol": {
+   "location": "query",
+   "type": "string"
+  }
+ },
+ "resources": {
+  "activities": {
+   "methods": {
+    "list": {
+     "httpMethod": "GET",
+     "id": "reports.activities.list",
+     "parameters": {
+      "actorIpAddress": {
+       "location": "query",
+       "type": "string"
+      },
+      "agentInfoFilter": {
+       "location": "query",
+       "type": "string"
+      },
+      "applicationInfoFilter": {
+       "location": "query",
+       "type": "string"
+      },
+      "applicationName": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      },
+      "customerId": {
+       "location": "query",
+       "type": "string"
+      },
+      "deviceFilter": {
+       "location": "query",
+       "type": "string"
+      },
+      "endTime": {
+       "location": "query",
+       "type": "string"
+      },
+      "eventName": {
+       "location": "query",
+       "type": "string"
+      },
+      "filters": {
+       "location": "query",
+       "type": "string"
+      },
+      "groupIdFilter": {
+       "location": "query",
+       "type": "string"
+      },
+      "includeSensitiveData": {
+       "location": "query",
+       "type": "boolean"
+      },
+      "maxResults": {
+       "location": "query",
+       "type": "integer"
+      },
+      "networkInfoFilter": {
+       "location": "query",
+       "type": "string"
+      },
+      "orgUnitID": {
+       "location": "query",
+       "type": "string"
+      },
+      "pageToken": {
+       "location": "query",
+       "type": "string"
+      },
+      "resourceDetailsFilter": {
+       "location": "query",
+       "type": "string"
+      },
+      "startTime": {
+       "location": "query",
+       "type": "string"
+      },
+      "statusFilter": {
+       "location": "query",
+       "type": "string"
+      },
+      "userKey": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      }
+     },
+     "path": "admin/reports/v1/activity/users/{userKey}/applications/{applicationName}"
+    },
+    "watch": {
+     "httpMethod": "POST",
+     "id": "reports.activities.watch",
+     "parameters": {
+      "actorIpAddress": {
+       "location": "query",
+       "type": "string"
+      },
+      "applicationName": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      },
+      "customerId": {
+       "location": "query",
+       "type": "string"
+      },
+      "endTime": {
+       "location": "query",
+       "type": "string"
+      },
+      "eventName": {
+       "location": "query",
+       "type": "string"
+      },
+      "filters": {
+       "location": "query",
+       "type": "string"
+      },
+      "groupIdFilter": {
+       "location": "query",
+       "type": "string"
+      },
+      "maxResults": {
+       "location": "query",
+       "type": "integer"
+      },
+      "orgUnitID": {
+       "location": "query",
+       "type": "string"
+      },
+      "pageToken": {
+       "location": "query",
+       "type": "string"
+      },
+      "startTime": {
+       "location": "query",
+       "type": "string"
+      },
+      "userKey": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      }
+     },
+     "path": "admin/reports/v1/activity/users/{userKey}/applications/{applicationName}/watch",
+     "request": {
+      "$ref": "Channel"
+     }
+    }
+   }
+  },
+  "channels": {
+   "methods": {
+    "stop": {
+     "httpMethod": "POST",
+     "id": "admin.channels.stop",
+     "path": "admin/reports_v1/channels/stop",
+     "request": {
+      "$ref": "Channel"
+     }
+    }
+   }
+  },
+  "customerUsageReports": {
+   "methods": {
+    "get": {
+     "httpMethod": "GET",
+     "id": "reports.customerUsageReports.get",
+     "parameters": {
+      "customerId": {
+       "location": "query",
+       "type": "string"
+      },
+      "date": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      },
+      "pageToken": {
+       "location": "query",
+       "type": "string"
+      },
+      "parameters": {
+       "location": "query",
+       "type": "string"
+      }
+     },
+     "path": "admin/reports/v1/usage/dates/{date}"
+    }
+   }
+  },
+  "entityUsageReports": {
+   "methods": {
+    "get": {
+     "httpMethod": "GET",
+     "id": "reports.entityUsageReports.get",
+     "parameters": {
+      "customerId": {
+       "location": "query",
+       "type": "string"
+      },
+      "date": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      },
+      "entityKey": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      },
+      "entityType": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      },
+      "filters": {
+       "location": "query",
+       "type": "string"
+      },
+      "maxResults": {
+       "location": "query",
+       "type": "integer"
+      },
+      "pageToken": {
+       "location": "query",
+       "type": "string"
+      },
+      "parameters": {
+       "location": "query",
+       "type": "string"
+      }
+     },
+     "path": "admin/reports/v1/usage/{entityType}/{entityKey}/dates/{date}"
+    }
+   }
+  },
+  "userUsageReport": {
+   "methods": {
+    "get": {
+     "httpMethod": "GET",
+     "id": "reports.userUsageReport.get",
+     "parameters": {
+      "customerId": {
+       "location": "query",
+       "type": "string"
+      },
+      "date": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      },
+      "filters": {
+       "location": "query",
+       "type": "string"
+      },
+      "groupIdFilter": {
+       "location": "query",
+       "type": "string"
+      },
+      "maxResults": {
+       "location": "query",
+       "type": "integer"
+      },
+      "orgUnitID": {
+       "location": "query",
+       "type": "string"
+      },
+      "pageToken": {
+       "location": "query",
+       "type": "string"
+      },
+      "parameters": {
+       "location": "query",
+       "type": "string"
+      },
+      "userKey": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      }
+     },
+     "path": "admin/reports/v1/usage/users/{userKey}/dates/{date}"
+    }
+   }
+  }
+ },
+ "rootUrl": "https://admin.googleapis.com/",
+ "servicePath": "",
+ "version": "reports_v1"
+}

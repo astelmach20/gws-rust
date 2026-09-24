@@ -1,0 +1,230 @@
+{
+ "_note": "Stripped Discovery document used only by the registry validation test. Regenerate from https://www.googleapis.com/discovery/v1/apis/forms/v1/rest",
+ "name": "forms",
+ "parameters": {
+  "$.xgafv": {
+   "location": "query",
+   "type": "string"
+  },
+  "access_token": {
+   "location": "query",
+   "type": "string"
+  },
+  "alt": {
+   "location": "query",
+   "type": "string"
+  },
+  "callback": {
+   "location": "query",
+   "type": "string"
+  },
+  "fields": {
+   "location": "query",
+   "type": "string"
+  },
+  "key": {
+   "location": "query",
+   "type": "string"
+  },
+  "oauth_token": {
+   "location": "query",
+   "type": "string"
+  },
+  "prettyPrint": {
+   "location": "query",
+   "type": "boolean"
+  },
+  "quotaUser": {
+   "location": "query",
+   "type": "string"
+  },
+  "uploadType": {
+   "location": "query",
+   "type": "string"
+  },
+  "upload_protocol": {
+   "location": "query",
+   "type": "string"
+  }
+ },
+ "resources": {
+  "forms": {
+   "methods": {
+    "batchUpdate": {
+     "httpMethod": "POST",
+     "id": "forms.forms.batchUpdate",
+     "parameters": {
+      "formId": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      }
+     },
+     "path": "v1/forms/{formId}:batchUpdate",
+     "request": {
+      "$ref": "BatchUpdateFormRequest"
+     }
+    },
+    "create": {
+     "httpMethod": "POST",
+     "id": "forms.forms.create",
+     "parameters": {
+      "unpublished": {
+       "location": "query",
+       "type": "boolean"
+      }
+     },
+     "path": "v1/forms",
+     "request": {
+      "$ref": "Form"
+     }
+    },
+    "get": {
+     "httpMethod": "GET",
+     "id": "forms.forms.get",
+     "parameters": {
+      "formId": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      }
+     },
+     "path": "v1/forms/{formId}"
+    },
+    "setPublishSettings": {
+     "httpMethod": "POST",
+     "id": "forms.forms.setPublishSettings",
+     "parameters": {
+      "formId": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      }
+     },
+     "path": "v1/forms/{formId}:setPublishSettings",
+     "request": {
+      "$ref": "SetPublishSettingsRequest"
+     }
+    }
+   },
+   "resources": {
+    "responses": {
+     "methods": {
+      "get": {
+       "httpMethod": "GET",
+       "id": "forms.forms.responses.get",
+       "parameters": {
+        "formId": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        },
+        "responseId": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        }
+       },
+       "path": "v1/forms/{formId}/responses/{responseId}"
+      },
+      "list": {
+       "httpMethod": "GET",
+       "id": "forms.forms.responses.list",
+       "parameters": {
+        "filter": {
+         "location": "query",
+         "type": "string"
+        },
+        "formId": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        },
+        "pageSize": {
+         "location": "query",
+         "type": "integer"
+        },
+        "pageToken": {
+         "location": "query",
+         "type": "string"
+        }
+       },
+       "path": "v1/forms/{formId}/responses"
+      }
+     }
+    },
+    "watches": {
+     "methods": {
+      "create": {
+       "httpMethod": "POST",
+       "id": "forms.forms.watches.create",
+       "parameters": {
+        "formId": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        }
+       },
+       "path": "v1/forms/{formId}/watches",
+       "request": {
+        "$ref": "CreateWatchRequest"
+       }
+      },
+      "delete": {
+       "httpMethod": "DELETE",
+       "id": "forms.forms.watches.delete",
+       "parameters": {
+        "formId": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        },
+        "watchId": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        }
+       },
+       "path": "v1/forms/{formId}/watches/{watchId}"
+      },
+      "list": {
+       "httpMethod": "GET",
+       "id": "forms.forms.watches.list",
+       "parameters": {
+        "formId": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        }
+       },
+       "path": "v1/forms/{formId}/watches"
+      },
+      "renew": {
+       "httpMethod": "POST",
+       "id": "forms.forms.watches.renew",
+       "parameters": {
+        "formId": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        },
+        "watchId": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        }
+       },
+       "path": "v1/forms/{formId}/watches/{watchId}:renew",
+       "request": {
+        "$ref": "RenewWatchRequest"
+       }
+      }
+     }
+    }
+   }
+  }
+ },
+ "rootUrl": "https://forms.googleapis.com/",
+ "servicePath": "",
+ "version": "v1"
+}

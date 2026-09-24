@@ -2,6 +2,8 @@
 /target/
 **/*.rs.bk
 bin/
+# The npm launcher is source, not a build output.
+!/npm/bin/
 lcov.info
 
 
@@ -17,7 +19,7 @@ yarn-error.log*
 # Build outputs
 /dist/
 *.tsbuildinfo
-/bin/gws-native*
+/bin/gwsr-native*
 
 # IDE
 .idea/

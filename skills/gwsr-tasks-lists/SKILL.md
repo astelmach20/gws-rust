@@ -1,0 +1,36 @@
+---
+name: gwsr-tasks-lists
+description: "Google Tasks: List your task lists."
+metadata:
+  version: 0.22.5
+  openclaw:
+    category: "productivity"
+    requires:
+      bins:
+        - gwsr
+    cliHelp: "gwsr tasks +lists --help"
+---
+<!-- gwsr generated skill: do not edit by hand -->
+
+# tasks +lists
+
+> **PREREQUISITE:** Read `../gwsr-shared/SKILL.md` for auth, global flags, and security rules.
+
+List your task lists
+
+## Usage
+
+```bash
+gwsr tasks +lists
+```
+
+## Examples
+
+```bash
+gwsr tasks +lists --format table
+```
+
+## See Also
+
+- [gwsr-shared](../gwsr-shared/SKILL.md) — Global flags and auth
+- [gwsr-tasks](../gwsr-tasks/SKILL.md) — All manage task lists and tasks commands
