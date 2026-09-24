@@ -20,7 +20,7 @@
 //! first, sends through core's retry policy ([`gws_rust_core::client::send`];
 //! a non-idempotent request is sent at most once), and on a 401 mints a new
 //! token once through [`AccessTokenProvider::refresh_access_token`].
-//! Non-2xx responses become [`GwsError::Api`] through [`errors::api_error`].
+//! Non-2xx responses become [`GwsError::Api`] through [`errors::error_from_response`].
 
 pub(crate) mod errors;
 

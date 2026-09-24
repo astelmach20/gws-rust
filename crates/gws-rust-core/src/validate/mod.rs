@@ -19,7 +19,7 @@
 //! LLM agent rather than a human operator.
 //!
 //! - Character and identifier validation, URL path encoding (this module)
-//! - File-system path validation with an optional CWD sandbox: [`paths`]
+//! - File-system path validation with an optional CWD sandbox (`paths`)
 //! - API endpoint (rootUrl) trust checks: [`validate_api_base`]
 //! - Model Armor template names: [`ModelArmorTemplate`]
 
