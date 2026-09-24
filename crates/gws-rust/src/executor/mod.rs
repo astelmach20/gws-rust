@@ -419,7 +419,7 @@ pub(crate) async fn execute_to(
     }
 
     let quota_project = if options.quota_project {
-        crate::auth::get_quota_project()
+        crate::auth::get_quota_project()?
     } else {
         None
     };

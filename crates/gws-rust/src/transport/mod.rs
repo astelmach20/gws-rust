@@ -123,7 +123,7 @@ pub(crate) fn quota_project_from_env() -> Result<Option<String>, GwsError> {
     if env_flag(NO_QUOTA_PROJECT_ENV)? {
         return Ok(None);
     }
-    Ok(crate::auth::get_quota_project())
+    crate::auth::get_quota_project()
 }
 
 struct Shared {
