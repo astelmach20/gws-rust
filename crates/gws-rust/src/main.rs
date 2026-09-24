@@ -120,7 +120,12 @@ async fn run() -> Result<(), GwsError> {
         // Remove the flag if it exists so it doesn't mess up path parsing, or just pass the path
         // The path is args[2], flags might follow.
         let path = &args[2];
-        return schema::handle_schema_command(path, resolve_refs).await;
+        let schema = schema::handle_schema_command(path, resolve_refs).await?;
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&schema).map_err(GwsError::other)?
+        );
+        return Ok(());
     }
 
     // Handle the `generate-skills` command
@@ -147,9 +152,7 @@ async fn run() -> Result<(), GwsError> {
         }
     } else {
         // Fetch the Discovery Document
-        discovery::fetch_discovery_document(&api_name, &version)
-            .await
-            .map_err(|e| GwsError::Discovery(format!("{e:#}")))?
+        discovery::fetch_discovery_document(&api_name, &version).await?
     };
 
     // Build the dynamic command tree (all commands shown regardless of auth state)
@@ -319,27 +322,18 @@ pub fn parse_service_and_version(
     args: &[String],
     first_arg: &str,
 ) -> Result<(String, String), GwsError> {
-    let mut service_arg = first_arg;
-    let mut version_override: Option<String> = None;
-
-    // Check for --api-version flag anywhere in args
-    for i in 0..args.len() {
-        if args[i] == "--api-version" && i + 1 < args.len() {
-            version_override = Some(args[i + 1].clone());
+    // --api-version (or --api-version=V) anywhere in args overrides the
+    // version; the last occurrence wins.
+    let mut version_override = None;
+    for (i, arg) in args.iter().enumerate() {
+        if arg == "--api-version" {
+            version_override = args.get(i + 1).map(String::as_str);
+        } else if let Some(v) = arg.strip_prefix("--api-version=") {
+            version_override = Some(v);
         }
     }
-
-    // Support "service:version" syntax on the service arg itself
-    if let Some((svc, ver)) = service_arg.split_once(':') {
-        service_arg = svc;
-        if version_override.is_none() {
-            version_override = Some(ver.to_string());
-        }
-    }
-
-    let (api_name, default_version) = services::resolve_service(service_arg)?;
-    let version = version_override.unwrap_or(default_version);
-    Ok((api_name, version))
+    let resolved = services::resolve_service_spec(first_arg, version_override)?;
+    Ok((resolved.api_name, resolved.version))
 }
 
 pub fn filter_args_for_subcommand(args: &[String], service_name: &str) -> Vec<String> {
