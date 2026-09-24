@@ -370,7 +370,7 @@ mod tests {
         let u = build_url(&doc, &m, &params, UrlTarget::Method, &google()).unwrap();
         assert_eq!(
             u.url,
-            "https://api.googleapis.com/v1/literal%2D%7Bchild%7D%2Dvalue/ok"
+            "https://api.googleapis.com/v1/literal-%7Bchild%7D-value/ok"
         );
     }
 

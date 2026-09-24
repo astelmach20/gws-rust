@@ -17,9 +17,10 @@
 //! Script IDs are encoded per RFC 3986 so `-`/`_` stay literal (#842).
 
 use super::Helper;
-use super::http::{self, Api, ApiRequest, encode_segment, flag, many, optional, required};
+use super::http::{self, Api, ApiRequest, flag, many, optional, required};
 use crate::confirm::{self, Impact, with_yes};
 use crate::error::GwsError;
+use crate::validate::encode_path_segment;
 use clap::{Arg, ArgAction, ArgMatches, Command};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
@@ -238,7 +239,7 @@ TIPS:
 fn project_url(api: &Api, script_id: &str, suffix: &str) -> String {
     api.url(&format!(
         "v1/projects/{}{suffix}",
-        encode_segment(script_id)
+        encode_path_segment(script_id)
     ))
 }
 
@@ -486,8 +487,11 @@ async fn run(
     }
     let resp = api
         .send(
-            ApiRequest::post(api.url(&format!("v1/scripts/{}:run", encode_segment(script_id))))
-                .json(body),
+            ApiRequest::post(api.url(&format!(
+                "v1/scripts/{}:run",
+                encode_path_segment(script_id)
+            )))
+            .json(body),
         )
         .await?;
     if api.is_dry_run() {

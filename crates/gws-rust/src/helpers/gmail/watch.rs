@@ -603,7 +603,7 @@ mod tests {
             .mount(&server)
             .await;
         Mock::given(method("GET"))
-            .and(path("/gmail/v1/users/me/messages/msg%2D1"))
+            .and(path("/gmail/v1/users/me/messages/msg-1"))
             .and(query_param("format", "full"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "id": "msg-1" })))
             .expect(1)

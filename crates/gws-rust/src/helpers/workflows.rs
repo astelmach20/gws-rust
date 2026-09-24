@@ -913,7 +913,7 @@ mod tests {
             .mount(&server)
             .await;
         Mock::given(method("POST"))
-            .and(path("/tasks/v1/lists/%40default/tasks"))
+            .and(path("/tasks/v1/lists/@default/tasks"))
             .and(body_json(
                 json!({"title": "Do the thing", "notes": "From email: m1\n\nhello"}),
             ))

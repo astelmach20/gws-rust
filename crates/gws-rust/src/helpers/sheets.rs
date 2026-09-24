@@ -16,11 +16,10 @@
 //! import (`--csv-file`) and export (`+read --output`).
 
 use super::Helper;
-use super::http::{
-    self, Api, ApiRequest, OutputTarget, encode_segment, flag, many, optional, required,
-};
+use super::http::{self, Api, ApiRequest, OutputTarget, flag, many, optional, required};
 use crate::confirm::{self, Impact, with_yes};
 use crate::error::GwsError;
+use crate::validate::encode_path_segment;
 use clap::{Arg, ArgAction, ArgGroup, ArgMatches, Command};
 use serde_json::{Value, json};
 use std::future::Future;
@@ -369,8 +368,8 @@ fn parse_values(m: &ArgMatches) -> Result<Vec<Vec<Value>>, GwsError> {
 fn values_url(api: &Api, spreadsheet_id: &str, range: &str, suffix: &str) -> String {
     api.url(&format!(
         "v4/spreadsheets/{}/values/{}{suffix}",
-        encode_segment(spreadsheet_id),
-        encode_segment(range)
+        encode_path_segment(spreadsheet_id),
+        encode_path_segment(range)
     ))
 }
 

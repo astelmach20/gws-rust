@@ -19,8 +19,9 @@
 //! date and rejects a non-midnight time instead of losing it.
 
 use super::Helper;
-use super::http::{self, Api, ApiRequest, encode_segment, flag, optional, required};
+use super::http::{self, Api, ApiRequest, flag, optional, required};
 use crate::error::GwsError;
+use crate::validate::encode_path_segment;
 use clap::{Arg, ArgAction, ArgMatches, Command};
 use serde_json::{Value, json};
 use std::future::Future;
@@ -210,8 +211,11 @@ async fn add(
         body["due"] = json!(d);
     }
     api.send(
-        ApiRequest::post(api.url(&format!("tasks/v1/lists/{}/tasks", encode_segment(list_id))))
-            .json(body),
+        ApiRequest::post(api.url(&format!(
+            "tasks/v1/lists/{}/tasks",
+            encode_path_segment(list_id)
+        )))
+        .json(body),
     )
     .await
 }
@@ -222,11 +226,13 @@ async fn list(
     show_completed: bool,
     limit: Option<usize>,
 ) -> Result<Value, GwsError> {
-    let req =
-        ApiRequest::get(api.url(&format!("tasks/v1/lists/{}/tasks", encode_segment(list_id))))
-            .query("maxResults", "100")
-            .query("showCompleted", show_completed.to_string())
-            .query("showHidden", show_completed.to_string());
+    let req = ApiRequest::get(api.url(&format!(
+        "tasks/v1/lists/{}/tasks",
+        encode_path_segment(list_id)
+    )))
+    .query("maxResults", "100")
+    .query("showCompleted", show_completed.to_string())
+    .query("showHidden", show_completed.to_string());
     let page = api.paginate(req, "items", limit).await?;
     Ok(page.into_json("tasks"))
 }
