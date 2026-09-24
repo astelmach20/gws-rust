@@ -15,8 +15,9 @@
 //! Slides helpers: `+create`, `+read` (slide text and speaker notes).
 
 use super::Helper;
-use super::http::{self, Api, ApiRequest, encode_segment, required};
+use super::http::{self, Api, ApiRequest, required};
 use crate::error::GwsError;
+use crate::validate::encode_path_segment;
 use clap::{Arg, ArgMatches, Command};
 use serde_json::{Value, json};
 use std::future::Future;
@@ -105,9 +106,9 @@ TIPS:
                 "+read" => {
                     let api = Api::new(doc, &[SCOPE_PRESENTATIONS_READONLY], dry, sanitize).await?;
                     let id = required(m, "presentation-id")?;
-                    let pres = api
-                        .send(ApiRequest::get(
-                            api.url(&format!("v1/presentations/{}", encode_segment(id))),
+                    let pres =
+                        api.send(ApiRequest::get(
+                            api.url(&format!("v1/presentations/{}", encode_path_segment(id))),
                         ))
                         .await?;
                     let v = if api.is_dry_run() {

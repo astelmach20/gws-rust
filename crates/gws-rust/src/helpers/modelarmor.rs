@@ -908,8 +908,8 @@ mod tests {
         };
         let url = build_create_template_url(&config);
         assert!(url.starts_with("https://modelarmor.us-central1.rep.googleapis.com/v1/"));
-        assert!(url.contains("projects/my%2Dproject"));
-        assert!(url.contains("templateId=my%2Dtemplate"));
+        assert!(url.contains("projects/my-project/locations/us-central1"));
+        assert!(url.contains("templateId=my-template"));
     }
 
     fn make_matches_create(args: &[&str]) -> ArgMatches {

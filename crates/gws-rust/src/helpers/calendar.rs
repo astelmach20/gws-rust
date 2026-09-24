@@ -18,9 +18,10 @@
 mod time;
 
 use super::Helper;
-use super::http::{self, Api, ApiRequest, encode_segment, flag, many, optional, required};
+use super::http::{self, Api, ApiRequest, flag, many, optional, required};
 use crate::confirm::{self, Impact, with_yes};
 use crate::error::GwsError;
+use crate::validate::encode_path_segment;
 use chrono_tz::Tz;
 use clap::{Arg, ArgAction, ArgGroup, ArgMatches, Command};
 use serde_json::{Value, json};
@@ -456,14 +457,17 @@ impl TzInfo {
 }
 
 fn events_url(api: &Api, calendar_id: &str) -> String {
-    api.url(&format!("calendars/{}/events", encode_segment(calendar_id)))
+    api.url(&format!(
+        "calendars/{}/events",
+        encode_path_segment(calendar_id)
+    ))
 }
 
 fn event_url(api: &Api, calendar_id: &str, event_id: &str) -> String {
     api.url(&format!(
         "calendars/{}/events/{}",
-        encode_segment(calendar_id),
-        encode_segment(event_id)
+        encode_path_segment(calendar_id),
+        encode_path_segment(event_id)
     ))
 }
 

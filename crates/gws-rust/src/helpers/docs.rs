@@ -18,8 +18,9 @@ mod markdown;
 mod reader;
 
 use super::Helper;
-use super::http::{self, Api, ApiRequest, encode_segment, flag, optional, required};
+use super::http::{self, Api, ApiRequest, flag, optional, required};
 use crate::error::GwsError;
+use crate::validate::encode_path_segment;
 use clap::{Arg, ArgAction, ArgGroup, ArgMatches, Command};
 use serde_json::{Value, json};
 use std::future::Future;
@@ -308,16 +309,17 @@ impl Content {
 }
 
 async fn get_document(api: &Api, document_id: &str) -> Result<Value, GwsError> {
-    api.send(ApiRequest::get(
-        api.url(&format!("v1/documents/{}", encode_segment(document_id))),
-    ))
+    api.send(ApiRequest::get(api.url(&format!(
+        "v1/documents/{}",
+        encode_path_segment(document_id)
+    ))))
     .await
 }
 
 fn batch_update_request(api: &Api, document_id: &str, requests: Vec<Value>) -> ApiRequest {
     ApiRequest::post(api.url(&format!(
         "v1/documents/{}:batchUpdate",
-        encode_segment(document_id)
+        encode_path_segment(document_id)
     )))
     .json(json!({ "requests": requests }))
 }

@@ -38,14 +38,16 @@ proptest! {
     #[test]
     fn encode_path_segment_is_safe_and_roundtrips(s in any::<String>()) {
         let enc = encode_path_segment(&s);
-        prop_assert!(enc.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'%'));
+        prop_assert!(enc.bytes().all(|b| b.is_ascii_alphanumeric() || b"%-._~@".contains(&b)));
+        prop_assert!(enc != "." && enc != "..");
         prop_assert_eq!(percent_decode_str(&enc).decode_utf8().unwrap(), s.as_str());
     }
 
     #[test]
     fn encode_preserving_slashes_keeps_segments(s in any::<String>()) {
         let enc = encode_path_preserving_slashes(&s);
-        prop_assert!(enc.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'%' || b == b'/'));
+        prop_assert!(enc.bytes().all(|b| b.is_ascii_alphanumeric() || b"%-._~@/".contains(&b)));
+        prop_assert!(enc.split('/').all(|seg| seg != "." && seg != ".."));
         prop_assert_eq!(enc.matches('/').count(), s.matches('/').count());
         prop_assert_eq!(percent_decode_str(&enc).decode_utf8().unwrap(), s.as_str());
     }

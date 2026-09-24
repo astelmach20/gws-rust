@@ -15,8 +15,9 @@
 //! Forms helpers: `+responses` (JSON rows, or CSV via `--output`).
 
 use super::Helper;
-use super::http::{self, Api, ApiRequest, OutputTarget, encode_segment, flag, optional, required};
+use super::http::{self, Api, ApiRequest, OutputTarget, flag, optional, required};
 use crate::error::GwsError;
+use crate::validate::encode_path_segment;
 use clap::{Arg, ArgAction, ArgMatches, Command};
 use serde_json::{Map, Value, json};
 use std::future::Future;
@@ -272,7 +273,7 @@ impl Table {
 }
 
 async fn responses(api: &Api, form_id: &str) -> Result<Option<Table>, GwsError> {
-    let base = format!("v1/forms/{}", encode_segment(form_id));
+    let base = format!("v1/forms/{}", encode_path_segment(form_id));
     let form = api.send(ApiRequest::get(api.url(&base))).await?;
     let page = api
         .paginate(

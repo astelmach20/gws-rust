@@ -43,28 +43,6 @@ pub(crate) fn other_err(e: impl Into<anyhow::Error>) -> GwsError {
     GwsError::from(e.into())
 }
 
-/// Percent-encode a single path segment per RFC 3986, leaving the unreserved
-/// characters (`A-Z a-z 0-9 - . _ ~`) and `@` (a legal `pchar`, common in
-/// calendar IDs and `@default`) intact.
-///
-/// Google IDs routinely contain `-` and `_` (Apps Script IDs, Drive IDs);
-/// some endpoints (e.g. `scripts.run`, upstream #842) reject them when they
-/// are encoded as `%2D` / `%5F`.
-pub(crate) fn encode_segment(s: &str) -> String {
-    use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
-    const SEGMENT: &AsciiSet = &NON_ALPHANUMERIC
-        .remove(b'-')
-        .remove(b'.')
-        .remove(b'_')
-        .remove(b'~')
-        .remove(b'@');
-    // "." and ".." are dot-segments and must never be sent verbatim.
-    if s == "." || s == ".." {
-        return s.replace('.', "%2E");
-    }
-    utf8_percent_encode(s, SEGMENT).to_string()
-}
-
 /// Request body variants.
 #[derive(Debug, Clone)]
 pub(crate) enum Body {
@@ -935,15 +913,6 @@ mod tests {
     use super::*;
     use wiremock::matchers::{header, method, path, query_param};
     use wiremock::{Mock, MockServer, ResponseTemplate};
-
-    #[test]
-    fn encode_segment_keeps_unreserved() {
-        assert_eq!(encode_segment("1-ab_C.d~e"), "1-ab_C.d~e");
-        assert_eq!(encode_segment("a/b?c#d e"), "a%2Fb%3Fc%23d%20e");
-        assert_eq!(encode_segment(".."), "%2E%2E");
-        assert_eq!(encode_segment("a:b"), "a%3Ab");
-        assert_eq!(encode_segment("ann@example.com"), "ann@example.com");
-    }
 
     #[test]
     fn dry_run_request_matches_describe() {

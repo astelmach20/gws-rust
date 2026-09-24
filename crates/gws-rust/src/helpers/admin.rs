@@ -20,9 +20,10 @@
 //! on the document version.
 
 use super::Helper;
-use super::http::{self, Api, ApiRequest, encode_segment, flag, optional, required};
+use super::http::{self, Api, ApiRequest, flag, optional, required};
 use crate::confirm::{self, Impact, with_yes};
 use crate::error::GwsError;
+use crate::validate::encode_path_segment;
 use clap::{Arg, ArgAction, ArgMatches, Command};
 use serde_json::{Value, json};
 use std::future::Future;
@@ -387,7 +388,7 @@ async fn user_suspend(
         .send(
             ApiRequest::put(api.url(&format!(
                 "admin/directory/v1/users/{}",
-                encode_segment(user)
+                encode_path_segment(user)
             )))
             .json(body),
         )
@@ -407,7 +408,7 @@ async fn group_add_member(
     api.send(
         ApiRequest::post(api.url(&format!(
             "admin/directory/v1/groups/{}/members",
-            encode_segment(group)
+            encode_path_segment(group)
         )))
         .json(json!({ "email": member, "role": role })),
     )
@@ -487,8 +488,8 @@ async fn audit(api: &Api, a: &Audit) -> Result<Value, GwsError> {
     let page_size = a.limit.unwrap_or(1000).min(1000).to_string();
     let req = ApiRequest::get(api.url(&format!(
         "admin/reports/v1/activity/users/{}/applications/{}",
-        encode_segment(&a.user),
-        encode_segment(&a.application)
+        encode_path_segment(&a.user),
+        encode_path_segment(&a.application)
     )))
     .query("startTime", a.start.clone())
     .query_opt("endTime", a.end.clone())

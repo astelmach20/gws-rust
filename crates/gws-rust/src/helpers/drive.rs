@@ -17,11 +17,10 @@
 //! Every call sets `supportsAllDrives=true` so Shared Drive items work.
 
 use super::Helper;
-use super::http::{
-    self, Api, ApiRequest, OutputTarget, encode_segment, flag, optional, required, safe_filename,
-};
+use super::http::{self, Api, ApiRequest, OutputTarget, flag, optional, required, safe_filename};
 use crate::confirm::{self, Impact, with_yes};
 use crate::error::GwsError;
+use crate::validate::encode_path_segment;
 use clap::{Arg, ArgAction, ArgMatches, Command};
 use serde_json::{Value, json};
 use std::future::Future;
@@ -459,7 +458,7 @@ async fn upload(api: &Api, args: &UploadArgs) -> Result<Value, GwsError> {
 
 async fn get_metadata(api: &Api, file_id: &str) -> Result<Value, GwsError> {
     api.send(
-        ApiRequest::get(api.url(&format!("files/{}", encode_segment(file_id))))
+        ApiRequest::get(api.url(&format!("files/{}", encode_path_segment(file_id))))
             .query("supportsAllDrives", "true")
             .query("fields", FILE_FIELDS),
     )
@@ -513,7 +512,7 @@ async fn download(
     };
     let bytes = api
         .download(
-            ApiRequest::get(api.url(&format!("files/{}", encode_segment(file_id))))
+            ApiRequest::get(api.url(&format!("files/{}", encode_path_segment(file_id))))
                 .query("alt", "media")
                 .query("supportsAllDrives", "true"),
             &target,
@@ -698,7 +697,7 @@ async fn export(
     let target = resolve_target(output, &with_extension(&name, format.ext), overwrite)?;
     let bytes = api
         .download(
-            ApiRequest::get(api.url(&format!("files/{}/export", encode_segment(file_id))))
+            ApiRequest::get(api.url(&format!("files/{}/export", encode_path_segment(file_id))))
                 .query("mimeType", format.mime),
             &target,
         )
@@ -732,7 +731,7 @@ async fn move_file(api: &Api, file_id: &str, folder_id: &str) -> Result<Value, G
             .collect::<Vec<_>>()
             .join(",")
     };
-    let mut req = ApiRequest::patch(api.url(&format!("files/{}", encode_segment(file_id))))
+    let mut req = ApiRequest::patch(api.url(&format!("files/{}", encode_path_segment(file_id))))
         .query("addParents", folder_id)
         .query("supportsAllDrives", "true")
         .query("fields", FILE_FIELDS)
@@ -859,7 +858,7 @@ async fn share(api: &Api, args: &ShareArgs) -> Result<Value, GwsError> {
     let is_person = matches!(args.grantee, Grantee::User(_) | Grantee::Group(_));
     let mut req = ApiRequest::post(api.url(&format!(
         "files/{}/permissions",
-        encode_segment(&args.file_id)
+        encode_path_segment(&args.file_id)
     )))
     .query("supportsAllDrives", "true")
     .json(body);
@@ -991,13 +990,15 @@ async fn sync(api: &Api, folder_id: &str, dir: &Path) -> Result<Value, GwsError>
                 overwrite: true,
             };
             let req = match export {
-                Some(f) => {
-                    ApiRequest::get(api.url(&format!("files/{}/export", encode_segment(child_id))))
-                        .query("mimeType", f.mime)
+                Some(f) => ApiRequest::get(
+                    api.url(&format!("files/{}/export", encode_path_segment(child_id))),
+                )
+                .query("mimeType", f.mime),
+                None => {
+                    ApiRequest::get(api.url(&format!("files/{}", encode_path_segment(child_id))))
+                        .query("alt", "media")
+                        .query("supportsAllDrives", "true")
                 }
-                None => ApiRequest::get(api.url(&format!("files/{}", encode_segment(child_id))))
-                    .query("alt", "media")
-                    .query("supportsAllDrives", "true"),
             };
             let bytes = api.download(req, &target).await?;
             downloaded

@@ -80,11 +80,28 @@ pub fn reject_dangerous_chars(value: &str, flag_name: &str) -> Result<(), GwsErr
 
 // ── URL encoding ──────────────────────────────────────────────────────
 
+/// Characters escaped in a path segment: everything except the RFC 3986
+/// unreserved set (`A-Z a-z 0-9 - . _ ~`) and `@` (a legal `pchar`, common in
+/// calendar IDs and the Tasks `@default` alias).
+const PATH_SEGMENT: &percent_encoding::AsciiSet = &percent_encoding::NON_ALPHANUMERIC
+    .remove(b'-')
+    .remove(b'.')
+    .remove(b'_')
+    .remove(b'~')
+    .remove(b'@');
+
 /// Percent-encode a value for use as a single URL path segment (e.g., file ID,
-/// calendar ID, message ID). All non-alphanumeric characters are encoded.
+/// calendar ID, message ID).
+///
+/// Unreserved characters stay literal: Google IDs routinely contain `-` and
+/// `_`, and some endpoints (e.g. `scripts.run`, upstream #842) reject them as
+/// `%2D`/`%5F`. The dot-segments `.` and `..` are always escaped so they can
+/// never climb the path.
 pub fn encode_path_segment(s: &str) -> String {
-    use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
-    utf8_percent_encode(s, NON_ALPHANUMERIC).to_string()
+    if s == "." || s == ".." {
+        return s.replace('.', "%2E");
+    }
+    percent_encoding::utf8_percent_encode(s, PATH_SEGMENT).to_string()
 }
 
 /// Percent-encode a value for use in URI path templates where `/` should stay
@@ -227,10 +244,17 @@ mod tests {
     }
 
     #[test]
-    fn test_encode_path_segment_email() {
-        let encoded = encode_path_segment("user@gmail.com");
-        assert!(!encoded.contains('@'));
-        assert!(!encoded.contains('.'));
+    fn test_encode_path_segment_keeps_unreserved_and_at() {
+        assert_eq!(encode_path_segment("1-ab_C.d~e"), "1-ab_C.d~e");
+        assert_eq!(encode_path_segment("user@gmail.com"), "user@gmail.com");
+        assert_eq!(encode_path_segment("a:b"), "a%3Ab");
+    }
+
+    #[test]
+    fn test_encode_path_segment_escapes_dot_segments() {
+        assert_eq!(encode_path_segment("."), "%2E");
+        assert_eq!(encode_path_segment(".."), "%2E%2E");
+        assert_eq!(encode_path_segment("..."), "...");
     }
 
     #[test]
@@ -249,8 +273,7 @@ mod tests {
     #[test]
     fn test_encode_path_segment_path_traversal() {
         let encoded = encode_path_segment("../../etc/passwd");
-        assert!(!encoded.contains('/'));
-        assert!(!encoded.contains(".."));
+        assert_eq!(encoded, "..%2F..%2Fetc%2Fpasswd");
     }
 
     #[test]
