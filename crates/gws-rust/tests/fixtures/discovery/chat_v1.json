@@ -1,0 +1,1069 @@
+{
+ "_note": "Stripped Discovery document used only by the registry validation test. Regenerate from https://www.googleapis.com/discovery/v1/apis/chat/v1/rest",
+ "name": "chat",
+ "parameters": {
+  "$.xgafv": {
+   "location": "query",
+   "type": "string"
+  },
+  "access_token": {
+   "location": "query",
+   "type": "string"
+  },
+  "alt": {
+   "location": "query",
+   "type": "string"
+  },
+  "callback": {
+   "location": "query",
+   "type": "string"
+  },
+  "fields": {
+   "location": "query",
+   "type": "string"
+  },
+  "key": {
+   "location": "query",
+   "type": "string"
+  },
+  "oauth_token": {
+   "location": "query",
+   "type": "string"
+  },
+  "prettyPrint": {
+   "location": "query",
+   "type": "boolean"
+  },
+  "quotaUser": {
+   "location": "query",
+   "type": "string"
+  },
+  "uploadType": {
+   "location": "query",
+   "type": "string"
+  },
+  "upload_protocol": {
+   "location": "query",
+   "type": "string"
+  }
+ },
+ "resources": {
+  "customEmojis": {
+   "methods": {
+    "create": {
+     "httpMethod": "POST",
+     "id": "chat.customEmojis.create",
+     "path": "v1/customEmojis",
+     "request": {
+      "$ref": "CustomEmoji"
+     }
+    },
+    "delete": {
+     "httpMethod": "DELETE",
+     "id": "chat.customEmojis.delete",
+     "parameters": {
+      "name": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      }
+     },
+     "path": "v1/{+name}"
+    },
+    "get": {
+     "httpMethod": "GET",
+     "id": "chat.customEmojis.get",
+     "parameters": {
+      "name": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      }
+     },
+     "path": "v1/{+name}"
+    },
+    "list": {
+     "httpMethod": "GET",
+     "id": "chat.customEmojis.list",
+     "parameters": {
+      "filter": {
+       "location": "query",
+       "type": "string"
+      },
+      "pageSize": {
+       "location": "query",
+       "type": "integer"
+      },
+      "pageToken": {
+       "location": "query",
+       "type": "string"
+      }
+     },
+     "path": "v1/customEmojis"
+    }
+   }
+  },
+  "media": {
+   "methods": {
+    "download": {
+     "httpMethod": "GET",
+     "id": "chat.media.download",
+     "parameters": {
+      "resourceName": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      }
+     },
+     "path": "v1/media/{+resourceName}"
+    },
+    "upload": {
+     "httpMethod": "POST",
+     "id": "chat.media.upload",
+     "parameters": {
+      "parent": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      }
+     },
+     "path": "v1/{+parent}/attachments:upload",
+     "request": {
+      "$ref": "UploadAttachmentRequest"
+     },
+     "supportsMediaUpload": true
+    }
+   }
+  },
+  "spaces": {
+   "methods": {
+    "completeImport": {
+     "httpMethod": "POST",
+     "id": "chat.spaces.completeImport",
+     "parameters": {
+      "name": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      }
+     },
+     "path": "v1/{+name}:completeImport",
+     "request": {
+      "$ref": "CompleteImportSpaceRequest"
+     }
+    },
+    "create": {
+     "httpMethod": "POST",
+     "id": "chat.spaces.create",
+     "parameters": {
+      "requestId": {
+       "location": "query",
+       "type": "string"
+      }
+     },
+     "path": "v1/spaces",
+     "request": {
+      "$ref": "Space"
+     }
+    },
+    "delete": {
+     "httpMethod": "DELETE",
+     "id": "chat.spaces.delete",
+     "parameters": {
+      "name": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      },
+      "useAdminAccess": {
+       "location": "query",
+       "type": "boolean"
+      }
+     },
+     "path": "v1/{+name}"
+    },
+    "findDirectMessage": {
+     "httpMethod": "GET",
+     "id": "chat.spaces.findDirectMessage",
+     "parameters": {
+      "name": {
+       "location": "query",
+       "type": "string"
+      }
+     },
+     "path": "v1/spaces:findDirectMessage"
+    },
+    "findGroupChats": {
+     "httpMethod": "GET",
+     "id": "chat.spaces.findGroupChats",
+     "parameters": {
+      "pageSize": {
+       "location": "query",
+       "type": "integer"
+      },
+      "pageToken": {
+       "location": "query",
+       "type": "string"
+      },
+      "spaceView": {
+       "location": "query",
+       "type": "string"
+      },
+      "users": {
+       "location": "query",
+       "repeated": true,
+       "type": "string"
+      }
+     },
+     "path": "v1/spaces:findGroupChats"
+    },
+    "get": {
+     "httpMethod": "GET",
+     "id": "chat.spaces.get",
+     "parameters": {
+      "name": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      },
+      "useAdminAccess": {
+       "location": "query",
+       "type": "boolean"
+      }
+     },
+     "path": "v1/{+name}"
+    },
+    "list": {
+     "httpMethod": "GET",
+     "id": "chat.spaces.list",
+     "parameters": {
+      "filter": {
+       "location": "query",
+       "type": "string"
+      },
+      "pageSize": {
+       "location": "query",
+       "type": "integer"
+      },
+      "pageToken": {
+       "location": "query",
+       "type": "string"
+      }
+     },
+     "path": "v1/spaces"
+    },
+    "patch": {
+     "httpMethod": "PATCH",
+     "id": "chat.spaces.patch",
+     "parameters": {
+      "name": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      },
+      "updateMask": {
+       "location": "query",
+       "type": "string"
+      },
+      "useAdminAccess": {
+       "location": "query",
+       "type": "boolean"
+      }
+     },
+     "path": "v1/{+name}",
+     "request": {
+      "$ref": "Space"
+     }
+    },
+    "search": {
+     "httpMethod": "GET",
+     "id": "chat.spaces.search",
+     "parameters": {
+      "orderBy": {
+       "location": "query",
+       "type": "string"
+      },
+      "pageSize": {
+       "location": "query",
+       "type": "integer"
+      },
+      "pageToken": {
+       "location": "query",
+       "type": "string"
+      },
+      "query": {
+       "location": "query",
+       "type": "string"
+      },
+      "useAdminAccess": {
+       "location": "query",
+       "type": "boolean"
+      }
+     },
+     "path": "v1/spaces:search"
+    },
+    "setup": {
+     "httpMethod": "POST",
+     "id": "chat.spaces.setup",
+     "path": "v1/spaces:setup",
+     "request": {
+      "$ref": "SetUpSpaceRequest"
+     }
+    }
+   },
+   "resources": {
+    "members": {
+     "methods": {
+      "create": {
+       "httpMethod": "POST",
+       "id": "chat.spaces.members.create",
+       "parameters": {
+        "parent": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        },
+        "useAdminAccess": {
+         "location": "query",
+         "type": "boolean"
+        }
+       },
+       "path": "v1/{+parent}/members",
+       "request": {
+        "$ref": "Membership"
+       }
+      },
+      "delete": {
+       "httpMethod": "DELETE",
+       "id": "chat.spaces.members.delete",
+       "parameters": {
+        "name": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        },
+        "useAdminAccess": {
+         "location": "query",
+         "type": "boolean"
+        }
+       },
+       "path": "v1/{+name}"
+      },
+      "get": {
+       "httpMethod": "GET",
+       "id": "chat.spaces.members.get",
+       "parameters": {
+        "name": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        },
+        "useAdminAccess": {
+         "location": "query",
+         "type": "boolean"
+        }
+       },
+       "path": "v1/{+name}"
+      },
+      "list": {
+       "httpMethod": "GET",
+       "id": "chat.spaces.members.list",
+       "parameters": {
+        "filter": {
+         "location": "query",
+         "type": "string"
+        },
+        "pageSize": {
+         "location": "query",
+         "type": "integer"
+        },
+        "pageToken": {
+         "location": "query",
+         "type": "string"
+        },
+        "parent": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        },
+        "showGroups": {
+         "location": "query",
+         "type": "boolean"
+        },
+        "showInvited": {
+         "location": "query",
+         "type": "boolean"
+        },
+        "useAdminAccess": {
+         "location": "query",
+         "type": "boolean"
+        }
+       },
+       "path": "v1/{+parent}/members"
+      },
+      "patch": {
+       "httpMethod": "PATCH",
+       "id": "chat.spaces.members.patch",
+       "parameters": {
+        "name": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        },
+        "updateMask": {
+         "location": "query",
+         "type": "string"
+        },
+        "useAdminAccess": {
+         "location": "query",
+         "type": "boolean"
+        }
+       },
+       "path": "v1/{+name}",
+       "request": {
+        "$ref": "Membership"
+       }
+      }
+     }
+    },
+    "messagePins": {
+     "methods": {
+      "create": {
+       "httpMethod": "POST",
+       "id": "chat.spaces.messagePins.create",
+       "parameters": {
+        "parent": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        }
+       },
+       "path": "v1/{+parent}/messagePins",
+       "request": {
+        "$ref": "MessagePin"
+       }
+      },
+      "delete": {
+       "httpMethod": "DELETE",
+       "id": "chat.spaces.messagePins.delete",
+       "parameters": {
+        "name": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        }
+       },
+       "path": "v1/{+name}"
+      },
+      "list": {
+       "httpMethod": "GET",
+       "id": "chat.spaces.messagePins.list",
+       "parameters": {
+        "pageSize": {
+         "location": "query",
+         "type": "integer"
+        },
+        "pageToken": {
+         "location": "query",
+         "type": "string"
+        },
+        "parent": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        }
+       },
+       "path": "v1/{+parent}/messagePins"
+      }
+     }
+    },
+    "messages": {
+     "methods": {
+      "create": {
+       "httpMethod": "POST",
+       "id": "chat.spaces.messages.create",
+       "parameters": {
+        "createMessageNotificationOptions.notificationType": {
+         "location": "query",
+         "type": "string"
+        },
+        "messageId": {
+         "location": "query",
+         "type": "string"
+        },
+        "messageReplyOption": {
+         "location": "query",
+         "type": "string"
+        },
+        "parent": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        },
+        "requestId": {
+         "location": "query",
+         "type": "string"
+        },
+        "threadKey": {
+         "location": "query",
+         "type": "string"
+        }
+       },
+       "path": "v1/{+parent}/messages",
+       "request": {
+        "$ref": "Message"
+       }
+      },
+      "delete": {
+       "httpMethod": "DELETE",
+       "id": "chat.spaces.messages.delete",
+       "parameters": {
+        "force": {
+         "location": "query",
+         "type": "boolean"
+        },
+        "name": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        }
+       },
+       "path": "v1/{+name}"
+      },
+      "get": {
+       "httpMethod": "GET",
+       "id": "chat.spaces.messages.get",
+       "parameters": {
+        "markupSyntax": {
+         "location": "query",
+         "type": "string"
+        },
+        "name": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        }
+       },
+       "path": "v1/{+name}"
+      },
+      "list": {
+       "httpMethod": "GET",
+       "id": "chat.spaces.messages.list",
+       "parameters": {
+        "filter": {
+         "location": "query",
+         "type": "string"
+        },
+        "markupSyntax": {
+         "location": "query",
+         "type": "string"
+        },
+        "orderBy": {
+         "location": "query",
+         "type": "string"
+        },
+        "pageSize": {
+         "location": "query",
+         "type": "integer"
+        },
+        "pageToken": {
+         "location": "query",
+         "type": "string"
+        },
+        "parent": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        },
+        "showDeleted": {
+         "location": "query",
+         "type": "boolean"
+        }
+       },
+       "path": "v1/{+parent}/messages"
+      },
+      "patch": {
+       "httpMethod": "PATCH",
+       "id": "chat.spaces.messages.patch",
+       "parameters": {
+        "allowMissing": {
+         "location": "query",
+         "type": "boolean"
+        },
+        "name": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        },
+        "updateMask": {
+         "location": "query",
+         "type": "string"
+        }
+       },
+       "path": "v1/{+name}",
+       "request": {
+        "$ref": "Message"
+       }
+      },
+      "search": {
+       "httpMethod": "POST",
+       "id": "chat.spaces.messages.search",
+       "parameters": {
+        "parent": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        }
+       },
+       "path": "v1/{+parent}/messages:search",
+       "request": {
+        "$ref": "SearchMessagesRequest"
+       }
+      },
+      "update": {
+       "httpMethod": "PUT",
+       "id": "chat.spaces.messages.update",
+       "parameters": {
+        "allowMissing": {
+         "location": "query",
+         "type": "boolean"
+        },
+        "name": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        },
+        "updateMask": {
+         "location": "query",
+         "type": "string"
+        }
+       },
+       "path": "v1/{+name}",
+       "request": {
+        "$ref": "Message"
+       }
+      }
+     },
+     "resources": {
+      "attachments": {
+       "methods": {
+        "get": {
+         "httpMethod": "GET",
+         "id": "chat.spaces.messages.attachments.get",
+         "parameters": {
+          "name": {
+           "location": "path",
+           "required": true,
+           "type": "string"
+          }
+         },
+         "path": "v1/{+name}"
+        }
+       }
+      },
+      "reactions": {
+       "methods": {
+        "create": {
+         "httpMethod": "POST",
+         "id": "chat.spaces.messages.reactions.create",
+         "parameters": {
+          "parent": {
+           "location": "path",
+           "required": true,
+           "type": "string"
+          }
+         },
+         "path": "v1/{+parent}/reactions",
+         "request": {
+          "$ref": "Reaction"
+         }
+        },
+        "delete": {
+         "httpMethod": "DELETE",
+         "id": "chat.spaces.messages.reactions.delete",
+         "parameters": {
+          "name": {
+           "location": "path",
+           "required": true,
+           "type": "string"
+          }
+         },
+         "path": "v1/{+name}"
+        },
+        "list": {
+         "httpMethod": "GET",
+         "id": "chat.spaces.messages.reactions.list",
+         "parameters": {
+          "filter": {
+           "location": "query",
+           "type": "string"
+          },
+          "pageSize": {
+           "location": "query",
+           "type": "integer"
+          },
+          "pageToken": {
+           "location": "query",
+           "type": "string"
+          },
+          "parent": {
+           "location": "path",
+           "required": true,
+           "type": "string"
+          }
+         },
+         "path": "v1/{+parent}/reactions"
+        }
+       }
+      }
+     }
+    },
+    "spaceEvents": {
+     "methods": {
+      "get": {
+       "httpMethod": "GET",
+       "id": "chat.spaces.spaceEvents.get",
+       "parameters": {
+        "name": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        }
+       },
+       "path": "v1/{+name}"
+      },
+      "list": {
+       "httpMethod": "GET",
+       "id": "chat.spaces.spaceEvents.list",
+       "parameters": {
+        "filter": {
+         "location": "query",
+         "type": "string"
+        },
+        "pageSize": {
+         "location": "query",
+         "type": "integer"
+        },
+        "pageToken": {
+         "location": "query",
+         "type": "string"
+        },
+        "parent": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        }
+       },
+       "path": "v1/{+parent}/spaceEvents"
+      }
+     }
+    }
+   }
+  },
+  "users": {
+   "resources": {
+    "availability": {
+     "methods": {
+      "get": {
+       "httpMethod": "GET",
+       "id": "chat.users.availability.get",
+       "parameters": {
+        "name": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        }
+       },
+       "path": "v1/{+name}"
+      },
+      "markAsActive": {
+       "httpMethod": "POST",
+       "id": "chat.users.availability.markAsActive",
+       "parameters": {
+        "name": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        }
+       },
+       "path": "v1/{+name}:markAsActive",
+       "request": {
+        "$ref": "MarkAsActiveRequest"
+       }
+      },
+      "markAsAway": {
+       "httpMethod": "POST",
+       "id": "chat.users.availability.markAsAway",
+       "parameters": {
+        "name": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        }
+       },
+       "path": "v1/{+name}:markAsAway",
+       "request": {
+        "$ref": "MarkAsAwayRequest"
+       }
+      },
+      "markAsDoNotDisturb": {
+       "httpMethod": "POST",
+       "id": "chat.users.availability.markAsDoNotDisturb",
+       "parameters": {
+        "name": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        }
+       },
+       "path": "v1/{+name}:markAsDoNotDisturb",
+       "request": {
+        "$ref": "MarkAsDoNotDisturbRequest"
+       }
+      },
+      "patch": {
+       "httpMethod": "PATCH",
+       "id": "chat.users.availability.patch",
+       "parameters": {
+        "name": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        },
+        "updateMask": {
+         "location": "query",
+         "type": "string"
+        }
+       },
+       "path": "v1/{+name}",
+       "request": {
+        "$ref": "Availability"
+       }
+      }
+     }
+    },
+    "sections": {
+     "methods": {
+      "create": {
+       "httpMethod": "POST",
+       "id": "chat.users.sections.create",
+       "parameters": {
+        "parent": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        }
+       },
+       "path": "v1/{+parent}/sections",
+       "request": {
+        "$ref": "GoogleChatV1Section"
+       }
+      },
+      "delete": {
+       "httpMethod": "DELETE",
+       "id": "chat.users.sections.delete",
+       "parameters": {
+        "name": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        }
+       },
+       "path": "v1/{+name}"
+      },
+      "list": {
+       "httpMethod": "GET",
+       "id": "chat.users.sections.list",
+       "parameters": {
+        "pageSize": {
+         "location": "query",
+         "type": "integer"
+        },
+        "pageToken": {
+         "location": "query",
+         "type": "string"
+        },
+        "parent": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        }
+       },
+       "path": "v1/{+parent}/sections"
+      },
+      "patch": {
+       "httpMethod": "PATCH",
+       "id": "chat.users.sections.patch",
+       "parameters": {
+        "name": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        },
+        "updateMask": {
+         "location": "query",
+         "type": "string"
+        }
+       },
+       "path": "v1/{+name}",
+       "request": {
+        "$ref": "GoogleChatV1Section"
+       }
+      },
+      "position": {
+       "httpMethod": "POST",
+       "id": "chat.users.sections.position",
+       "parameters": {
+        "name": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        }
+       },
+       "path": "v1/{+name}:position",
+       "request": {
+        "$ref": "PositionSectionRequest"
+       }
+      }
+     },
+     "resources": {
+      "items": {
+       "methods": {
+        "list": {
+         "httpMethod": "GET",
+         "id": "chat.users.sections.items.list",
+         "parameters": {
+          "filter": {
+           "location": "query",
+           "type": "string"
+          },
+          "pageSize": {
+           "location": "query",
+           "type": "integer"
+          },
+          "pageToken": {
+           "location": "query",
+           "type": "string"
+          },
+          "parent": {
+           "location": "path",
+           "required": true,
+           "type": "string"
+          }
+         },
+         "path": "v1/{+parent}/items"
+        },
+        "move": {
+         "httpMethod": "POST",
+         "id": "chat.users.sections.items.move",
+         "parameters": {
+          "name": {
+           "location": "path",
+           "required": true,
+           "type": "string"
+          }
+         },
+         "path": "v1/{+name}:move",
+         "request": {
+          "$ref": "MoveSectionItemRequest"
+         }
+        }
+       }
+      }
+     }
+    },
+    "spaces": {
+     "methods": {
+      "getSpaceReadState": {
+       "httpMethod": "GET",
+       "id": "chat.users.spaces.getSpaceReadState",
+       "parameters": {
+        "name": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        }
+       },
+       "path": "v1/{+name}"
+      },
+      "updateSpaceReadState": {
+       "httpMethod": "PATCH",
+       "id": "chat.users.spaces.updateSpaceReadState",
+       "parameters": {
+        "name": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        },
+        "updateMask": {
+         "location": "query",
+         "type": "string"
+        }
+       },
+       "path": "v1/{+name}",
+       "request": {
+        "$ref": "SpaceReadState"
+       }
+      }
+     },
+     "resources": {
+      "spaceNotificationSetting": {
+       "methods": {
+        "get": {
+         "httpMethod": "GET",
+         "id": "chat.users.spaces.spaceNotificationSetting.get",
+         "parameters": {
+          "name": {
+           "location": "path",
+           "required": true,
+           "type": "string"
+          }
+         },
+         "path": "v1/{+name}"
+        },
+        "patch": {
+         "httpMethod": "PATCH",
+         "id": "chat.users.spaces.spaceNotificationSetting.patch",
+         "parameters": {
+          "name": {
+           "location": "path",
+           "required": true,
+           "type": "string"
+          },
+          "updateMask": {
+           "location": "query",
+           "type": "string"
+          }
+         },
+         "path": "v1/{+name}",
+         "request": {
+          "$ref": "SpaceNotificationSetting"
+         }
+        }
+       }
+      },
+      "threads": {
+       "methods": {
+        "getThreadReadState": {
+         "httpMethod": "GET",
+         "id": "chat.users.spaces.threads.getThreadReadState",
+         "parameters": {
+          "name": {
+           "location": "path",
+           "required": true,
+           "type": "string"
+          }
+         },
+         "path": "v1/{+name}"
+        }
+       }
+      }
+     }
+    }
+   }
+  }
+ },
+ "rootUrl": "https://chat.googleapis.com/",
+ "servicePath": "",
+ "version": "v1"
+}

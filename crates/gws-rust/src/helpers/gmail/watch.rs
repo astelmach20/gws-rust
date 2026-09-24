@@ -1,994 +1,802 @@
-use super::*;
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+//! `gmail +watch`: stream new messages as NDJSON via Gmail push + Pub/Sub.
+//!
+//! Delivery is at-least-once: Pub/Sub notifications are acknowledged only
+//! after every new message they announce has been emitted, so a failure
+//! mid-batch leads to redelivery rather than loss. Messages already emitted in
+//! this session are not emitted twice.
+
+use super::cli::{required_str, value_or_default};
+use super::prelude::*;
 use crate::auth::AccessTokenProvider;
-use crate::helpers::PUBSUB_API_BASE;
-use crate::output::colorize;
-use crate::output::sanitize_for_terminal;
+use crate::helpers::events::stream::{
+    PubSubClient, StepError, StreamOptions, StreamStep, cleanup_resources, emit_diagnostic,
+    run_stream,
+};
+use crate::helpers::modelarmor::{SanitizeConfig, Sanitized, sanitize_value};
+use crate::helpers::rest::RestClient;
+use std::collections::{HashSet, VecDeque};
+use std::io::Write;
+use std::path::PathBuf;
+use std::time::Duration;
 
-const GMAIL_API_BASE: &str = "https://gmail.googleapis.com/gmail/v1";
+/// Gmail's push service account that must be able to publish to the topic.
+const GMAIL_PUSH_MEMBER: &str = "serviceAccount:gmail-api-push@system.gserviceaccount.com";
+/// Remember this many emitted message IDs to suppress duplicates.
+const EMITTED_MEMORY: usize = 10_000;
 
-/// Handles the `+watch` command — Gmail push notifications via Pub/Sub.
-pub(super) async fn handle_watch(
-    matches: &ArgMatches,
-    sanitize_config: &crate::helpers::modelarmor::SanitizeConfig,
-) -> Result<(), GwsError> {
-    let config = parse_watch_args(matches)?;
-
-    if let Some(ref dir) = config.output_dir {
-        std::fs::create_dir_all(dir).context("Failed to create output dir")?;
-    }
-
-    let client = crate::client::build_client()?;
-    let gmail_token_provider = auth::token_provider(&[GMAIL_SCOPE]);
-    let pubsub_token_provider = auth::token_provider(&[PUBSUB_SCOPE]);
-
-    // Get tokens
-    let gmail_token = auth::get_token(&[GMAIL_SCOPE])
-        .await
-        .context("Failed to get Gmail token")?;
-    let pubsub_token = auth::get_token(&[PUBSUB_SCOPE])
-        .await
-        .context("Failed to get Pub/Sub token")?;
-
-    let (pubsub_subscription, topic_name, created_resources) =
-        if let Some(ref sub_name) = config.subscription {
-            (sub_name.clone(), None, false)
-        } else {
-            let project = config
-                .project
-                .clone()
-                .or_else(|| std::env::var("GWSR_PROJECT_ID").ok())
-                .ok_or_else(|| {
-                    GwsError::Validation(
-                    "--project is required when not using --subscription (or set GWSR_PROJECT_ID)"
-                        .to_string(),
-                )
-                })?;
-
-            let suffix = format!("{:08x}", rand::random::<u32>());
-            let topic = if let Some(ref t) = config.topic {
-                crate::validate::validate_resource_name(t)?.to_string()
-            } else {
-                let project = crate::validate::validate_resource_name(&project)?;
-                let t = format!("projects/{project}/topics/gwsr-gmail-watch-{suffix}");
-                // Create Pub/Sub topic
-                eprintln!("Creating Pub/Sub topic: {t}");
-                let resp = client
-                    .put(format!("{PUBSUB_API_BASE}/{t}"))
-                    .bearer_auth(&pubsub_token)
-                    .header("Content-Type", "application/json")
-                    .body("{}")
-                    .send()
-                    .await
-                    .context("Failed to create topic")?;
-
-                if !resp.status().is_success() {
-                    let body = resp.text().await.unwrap_or_default();
-                    return Err(GwsError::Api {
-                        code: 400,
-                        message: format!("Failed to create Pub/Sub topic: {body}"),
-                        reason: "pubsubError".to_string(),
-                        enable_url: None,
-                    });
-                }
-
-                // Grant Gmail publish permission on the topic
-                eprintln!("Granting Gmail push permission on topic...");
-                let iam_body = json!({
-                    "policy": {
-                        "bindings": [{
-                            "role": "roles/pubsub.publisher",
-                            "members": ["serviceAccount:gmail-api-push@system.gserviceaccount.com"]
-                        }]
-                    }
-                });
-                let resp = client
-                    .post(format!("{PUBSUB_API_BASE}/{t}:setIamPolicy"))
-                    .bearer_auth(&pubsub_token)
-                    .header("Content-Type", "application/json")
-                    .json(&iam_body)
-                    .send()
-                    .await
-                    .context("Failed to set topic IAM policy")?;
-
-                if !resp.status().is_success() {
-                    let body = resp.text().await.unwrap_or_default();
-                    eprintln!("Warning: Could not auto-grant Gmail push permission.");
-                    eprintln!("You may need to manually grant publisher access:");
-                    eprintln!(
-                        "  gcloud pubsub topics add-iam-policy-binding {} \\",
-                        t.split('/').rfind(|s| !s.is_empty()).unwrap_or(&t)
-                    );
-                    eprintln!(
-                        "    --member=serviceAccount:gmail-api-push@system.gserviceaccount.com \\"
-                    );
-                    eprintln!("    --role=roles/pubsub.publisher");
-                    eprintln!("Error: {}", sanitize_for_terminal(&body));
-                }
-
-                t
-            };
-
-            let project = crate::validate::validate_resource_name(&project)?;
-            let sub = format!("projects/{project}/subscriptions/gwsr-gmail-watch-{suffix}");
-
-            // 3. Create Pub/Sub subscription
-            eprintln!("Creating Pub/Sub subscription: {sub}");
-            let sub_body = json!({
-                "topic": topic,
-                "ackDeadlineSeconds": 60,
-            });
-            let resp = client
-                .put(format!("{PUBSUB_API_BASE}/{sub}"))
-                .bearer_auth(&pubsub_token)
-                .header("Content-Type", "application/json")
-                .json(&sub_body)
-                .send()
-                .await
-                .context("Failed to create subscription")?;
-
-            if !resp.status().is_success() {
-                let body = resp.text().await.unwrap_or_default();
-                return Err(GwsError::Api {
-                    code: 400,
-                    message: format!("Failed to create Pub/Sub subscription: {body}"),
-                    reason: "pubsubError".to_string(),
-                    enable_url: None,
-                });
-            }
-
-            // 4. Call gmail.users.watch
-            eprintln!("Setting up Gmail watch...");
-            let mut watch_body = json!({
-                "topicName": topic,
-            });
-            if let Some(ref label_ids) = config.label_ids {
-                let labels: Vec<&str> = label_ids.split(',').map(|s| s.trim()).collect();
-                watch_body["labelIds"] = json!(labels);
-            }
-
-            let resp = client
-                .post(format!("{GMAIL_API_BASE}/users/me/watch"))
-                .bearer_auth(&gmail_token)
-                .header("Content-Type", "application/json")
-                .json(&watch_body)
-                .send()
-                .await
-                .context("Failed to call gmail.users.watch")?;
-
-            let watch_resp: Value = resp
-                .json()
-                .await
-                .context("Failed to parse watch response")?;
-
-            if let Some(err) = watch_resp.get("error") {
-                return Err(GwsError::Api {
-                    code: err.get("code").and_then(|c| c.as_u64()).unwrap_or(400) as u16,
-                    message: format!(
-                        "gmail.users.watch failed: {}",
-                        serde_json::to_string(err).unwrap_or_default()
-                    ),
-                    reason: "gmailError".to_string(),
-                    enable_url: None,
-                });
-            }
-
-            let history_id = watch_resp
-                .get("historyId")
-                .and_then(|h| h.as_str())
-                .unwrap_or("0");
-            let expiration = watch_resp
-                .get("expiration")
-                .and_then(|e| e.as_str())
-                .unwrap_or("unknown");
-
-            eprintln!("Gmail watch active (historyId: {history_id}, expires: {expiration})");
-            eprintln!("Listening for new emails...\n");
-
-            (sub, Some(topic), true)
-        };
-
-    // Get initial historyId for tracking
-    let profile_resp = client
-        .get(format!("{GMAIL_API_BASE}/users/me/profile"))
-        .bearer_auth(&gmail_token)
-        .send()
-        .await
-        .context("Failed to get Gmail profile")?;
-
-    let profile: Value = profile_resp.json().await.unwrap_or(json!({}));
-    let mut last_history_id: u64 = profile
-        .get("historyId")
-        .and_then(|h| h.as_str().or_else(|| h.as_u64().map(|_| "")))
-        .and_then(|s| s.parse().ok())
-        .or_else(|| profile.get("historyId").and_then(|h| h.as_u64()))
-        .unwrap_or(0);
-
-    // Pull loop
-    let runtime = WatchRuntime {
-        client: &client,
-        pubsub_token_provider: &pubsub_token_provider,
-        gmail_token_provider: &gmail_token_provider,
-        sanitize_config,
-        pubsub_api_base: PUBSUB_API_BASE,
-        gmail_api_base: GMAIL_API_BASE,
-    };
-    let result = watch_pull_loop(
-        &runtime,
-        &pubsub_subscription,
-        &mut last_history_id,
-        config.clone(),
-    )
-    .await;
-
-    // Cleanup or print reconnection info
-    if created_resources {
-        if config.cleanup {
-            eprintln!("\nCleaning up Pub/Sub resources...");
-            match pubsub_token_provider.access_token().await {
-                Ok(pubsub_token) => {
-                    let _ = client
-                        .delete(format!("{PUBSUB_API_BASE}/{}", pubsub_subscription))
-                        .bearer_auth(&pubsub_token)
-                        .send()
-                        .await;
-                    if let Some(ref topic) = topic_name {
-                        let _ = client
-                            .delete(format!("{PUBSUB_API_BASE}/{}", topic))
-                            .bearer_auth(&pubsub_token)
-                            .send()
-                            .await;
-                    }
-                    eprintln!("Cleanup complete.");
-                }
-                _ => {
-                    eprintln!(
-                        "Warning: failed to refresh token for cleanup. Resources may need manual deletion."
-                    );
-                }
-            }
-        } else {
-            eprintln!("\n--- Reconnection Info ---");
-            eprintln!(
-                "To reconnect later:\n  gwsr gmail +watch --subscription {}",
-                pubsub_subscription
-            );
-            if let Some(ref topic) = topic_name {
-                eprintln!("Pub/Sub topic: {}", topic);
-            }
-            eprintln!("Pub/Sub subscription: {}", pubsub_subscription);
-            eprintln!("Note: Gmail watch expires after 7 days. Re-run +watch to renew.");
-        }
-    }
-
-    result
-}
-
-/// Pull loop for Gmail watch — polls Pub/Sub, fetches messages via history API.
-async fn watch_pull_loop(
-    runtime: &WatchRuntime<'_>,
-    subscription: &str,
-    last_history_id: &mut u64,
-    config: WatchConfig,
-) -> Result<(), GwsError> {
-    loop {
-        let pubsub_token = runtime
-            .pubsub_token_provider
-            .access_token()
-            .await
-            .context("Failed to get Pub/Sub token")?;
-        let pull_body = json!({ "maxMessages": config.max_messages });
-        let pull_future = runtime
-            .client
-            .post(format!("{}/{subscription}:pull", runtime.pubsub_api_base))
-            .bearer_auth(&pubsub_token)
-            .header("Content-Type", "application/json")
-            .json(&pull_body)
-            .timeout(std::time::Duration::from_secs(config.poll_interval.max(10)))
-            .send();
-
-        let resp = tokio::select! {
-            result = pull_future => {
-                match result {
-                    Ok(r) => r,
-                    Err(e) if e.is_timeout() => continue,
-                    Err(e) => return Err(GwsError::other(anyhow::anyhow!("Pub/Sub pull failed: {e}"))),
-                }
-            }
-            _ = super::super::shutdown_signal() => {
-                eprintln!("\nReceived shutdown signal, stopping...");
-                return Ok(());
-            }
-        };
-
-        if !resp.status().is_success() {
-            let body = resp.text().await.unwrap_or_default();
-            return Err(GwsError::Api {
-                code: 400,
-                message: format!("Pub/Sub pull failed: {body}"),
-                reason: "pubsubError".to_string(),
-                enable_url: None,
-            });
-        }
-
-        let pull_response: Value = resp.json().await.context("Failed to parse pull response")?;
-
-        let (ack_ids, max_history_id) = process_pull_response(&pull_response);
-
-        if max_history_id > *last_history_id && *last_history_id > 0 {
-            // Fetch new messages via history API
-            fetch_and_output_messages(
-                runtime.client,
-                runtime.gmail_token_provider,
-                *last_history_id,
-                &config.format,
-                config.output_dir.as_ref(),
-                runtime.sanitize_config,
-                runtime.gmail_api_base,
-            )
-            .await?;
-        }
-
-        if max_history_id > *last_history_id {
-            *last_history_id = max_history_id;
-        }
-
-        // Acknowledge messages
-        if !ack_ids.is_empty() {
-            let ack_body = json!({ "ackIds": ack_ids });
-            let _ = runtime
-                .client
-                .post(format!(
-                    "{}/{subscription}:acknowledge",
-                    runtime.pubsub_api_base
-                ))
-                .bearer_auth(&pubsub_token)
-                .header("Content-Type", "application/json")
-                .json(&ack_body)
-                .send()
-                .await;
-        }
-
-        if config.once {
-            break;
-        }
-
-        tokio::select! {
-            _ = tokio::time::sleep(std::time::Duration::from_secs(config.poll_interval)) => {},
-            _ = super::super::shutdown_signal() => {
-                eprintln!("\nReceived shutdown signal, stopping...");
-                break;
-            }
-        }
-    }
-
-    Ok(())
-}
-
-fn process_pull_response(response: &Value) -> (Vec<String>, u64) {
-    let mut ack_ids = Vec::new();
-    let mut max_history_id = 0;
-
-    if let Some(messages) = response.get("receivedMessages").and_then(|m| m.as_array()) {
-        for msg in messages {
-            if let Some(ack_id) = msg.get("ackId").and_then(|a| a.as_str()) {
-                ack_ids.push(ack_id.to_string());
-            }
-
-            // Extract historyId from the notification
-            if let Some(pubsub_msg) = msg.get("message") {
-                let data = pubsub_msg
-                    .get("data")
-                    .and_then(|d| d.as_str())
-                    .and_then(|d| base64::engine::general_purpose::STANDARD.decode(d).ok())
-                    .and_then(|bytes| String::from_utf8(bytes).ok())
-                    .and_then(|s| serde_json::from_str::<Value>(&s).ok());
-
-                if let Some(notification) = data {
-                    let notif_history_id = notification
-                        .get("historyId")
-                        .and_then(|h| h.as_u64().or_else(|| h.as_str()?.parse().ok()))
-                        .unwrap_or(0);
-
-                    if notif_history_id > max_history_id {
-                        max_history_id = notif_history_id;
-                    }
-                }
-            }
-        }
-    }
-
-    (ack_ids, max_history_id)
-}
-
-/// Fetches new messages since `start_history_id` and outputs them as NDJSON.
-async fn fetch_and_output_messages(
-    client: &reqwest::Client,
-    gmail_token_provider: &dyn auth::AccessTokenProvider,
-    start_history_id: u64,
-    msg_format: &str,
-    output_dir: Option<&std::path::PathBuf>,
-    sanitize_config: &crate::helpers::modelarmor::SanitizeConfig,
-    gmail_api_base: &str,
-) -> Result<(), GwsError> {
-    let gmail_token = gmail_token_provider
-        .access_token()
-        .await
-        .context("Failed to get Gmail token")?;
-    let resp = client
-        .get(format!("{gmail_api_base}/users/me/history"))
-        .query(&[
-            ("startHistoryId", &start_history_id.to_string()),
-            ("historyTypes", &"messageAdded".to_string()),
-        ])
-        .bearer_auth(&gmail_token)
-        .send()
-        .await
-        .context("Failed to get history")?;
-
-    let body: Value = resp.json().await.unwrap_or(json!({}));
-
-    let msg_ids = extract_message_ids_from_history(&body);
-
-    for msg_id in msg_ids {
-        let msg_url = format!(
-            "{gmail_api_base}/users/me/messages/{}",
-            crate::validate::encode_path_segment(&msg_id),
-        );
-        let msg_resp = client
-            .get(&msg_url)
-            .query(&[("format", msg_format)])
-            .bearer_auth(&gmail_token)
-            .send()
-            .await;
-
-        if let Ok(resp) = msg_resp
-            && let Ok(mut full_msg) = resp.json::<Value>().await
-        {
-            // Apply sanitization if configured
-            if let Some(ref template) = sanitize_config.template {
-                let text_to_check = serde_json::to_string(&full_msg).unwrap_or_default();
-                match crate::helpers::modelarmor::sanitize_text(template, &text_to_check).await {
-                    Ok(result) => {
-                        if let Some(sanitized_msg) =
-                            apply_sanitization_result(full_msg, sanitize_config, &result, &msg_id)
-                        {
-                            full_msg = sanitized_msg;
-                        } else {
-                            continue;
-                        }
-                    }
-                    Err(e) => {
-                        eprintln!(
-                            "{} Model Armor sanitization failed for message {msg_id}: {}",
-                            colorize("warning:", "33"),
-                            sanitize_for_terminal(&e.to_string())
-                        );
-                    }
-                }
-            }
-
-            let json_str =
-                serde_json::to_string_pretty(&full_msg).unwrap_or_else(|_| "{}".to_string());
-            if let Some(dir) = output_dir {
-                let path = dir.join(format!(
-                    "{}.json",
-                    crate::validate::encode_path_segment(&msg_id)
-                ));
-                if let Err(e) = std::fs::write(&path, &json_str) {
-                    eprintln!(
-                        "Warning: failed to write {}: {}",
-                        path.display(),
-                        sanitize_for_terminal(&e.to_string())
-                    );
-                } else {
-                    eprintln!("Wrote {}", path.display());
-                }
-            } else {
-                println!(
-                    "{}",
-                    serde_json::to_string(&full_msg).unwrap_or_else(|_| "{}".to_string())
-                );
-            }
-        }
-    }
-
-    Ok(())
-}
-
-fn apply_sanitization_result(
-    mut full_msg: Value,
-    sanitize_config: &crate::helpers::modelarmor::SanitizeConfig,
-    result: &crate::helpers::modelarmor::SanitizationResult,
-    msg_id: &str,
-) -> Option<Value> {
-    if result.filter_match_state == "MATCH_FOUND" {
-        match sanitize_config.mode {
-            crate::helpers::modelarmor::SanitizeMode::Block => {
-                eprintln!(
-                    "{} Message {msg_id} blocked by Model Armor (match found)",
-                    colorize("blocked:", "31")
-                );
-                return None;
-            }
-            crate::helpers::modelarmor::SanitizeMode::Warn => {
-                eprintln!(
-                    "{} Model Armor match found in message {msg_id}",
-                    colorize("warning:", "33")
-                );
-                full_msg["_sanitization"] = serde_json::json!({
-                    "filterMatchState": result.filter_match_state,
-                    "filterResults": result.filter_results,
-                });
-            }
-        }
-    }
-    Some(full_msg)
-}
-
-fn extract_message_ids_from_history(history_body: &Value) -> Vec<String> {
-    let mut seen_ids = std::collections::HashSet::new();
-    let mut result = Vec::new();
-
-    if let Some(history) = history_body.get("history").and_then(|h| h.as_array()) {
-        for entry in history {
-            if let Some(added) = entry.get("messagesAdded").and_then(|m| m.as_array()) {
-                for msg_entry in added {
-                    if let Some(msg_id) = msg_entry
-                        .get("message")
-                        .and_then(|m| m.get("id"))
-                        .and_then(|id| id.as_str())
-                        && seen_ids.insert(msg_id.to_string())
-                    {
-                        result.push(msg_id.to_string());
-                    }
-                }
-            }
-        }
-    }
-    result
-}
-
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 struct WatchConfig {
     project: Option<String>,
     subscription: Option<String>,
     topic: Option<String>,
-    label_ids: Option<String>,
+    label_ids: Vec<String>,
     max_messages: u32,
     poll_interval: u64,
+    max_failures: u32,
     format: String,
     once: bool,
     cleanup: bool,
-    output_dir: Option<std::path::PathBuf>,
-}
-
-struct WatchRuntime<'a> {
-    client: &'a reqwest::Client,
-    pubsub_token_provider: &'a dyn auth::AccessTokenProvider,
-    gmail_token_provider: &'a dyn auth::AccessTokenProvider,
-    sanitize_config: &'a crate::helpers::modelarmor::SanitizeConfig,
-    pubsub_api_base: &'a str,
-    gmail_api_base: &'a str,
+    output_dir: Option<PathBuf>,
 }
 
 fn parse_watch_args(matches: &ArgMatches) -> Result<WatchConfig, GwsError> {
-    let format_str = matches
-        .get_one::<String>("msg-format")
-        .map(|s| s.as_str())
-        .unwrap_or("full");
-    // Note: msg-format is already constrained by clap's value_parser
-
     let output_dir = matches
         .get_one::<String>("output-dir")
         .map(|dir| crate::validate::validate_safe_output_dir(dir))
         .transpose()?;
-
+    let subscription = matches
+        .get_one::<String>("subscription")
+        .map(|s| crate::validate::validate_resource_name(s).map(str::to_string))
+        .transpose()?;
+    let topic = matches
+        .get_one::<String>("topic")
+        .map(|s| crate::validate::validate_resource_name(s).map(str::to_string))
+        .transpose()?;
+    let project = match matches.get_one::<String>("project") {
+        Some(p) => Some(p.clone()),
+        None => match std::env::var("GWSR_PROJECT_ID") {
+            Ok(p) => Some(p),
+            Err(std::env::VarError::NotPresent) => None,
+            Err(std::env::VarError::NotUnicode(_)) => {
+                return Err(GwsError::Validation(
+                    "GWSR_PROJECT_ID is not valid UTF-8".to_string(),
+                ));
+            }
+        },
+    }
+    .map(|p| crate::validate::validate_resource_name(&p).map(str::to_string))
+    .transpose()?;
+    if subscription.is_none() && project.is_none() {
+        return Err(GwsError::Validation(
+            "--project is required when not using --subscription (or set GWSR_PROJECT_ID)"
+                .to_string(),
+        ));
+    }
     Ok(WatchConfig {
-        project: matches.get_one::<String>("project").cloned(),
-        subscription: matches
-            .get_one::<String>("subscription")
-            .map(|s| {
-                crate::validate::validate_resource_name(s)?;
-                Ok::<_, GwsError>(s.clone())
-            })
-            .transpose()?,
-        topic: matches.get_one::<String>("topic").cloned(),
-        label_ids: matches.get_one::<String>("label-ids").cloned(),
-        max_messages: matches
-            .get_one::<String>("max-messages")
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(10),
-        poll_interval: matches
-            .get_one::<String>("poll-interval")
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(5),
-        format: format_str.to_string(),
+        project,
+        subscription,
+        topic,
+        label_ids: super::cli::list_values(matches, "label-ids"),
+        max_messages: value_or_default::<u32>(matches, "max-messages")?,
+        poll_interval: value_or_default::<u64>(matches, "poll-interval")?,
+        max_failures: value_or_default::<u32>(matches, "max-failures")?,
+        format: required_str(matches, "msg-format")?,
         once: matches.get_flag("once"),
         cleanup: matches.get_flag("cleanup"),
         output_dir,
     })
 }
 
+/// Extract the Gmail `historyId` from a Pub/Sub notification message.
+fn notification_history_id(message: &Value) -> Result<u64, String> {
+    let data = message
+        .get("data")
+        .and_then(Value::as_str)
+        .ok_or("notification has no data")?;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(data)
+        .map_err(|e| format!("notification data is not base64: {e}"))?;
+    let json: Value = serde_json::from_slice(&bytes)
+        .map_err(|e| format!("notification data is not JSON: {e}"))?;
+    let h = json
+        .get("historyId")
+        .ok_or("notification has no historyId")?;
+    h.as_u64()
+        .or_else(|| h.as_str().and_then(|s| s.parse().ok()))
+        .ok_or_else(|| format!("invalid historyId {h}"))
+}
+
+/// Parse a `historyId` field (string or number) from an API response.
+fn parse_history_id(v: &Value, context: &str) -> Result<u64, GwsError> {
+    let h = v
+        .get("historyId")
+        .ok_or_else(|| other_error(format!("{context}: response has no historyId")))?;
+    h.as_u64()
+        .or_else(|| h.as_str().and_then(|s| s.parse().ok()))
+        .ok_or_else(|| other_error(format!("{context}: invalid historyId {h}")))
+}
+
+/// Collect message IDs added in one history page (deduplicated, in order).
+fn extract_message_ids_from_history(
+    history_body: &Value,
+    seen: &mut HashSet<String>,
+) -> Vec<String> {
+    let mut result = Vec::new();
+    let entries = history_body.get("history").and_then(Value::as_array);
+    for entry in entries.into_iter().flatten() {
+        let added = entry.get("messagesAdded").and_then(Value::as_array);
+        for msg_entry in added.into_iter().flatten() {
+            if let Some(id) = msg_entry
+                .get("message")
+                .and_then(|m| m.get("id"))
+                .and_then(Value::as_str)
+                && seen.insert(id.to_string())
+            {
+                result.push(id.to_string());
+            }
+        }
+    }
+    result
+}
+
+/// State for one `+watch` session.
+struct GmailWatchStep<'a> {
+    http: reqwest::Client,
+    pubsub: PubSubClient,
+    pubsub_tokens: &'a dyn AccessTokenProvider,
+    gmail_tokens: &'a dyn AccessTokenProvider,
+    gmail_base: String,
+    subscription: String,
+    config: WatchConfig,
+    sanitize: &'a SanitizeConfig,
+    last_history_id: u64,
+    emitted: HashSet<String>,
+    emitted_order: VecDeque<String>,
+    pull_timeout: Duration,
+}
+
+impl GmailWatchStep<'_> {
+    fn remember(&mut self, id: &str) {
+        if self.emitted.insert(id.to_string()) {
+            self.emitted_order.push_back(id.to_string());
+            if self.emitted_order.len() > EMITTED_MEMORY
+                && let Some(old) = self.emitted_order.pop_front()
+            {
+                self.emitted.remove(&old);
+            }
+        }
+    }
+
+    fn output(&self, id: &str, msg: &Value) -> Result<(), StepError> {
+        let fatal = |e: String| StepError::Fatal(other_error(e));
+        match &self.config.output_dir {
+            Some(dir) => {
+                let path = dir.join(format!("{}.json", crate::validate::encode_path_segment(id)));
+                let text = serde_json::to_string_pretty(msg)
+                    .map_err(|e| fatal(format!("Failed to serialize message {id}: {e}")))?;
+                std::fs::write(&path, text)
+                    .map_err(|e| fatal(format!("Failed to write {}: {e}", path.display())))?;
+                emit_diagnostic(
+                    "info",
+                    "wrote",
+                    json!({ "path": path.display().to_string() }),
+                );
+            }
+            None => {
+                let line = serde_json::to_string(msg)
+                    .map_err(|e| fatal(format!("Failed to serialize message {id}: {e}")))?;
+                let mut out = std::io::stdout().lock();
+                writeln!(out, "{line}")
+                    .and_then(|()| out.flush())
+                    .map_err(|e| fatal(format!("Failed to write to stdout: {e}")))?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Fetch, sanitize, and emit every message added since `last_history_id`.
+    async fn emit_new_messages(&mut self) -> Result<(), StepError> {
+        let token = self
+            .gmail_tokens
+            .access_token()
+            .await
+            .map_err(|e| StepError::Transient {
+                status: None,
+                message: format!("Failed to get Gmail token: {e}"),
+            })?;
+        let api = GmailApi::with_bases(
+            RestClient::new(self.http.clone(), token),
+            &self.gmail_base,
+            &self.gmail_base,
+        );
+
+        let mut ids = Vec::new();
+        let mut seen = HashSet::new();
+        let mut page_token: Option<String> = None;
+        loop {
+            let page = api
+                .history(self.last_history_id, page_token.as_deref())
+                .await
+                .map_err(|e| match e {
+                    GwsError::Api { code: 404, .. } => StepError::Fatal(other_error(format!(
+                        "Gmail history since {} is no longer available ({e}); restart +watch",
+                        self.last_history_id
+                    ))),
+                    other => StepError::from(other),
+                })?;
+            ids.extend(extract_message_ids_from_history(&page, &mut seen));
+            match page.get("nextPageToken").and_then(Value::as_str) {
+                Some(t) => page_token = Some(t.to_string()),
+                None => break,
+            }
+        }
+
+        for id in ids {
+            if self.emitted.contains(&id) {
+                continue;
+            }
+            let msg = match api.get_message(&id, &self.config.format, &[]).await {
+                Ok(m) => m,
+                Err(GwsError::Api { code: 404, .. }) => {
+                    emit_diagnostic("warning", "message_gone", json!({ "id": id }));
+                    continue;
+                }
+                Err(e) => return Err(StepError::from(e)),
+            };
+            // Fail closed: a sanitization error in block mode aborts this
+            // iteration before anything is emitted or acknowledged.
+            match sanitize_value(self.sanitize, msg)
+                .await
+                .map_err(|e| StepError::Transient {
+                    status: None,
+                    message: e.to_string(),
+                })? {
+                Sanitized::Pass(v) => self.output(&id, &v)?,
+                Sanitized::Blocked(result) => emit_diagnostic(
+                    "warning",
+                    "blocked",
+                    json!({ "id": id, "filterMatchState": result.filter_match_state }),
+                ),
+            }
+            self.remember(&id);
+        }
+        Ok(())
+    }
+}
+
+impl StreamStep for GmailWatchStep<'_> {
+    async fn step(&mut self) -> Result<(), StepError> {
+        let token = self
+            .pubsub_tokens
+            .access_token()
+            .await
+            .map_err(|e| StepError::Transient {
+                status: None,
+                message: format!("Failed to get Pub/Sub token: {e}"),
+            })?;
+        let received = self
+            .pubsub
+            .pull(
+                &token,
+                &self.subscription,
+                self.config.max_messages,
+                self.pull_timeout,
+            )
+            .await?;
+        if received.is_empty() {
+            return Ok(());
+        }
+        let mut max_history_id = 0;
+        for m in &received {
+            match notification_history_id(&m.message) {
+                Ok(h) => max_history_id = max_history_id.max(h),
+                // Nothing can be done with an undecodable notification; it is
+                // reported and acknowledged so it is not redelivered forever.
+                Err(reason) => emit_diagnostic(
+                    "warning",
+                    "undecodable_notification",
+                    json!({ "reason": reason }),
+                ),
+            }
+        }
+        if max_history_id > self.last_history_id {
+            self.emit_new_messages().await?;
+            self.last_history_id = max_history_id;
+        }
+        let ack_ids: Vec<String> = received.into_iter().map(|m| m.ack_id).collect();
+        self.pubsub.ack(&token, &self.subscription, &ack_ids).await
+    }
+}
+
+/// Pub/Sub resources created for this session.
+struct Created {
+    topic: Option<String>,
+    subscription: String,
+}
+
+/// Create the topic/subscription (unless given) and start the Gmail watch.
+/// Returns the subscription, created resources, and the starting historyId.
+async fn setup(
+    config: &WatchConfig,
+    pubsub: &PubSubClient,
+    pubsub_token: &str,
+    gmail: &GmailApi,
+) -> Result<(String, Option<Created>, u64), GwsError> {
+    if let Some(sub) = &config.subscription {
+        let profile = gmail.profile().await?;
+        return Ok((
+            sub.clone(),
+            None,
+            parse_history_id(&profile, "Gmail profile")?,
+        ));
+    }
+    let project = config
+        .project
+        .as_deref()
+        .ok_or_else(|| GwsError::Validation("--project is required".to_string()))?;
+    let suffix = format!("{:08x}", rand::random::<u32>());
+    let (topic, created_topic) = match &config.topic {
+        Some(t) => (t.clone(), None),
+        None => {
+            let t = format!("projects/{project}/topics/gwsr-gmail-watch-{suffix}");
+            emit_diagnostic("info", "creating_topic", json!({ "topic": t }));
+            pubsub.create_topic(pubsub_token, &t).await?;
+            pubsub
+                .set_topic_publisher(pubsub_token, &t, GMAIL_PUSH_MEMBER)
+                .await
+                .map_err(|e| other_error(format!(
+                    "{e}. Grant it manually: gcloud pubsub topics add-iam-policy-binding {t}                      --member={GMAIL_PUSH_MEMBER} --role=roles/pubsub.publisher"
+                )))?;
+            (t.clone(), Some(t))
+        }
+    };
+    let sub = format!("projects/{project}/subscriptions/gwsr-gmail-watch-{suffix}");
+    emit_diagnostic(
+        "info",
+        "creating_subscription",
+        json!({ "subscription": sub }),
+    );
+    pubsub
+        .create_subscription(pubsub_token, &sub, &topic)
+        .await?;
+
+    let mut watch_body = json!({ "topicName": topic });
+    if !config.label_ids.is_empty() {
+        watch_body["labelIds"] = json!(config.label_ids);
+    }
+    let watch = gmail.watch(&watch_body).await?;
+    let history_id = parse_history_id(&watch, "gmail.users.watch")?;
+    emit_diagnostic(
+        "info",
+        "watch_active",
+        json!({ "historyId": history_id, "expiration": watch.get("expiration") }),
+    );
+    Ok((
+        sub.clone(),
+        Some(Created {
+            topic: created_topic,
+            subscription: sub,
+        }),
+        history_id,
+    ))
+}
+
+fn dry_run_plan(config: &WatchConfig) -> Result<(), GwsError> {
+    let plan = json!({
+        "dry_run": true,
+        "action": if config.subscription.is_some() { "listen to existing subscription" } else { "create Pub/Sub topic + subscription and start gmail.users.watch" },
+        "subscription": config.subscription,
+        "project": config.project,
+        "topic": config.topic,
+        "labelIds": config.label_ids,
+    });
+    let text = serde_json::to_string_pretty(&plan)
+        .map_err(|e| other_error(format!("Failed to serialize plan: {e}")))?;
+    println!("{text}");
+    Ok(())
+}
+
+/// Handles the `+watch` command.
+pub(super) async fn handle_watch(
+    matches: &ArgMatches,
+    sanitize_config: &SanitizeConfig,
+) -> Result<(), GwsError> {
+    let config = parse_watch_args(matches)?;
+    if crate::helpers::rest::dry_run(matches)? {
+        return dry_run_plan(&config);
+    }
+    if let Some(dir) = &config.output_dir {
+        std::fs::create_dir_all(dir)
+            .map_err(|e| other_error(format!("Failed to create {}: {e}", dir.display())))?;
+    }
+
+    let http = crate::client::shared_client()?;
+    let gmail_tokens = auth::token_provider(&[GMAIL_SCOPE]);
+    let pubsub_tokens = auth::token_provider(&[PUBSUB_SCOPE]);
+    let pubsub = PubSubClient::new(http.clone());
+
+    let pubsub_token = pubsub_tokens
+        .access_token()
+        .await
+        .map_err(|e| GwsError::Auth(format!("Failed to get Pub/Sub token: {e}")))?;
+    let gmail_token = gmail_tokens
+        .access_token()
+        .await
+        .map_err(|e| GwsError::Auth(format!("Failed to get Gmail token: {e}")))?;
+    let gmail = GmailApi::new(RestClient::new(http.clone(), gmail_token));
+
+    let (subscription, created, history_id) =
+        setup(&config, &pubsub, &pubsub_token, &gmail).await?;
+
+    let opts = StreamOptions::new(config.once, config.poll_interval, config.max_failures);
+    let mut step = GmailWatchStep {
+        http,
+        pubsub: pubsub.clone(),
+        pubsub_tokens: &pubsub_tokens,
+        gmail_tokens: &gmail_tokens,
+        gmail_base: super::api::GMAIL_API_BASE.to_string(),
+        subscription: subscription.clone(),
+        pull_timeout: Duration::from_secs(config.poll_interval.max(10)),
+        config: config.clone(),
+        sanitize: sanitize_config,
+        last_history_id: history_id,
+        emitted: HashSet::new(),
+        emitted_order: VecDeque::new(),
+    };
+    let result = run_stream(&opts, &mut step).await;
+
+    let Some(created) = created else {
+        return result;
+    };
+    if config.cleanup {
+        let mut names = vec![created.subscription.as_str()];
+        if let Some(t) = &created.topic {
+            names.push(t);
+        }
+        let token = pubsub_tokens
+            .access_token()
+            .await
+            .map_err(|e| other_error(e.to_string()));
+        let cleaned = cleanup_resources(&pubsub, token, &names).await;
+        return match (result, cleaned) {
+            (Err(e), Err(c)) => {
+                emit_diagnostic(
+                    "error",
+                    "cleanup_failed",
+                    json!({ "message": c.to_string() }),
+                );
+                Err(e)
+            }
+            (Err(e), Ok(())) => Err(e),
+            (Ok(()), c) => c,
+        };
+    }
+    emit_diagnostic(
+        "info",
+        "reconnect",
+        json!({
+            "subscription": created.subscription,
+            "topic": created.topic,
+            "command": format!("gwsr gmail +watch --subscription {}", created.subscription),
+            "note": "Gmail watch expires after 7 days; re-run +watch to renew",
+        }),
+    );
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::auth::FakeTokenProvider;
-    use std::sync::Arc;
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    use tokio::net::TcpListener;
-    use tokio::sync::Mutex;
+    use crate::helpers::gmail::test_support::helper_matches;
+    use wiremock::matchers::{header, method, path, query_param};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
 
-    async fn spawn_watch_server() -> (
-        String,
-        String,
-        Arc<Mutex<Vec<(String, String)>>>,
-        tokio::task::JoinHandle<()>,
-    ) {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let requests = Arc::new(Mutex::new(Vec::new()));
-        let recorded_requests = Arc::clone(&requests);
-
-        let handle = tokio::spawn(async move {
-            for _ in 0..4 {
-                let (mut stream, _) = listener.accept().await.unwrap();
-                let mut buf = [0_u8; 8192];
-                let bytes_read = stream.read(&mut buf).await.unwrap();
-                let request = String::from_utf8_lossy(&buf[..bytes_read]);
-                let path = request
-                    .lines()
-                    .next()
-                    .and_then(|line| line.split_whitespace().nth(1))
-                    .unwrap_or("")
-                    .to_string();
-                let auth_header = request
-                    .lines()
-                    .find(|line| line.to_ascii_lowercase().starts_with("authorization:"))
-                    .unwrap_or("")
-                    .trim()
-                    .to_string();
-                recorded_requests
-                    .lock()
-                    .await
-                    .push((path.clone(), auth_header));
-
-                let body = match path.as_str() {
-                    "/v1/projects/test/subscriptions/demo:pull" => {
-                        let payload = base64::engine::general_purpose::STANDARD
-                            .encode(json!({ "historyId": 2 }).to_string());
-                        json!({
-                            "receivedMessages": [{
-                                "ackId": "ack-1",
-                                "message": {
-                                    "data": payload,
-                                    "messageId": "msg-1"
-                                }
-                            }]
-                        })
-                        .to_string()
-                    }
-                    "/gmail/v1/users/me/history?startHistoryId=1&historyTypes=messageAdded" => {
-                        json!({
-                            "history": [{
-                                "messagesAdded": [{
-                                    "message": { "id": "msg-1" }
-                                }]
-                            }]
-                        })
-                        .to_string()
-                    }
-                    "/gmail/v1/users/me/messages/msg%2D1?format=full" => {
-                        json!({ "id": "msg-1" }).to_string()
-                    }
-                    "/v1/projects/test/subscriptions/demo:acknowledge" => json!({}).to_string(),
-                    other => panic!("unexpected request path: {other}"),
-                };
-
-                let response = format!(
-                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{}",
-                    body.len(),
-                    body
-                );
-                stream.write_all(response.as_bytes()).await.unwrap();
-            }
-        });
-
-        (
-            format!("http://{addr}/v1"),
-            format!("http://{addr}/gmail/v1"),
-            requests,
-            handle,
-        )
+    fn notification(history_id: u64) -> String {
+        base64::engine::general_purpose::STANDARD
+            .encode(json!({ "historyId": history_id }).to_string())
     }
 
     #[test]
-    fn test_extract_message_ids_from_history() {
-        let history = json!({
-            "history": [
-                {
-                    "messagesAdded": [
-                        { "message": { "id": "msg1", "threadId": "t1" } }
-                    ]
-                },
-                {
-                    "messagesAdded": [
-                        { "message": { "id": "msg2", "threadId": "t2" } },
-                        { "message": { "id": "msg1", "threadId": "t1" } } // duplicate
-                    ]
-                }
-            ]
-        });
-
-        let ids = extract_message_ids_from_history(&history);
-        assert_eq!(ids.len(), 2);
-        assert!(ids.contains(&"msg1".to_string()));
-        assert!(ids.contains(&"msg2".to_string()));
+    fn test_extract_message_ids_from_history_dedupes() {
+        let body = json!({ "history": [
+            { "messagesAdded": [ { "message": { "id": "a" } }, { "message": { "id": "b" } } ] },
+            { "messagesAdded": [ { "message": { "id": "a" } } ] },
+            { "labelsAdded": [] }
+        ]});
+        let mut seen = HashSet::new();
+        assert_eq!(
+            extract_message_ids_from_history(&body, &mut seen),
+            vec!["a", "b"]
+        );
+        assert!(extract_message_ids_from_history(&json!({}), &mut seen).is_empty());
     }
 
     #[test]
-    fn test_extract_message_ids_empty() {
-        let history = json!({});
-        let ids = extract_message_ids_from_history(&history);
-        assert!(ids.is_empty());
+    fn test_notification_history_id() {
+        assert_eq!(
+            notification_history_id(&json!({ "data": notification(42) })).unwrap(),
+            42
+        );
+        let s = base64::engine::general_purpose::STANDARD.encode(r#"{"historyId":"7"}"#);
+        assert_eq!(notification_history_id(&json!({ "data": s })).unwrap(), 7);
+        assert!(notification_history_id(&json!({})).is_err());
+        assert!(notification_history_id(&json!({ "data": "!!" })).is_err());
     }
 
     #[test]
-    fn test_process_pull_response() {
-        let encoded_data = URL_SAFE
-            .encode(json!({ "emailAddress": "me@example.com", "historyId": 12345 }).to_string());
-        let response = json!({
-            "receivedMessages": [
-                {
-                    "ackId": "ack1",
-                    "message": {
-                        "data": encoded_data,
-                        "messageId": "msg1"
-                    }
-                },
-                {
-                    "ackId": "ack2",
-                    "message": {
-                        "data": URL_SAFE.encode(json!({ "historyId": 100 }).to_string()),
-                        "messageId": "msg2"
-                    }
-                }
-            ]
-        });
-
-        let (ack_ids, max_history) = process_pull_response(&response);
-        assert_eq!(ack_ids.len(), 2);
-        assert!(ack_ids.contains(&"ack1".to_string()));
-        assert!(ack_ids.contains(&"ack2".to_string()));
-        assert_eq!(max_history, 12345);
-    }
-
-    fn make_matches_watch(args: &[&str]) -> ArgMatches {
-        let cmd = Command::new("test")
-            .arg(Arg::new("project").long("project"))
-            .arg(Arg::new("subscription").long("subscription"))
-            .arg(Arg::new("topic").long("topic"))
-            .arg(Arg::new("label-ids").long("label-ids"))
-            .arg(Arg::new("max-messages").long("max-messages"))
-            .arg(Arg::new("poll-interval").long("poll-interval"))
-            .arg(Arg::new("msg-format").long("msg-format"))
-            .arg(Arg::new("once").long("once").action(ArgAction::SetTrue))
-            .arg(
-                Arg::new("cleanup")
-                    .long("cleanup")
-                    .action(ArgAction::SetTrue),
-            )
-            .arg(Arg::new("output-dir").long("output-dir"));
-        cmd.try_get_matches_from(args).unwrap()
-    }
-
-    #[test]
-    fn test_parse_watch_args_invalid_format_rejected_by_clap() {
-        // msg-format is constrained by clap's value_parser, so invalid values
-        // are rejected at the clap level before parse_watch_args is called.
-        // Verify the real command definition rejects bad formats:
-        let helper = super::super::GmailHelper;
-        let doc = crate::discovery::RestDescription::default();
-        let cmd = helper.inject_commands(Command::new("test"), &doc);
-        let watch_cmd = cmd
-            .get_subcommands()
-            .find(|c| c.get_name() == "+watch")
-            .unwrap()
-            .clone();
-        let result =
-            watch_cmd.try_get_matches_from(vec!["+watch", "--msg-format", "invalid-format"]);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_parse_watch_args_invalid_output_dir() {
-        let matches = make_matches_watch(&["test", "--output-dir", "bad\x01dir"]);
-        let result = parse_watch_args(&matches);
-        assert!(result.is_err());
-        let msg = result.unwrap_err().to_string();
-        assert!(msg.contains("control characters"));
-    }
-
-    #[test]
-    fn test_parse_watch_args_rejects_traversal_subscription() {
-        let matches = make_matches_watch(&["test", "--subscription", "../../evil"]);
-        let result = parse_watch_args(&matches);
-        assert!(result.is_err());
-        let msg = result.unwrap_err().to_string();
-        assert!(msg.contains("path traversal"));
+    fn test_parse_history_id_requires_value() {
+        assert_eq!(
+            parse_history_id(&json!({"historyId": "123"}), "x").unwrap(),
+            123
+        );
+        assert!(parse_history_id(&json!({}), "x").is_err());
     }
 
     #[test]
     fn test_parse_watch_args_full() {
-        let matches = make_matches_watch(&[
-            "test",
+        let m = helper_matches(&[
+            "+watch",
             "--project",
-            "p1",
-            "--subscription",
-            "s1",
+            "p",
+            "--label-ids",
+            "INBOX, UNREAD",
             "--max-messages",
-            "20",
-            "--once",
-        ]);
-        let config = parse_watch_args(&matches).unwrap();
-        assert_eq!(config.project.unwrap(), "p1");
-        assert_eq!(config.subscription.unwrap(), "s1");
-        assert_eq!(config.max_messages, 20);
-        assert!(config.once);
-        assert!(!config.cleanup);
-        // Default check handled by unwrap_or
-        assert_eq!(config.poll_interval, 5);
-        assert_eq!(config.format, "full");
-        assert_eq!(config.label_ids, None);
-        assert_eq!(config.topic, None);
-        assert_eq!(config.output_dir, None);
-    }
-
-    #[test]
-    fn test_parse_watch_args_defaults() {
-        let matches = make_matches_watch(&["test"]);
-        let config = parse_watch_args(&matches).unwrap();
-        assert_eq!(config.project, None);
-        assert_eq!(config.subscription, None);
-        assert_eq!(config.max_messages, 10);
-        assert_eq!(config.poll_interval, 5);
-        assert_eq!(config.format, "full");
-        assert!(!config.once);
-        assert!(!config.cleanup);
-    }
-
-    #[test]
-    fn test_parse_watch_args_invalid_numbers() {
-        let matches = make_matches_watch(&[
-            "test",
-            "--max-messages",
-            "not_a_number",
+            "5",
             "--poll-interval",
-            "invalid",
+            "3",
+            "--max-failures",
+            "4",
+            "--msg-format",
+            "metadata",
+            "--once",
+            "--cleanup",
         ]);
-        let config = parse_watch_args(&matches).unwrap();
-        // Should fallback to defaults
-        assert_eq!(config.max_messages, 10);
-        assert_eq!(config.poll_interval, 5);
+        let c = parse_watch_args(&m).unwrap();
+        assert_eq!(c.project.as_deref(), Some("p"));
+        assert_eq!(c.label_ids, vec!["INBOX", "UNREAD"]);
+        assert_eq!((c.max_messages, c.poll_interval, c.max_failures), (5, 3, 4));
+        assert_eq!(c.format, "metadata");
+        assert!(c.once && c.cleanup);
     }
 
     #[test]
-    fn test_apply_sanitization_result_block_mode() {
-        let msg = json!({ "id": "msg1" });
-        let config = crate::helpers::modelarmor::SanitizeConfig {
-            template: Some("projects/x/locations/y/templates/z".to_string()),
-            mode: crate::helpers::modelarmor::SanitizeMode::Block,
-        };
-        let result = crate::helpers::modelarmor::SanitizationResult {
-            filter_match_state: "MATCH_FOUND".to_string(),
-            filter_results: json!([]),
-            invocation_result: "{}".to_string(),
-        };
-
-        let output = apply_sanitization_result(msg, &config, &result, "msg1");
-        assert!(output.is_none());
+    fn test_parse_watch_args_validation() {
+        let m = helper_matches(&["+watch", "--subscription", "projects/p/subscriptions/../x"]);
+        assert!(parse_watch_args(&m).is_err());
+        let m = helper_matches(&["+watch", "--subscription", "s", "--output-dir", "bad\x01dir"]);
+        assert!(parse_watch_args(&m).is_err());
+        let m = helper_matches(&["+watch", "--subscription", "projects/p/subscriptions/s"]);
+        let c = parse_watch_args(&m).unwrap();
+        assert_eq!(
+            (c.max_messages, c.poll_interval, c.max_failures),
+            (10, 5, 10)
+        );
+        assert_eq!(c.format, "full");
     }
 
-    #[test]
-    fn test_apply_sanitization_result_warn_mode() {
-        let msg = json!({ "id": "msg1" });
-        let config = crate::helpers::modelarmor::SanitizeConfig {
-            template: Some("projects/x/locations/y/templates/z".to_string()),
-            mode: crate::helpers::modelarmor::SanitizeMode::Warn,
-        };
-        let result = crate::helpers::modelarmor::SanitizationResult {
-            filter_match_state: "MATCH_FOUND".to_string(),
-            filter_results: json!([]),
-            invocation_result: "{}".to_string(),
-        };
-
-        let output = apply_sanitization_result(msg, &config, &result, "msg1").unwrap();
-        // Warn mode adds the `_sanitization` metadata.
-        assert!(output.get("_sanitization").is_some());
-        assert_eq!(output["_sanitization"]["filterMatchState"], "MATCH_FOUND");
-    }
-
-    #[test]
-    fn test_apply_sanitization_result_no_match() {
-        let msg = json!({ "id": "msg1" });
-        let config = crate::helpers::modelarmor::SanitizeConfig {
-            template: Some("projects/x/locations/y/templates/z".to_string()),
-            mode: crate::helpers::modelarmor::SanitizeMode::Block,
-        };
-        let result = crate::helpers::modelarmor::SanitizationResult {
-            filter_match_state: "NO_MATCH_FOUND".to_string(),
-            filter_results: json!([]),
-            invocation_result: "{}".to_string(),
-        };
-
-        let output = apply_sanitization_result(msg.clone(), &config, &result, "msg1").unwrap();
-        // If no match found, block mode returns the exact input untouched.
-        assert_eq!(output, msg);
-        assert!(output.get("_sanitization").is_none());
-    }
-
-    #[tokio::test]
-    async fn test_watch_pull_loop_refreshes_tokens_for_each_request() {
-        let client = reqwest::Client::new();
-        let pubsub_provider = FakeTokenProvider::new(["pubsub-token"]);
-        let gmail_provider = FakeTokenProvider::new(["gmail-token"]);
-        let (pubsub_base, gmail_base, requests, server) = spawn_watch_server().await;
-        let mut last_history_id = 1;
+    async fn run_once(server: &MockServer, sanitize: &SanitizeConfig) -> Result<u64, GwsError> {
+        let pubsub_tokens = FakeTokenProvider::new(["pubsub-1", "pubsub-2", "pubsub-3"]);
+        let gmail_tokens = FakeTokenProvider::new(["gmail-1", "gmail-2"]);
         let config = WatchConfig {
             project: None,
-            subscription: None,
+            subscription: Some("projects/test/subscriptions/demo".into()),
             topic: None,
-            label_ids: None,
+            label_ids: vec![],
             max_messages: 10,
             poll_interval: 1,
-            format: "full".to_string(),
+            max_failures: 3,
+            format: "full".into(),
             once: true,
             cleanup: false,
             output_dir: None,
         };
-        let sanitize_config = crate::helpers::modelarmor::SanitizeConfig {
-            template: None,
-            mode: crate::helpers::modelarmor::SanitizeMode::Warn,
-        };
-
-        let runtime = WatchRuntime {
-            client: &client,
-            pubsub_token_provider: &pubsub_provider,
-            gmail_token_provider: &gmail_provider,
-            sanitize_config: &sanitize_config,
-            pubsub_api_base: &pubsub_base,
-            gmail_api_base: &gmail_base,
-        };
-
-        watch_pull_loop(
-            &runtime,
-            "projects/test/subscriptions/demo",
-            &mut last_history_id,
+        let mut step = GmailWatchStep {
+            http: reqwest::Client::new(),
+            pubsub: PubSubClient::with_base(
+                reqwest::Client::new(),
+                &format!("{}/v1", server.uri()),
+            ),
+            pubsub_tokens: &pubsub_tokens,
+            gmail_tokens: &gmail_tokens,
+            gmail_base: format!("{}/gmail/v1", server.uri()),
+            subscription: "projects/test/subscriptions/demo".into(),
+            pull_timeout: Duration::from_secs(5),
             config,
-        )
-        .await
-        .unwrap();
+            sanitize,
+            last_history_id: 1,
+            emitted: HashSet::new(),
+            emitted_order: VecDeque::new(),
+        };
+        let mut opts = StreamOptions::new(true, 1, 3);
+        opts.backoff_base = Duration::from_millis(1);
+        opts.backoff_cap = Duration::from_millis(2);
+        run_stream(&opts, &mut step)
+            .await
+            .map(|()| step.last_history_id)
+    }
 
-        server.await.unwrap();
+    async fn mount_pull(server: &MockServer) {
+        Mock::given(method("POST"))
+            .and(path("/v1/projects/test/subscriptions/demo:pull"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "receivedMessages": [{ "ackId": "ack-1", "message": { "data": notification(2) } }]
+            })))
+            .mount(server)
+            .await;
+    }
 
-        let requests = requests.lock().await;
-        assert_eq!(requests.len(), 4);
-        assert_eq!(requests[0].0, "/v1/projects/test/subscriptions/demo:pull");
-        assert_eq!(requests[0].1, "authorization: Bearer pubsub-token");
-        assert_eq!(
-            requests[1].0,
-            "/gmail/v1/users/me/history?startHistoryId=1&historyTypes=messageAdded"
-        );
-        assert_eq!(requests[1].1, "authorization: Bearer gmail-token");
-        assert_eq!(
-            requests[2].0,
-            "/gmail/v1/users/me/messages/msg%2D1?format=full"
-        );
-        assert_eq!(requests[2].1, "authorization: Bearer gmail-token");
-        assert_eq!(
-            requests[3].0,
-            "/v1/projects/test/subscriptions/demo:acknowledge"
-        );
-        assert_eq!(requests[3].1, "authorization: Bearer pubsub-token");
-        assert_eq!(last_history_id, 2);
+    #[tokio::test]
+    async fn watch_pulls_fetches_emits_and_acks_with_fresh_tokens() {
+        let server = MockServer::start().await;
+        mount_pull(&server).await;
+        Mock::given(method("GET"))
+            .and(path("/gmail/v1/users/me/history"))
+            .and(query_param("startHistoryId", "1"))
+            .and(header("authorization", "Bearer gmail-1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "history": [{ "messagesAdded": [{ "message": { "id": "msg-1" } }] }]
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/gmail/v1/users/me/messages/msg%2D1"))
+            .and(query_param("format", "full"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "id": "msg-1" })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/v1/projects/test/subscriptions/demo:acknowledge"))
+            .and(header("authorization", "Bearer pubsub-1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let last = run_once(&server, &SanitizeConfig::default()).await.unwrap();
+        assert_eq!(last, 2);
+    }
+
+    #[tokio::test]
+    async fn watch_retries_transient_pull_errors() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/projects/test/subscriptions/demo:pull"))
+            .respond_with(ResponseTemplate::new(503))
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/v1/projects/test/subscriptions/demo:pull"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+            .mount(&server)
+            .await;
+        run_once(&server, &SanitizeConfig::default()).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn watch_does_not_ack_when_message_fetch_fails() {
+        let server = MockServer::start().await;
+        mount_pull(&server).await;
+        Mock::given(method("GET"))
+            .and(path("/gmail/v1/users/me/history"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "history": [{ "messagesAdded": [{ "message": { "id": "m" } }] }]
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/gmail/v1/users/me/messages/m"))
+            .respond_with(ResponseTemplate::new(403))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/v1/projects/test/subscriptions/demo:acknowledge"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(0)
+            .mount(&server)
+            .await;
+        let err = run_once(&server, &SanitizeConfig::default())
+            .await
+            .unwrap_err();
+        assert!(matches!(err, GwsError::Api { code: 403, .. }), "{err:?}");
+    }
+
+    #[tokio::test]
+    async fn watch_history_gone_is_fatal() {
+        let server = MockServer::start().await;
+        mount_pull(&server).await;
+        Mock::given(method("GET"))
+            .and(path("/gmail/v1/users/me/history"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+        let err = run_once(&server, &SanitizeConfig::default())
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("restart +watch"));
+    }
+
+    #[tokio::test]
+    async fn watch_paginates_history() {
+        let server = MockServer::start().await;
+        mount_pull(&server).await;
+        Mock::given(method("GET"))
+            .and(path("/gmail/v1/users/me/history"))
+            .and(query_param("pageToken", "p2"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "history": [{ "messagesAdded": [{ "message": { "id": "m2" } }] }]
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/gmail/v1/users/me/history"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "history": [{ "messagesAdded": [{ "message": { "id": "m1" } }] }],
+                "nextPageToken": "p2"
+            })))
+            .mount(&server)
+            .await;
+        for id in ["m1", "m2"] {
+            Mock::given(method("GET"))
+                .and(path(format!("/gmail/v1/users/me/messages/{id}")))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "id": id })))
+                .expect(1)
+                .mount(&server)
+                .await;
+        }
+        Mock::given(method("POST"))
+            .and(path("/v1/projects/test/subscriptions/demo:acknowledge"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&server)
+            .await;
+        run_once(&server, &SanitizeConfig::default()).await.unwrap();
+    }
+
+    /// SEC-14: when block-mode sanitization cannot run, nothing is emitted or acked.
+    #[tokio::test]
+    async fn watch_block_mode_sanitization_failure_fails_closed() {
+        let server = MockServer::start().await;
+        mount_pull(&server).await;
+        Mock::given(method("GET"))
+            .and(path("/gmail/v1/users/me/history"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "history": [{ "messagesAdded": [{ "message": { "id": "m" } }] }]
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/gmail/v1/users/me/messages/m"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "id": "m" })))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/v1/projects/test/subscriptions/demo:acknowledge"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(0)
+            .mount(&server)
+            .await;
+        // An invalid template makes sanitization fail without network access.
+        let sanitize = SanitizeConfig {
+            template: Some("projects/p/locations/evil.com#/templates/t".into()),
+            mode: crate::helpers::modelarmor::SanitizeMode::Block,
+        };
+        let err = run_once(&server, &sanitize).await.unwrap_err();
+        assert!(err.to_string().contains("giving up"), "{err}");
     }
 }

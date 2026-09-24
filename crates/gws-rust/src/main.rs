@@ -52,7 +52,7 @@ use std::process::ExitCode;
 use clap::{FromArgMatches, Parser};
 
 use cli_args::{CacheCommand, Cli, DevCommand, GlobalArgs, PreScan, TopCommand};
-use config::{JsonStylePref, SanitizeModePref, Settings};
+use config::{JsonStylePref, Settings};
 use error::{CliError, ErrorContext, GwsError};
 use formatter::{JsonStyle, OutputFormat, OutputSettings};
 
@@ -416,16 +416,17 @@ async fn run_service(
     });
 
     let output_format = OutputFormat::from_matches(&matches);
+    let sanitize_template = global
+        .sanitize
+        .clone()
+        .or_else(|| settings.sanitize_template.clone());
+    // SEC-05: a malformed template fails before any request is made.
+    if let Some(t) = &sanitize_template {
+        helpers::modelarmor::ModelArmorTemplate::parse(t)?;
+    }
     let sanitize_config = helpers::modelarmor::SanitizeConfig {
-        template: global
-            .sanitize
-            .clone()
-            .or_else(|| settings.sanitize_template.clone()),
-        // The mode string is already validated by `config::resolve`.
-        mode: helpers::modelarmor::SanitizeMode::from_str(match settings.sanitize_mode {
-            SanitizeModePref::Warn => "warn",
-            SanitizeModePref::Block => "block",
-        }),
+        template: sanitize_template,
+        mode: settings.sanitize_mode.clone(),
     };
 
     // Check if a helper wants to handle this command

@@ -12,58 +12,61 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use super::*;
+//! `gmail +forward`: forward a message (with its attachments) to new recipients.
+
+use super::cli::{parse_optional_mailboxes, parse_optional_trimmed, required_str};
+use super::dispatch::{Delivery, deliver};
+use super::prelude::*;
+use super::sender::resolve_sender;
 
 /// Handle the `+forward` subcommand.
-pub(super) async fn handle_forward(
-    doc: &crate::discovery::RestDescription,
-    matches: &ArgMatches,
-) -> Result<(), GwsError> {
+pub(super) async fn handle_forward(matches: &ArgMatches) -> Result<(), GwsError> {
     let mut config = parse_forward_args(matches)?;
+    let delivery = Delivery::from_matches(matches)?;
+    delivery.confirm(
+        matches,
+        &format!(
+            "forward message {} to {}",
+            config.message_id,
+            super::send::describe(&config.to)
+        ),
+    )?;
 
-    let dry_run = matches.get_flag("dry-run");
-
-    let (original, token, client) = if dry_run {
+    let (original, api) = if delivery.dry_run {
         (
             OriginalMessage::dry_run_placeholder(&config.message_id),
             None,
-            None,
         )
     } else {
-        let t = auth::get_token(&[GMAIL_SCOPE])
-            .await
-            .map_err(|e| GwsError::Auth(format!("Gmail auth failed: {e}")))?;
-        let c = crate::client::build_client()?;
-        let orig = fetch_message_metadata(&c, &t, &config.message_id).await?;
-        config.from = resolve_sender(&c, &t, config.from.as_deref()).await?;
-        (orig, Some(t), Some(c))
+        let api = super::api::authenticated(&[GMAIL_SCOPE]).await?;
+        let orig = api.get_original_message(&config.message_id).await?;
+        config.from = resolve_sender(&api, config.from.as_deref()).await?;
+        (orig, Some(api))
     };
 
     // Select which original parts to include:
     // - --no-original-attachments: skip regular file attachments, but still
-    //   include inline images in HTML mode (they're part of the body, not
-    //   "attachments" in the UI sense)
+    //   include inline images in HTML mode (they're part of the body)
     // - Plain-text mode: drop inline images entirely (matching Gmail web)
     // - HTML mode: include inline images (rendered via cid: in multipart/related)
     let mut all_attachments = config.attachments;
-    if let (Some(client), Some(token)) = (&client, &token) {
-        let selected: Vec<_> = original
-            .parts
-            .iter()
-            .filter(|p| include_original_part(p, config.html, config.no_original_attachments))
-            .cloned()
-            .collect();
-
-        fetch_and_merge_original_parts(
-            client,
-            token,
-            &config.message_id,
-            &selected,
-            &mut all_attachments,
-        )
-        .await?;
-    } else {
-        eprintln!("Note: original attachments not included in dry-run preview");
+    match &api {
+        Some(api) => {
+            let selected: Vec<_> = original
+                .parts
+                .iter()
+                .filter(|p| include_original_part(p, config.html, config.no_original_attachments))
+                .cloned()
+                .collect();
+            fetch_and_merge_original_parts(
+                api,
+                &config.message_id,
+                &selected,
+                &mut all_attachments,
+            )
+            .await?;
+        }
+        None => eprintln!("Note: original attachments are not included in the dry-run preview"),
     }
 
     let subject = build_forward_subject(&original.subject);
@@ -83,15 +86,7 @@ pub(super) async fn handle_forward(
     };
 
     let raw = create_forward_raw_message(&envelope, &original, &all_attachments)?;
-
-    super::dispatch_raw_email(
-        doc,
-        matches,
-        &raw,
-        original.thread_id.as_deref(),
-        token.as_deref(),
-    )
-    .await
+    deliver(api.as_ref(), delivery, &raw, original.thread_id.as_deref()).await
 }
 
 /// Whether an original MIME part should be included when forwarding.
@@ -145,7 +140,7 @@ fn build_forward_subject(original_subject: &str) -> String {
 }
 
 fn create_forward_raw_message(
-    envelope: &ForwardEnvelope,
+    envelope: &ForwardEnvelope<'_>,
     original: &OriginalMessage,
     attachments: &[Attachment],
 ) -> Result<String, GwsError> {
@@ -242,14 +237,14 @@ fn format_forwarded_message_html(original: &OriginalMessage) -> String {
 // --- Argument parsing ---
 
 fn parse_forward_args(matches: &ArgMatches) -> Result<ForwardConfig, GwsError> {
-    let to = Mailbox::parse_list(matches.get_one::<String>("to").unwrap());
+    let to = Mailbox::parse_list(&required_str(matches, "to")?);
     if to.is_empty() {
         return Err(GwsError::Validation(
             "--to must specify at least one recipient".to_string(),
         ));
     }
     Ok(ForwardConfig {
-        message_id: matches.get_one::<String>("message-id").unwrap().to_string(),
+        message_id: required_str(matches, "message-id")?,
         to,
         from: parse_optional_mailboxes(matches, "from"),
         cc: parse_optional_mailboxes(matches, "cc"),
@@ -263,8 +258,10 @@ fn parse_forward_args(matches: &ArgMatches) -> Result<ForwardConfig, GwsError> {
 
 #[cfg(test)]
 mod tests {
-    use super::super::tests::{extract_header, strip_qp_soft_breaks};
     use super::*;
+    use crate::helpers::gmail::test_support::{
+        extract_header, helper_matches, strip_qp_soft_breaks,
+    };
 
     // --- format_forwarded_message (plain text) ---
 
@@ -503,32 +500,9 @@ mod tests {
     }
 
     fn make_forward_matches(args: &[&str]) -> ArgMatches {
-        let cmd = Command::new("test")
-            .arg(Arg::new("message-id").long("message-id"))
-            .arg(Arg::new("to").long("to"))
-            .arg(Arg::new("from").long("from"))
-            .arg(Arg::new("cc").long("cc"))
-            .arg(Arg::new("bcc").long("bcc"))
-            .arg(Arg::new("body").long("body"))
-            .arg(Arg::new("html").long("html").action(ArgAction::SetTrue))
-            .arg(
-                Arg::new("attach")
-                    .short('a')
-                    .long("attach")
-                    .action(ArgAction::Append),
-            )
-            .arg(
-                Arg::new("dry-run")
-                    .long("dry-run")
-                    .action(ArgAction::SetTrue),
-            )
-            .arg(
-                Arg::new("no-original-attachments")
-                    .long("no-original-attachments")
-                    .action(ArgAction::SetTrue),
-            )
-            .arg(Arg::new("draft").long("draft").action(ArgAction::SetTrue));
-        cmd.try_get_matches_from(args).unwrap()
+        let mut full = vec!["+forward"];
+        full.extend_from_slice(&args[1..]);
+        helper_matches(&full)
     }
 
     #[test]
@@ -977,7 +951,7 @@ mod tests {
             filename: "test".to_string(),
             content_type: "image/png".to_string(),
             size: 100,
-            attachment_id: "ATT1".to_string(),
+            data: PartData::AttachmentId("ATT1".to_string()),
             content_id: if inline {
                 Some("cid@example.com".to_string())
             } else {

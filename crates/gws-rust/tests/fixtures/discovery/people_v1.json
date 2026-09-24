@@ -1,0 +1,570 @@
+{
+ "_note": "Stripped Discovery document used only by the registry validation test. Regenerate from https://www.googleapis.com/discovery/v1/apis/people/v1/rest",
+ "name": "people",
+ "parameters": {
+  "$.xgafv": {
+   "location": "query",
+   "type": "string"
+  },
+  "access_token": {
+   "location": "query",
+   "type": "string"
+  },
+  "alt": {
+   "location": "query",
+   "type": "string"
+  },
+  "callback": {
+   "location": "query",
+   "type": "string"
+  },
+  "fields": {
+   "location": "query",
+   "type": "string"
+  },
+  "key": {
+   "location": "query",
+   "type": "string"
+  },
+  "oauth_token": {
+   "location": "query",
+   "type": "string"
+  },
+  "prettyPrint": {
+   "location": "query",
+   "type": "boolean"
+  },
+  "quotaUser": {
+   "location": "query",
+   "type": "string"
+  },
+  "uploadType": {
+   "location": "query",
+   "type": "string"
+  },
+  "upload_protocol": {
+   "location": "query",
+   "type": "string"
+  }
+ },
+ "resources": {
+  "contactGroups": {
+   "methods": {
+    "batchGet": {
+     "httpMethod": "GET",
+     "id": "people.contactGroups.batchGet",
+     "parameters": {
+      "groupFields": {
+       "location": "query",
+       "type": "string"
+      },
+      "maxMembers": {
+       "location": "query",
+       "type": "integer"
+      },
+      "resourceNames": {
+       "location": "query",
+       "repeated": true,
+       "type": "string"
+      }
+     },
+     "path": "v1/contactGroups:batchGet"
+    },
+    "create": {
+     "httpMethod": "POST",
+     "id": "people.contactGroups.create",
+     "path": "v1/contactGroups",
+     "request": {
+      "$ref": "CreateContactGroupRequest"
+     }
+    },
+    "delete": {
+     "httpMethod": "DELETE",
+     "id": "people.contactGroups.delete",
+     "parameters": {
+      "deleteContacts": {
+       "location": "query",
+       "type": "boolean"
+      },
+      "resourceName": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      }
+     },
+     "path": "v1/{+resourceName}"
+    },
+    "get": {
+     "httpMethod": "GET",
+     "id": "people.contactGroups.get",
+     "parameters": {
+      "groupFields": {
+       "location": "query",
+       "type": "string"
+      },
+      "maxMembers": {
+       "location": "query",
+       "type": "integer"
+      },
+      "resourceName": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      }
+     },
+     "path": "v1/{+resourceName}"
+    },
+    "list": {
+     "httpMethod": "GET",
+     "id": "people.contactGroups.list",
+     "parameters": {
+      "groupFields": {
+       "location": "query",
+       "type": "string"
+      },
+      "pageSize": {
+       "location": "query",
+       "type": "integer"
+      },
+      "pageToken": {
+       "location": "query",
+       "type": "string"
+      },
+      "syncToken": {
+       "location": "query",
+       "type": "string"
+      }
+     },
+     "path": "v1/contactGroups"
+    },
+    "update": {
+     "httpMethod": "PUT",
+     "id": "people.contactGroups.update",
+     "parameters": {
+      "resourceName": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      }
+     },
+     "path": "v1/{+resourceName}",
+     "request": {
+      "$ref": "UpdateContactGroupRequest"
+     }
+    }
+   },
+   "resources": {
+    "members": {
+     "methods": {
+      "modify": {
+       "httpMethod": "POST",
+       "id": "people.contactGroups.members.modify",
+       "parameters": {
+        "resourceName": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        }
+       },
+       "path": "v1/{+resourceName}/members:modify",
+       "request": {
+        "$ref": "ModifyContactGroupMembersRequest"
+       }
+      }
+     }
+    }
+   }
+  },
+  "otherContacts": {
+   "methods": {
+    "copyOtherContactToMyContactsGroup": {
+     "httpMethod": "POST",
+     "id": "people.otherContacts.copyOtherContactToMyContactsGroup",
+     "parameters": {
+      "resourceName": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      }
+     },
+     "path": "v1/{+resourceName}:copyOtherContactToMyContactsGroup",
+     "request": {
+      "$ref": "CopyOtherContactToMyContactsGroupRequest"
+     }
+    },
+    "list": {
+     "httpMethod": "GET",
+     "id": "people.otherContacts.list",
+     "parameters": {
+      "pageSize": {
+       "location": "query",
+       "type": "integer"
+      },
+      "pageToken": {
+       "location": "query",
+       "type": "string"
+      },
+      "readMask": {
+       "location": "query",
+       "type": "string"
+      },
+      "requestSyncToken": {
+       "location": "query",
+       "type": "boolean"
+      },
+      "sources": {
+       "location": "query",
+       "repeated": true,
+       "type": "string"
+      },
+      "syncToken": {
+       "location": "query",
+       "type": "string"
+      }
+     },
+     "path": "v1/otherContacts"
+    },
+    "search": {
+     "httpMethod": "GET",
+     "id": "people.otherContacts.search",
+     "parameters": {
+      "pageSize": {
+       "location": "query",
+       "type": "integer"
+      },
+      "query": {
+       "location": "query",
+       "type": "string"
+      },
+      "readMask": {
+       "location": "query",
+       "type": "string"
+      }
+     },
+     "path": "v1/otherContacts:search"
+    }
+   }
+  },
+  "people": {
+   "methods": {
+    "batchCreateContacts": {
+     "httpMethod": "POST",
+     "id": "people.people.batchCreateContacts",
+     "path": "v1/people:batchCreateContacts",
+     "request": {
+      "$ref": "BatchCreateContactsRequest"
+     }
+    },
+    "batchDeleteContacts": {
+     "httpMethod": "POST",
+     "id": "people.people.batchDeleteContacts",
+     "path": "v1/people:batchDeleteContacts",
+     "request": {
+      "$ref": "BatchDeleteContactsRequest"
+     }
+    },
+    "batchUpdateContacts": {
+     "httpMethod": "POST",
+     "id": "people.people.batchUpdateContacts",
+     "path": "v1/people:batchUpdateContacts",
+     "request": {
+      "$ref": "BatchUpdateContactsRequest"
+     }
+    },
+    "createContact": {
+     "httpMethod": "POST",
+     "id": "people.people.createContact",
+     "parameters": {
+      "personFields": {
+       "location": "query",
+       "type": "string"
+      },
+      "sources": {
+       "location": "query",
+       "repeated": true,
+       "type": "string"
+      }
+     },
+     "path": "v1/people:createContact",
+     "request": {
+      "$ref": "Person"
+     }
+    },
+    "deleteContact": {
+     "httpMethod": "DELETE",
+     "id": "people.people.deleteContact",
+     "parameters": {
+      "resourceName": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      }
+     },
+     "path": "v1/{+resourceName}:deleteContact"
+    },
+    "deleteContactPhoto": {
+     "httpMethod": "DELETE",
+     "id": "people.people.deleteContactPhoto",
+     "parameters": {
+      "personFields": {
+       "location": "query",
+       "type": "string"
+      },
+      "resourceName": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      },
+      "sources": {
+       "location": "query",
+       "repeated": true,
+       "type": "string"
+      }
+     },
+     "path": "v1/{+resourceName}:deleteContactPhoto"
+    },
+    "get": {
+     "httpMethod": "GET",
+     "id": "people.people.get",
+     "parameters": {
+      "personFields": {
+       "location": "query",
+       "type": "string"
+      },
+      "requestMask.includeField": {
+       "location": "query",
+       "type": "string"
+      },
+      "resourceName": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      },
+      "sources": {
+       "location": "query",
+       "repeated": true,
+       "type": "string"
+      }
+     },
+     "path": "v1/{+resourceName}"
+    },
+    "getBatchGet": {
+     "httpMethod": "GET",
+     "id": "people.people.getBatchGet",
+     "parameters": {
+      "personFields": {
+       "location": "query",
+       "type": "string"
+      },
+      "requestMask.includeField": {
+       "location": "query",
+       "type": "string"
+      },
+      "resourceNames": {
+       "location": "query",
+       "repeated": true,
+       "type": "string"
+      },
+      "sources": {
+       "location": "query",
+       "repeated": true,
+       "type": "string"
+      }
+     },
+     "path": "v1/people:batchGet"
+    },
+    "listDirectoryPeople": {
+     "httpMethod": "GET",
+     "id": "people.people.listDirectoryPeople",
+     "parameters": {
+      "mergeSources": {
+       "location": "query",
+       "repeated": true,
+       "type": "string"
+      },
+      "pageSize": {
+       "location": "query",
+       "type": "integer"
+      },
+      "pageToken": {
+       "location": "query",
+       "type": "string"
+      },
+      "readMask": {
+       "location": "query",
+       "type": "string"
+      },
+      "requestSyncToken": {
+       "location": "query",
+       "type": "boolean"
+      },
+      "sources": {
+       "location": "query",
+       "repeated": true,
+       "type": "string"
+      },
+      "syncToken": {
+       "location": "query",
+       "type": "string"
+      }
+     },
+     "path": "v1/people:listDirectoryPeople"
+    },
+    "searchContacts": {
+     "httpMethod": "GET",
+     "id": "people.people.searchContacts",
+     "parameters": {
+      "pageSize": {
+       "location": "query",
+       "type": "integer"
+      },
+      "query": {
+       "location": "query",
+       "type": "string"
+      },
+      "readMask": {
+       "location": "query",
+       "type": "string"
+      },
+      "sources": {
+       "location": "query",
+       "repeated": true,
+       "type": "string"
+      }
+     },
+     "path": "v1/people:searchContacts"
+    },
+    "searchDirectoryPeople": {
+     "httpMethod": "GET",
+     "id": "people.people.searchDirectoryPeople",
+     "parameters": {
+      "mergeSources": {
+       "location": "query",
+       "repeated": true,
+       "type": "string"
+      },
+      "pageSize": {
+       "location": "query",
+       "type": "integer"
+      },
+      "pageToken": {
+       "location": "query",
+       "type": "string"
+      },
+      "query": {
+       "location": "query",
+       "type": "string"
+      },
+      "readMask": {
+       "location": "query",
+       "type": "string"
+      },
+      "sources": {
+       "location": "query",
+       "repeated": true,
+       "type": "string"
+      }
+     },
+     "path": "v1/people:searchDirectoryPeople"
+    },
+    "updateContact": {
+     "httpMethod": "PATCH",
+     "id": "people.people.updateContact",
+     "parameters": {
+      "personFields": {
+       "location": "query",
+       "type": "string"
+      },
+      "resourceName": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      },
+      "sources": {
+       "location": "query",
+       "repeated": true,
+       "type": "string"
+      },
+      "updatePersonFields": {
+       "location": "query",
+       "type": "string"
+      }
+     },
+     "path": "v1/{+resourceName}:updateContact",
+     "request": {
+      "$ref": "Person"
+     }
+    },
+    "updateContactPhoto": {
+     "httpMethod": "PATCH",
+     "id": "people.people.updateContactPhoto",
+     "parameters": {
+      "resourceName": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      }
+     },
+     "path": "v1/{+resourceName}:updateContactPhoto",
+     "request": {
+      "$ref": "UpdateContactPhotoRequest"
+     }
+    }
+   },
+   "resources": {
+    "connections": {
+     "methods": {
+      "list": {
+       "httpMethod": "GET",
+       "id": "people.people.connections.list",
+       "parameters": {
+        "pageSize": {
+         "location": "query",
+         "type": "integer"
+        },
+        "pageToken": {
+         "location": "query",
+         "type": "string"
+        },
+        "personFields": {
+         "location": "query",
+         "type": "string"
+        },
+        "requestMask.includeField": {
+         "location": "query",
+         "type": "string"
+        },
+        "requestSyncToken": {
+         "location": "query",
+         "type": "boolean"
+        },
+        "resourceName": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        },
+        "sortOrder": {
+         "location": "query",
+         "type": "string"
+        },
+        "sources": {
+         "location": "query",
+         "repeated": true,
+         "type": "string"
+        },
+        "syncToken": {
+         "location": "query",
+         "type": "string"
+        }
+       },
+       "path": "v1/{+resourceName}/connections"
+      }
+     }
+    }
+   }
+  }
+ },
+ "rootUrl": "https://people.googleapis.com/",
+ "servicePath": "",
+ "version": "v1"
+}

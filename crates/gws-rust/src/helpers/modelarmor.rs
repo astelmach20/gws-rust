@@ -12,16 +12,35 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//! Model Armor helpers and the response-sanitization pipeline (`--sanitize`).
+//!
+//! Security properties:
+//! * **The template never chooses the host (SEC-05).** Template names are parsed
+//!   with a strict grammar by [`ModelArmorTemplate::parse`]; the request host is
+//!   built only from the validated location (`modelarmor.<location>.rep.googleapis.com`).
+//! * **Block mode fails closed (SEC-14).** If sanitization cannot be performed,
+//!   [`sanitize_value`] returns an error in `block` mode and nothing is emitted.
+//!   In `warn` mode the content is emitted with an explicit
+//!   `_sanitization.error` annotation and a warning on stderr.
+//! * Unknown sanitize modes are rejected rather than silently becoming `warn`.
+
 use super::Helper;
 use crate::auth;
 use crate::discovery::RestDescription;
 use crate::error::GwsError;
-use anyhow::Context;
+use crate::helpers::rest::{RestClient, Retry, other_error};
+use crate::output::sanitize_for_terminal;
 use clap::{Arg, ArgMatches, Command};
+use reqwest::Method;
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+use serde_json::{Value, json};
 use std::future::Future;
 use std::pin::Pin;
+
+pub const CLOUD_PLATFORM_SCOPE: &str = "https://www.googleapis.com/auth/cloud-platform";
+
+/// The built-in jailbreak / prompt-injection preset.
+const JAILBREAK_PRESET: &str = include_str!("../../templates/modelarmor/jailbreak.json");
 
 /// Result of a Model Armor sanitization check.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -31,72 +50,359 @@ pub struct SanitizationResult {
     pub filter_match_state: String,
     /// Detailed results from specific filters (PI, Jailbreak, etc.).
     #[serde(default)]
-    pub filter_results: serde_json::Value,
+    pub filter_results: Value,
     /// The final decision based on the policy (e.g., "BLOCK", "ALLOW").
     #[serde(default)]
     pub invocation_result: String,
 }
 
-/// Controls behavior when sanitization finds a match.
-#[derive(Debug, Clone, PartialEq)]
+impl SanitizationResult {
+    pub fn is_match(&self) -> bool {
+        self.filter_match_state == "MATCH_FOUND"
+    }
+}
+
+/// Controls behavior when sanitization finds a match or fails.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum SanitizeMode {
-    /// Log warning to stderr, annotate output with _sanitization field
+    /// Warn on stderr and annotate the output with a `_sanitization` field.
+    #[default]
     Warn,
-    /// Suppress response output, exit non-zero
+    /// Suppress the output and fail.
     Block,
 }
 
-/// Configuration for Model Armor sanitization, threaded through the CLI.
-#[derive(Debug, Clone)]
-pub struct SanitizeConfig {
-    pub template: Option<String>,
-    pub mode: SanitizeMode,
-}
+impl std::str::FromStr for SanitizeMode {
+    type Err = GwsError;
 
-impl Default for SanitizeConfig {
-    /// Provides default values for `SanitizeConfig`.
-    ///
-    /// By default, no template is set (sanitization disabled) and the mode is `Warn`.
-    fn default() -> Self {
-        Self {
-            template: None,
-            mode: SanitizeMode::Warn,
+    /// Parse `warn` or `block` (case-insensitive). Anything else is an error.
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "warn" => Ok(SanitizeMode::Warn),
+            "block" => Ok(SanitizeMode::Block),
+            other => Err(GwsError::Validation(format!(
+                "Invalid sanitize mode '{other}' (GWSR_SANITIZE_MODE must be 'warn' or 'block')"
+            ))),
         }
     }
 }
 
-impl SanitizeMode {
-    /// Parses a string into a `SanitizeMode`.
-    ///
-    /// * "block" (case-insensitive) -> `Block`
-    /// * Any other value -> `Warn` (safe default)
-    pub fn from_str(s: &str) -> Self {
-        match s.to_lowercase().as_str() {
-            "block" => SanitizeMode::Block,
-            _ => SanitizeMode::Warn,
+/// Configuration for Model Armor sanitization, threaded through the CLI.
+#[derive(Debug, Clone, Default)]
+pub struct SanitizeConfig {
+    /// Template resource name; `None` disables sanitization.
+    pub template: Option<String>,
+    pub mode: SanitizeMode,
+}
+
+/// A validated Model Armor template resource name:
+/// `projects/PROJECT/locations/LOCATION/templates/TEMPLATE`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelArmorTemplate {
+    project: String,
+    location: String,
+    template: String,
+}
+
+fn is_project_id(s: &str) -> bool {
+    // Project ID: 6-30 chars, lowercase letter first, then [a-z0-9-], not ending in '-'.
+    // Project number: all digits.
+    let bytes = s.as_bytes();
+    let is_id = (6..=30).contains(&s.len())
+        && bytes.first().is_some_and(u8::is_ascii_lowercase)
+        && bytes
+            .iter()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || *b == b'-')
+        && !s.ends_with('-');
+    let is_number = !s.is_empty() && s.len() <= 20 && bytes.iter().all(u8::is_ascii_digit);
+    is_id || is_number
+}
+
+fn is_location(s: &str) -> bool {
+    // A single DNS label: [a-z0-9-], 1-63 chars, no leading/trailing '-'.
+    !s.is_empty()
+        && s.len() <= 63
+        && s.bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+        && !s.starts_with('-')
+        && !s.ends_with('-')
+}
+
+fn is_template_id(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= 63
+        && s.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+}
+
+impl ModelArmorTemplate {
+    /// Parse a template name with a strict grammar. Anything that could
+    /// influence the request host or path (`@`, `\`, `:`, `%`, `#`, `.`,
+    /// whitespace, extra segments, empty segments) is rejected.
+    pub fn parse(name: &str) -> Result<Self, GwsError> {
+        let invalid = |why: &str| {
+            GwsError::Validation(format!(
+                "Invalid Model Armor template '{}': {why}. Expected \
+                 projects/PROJECT/locations/LOCATION/templates/TEMPLATE",
+                sanitize_for_terminal(name)
+            ))
+        };
+        let parts: Vec<&str> = name.split('/').collect();
+        let [p, project, l, location, t, template] = parts.as_slice() else {
+            return Err(invalid("wrong number of path segments"));
+        };
+        if *p != "projects" || *l != "locations" || *t != "templates" {
+            return Err(invalid("unexpected segment names"));
         }
+        if !is_project_id(project) {
+            return Err(invalid("invalid project ID"));
+        }
+        if !is_location(location) {
+            return Err(invalid("invalid location"));
+        }
+        if !is_template_id(template) {
+            return Err(invalid("invalid template ID"));
+        }
+        Ok(Self {
+            project: (*project).to_string(),
+            location: (*location).to_string(),
+            template: (*template).to_string(),
+        })
+    }
+
+    /// The resource name, rebuilt from validated parts.
+    pub fn name(&self) -> String {
+        format!(
+            "projects/{}/locations/{}/templates/{}",
+            self.project, self.location, self.template
+        )
+    }
+
+    /// Regional API base URL. The host is derived only from the validated location.
+    pub fn base_url(&self) -> String {
+        regional_base_url(&self.location)
+    }
+
+    /// URL for a template method (`sanitizeUserPrompt`, `sanitizeModelResponse`).
+    pub fn method_url(&self, method: SanitizeMethod) -> String {
+        format!("{}/{}:{}", self.base_url(), self.name(), method.as_str())
+    }
+}
+
+/// Regional base URL. Model Armor requires region-specific endpoints
+/// (`modelarmor.{region}.rep.googleapis.com`); callers must pass a validated location.
+fn regional_base_url(location: &str) -> String {
+    format!("https://modelarmor.{location}.rep.googleapis.com/v1")
+}
+
+/// Which Model Armor check to run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SanitizeMethod {
+    UserPrompt,
+    ModelResponse,
+}
+
+impl SanitizeMethod {
+    fn as_str(self) -> &'static str {
+        match self {
+            SanitizeMethod::UserPrompt => "sanitizeUserPrompt",
+            SanitizeMethod::ModelResponse => "sanitizeModelResponse",
+        }
+    }
+
+    fn data_field(self) -> &'static str {
+        match self {
+            SanitizeMethod::UserPrompt => "userPromptData",
+            SanitizeMethod::ModelResponse => "modelResponseData",
+        }
+    }
+}
+
+/// A Model Armor client. `base_override` exists for tests only; production
+/// always derives the host from the validated template.
+pub(crate) struct ModelArmorClient {
+    rest: RestClient,
+    base_override: Option<String>,
+}
+
+impl ModelArmorClient {
+    pub(crate) async fn authenticated() -> Result<Self, GwsError> {
+        let token = auth::get_token(&[CLOUD_PLATFORM_SCOPE])
+            .await
+            .map_err(|e| GwsError::Auth(format!("Failed to get token for Model Armor: {e}")))?;
+        Ok(Self {
+            rest: RestClient::new(crate::client::shared_client()?, token),
+            base_override: None,
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_test(base: &str) -> Self {
+        Self {
+            rest: RestClient::new(reqwest::Client::new(), "test-token"),
+            base_override: Some(base.to_string()),
+        }
+    }
+
+    fn url(&self, template: &ModelArmorTemplate, method: SanitizeMethod) -> String {
+        match &self.base_override {
+            Some(base) => format!("{base}/{}:{}", template.name(), method.as_str()),
+            None => template.method_url(method),
+        }
+    }
+
+    /// Run a sanitize call and parse the result.
+    pub(crate) async fn sanitize(
+        &self,
+        template: &ModelArmorTemplate,
+        method: SanitizeMethod,
+        text: &str,
+    ) -> Result<SanitizationResult, GwsError> {
+        let body = json!({ method.data_field(): { "text": text } });
+        let resp = self
+            .rest
+            .json(
+                Method::POST,
+                &self.url(template, method),
+                &[],
+                Some(&body),
+                Retry::Idempotent,
+                "Model Armor sanitization failed",
+            )
+            .await?;
+        parse_sanitize_response(&resp)
+    }
+}
+
+/// Parse a Model Armor sanitize response.
+pub fn parse_sanitize_response(resp: &Value) -> Result<SanitizationResult, GwsError> {
+    let result = resp
+        .get("sanitizationResult")
+        .ok_or_else(|| other_error("No sanitizationResult in Model Armor response"))?;
+    serde_json::from_value(result.clone()).map_err(|e| {
+        other_error(format!(
+            "Failed to parse Model Armor sanitization result: {e}"
+        ))
+    })
+}
+
+/// Sanitize text through a Model Armor template (prompt-injection check on
+/// content that will be shown to a model).
+pub async fn sanitize_text(template: &str, text: &str) -> Result<SanitizationResult, GwsError> {
+    let template = ModelArmorTemplate::parse(template)?;
+    ModelArmorClient::authenticated()
+        .await?
+        .sanitize(&template, SanitizeMethod::UserPrompt, text)
+        .await
+}
+
+/// The outcome of sanitizing one output value.
+#[derive(Debug)]
+pub enum Sanitized {
+    /// Emit this value (possibly annotated with `_sanitization`).
+    Pass(Value),
+    /// Block mode matched: the value must not be emitted.
+    Blocked(SanitizationResult),
+}
+
+/// Attach a `_sanitization` annotation, wrapping non-objects so the
+/// annotation is never lost.
+fn annotate(value: Value, annotation: Value) -> Value {
+    match value {
+        Value::Object(mut map) => {
+            map.insert("_sanitization".to_string(), annotation);
+            Value::Object(map)
+        }
+        other => json!({ "data": other, "_sanitization": annotation }),
+    }
+}
+
+/// Apply the configured sanitization policy to one output value.
+///
+/// * No template: the value passes unchanged.
+/// * Sanitization error: `block` → `Err` (fail closed); `warn` → the value
+///   passes with `_sanitization.error` and a warning on stderr.
+/// * Match found: `block` → [`Sanitized::Blocked`]; `warn` → annotated value.
+pub async fn sanitize_value(config: &SanitizeConfig, value: Value) -> Result<Sanitized, GwsError> {
+    let Some(template) = &config.template else {
+        return Ok(Sanitized::Pass(value));
+    };
+    let template = ModelArmorTemplate::parse(template)?;
+    let client = match ModelArmorClient::authenticated().await {
+        Ok(c) => c,
+        Err(e) => return sanitization_failed(config, value, e),
+    };
+    sanitize_value_with(&client, &template, config, value).await
+}
+
+pub(crate) async fn sanitize_value_with(
+    client: &ModelArmorClient,
+    template: &ModelArmorTemplate,
+    config: &SanitizeConfig,
+    value: Value,
+) -> Result<Sanitized, GwsError> {
+    let text = serde_json::to_string(&value)
+        .map_err(|e| other_error(format!("Failed to serialize content for Model Armor: {e}")))?;
+    match client
+        .sanitize(template, SanitizeMethod::UserPrompt, &text)
+        .await
+    {
+        Err(e) => sanitization_failed(config, value, e),
+        Ok(result) if result.is_match() => match config.mode {
+            SanitizeMode::Block => Ok(Sanitized::Blocked(result)),
+            SanitizeMode::Warn => {
+                eprintln!("warning: Model Armor found a match (filterMatchState: MATCH_FOUND)");
+                let annotation = serde_json::to_value(&result).map_err(|e| {
+                    other_error(format!("Failed to serialize sanitization result: {e}"))
+                })?;
+                Ok(Sanitized::Pass(annotate(value, annotation)))
+            }
+        },
+        Ok(_) => Ok(Sanitized::Pass(value)),
+    }
+}
+
+fn sanitization_failed(
+    config: &SanitizeConfig,
+    value: Value,
+    error: GwsError,
+) -> Result<Sanitized, GwsError> {
+    match config.mode {
+        SanitizeMode::Block => Err(other_error(format!(
+            "Model Armor sanitization failed; output suppressed (block mode): {error}"
+        ))),
+        SanitizeMode::Warn => {
+            let msg = error.to_string();
+            eprintln!(
+                "warning: Model Armor sanitization failed; output is NOT sanitized: {}",
+                sanitize_for_terminal(&msg)
+            );
+            Ok(Sanitized::Pass(annotate(value, json!({ "error": msg }))))
+        }
+    }
+}
+
+/// Convert a [`Sanitized`] into a value to print, turning a block into an error.
+pub fn require_pass(outcome: Sanitized) -> Result<Value, GwsError> {
+    match outcome {
+        Sanitized::Pass(v) => Ok(v),
+        Sanitized::Blocked(result) => Err(other_error(format!(
+            "Content blocked by Model Armor (filterMatchState: {})",
+            result.filter_match_state
+        ))),
     }
 }
 
 pub struct ModelArmorHelper;
 
-/// Build the regional base URL for Model Armor API.
-/// The discovery doc rootUrl (modelarmor.us.rep.googleapis.com) is incorrect —
-/// Model Armor requires region-specific endpoints: modelarmor.{region}.rep.googleapis.com
-fn regional_base_url(location: &str) -> String {
-    format!("https://modelarmor.{location}.rep.googleapis.com/v1")
-}
-
-/// Extract location from a full template resource name.
-/// e.g. "projects/my-project/locations/us-central1/templates/my-template" -> "us-central1"
-fn extract_location(resource_name: &str) -> Option<&str> {
-    let parts: Vec<&str> = resource_name.split('/').collect();
-    for i in 0..parts.len() {
-        if parts[i] == "locations" && i + 1 < parts.len() {
-            return Some(parts[i + 1]);
-        }
-    }
-    None
+fn template_arg() -> Arg {
+    Arg::new("template")
+        .long("template")
+        .help(
+            "Full template resource name (projects/PROJECT/locations/LOCATION/templates/TEMPLATE)",
+        )
+        .required(true)
+        .value_name("NAME")
 }
 
 impl Helper for ModelArmorHelper {
@@ -104,13 +410,7 @@ impl Helper for ModelArmorHelper {
         cmd = cmd.subcommand(
             Command::new("+sanitize-prompt")
                 .about("[Helper] Sanitize a user prompt through a Model Armor template")
-                .arg(
-                    Arg::new("template")
-                        .long("template")
-                        .help("Full template resource name (projects/PROJECT/locations/LOCATION/templates/TEMPLATE)")
-                        .required(true)
-                        .value_name("NAME"),
-                )
+                .arg(template_arg())
                 .arg(
                     Arg::new("text")
                         .long("text")
@@ -120,29 +420,26 @@ impl Helper for ModelArmorHelper {
                 .arg(
                     Arg::new("json")
                         .long("json")
-                        .help("Full JSON request body (overrides --text)")
-                        .value_name("JSON"),
+                        .help("Full JSON request body (instead of --text)")
+                        .value_name("JSON")
+                        .conflicts_with("text"),
                 )
-                .after_help("\
+                .after_help(
+                    "\
 EXAMPLES:
   gwsr modelarmor +sanitize-prompt --template projects/P/locations/L/templates/T --text 'user input'
   echo 'prompt' | gwsr modelarmor +sanitize-prompt --template ...
 
 TIPS:
   If neither --text nor --json is given, reads from stdin.
-  For outbound safety, use +sanitize-response instead."),
+  For outbound safety, use +sanitize-response instead.",
+                ),
         );
 
         cmd = cmd.subcommand(
             Command::new("+sanitize-response")
                 .about("[Helper] Sanitize a model response through a Model Armor template")
-                .arg(
-                    Arg::new("template")
-                        .long("template")
-                        .help("Full template resource name (projects/PROJECT/locations/LOCATION/templates/TEMPLATE)")
-                        .required(true)
-                        .value_name("NAME"),
-                )
+                .arg(template_arg())
                 .arg(
                     Arg::new("text")
                         .long("text")
@@ -152,8 +449,9 @@ TIPS:
                 .arg(
                     Arg::new("json")
                         .long("json")
-                        .help("Full JSON request body (overrides --text)")
-                        .value_name("JSON"),
+                        .help("Full JSON request body (instead of --text)")
+                        .value_name("JSON")
+                        .conflicts_with("text"),
                 )
                 .after_help("\
 EXAMPLES:
@@ -199,8 +497,9 @@ TIPS:
                 .arg(
                     Arg::new("json")
                         .long("json")
-                        .help("JSON body for the template configuration (overrides --preset)")
-                        .value_name("JSON"),
+                        .help("JSON body for the template configuration (instead of --preset)")
+                        .value_name("JSON")
+                        .conflicts_with("preset"),
                 )
                 .after_help("\
 EXAMPLES:
@@ -208,7 +507,7 @@ EXAMPLES:
   gwsr modelarmor +create-template --project P --location us-central1 --template-id my-tmpl --json '{...}'
 
 TIPS:
-  Defaults to the jailbreak preset if neither --preset nor --json is given.
+  Defaults to the built-in jailbreak preset if neither --preset nor --json is given.
   Use the resulting template name with +sanitize-prompt and +sanitize-response."),
         );
 
@@ -227,11 +526,11 @@ TIPS:
     ) -> Pin<Box<dyn Future<Output = Result<bool, GwsError>> + Send + 'a>> {
         Box::pin(async move {
             if let Some(sub) = matches.subcommand_matches("+sanitize-prompt") {
-                handle_sanitize(sub, "sanitizeUserPrompt", "userPromptData").await?;
+                handle_sanitize(sub, SanitizeMethod::UserPrompt).await?;
                 return Ok(true);
             }
             if let Some(sub) = matches.subcommand_matches("+sanitize-response") {
-                handle_sanitize(sub, "sanitizeModelResponse", "modelResponseData").await?;
+                handle_sanitize(sub, SanitizeMethod::ModelResponse).await?;
                 return Ok(true);
             }
             if let Some(sub) = matches.subcommand_matches("+create-template") {
@@ -243,93 +542,47 @@ TIPS:
     }
 }
 
-pub const CLOUD_PLATFORM_SCOPE: &str = "https://www.googleapis.com/auth/cloud-platform";
-
-/// Sanitize text through a Model Armor template and return the result.
-/// Template format: projects/PROJECT/locations/LOCATION/templates/TEMPLATE
-pub async fn sanitize_text(template: &str, text: &str) -> Result<SanitizationResult, GwsError> {
-    let (body, url) = build_sanitize_request_data(template, text, "sanitizeUserPrompt")?;
-
-    let token = auth::get_token(&[CLOUD_PLATFORM_SCOPE])
-        .await
-        .context("Failed to get auth token for Model Armor")?;
-
-    let client = crate::client::build_client()?;
-    let resp = client
-        .post(&url)
-        .header("Authorization", format!("Bearer {token}"))
-        .header("Content-Type", "application/json")
-        .body(body)
-        .send()
-        .await
-        .context("Model Armor request failed")?;
-
-    let status = resp.status();
-    let resp_text = resp
-        .text()
-        .await
-        .context("Failed to read Model Armor response")?;
-
-    if !status.is_success() {
-        return Err(GwsError::other(anyhow::anyhow!(
-            "Model Armor API returned status {status}: {resp_text}"
-        )));
-    }
-
-    parse_sanitize_response(&resp_text)
-}
-
-/// Make a POST request to Model Armor's regional API endpoint.
-async fn model_armor_post(url: &str, body: &str) -> Result<(), GwsError> {
-    let token = auth::get_token(&[CLOUD_PLATFORM_SCOPE])
-        .await
-        .context("Failed to get auth token")?;
-
-    let client = crate::client::build_client()?;
-    let resp = client
-        .post(url)
-        .header("Authorization", format!("Bearer {token}"))
-        .header("Content-Type", "application/json")
-        .body(body.to_string())
-        .send()
-        .await
-        .context("HTTP request failed")?;
-
-    let status = resp.status();
-    let text = resp.text().await.context("Failed to read response")?;
-
-    if !status.is_success() {
-        return Err(GwsError::other(anyhow::anyhow!(
-            "API returned status {status}: {text}"
-        )));
-    }
-
-    println!("{text}");
-
-    Ok(())
-}
-
 /// Handle +sanitize-prompt and +sanitize-response
-async fn handle_sanitize(
-    matches: &ArgMatches,
-    method_name: &str,
-    data_field: &str,
-) -> Result<(), GwsError> {
-    let template_raw = matches.get_one::<String>("template").unwrap();
-    let template = crate::validate::validate_resource_name(template_raw)?;
+async fn handle_sanitize(matches: &ArgMatches, method: SanitizeMethod) -> Result<(), GwsError> {
+    let template = ModelArmorTemplate::parse(&required(matches, "template")?)?;
+    let body = parse_sanitize_args(matches, method.data_field())?;
+    let url = template.method_url(method);
+    model_armor_post(matches, &url, &body).await
+}
 
-    let location = extract_location(template).ok_or_else(|| {
-        GwsError::Validation(
-            "Cannot extract location from template name. Expected format: projects/PROJECT/locations/LOCATION/templates/TEMPLATE".to_string(),
+fn required(matches: &ArgMatches, name: &str) -> Result<String, GwsError> {
+    matches
+        .get_one::<String>(name)
+        .cloned()
+        .ok_or_else(|| GwsError::Validation(format!("--{name} is required")))
+}
+
+/// POST a JSON body to a Model Armor endpoint and print the response.
+async fn model_armor_post(matches: &ArgMatches, url: &str, body: &Value) -> Result<(), GwsError> {
+    if crate::helpers::rest::dry_run(matches)? {
+        return crate::helpers::rest::print_dry_run(vec![crate::helpers::rest::dry_run_request(
+            "POST",
+            url,
+            &[],
+            Some(body),
+        )]);
+    }
+    let client = ModelArmorClient::authenticated().await?;
+    let resp = client
+        .rest
+        .json(
+            Method::POST,
+            url,
+            &[],
+            Some(body),
+            Retry::Never,
+            "Model Armor request failed",
         )
-    })?;
-
-    let body = parse_sanitize_args(matches, data_field)?;
-
-    let base = regional_base_url(location);
-    let url = format!("{base}/{template}:{method_name}");
-
-    model_armor_post(&url, &body).await
+        .await?;
+    let text = serde_json::to_string_pretty(&resp)
+        .map_err(|e| other_error(format!("Failed to serialize response: {e}")))?;
+    println!("{text}");
+    Ok(())
 }
 
 #[derive(Debug, PartialEq)]
@@ -337,25 +590,28 @@ pub struct CreateTemplateConfig {
     pub project: String,
     pub location: String,
     pub template_id: String,
-    pub body: String,
+    pub body: Value,
 }
 
 fn parse_create_template_args(matches: &ArgMatches) -> Result<CreateTemplateConfig, GwsError> {
-    let project_raw = matches.get_one::<String>("project").unwrap();
-    let project = crate::validate::validate_resource_name(project_raw)?.to_string();
-    let location_raw = matches.get_one::<String>("location").unwrap();
-    let location = crate::validate::validate_resource_name(location_raw)?.to_string();
-    let template_id_raw = matches.get_one::<String>("template-id").unwrap();
-    let template_id = crate::validate::validate_resource_name(template_id_raw)?.to_string();
+    let project = required(matches, "project")?;
+    let location = required(matches, "location")?;
+    let template_id = required(matches, "template-id")?;
+    // Validate all three through the same strict grammar used for template names.
+    ModelArmorTemplate::parse(&format!(
+        "projects/{project}/locations/{location}/templates/{template_id}"
+    ))?;
 
-    let body = if let Some(json_str) = matches.get_one::<String>("json") {
-        json_str.clone()
-    } else {
-        let preset = matches
-            .get_one::<String>("preset")
-            .map(|s| s.as_str())
-            .unwrap_or("jailbreak");
-        load_preset_template(preset)?
+    let body = match matches.get_one::<String>("json") {
+        Some(json_str) => serde_json::from_str(json_str)
+            .map_err(|e| GwsError::Validation(format!("--json is not valid JSON: {e}")))?,
+        None => {
+            let preset = matches
+                .get_one::<String>("preset")
+                .map(String::as_str)
+                .unwrap_or("jailbreak");
+            load_preset_template(preset)?
+        }
     };
 
     Ok(CreateTemplateConfig {
@@ -381,61 +637,54 @@ pub fn build_create_template_url(config: &CreateTemplateConfig) -> String {
 async fn handle_create_template(matches: &ArgMatches) -> Result<(), GwsError> {
     let config = parse_create_template_args(matches)?;
     let url = build_create_template_url(&config);
-
-    eprintln!(
-        "Creating template '{}' with preset: {}",
-        config.template_id,
-        matches
-            .get_one::<String>("preset")
-            .map(|s| s.as_str())
-            .unwrap_or("jailbreak")
-    );
-
-    model_armor_post(&url, &config.body).await
+    eprintln!("Creating Model Armor template '{}'", config.template_id);
+    model_armor_post(matches, &url, &config.body).await
 }
 
-/// Loads a preset template JSON file from the templates/modelarmor/ directory.
-/// Falls back to the embedded template if the file is not found.
-fn load_preset_template(name: &str) -> Result<String, GwsError> {
-    // Try to find templates relative to the executable
-    let exe_path = std::env::current_exe().ok();
-    let search_dirs: Vec<std::path::PathBuf> = [
-        // Relative to current directory
-        Some(std::path::PathBuf::from("templates/modelarmor")),
-        // Relative to executable
-        exe_path
-            .as_ref()
-            .and_then(|p| p.parent())
-            .map(|p| p.join("../templates/modelarmor")),
-        exe_path
-            .as_ref()
-            .and_then(|p| p.parent())
-            .map(|p| p.join("templates/modelarmor")),
-    ]
-    .into_iter()
-    .flatten()
-    .collect();
-
-    let filename = format!("{name}.json");
-
-    for dir in &search_dirs {
-        let path = dir.join(&filename);
-        if path.exists() {
-            let content = std::fs::read_to_string(&path)
-                .with_context(|| format!("Failed to read template '{}'", path.display()))?;
-            eprintln!("Using preset template from: {}", path.display());
-            return Ok(content);
+/// Load a built-in preset. Presets are compiled into the binary; nothing is
+/// read from the current directory or next to the executable.
+fn load_preset_template(name: &str) -> Result<Value, GwsError> {
+    let text = match name {
+        "jailbreak" => JAILBREAK_PRESET,
+        other => {
+            return Err(GwsError::Validation(format!(
+                "Unknown preset '{other}' (available: jailbreak)"
+            )));
         }
-    }
+    };
+    serde_json::from_str(text)
+        .map_err(|e| other_error(format!("Built-in preset '{name}' is not valid JSON: {e}")))
+}
 
-    // Fallback: embedded preset
-    eprintln!("Template file not found, using embedded '{}' preset", name);
-    Ok(include_str!("../../templates/modelarmor/jailbreak.json").to_string())
+fn parse_sanitize_args(matches: &ArgMatches, data_field: &str) -> Result<Value, GwsError> {
+    if let Some(json_str) = matches.get_one::<String>("json") {
+        return serde_json::from_str(json_str)
+            .map_err(|e| GwsError::Validation(format!("--json is not valid JSON: {e}")));
+    }
+    let text = match matches.get_one::<String>("text") {
+        Some(text) => text.clone(),
+        None => {
+            let stdin_text = std::io::read_to_string(std::io::stdin())
+                .map_err(|e| other_error(format!("Failed to read stdin: {e}")))?;
+            let trimmed = stdin_text.trim();
+            if trimmed.is_empty() {
+                return Err(GwsError::Validation(
+                    "Provide text via --text, --json, or pipe to stdin".to_string(),
+                ));
+            }
+            trimmed.to_string()
+        }
+    };
+    Ok(json!({ data_field: { "text": text } }))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    const TEMPLATE: &str = "projects/my-project/locations/us-central1/templates/t";
 
     #[test]
     fn test_sanitize_config_default() {
@@ -445,200 +694,193 @@ mod tests {
     }
 
     #[test]
-    fn test_sanitize_config_with_template() {
-        let config = SanitizeConfig {
-            template: Some("projects/p/locations/us-central1/templates/t".to_string()),
-            mode: SanitizeMode::Block,
-        };
+    fn test_sanitize_mode_parsing() {
+        assert_eq!("warn".parse::<SanitizeMode>().unwrap(), SanitizeMode::Warn);
+        assert_eq!("WARN".parse::<SanitizeMode>().unwrap(), SanitizeMode::Warn);
         assert_eq!(
-            config.template.as_deref(),
-            Some("projects/p/locations/us-central1/templates/t")
-        );
-        assert_eq!(config.mode, SanitizeMode::Block);
-    }
-
-    #[test]
-    fn test_sanitize_mode_from_str_warn() {
-        assert_eq!(SanitizeMode::from_str("warn"), SanitizeMode::Warn);
-        assert_eq!(SanitizeMode::from_str("WARN"), SanitizeMode::Warn);
-        assert_eq!(SanitizeMode::from_str("Warn"), SanitizeMode::Warn);
-    }
-
-    #[test]
-    fn test_sanitize_mode_from_str_block() {
-        assert_eq!(SanitizeMode::from_str("block"), SanitizeMode::Block);
-        assert_eq!(SanitizeMode::from_str("BLOCK"), SanitizeMode::Block);
-        assert_eq!(SanitizeMode::from_str("Block"), SanitizeMode::Block);
-    }
-
-    #[test]
-    fn test_sanitize_mode_from_str_unknown_defaults_to_warn() {
-        assert_eq!(SanitizeMode::from_str(""), SanitizeMode::Warn);
-        assert_eq!(SanitizeMode::from_str("invalid"), SanitizeMode::Warn);
-        assert_eq!(SanitizeMode::from_str("stop"), SanitizeMode::Warn);
-    }
-
-    #[test]
-    fn test_extract_location_valid() {
-        assert_eq!(
-            extract_location("projects/my-project/locations/us-central1/templates/my-template"),
-            Some("us-central1")
+            "Block".parse::<SanitizeMode>().unwrap(),
+            SanitizeMode::Block
         );
     }
 
+    /// SEC-14: unknown modes are an error, never a silent `warn`.
     #[test]
-    fn test_extract_location_different_region() {
-        assert_eq!(
-            extract_location("projects/p/locations/europe-west1/templates/t"),
-            Some("europe-west1")
-        );
-    }
-
-    #[test]
-    fn test_extract_location_no_locations() {
-        assert_eq!(extract_location("projects/my-project/templates/t"), None);
-    }
-
-    #[test]
-    fn test_extract_location_empty() {
-        assert_eq!(extract_location(""), None);
-    }
-
-    #[test]
-    fn test_extract_location_trailing_locations() {
-        // "locations" at the end with no value after
-        assert_eq!(extract_location("projects/p/locations"), None);
-    }
-
-    #[test]
-    fn test_regional_base_url() {
-        assert_eq!(
-            regional_base_url("us-central1"),
-            "https://modelarmor.us-central1.rep.googleapis.com/v1"
-        );
-    }
-
-    #[test]
-    fn test_regional_base_url_different_region() {
-        assert_eq!(
-            regional_base_url("europe-west1"),
-            "https://modelarmor.europe-west1.rep.googleapis.com/v1"
-        );
-    }
-
-    #[test]
-    fn test_cloud_platform_scope_constant() {
-        assert_eq!(
-            CLOUD_PLATFORM_SCOPE,
-            "https://www.googleapis.com/auth/cloud-platform"
-        );
-    }
-
-    #[test]
-    fn test_build_sanitize_request_data() {
-        let template = "projects/p/locations/us-central1/templates/t";
-        let (body, _) =
-            build_sanitize_request_data(template, "some text", "sanitizeUserPrompt").unwrap();
-        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
-        assert_eq!(json["userPromptData"]["text"], "some text");
-    }
-
-    #[test]
-    fn test_parse_sanitize_response_success() {
-        let json_resp = json!({
-            "sanitizationResult": {
-                "filterMatchState": "MATCH_FOUND",
-                "filterResults": {},
-                "invocationResult": "SUCCESS"
-            }
-        })
-        .to_string();
-
-        let res = parse_sanitize_response(&json_resp).unwrap();
-        assert_eq!(res.filter_match_state, "MATCH_FOUND");
-    }
-
-    #[test]
-    fn test_parse_sanitize_response_missing_field() {
-        let json_resp = json!({}).to_string();
-        assert!(parse_sanitize_response(&json_resp).is_err());
-    }
-}
-
-pub fn build_sanitize_request_data(
-    template: &str,
-    text: &str,
-    method: &str,
-) -> Result<(String, String), GwsError> {
-    let location = extract_location(template).ok_or_else(|| {
-        GwsError::Validation(
-            "Cannot extract location from --sanitize template. Expected format: projects/PROJECT/locations/LOCATION/templates/TEMPLATE".to_string(),
-        )
-    })?;
-
-    let base = regional_base_url(location);
-    let url = format!("{base}/{template}:{method}");
-
-    // Identify data field based on method
-    let data_field = if method == "sanitizeUserPrompt" {
-        "userPromptData"
-    } else {
-        "modelResponseData"
-    };
-
-    let body = json!({data_field: {"text": text}}).to_string();
-    Ok((body, url))
-}
-
-pub fn parse_sanitize_response(resp_text: &str) -> Result<SanitizationResult, GwsError> {
-    // Parse the response to extract sanitizationResult
-    let parsed: serde_json::Value =
-        serde_json::from_str(resp_text).context("Failed to parse Model Armor response")?;
-
-    let result = parsed.get("sanitizationResult").ok_or_else(|| {
-        GwsError::other(anyhow::anyhow!(
-            "No sanitizationResult in Model Armor response"
-        ))
-    })?;
-
-    let res =
-        serde_json::from_value(result.clone()).context("Failed to parse sanitization result")?;
-    Ok(res)
-}
-
-fn parse_sanitize_args(matches: &ArgMatches, data_field: &str) -> Result<String, GwsError> {
-    if let Some(json_str) = matches.get_one::<String>("json") {
-        Ok(json_str.clone())
-    } else if let Some(text) = matches.get_one::<String>("text") {
-        let mut body = serde_json::Map::new();
-        body.insert(data_field.to_string(), json!({"text": text}));
-        Ok(serde_json::Value::Object(body).to_string())
-    } else {
-        // Try to read from stdin, but since we can't easily test stdin in unit tests,
-        // we might check for TTY or empty stdin.
-        // For simplicity here, we assume if we reach here without text/json, we try stdin.
-
-        // Note: We removed the TTY check to avoid adding 'atty' or 'is-terminal' dependency.
-        // This means it will block on stdin if no input is provided, which is standard CLI behavior.
-
-        let stdin_text =
-            std::io::read_to_string(std::io::stdin()).context("Failed to read stdin")?;
-
-        if stdin_text.trim().is_empty() {
-            return Err(GwsError::Validation(
-                "Provide text via --text, --json, or pipe to stdin".to_string(),
-            ));
+    fn test_sanitize_mode_unknown_is_error() {
+        for bad in ["blok", "", "stop", "invalid"] {
+            assert!(
+                bad.parse::<SanitizeMode>().is_err(),
+                "{bad:?} must be rejected"
+            );
         }
-        let mut body = serde_json::Map::new();
-        body.insert(data_field.to_string(), json!({"text": stdin_text.trim()}));
-        Ok(serde_json::Value::Object(body).to_string())
     }
-}
 
-#[cfg(test)]
-mod parsing_tests {
-    use super::*;
-    use clap::{Arg, Command};
+    /// SEC-05: strict template grammar.
+    #[test]
+    fn test_template_parse_accepts_valid() {
+        for ok in [
+            TEMPLATE,
+            "projects/123456789/locations/europe-west4/templates/my_tmpl-1",
+            "projects/abcdef/locations/us/templates/T",
+        ] {
+            let t = ModelArmorTemplate::parse(ok).unwrap();
+            assert_eq!(t.name(), ok);
+        }
+    }
+
+    /// SEC-05: anything that could steer the host or path is rejected.
+    #[test]
+    fn test_template_parse_rejects_host_injection() {
+        for bad in [
+            "projects/p/locations/evil.com#/templates/t",
+            "projects/my-project/locations/evil.com/templates/t",
+            "projects/my-project/locations/us@evil/templates/t",
+            "projects/my-project/locations/us\\evil/templates/t",
+            "projects/my-project/locations/us:443/templates/t",
+            "projects/my-project/locations/us%2e/templates/t",
+            "projects/my-project/locations/us central/templates/t",
+            "projects/my-project/locations//templates/t",
+            "projects/my-project/locations/-us/templates/t",
+            "projects/my-project/locations/us-central1/templates/t/extra",
+            "projects/my-project/locations/us-central1/templates/",
+            "projects/my-project/locations/us-central1/templates/t?x=1",
+            "projects/../locations/us/templates/t",
+            "projects/My-Project/locations/us/templates/t",
+            "",
+        ] {
+            assert!(
+                ModelArmorTemplate::parse(bad).is_err(),
+                "{bad:?} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn test_template_url_host_is_always_google() {
+        let t = ModelArmorTemplate::parse(TEMPLATE).unwrap();
+        let url = reqwest::Url::parse(&t.method_url(SanitizeMethod::UserPrompt)).unwrap();
+        assert_eq!(url.scheme(), "https");
+        let host = url.host_str().unwrap();
+        assert_eq!(host, "modelarmor.us-central1.rep.googleapis.com");
+        assert!(host.ends_with(".rep.googleapis.com"));
+        assert!(url.path().ends_with(":sanitizeUserPrompt"));
+    }
+
+    #[test]
+    fn test_parse_sanitize_response() {
+        let ok = json!({"sanitizationResult": {"filterMatchState": "MATCH_FOUND"}});
+        assert!(parse_sanitize_response(&ok).unwrap().is_match());
+        assert!(parse_sanitize_response(&json!({})).is_err());
+    }
+
+    fn config(mode: SanitizeMode) -> SanitizeConfig {
+        SanitizeConfig {
+            template: Some(TEMPLATE.to_string()),
+            mode,
+        }
+    }
+
+    async fn armor_returning(template: ResponseTemplate) -> (MockServer, ModelArmorClient) {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path(format!("/{TEMPLATE}:sanitizeUserPrompt")))
+            .respond_with(template)
+            .mount(&server)
+            .await;
+        let client = ModelArmorClient::for_test(&server.uri());
+        (server, client)
+    }
+
+    /// SEC-14: block mode fails closed when Model Armor errors.
+    #[tokio::test]
+    async fn test_block_mode_fails_closed_on_error() {
+        let (_s, client) = armor_returning(ResponseTemplate::new(500)).await;
+        let t = ModelArmorTemplate::parse(TEMPLATE).unwrap();
+        let err = sanitize_value_with(&client, &t, &config(SanitizeMode::Block), json!({"a": 1}))
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("output suppressed"));
+    }
+
+    /// SEC-14: warn mode emits the content with an explicit error annotation.
+    #[tokio::test]
+    async fn test_warn_mode_annotates_error() {
+        let (_s, client) = armor_returning(ResponseTemplate::new(500)).await;
+        let t = ModelArmorTemplate::parse(TEMPLATE).unwrap();
+        let out = sanitize_value_with(&client, &t, &config(SanitizeMode::Warn), json!({"a": 1}))
+            .await
+            .unwrap();
+        match out {
+            Sanitized::Pass(v) => {
+                assert_eq!(v["a"], 1);
+                assert!(
+                    v["_sanitization"]["error"]
+                        .as_str()
+                        .unwrap()
+                        .contains("500")
+                );
+            }
+            Sanitized::Blocked(_) => panic!("warn mode must not block"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_block_mode_blocks_match() {
+        let body = json!({"sanitizationResult": {"filterMatchState": "MATCH_FOUND"}});
+        let (_s, client) = armor_returning(ResponseTemplate::new(200).set_body_json(body)).await;
+        let t = ModelArmorTemplate::parse(TEMPLATE).unwrap();
+        let out = sanitize_value_with(&client, &t, &config(SanitizeMode::Block), json!("x"))
+            .await
+            .unwrap();
+        assert!(matches!(out, Sanitized::Blocked(_)));
+        assert!(require_pass(out).is_err());
+    }
+
+    #[tokio::test]
+    async fn test_warn_mode_annotates_match_and_wraps_non_objects() {
+        let body = json!({"sanitizationResult": {"filterMatchState": "MATCH_FOUND"}});
+        let (_s, client) = armor_returning(ResponseTemplate::new(200).set_body_json(body)).await;
+        let t = ModelArmorTemplate::parse(TEMPLATE).unwrap();
+        let out = sanitize_value_with(&client, &t, &config(SanitizeMode::Warn), json!([1, 2]))
+            .await
+            .unwrap();
+        let v = require_pass(out).unwrap();
+        assert_eq!(v["data"], json!([1, 2]));
+        assert_eq!(v["_sanitization"]["filterMatchState"], "MATCH_FOUND");
+    }
+
+    #[tokio::test]
+    async fn test_no_match_passes_unchanged() {
+        let body = json!({"sanitizationResult": {"filterMatchState": "NO_MATCH_FOUND"}});
+        let (_s, client) = armor_returning(ResponseTemplate::new(200).set_body_json(body)).await;
+        let t = ModelArmorTemplate::parse(TEMPLATE).unwrap();
+        let v = require_pass(
+            sanitize_value_with(&client, &t, &config(SanitizeMode::Block), json!({"a": 1}))
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(v, json!({"a": 1}));
+    }
+
+    #[tokio::test]
+    async fn test_no_template_passes_without_request() {
+        let v = require_pass(
+            sanitize_value(&SanitizeConfig::default(), json!({"a": 1}))
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(v, json!({"a": 1}));
+    }
+
+    #[tokio::test]
+    async fn test_sanitize_value_rejects_bad_template_before_any_request() {
+        let cfg = SanitizeConfig {
+            template: Some("projects/p/locations/evil.com#/templates/t".to_string()),
+            mode: SanitizeMode::Warn,
+        };
+        assert!(sanitize_value(&cfg, json!({})).await.is_err());
+    }
 
     fn make_matches(args: &[&str]) -> ArgMatches {
         let cmd = Command::new("test")
@@ -650,42 +892,43 @@ mod parsing_tests {
     #[test]
     fn test_parse_sanitize_args_json() {
         let matches = make_matches(&["test", "--json", "{\"foo\":\"bar\"}"]);
-        let body = parse_sanitize_args(&matches, "field").unwrap();
-        assert_eq!(body, "{\"foo\":\"bar\"}");
+        assert_eq!(
+            parse_sanitize_args(&matches, "field").unwrap(),
+            json!({"foo": "bar"})
+        );
+        let matches = make_matches(&["test", "--json", "{bad"]);
+        assert!(parse_sanitize_args(&matches, "field").is_err());
     }
 
     #[test]
     fn test_parse_sanitize_args_text() {
         let matches = make_matches(&["test", "--text", "hello"]);
         let body = parse_sanitize_args(&matches, "field").unwrap();
-        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
-        assert_eq!(json["field"]["text"], "hello");
+        assert_eq!(body["field"]["text"], "hello");
     }
 
     #[test]
     fn test_build_create_template_url() {
         let config = CreateTemplateConfig {
-            project: "p".to_string(),
+            project: "my-project".to_string(),
             location: "us-central1".to_string(),
-            template_id: "t".to_string(),
-            body: "{}".to_string(),
+            template_id: "my-template".to_string(),
+            body: json!({}),
         };
         let url = build_create_template_url(&config);
-        // encode_path_segment encodes hyphens ('-' → '%2D')
-        assert_eq!(
-            url,
-            "https://modelarmor.us-central1.rep.googleapis.com/v1/projects/p/locations/us%2Dcentral1/templates?templateId=t"
-        );
+        assert!(url.starts_with("https://modelarmor.us-central1.rep.googleapis.com/v1/"));
+        assert!(url.contains("projects/my%2Dproject"));
+        assert!(url.contains("templateId=my%2Dtemplate"));
     }
 
     fn make_matches_create(args: &[&str]) -> ArgMatches {
-        let cmd = Command::new("test")
-            .arg(Arg::new("project").long("project").required(true))
-            .arg(Arg::new("location").long("location").required(true))
-            .arg(Arg::new("template-id").long("template-id").required(true))
-            .arg(Arg::new("json").long("json"))
-            .arg(Arg::new("preset").long("preset"));
-        cmd.try_get_matches_from(args).unwrap()
+        let mut argv = vec!["gwsr", "+create-template"];
+        argv.extend_from_slice(&args[1..]);
+        let m = ModelArmorHelper
+            .inject_commands(Command::new("gwsr"), &RestDescription::default())
+            .try_get_matches_from(argv)
+            .unwrap();
+        m.subcommand_matches("+create-template").unwrap().clone()
     }
 
     #[test]
@@ -693,19 +936,17 @@ mod parsing_tests {
         let matches = make_matches_create(&[
             "test",
             "--project",
-            "p",
+            "my-project",
             "--location",
-            "l",
+            "us-central1",
             "--template-id",
             "t",
             "--json",
             "{\"a\":1}",
         ]);
         let config = parse_create_template_args(&matches).unwrap();
-        assert_eq!(config.project, "p");
-        assert_eq!(config.location, "l");
-        assert_eq!(config.template_id, "t");
-        assert_eq!(config.body, "{\"a\":1}");
+        assert_eq!(config.project, "my-project");
+        assert_eq!(config.body, json!({"a": 1}));
     }
 
     #[test]
@@ -713,61 +954,7 @@ mod parsing_tests {
         let matches = make_matches_create(&[
             "test",
             "--project",
-            "p",
-            "--location",
-            "l",
-            "--template-id",
-            "t",
-            "--preset",
-            "jailbreak",
-        ]);
-        let config = parse_create_template_args(&matches).unwrap();
-        assert_eq!(config.project, "p");
-        assert_eq!(config.location, "l");
-        assert_eq!(config.template_id, "t");
-        assert!(config.body.contains("piAndJailbreakFilterSettings"));
-    }
-
-    #[test]
-    fn test_load_preset_template_fallback() {
-        // Will test loading the built-in preset template
-        let content = load_preset_template("jailbreak").unwrap();
-        assert!(content.contains("piAndJailbreakFilterSettings"));
-    }
-
-    #[test]
-    fn test_inject_commands() {
-        let helper = ModelArmorHelper;
-        let cmd = Command::new("test");
-        let doc = crate::discovery::RestDescription::default();
-
-        let cmd = helper.inject_commands(cmd, &doc);
-        let subcommands: Vec<_> = cmd.get_subcommands().map(|s| s.get_name()).collect();
-        assert!(subcommands.contains(&"+sanitize-prompt"));
-        assert!(subcommands.contains(&"+sanitize-response"));
-        assert!(subcommands.contains(&"+create-template"));
-    }
-
-    #[test]
-    fn test_build_create_template_url_encodes_segments() {
-        let config = CreateTemplateConfig {
-            project: "my-project".to_string(),
-            location: "us-central1".to_string(),
-            template_id: "my-template".to_string(),
-            body: "{}".to_string(),
-        };
-        let url = build_create_template_url(&config);
-        assert!(url.contains("projects/my%2Dproject"));
-        assert!(url.contains("locations/us%2Dcentral1"));
-        assert!(url.contains("templateId=my%2Dtemplate"));
-    }
-
-    #[test]
-    fn test_parse_create_template_args_rejects_traversal() {
-        let matches = make_matches_create(&[
-            "test",
-            "--project",
-            "../etc",
+            "my-project",
             "--location",
             "us-central1",
             "--template-id",
@@ -775,6 +962,67 @@ mod parsing_tests {
             "--preset",
             "jailbreak",
         ]);
-        assert!(parse_create_template_args(&matches).is_err());
+        let config = parse_create_template_args(&matches).unwrap();
+        assert!(
+            config
+                .body
+                .to_string()
+                .contains("piAndJailbreakFilterSettings")
+        );
+    }
+
+    #[test]
+    fn test_json_and_preset_conflict() {
+        let err = ModelArmorHelper
+            .inject_commands(Command::new("gwsr"), &RestDescription::default())
+            .try_get_matches_from([
+                "gwsr",
+                "+create-template",
+                "--project",
+                "my-project",
+                "--location",
+                "us",
+                "--template-id",
+                "t",
+                "--preset",
+                "jailbreak",
+                "--json",
+                "{}",
+            ])
+            .unwrap_err();
+        assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
+    }
+
+    #[test]
+    fn test_parse_create_template_args_rejects_invalid_names() {
+        for (project, location) in [("../etc", "us-central1"), ("my-project", "evil.com")] {
+            let matches = make_matches_create(&[
+                "test",
+                "--project",
+                project,
+                "--location",
+                location,
+                "--template-id",
+                "t",
+            ]);
+            assert!(parse_create_template_args(&matches).is_err());
+        }
+    }
+
+    #[test]
+    fn test_load_preset_template_is_embedded() {
+        let content = load_preset_template("jailbreak").unwrap();
+        assert!(content.to_string().contains("piAndJailbreakFilterSettings"));
+        assert!(load_preset_template("other").is_err());
+    }
+
+    #[test]
+    fn test_inject_commands() {
+        let cmd =
+            ModelArmorHelper.inject_commands(Command::new("test"), &RestDescription::default());
+        let subcommands: Vec<_> = cmd.get_subcommands().map(|s| s.get_name()).collect();
+        assert!(subcommands.contains(&"+sanitize-prompt"));
+        assert!(subcommands.contains(&"+sanitize-response"));
+        assert!(subcommands.contains(&"+create-template"));
     }
 }
