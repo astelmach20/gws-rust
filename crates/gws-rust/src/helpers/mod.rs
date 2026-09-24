@@ -31,6 +31,9 @@ pub mod keep;
 pub mod meet;
 pub mod modelarmor;
 pub mod people;
+#[cfg(test)]
+mod registry_tests;
+pub(crate) mod rest;
 pub mod script;
 pub mod sheets;
 pub mod slides;

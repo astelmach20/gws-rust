@@ -1,0 +1,1547 @@
+{
+ "_note": "Stripped Discovery document used only by the registry validation test. Regenerate from https://www.googleapis.com/discovery/v1/apis/gmail/v1/rest",
+ "name": "gmail",
+ "parameters": {
+  "$.xgafv": {
+   "location": "query",
+   "type": "string"
+  },
+  "access_token": {
+   "location": "query",
+   "type": "string"
+  },
+  "alt": {
+   "location": "query",
+   "type": "string"
+  },
+  "callback": {
+   "location": "query",
+   "type": "string"
+  },
+  "fields": {
+   "location": "query",
+   "type": "string"
+  },
+  "key": {
+   "location": "query",
+   "type": "string"
+  },
+  "oauth_token": {
+   "location": "query",
+   "type": "string"
+  },
+  "prettyPrint": {
+   "location": "query",
+   "type": "boolean"
+  },
+  "quotaUser": {
+   "location": "query",
+   "type": "string"
+  },
+  "uploadType": {
+   "location": "query",
+   "type": "string"
+  },
+  "upload_protocol": {
+   "location": "query",
+   "type": "string"
+  }
+ },
+ "resources": {
+  "users": {
+   "methods": {
+    "getProfile": {
+     "httpMethod": "GET",
+     "id": "gmail.users.getProfile",
+     "parameters": {
+      "userId": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      }
+     },
+     "path": "gmail/v1/users/{userId}/profile"
+    },
+    "stop": {
+     "httpMethod": "POST",
+     "id": "gmail.users.stop",
+     "parameters": {
+      "userId": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      }
+     },
+     "path": "gmail/v1/users/{userId}/stop"
+    },
+    "watch": {
+     "httpMethod": "POST",
+     "id": "gmail.users.watch",
+     "parameters": {
+      "userId": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      }
+     },
+     "path": "gmail/v1/users/{userId}/watch",
+     "request": {
+      "$ref": "WatchRequest"
+     }
+    }
+   },
+   "resources": {
+    "drafts": {
+     "methods": {
+      "create": {
+       "httpMethod": "POST",
+       "id": "gmail.users.drafts.create",
+       "parameters": {
+        "userId": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        }
+       },
+       "path": "gmail/v1/users/{userId}/drafts",
+       "request": {
+        "$ref": "Draft"
+       },
+       "supportsMediaUpload": true
+      },
+      "delete": {
+       "httpMethod": "DELETE",
+       "id": "gmail.users.drafts.delete",
+       "parameters": {
+        "id": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        },
+        "userId": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        }
+       },
+       "path": "gmail/v1/users/{userId}/drafts/{id}"
+      },
+      "get": {
+       "httpMethod": "GET",
+       "id": "gmail.users.drafts.get",
+       "parameters": {
+        "format": {
+         "location": "query",
+         "type": "string"
+        },
+        "id": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        },
+        "userId": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        }
+       },
+       "path": "gmail/v1/users/{userId}/drafts/{id}"
+      },
+      "list": {
+       "httpMethod": "GET",
+       "id": "gmail.users.drafts.list",
+       "parameters": {
+        "includeSpamTrash": {
+         "location": "query",
+         "type": "boolean"
+        },
+        "maxResults": {
+         "location": "query",
+         "type": "integer"
+        },
+        "pageToken": {
+         "location": "query",
+         "type": "string"
+        },
+        "q": {
+         "location": "query",
+         "type": "string"
+        },
+        "userId": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        }
+       },
+       "path": "gmail/v1/users/{userId}/drafts"
+      },
+      "send": {
+       "httpMethod": "POST",
+       "id": "gmail.users.drafts.send",
+       "parameters": {
+        "userId": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        }
+       },
+       "path": "gmail/v1/users/{userId}/drafts/send",
+       "request": {
+        "$ref": "Draft"
+       },
+       "supportsMediaUpload": true
+      },
+      "update": {
+       "httpMethod": "PUT",
+       "id": "gmail.users.drafts.update",
+       "parameters": {
+        "id": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        },
+        "userId": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        }
+       },
+       "path": "gmail/v1/users/{userId}/drafts/{id}",
+       "request": {
+        "$ref": "Draft"
+       },
+       "supportsMediaUpload": true
+      }
+     }
+    },
+    "history": {
+     "methods": {
+      "list": {
+       "httpMethod": "GET",
+       "id": "gmail.users.history.list",
+       "parameters": {
+        "historyTypes": {
+         "location": "query",
+         "repeated": true,
+         "type": "string"
+        },
+        "labelId": {
+         "location": "query",
+         "type": "string"
+        },
+        "maxResults": {
+         "location": "query",
+         "type": "integer"
+        },
+        "pageToken": {
+         "location": "query",
+         "type": "string"
+        },
+        "startHistoryId": {
+         "location": "query",
+         "type": "string"
+        },
+        "userId": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        }
+       },
+       "path": "gmail/v1/users/{userId}/history"
+      }
+     }
+    },
+    "labels": {
+     "methods": {
+      "create": {
+       "httpMethod": "POST",
+       "id": "gmail.users.labels.create",
+       "parameters": {
+        "userId": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        }
+       },
+       "path": "gmail/v1/users/{userId}/labels",
+       "request": {
+        "$ref": "Label"
+       }
+      },
+      "delete": {
+       "httpMethod": "DELETE",
+       "id": "gmail.users.labels.delete",
+       "parameters": {
+        "id": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        },
+        "userId": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        }
+       },
+       "path": "gmail/v1/users/{userId}/labels/{id}"
+      },
+      "get": {
+       "httpMethod": "GET",
+       "id": "gmail.users.labels.get",
+       "parameters": {
+        "id": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        },
+        "userId": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        }
+       },
+       "path": "gmail/v1/users/{userId}/labels/{id}"
+      },
+      "list": {
+       "httpMethod": "GET",
+       "id": "gmail.users.labels.list",
+       "parameters": {
+        "userId": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        }
+       },
+       "path": "gmail/v1/users/{userId}/labels"
+      },
+      "patch": {
+       "httpMethod": "PATCH",
+       "id": "gmail.users.labels.patch",
+       "parameters": {
+        "id": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        },
+        "userId": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        }
+       },
+       "path": "gmail/v1/users/{userId}/labels/{id}",
+       "request": {
+        "$ref": "Label"
+       }
+      },
+      "update": {
+       "httpMethod": "PUT",
+       "id": "gmail.users.labels.update",
+       "parameters": {
+        "id": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        },
+        "userId": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        }
+       },
+       "path": "gmail/v1/users/{userId}/labels/{id}",
+       "request": {
+        "$ref": "Label"
+       }
+      }
+     }
+    },
+    "messages": {
+     "methods": {
+      "batchDelete": {
+       "httpMethod": "POST",
+       "id": "gmail.users.messages.batchDelete",
+       "parameters": {
+        "userId": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        }
+       },
+       "path": "gmail/v1/users/{userId}/messages/batchDelete",
+       "request": {
+        "$ref": "BatchDeleteMessagesRequest"
+       }
+      },
+      "batchModify": {
+       "httpMethod": "POST",
+       "id": "gmail.users.messages.batchModify",
+       "parameters": {
+        "userId": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        }
+       },
+       "path": "gmail/v1/users/{userId}/messages/batchModify",
+       "request": {
+        "$ref": "BatchModifyMessagesRequest"
+       }
+      },
+      "delete": {
+       "httpMethod": "DELETE",
+       "id": "gmail.users.messages.delete",
+       "parameters": {
+        "id": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        },
+        "userId": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        }
+       },
+       "path": "gmail/v1/users/{userId}/messages/{id}"
+      },
+      "get": {
+       "httpMethod": "GET",
+       "id": "gmail.users.messages.get",
+       "parameters": {
+        "format": {
+         "location": "query",
+         "type": "string"
+        },
+        "id": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        },
+        "metadataHeaders": {
+         "location": "query",
+         "repeated": true,
+         "type": "string"
+        },
+        "userId": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        }
+       },
+       "path": "gmail/v1/users/{userId}/messages/{id}"
+      },
+      "import": {
+       "httpMethod": "POST",
+       "id": "gmail.users.messages.import",
+       "parameters": {
+        "deleted": {
+         "location": "query",
+         "type": "boolean"
+        },
+        "internalDateSource": {
+         "location": "query",
+         "type": "string"
+        },
+        "neverMarkSpam": {
+         "location": "query",
+         "type": "boolean"
+        },
+        "processForCalendar": {
+         "location": "query",
+         "type": "boolean"
+        },
+        "userId": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        }
+       },
+       "path": "gmail/v1/users/{userId}/messages/import",
+       "request": {
+        "$ref": "Message"
+       },
+       "supportsMediaUpload": true
+      },
+      "insert": {
+       "httpMethod": "POST",
+       "id": "gmail.users.messages.insert",
+       "parameters": {
+        "deleted": {
+         "location": "query",
+         "type": "boolean"
+        },
+        "internalDateSource": {
+         "location": "query",
+         "type": "string"
+        },
+        "userId": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        }
+       },
+       "path": "gmail/v1/users/{userId}/messages",
+       "request": {
+        "$ref": "Message"
+       },
+       "supportsMediaUpload": true
+      },
+      "list": {
+       "httpMethod": "GET",
+       "id": "gmail.users.messages.list",
+       "parameters": {
+        "includeSpamTrash": {
+         "location": "query",
+         "type": "boolean"
+        },
+        "labelIds": {
+         "location": "query",
+         "repeated": true,
+         "type": "string"
+        },
+        "maxResults": {
+         "location": "query",
+         "type": "integer"
+        },
+        "pageToken": {
+         "location": "query",
+         "type": "string"
+        },
+        "q": {
+         "location": "query",
+         "type": "string"
+        },
+        "userId": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        }
+       },
+       "path": "gmail/v1/users/{userId}/messages"
+      },
+      "modify": {
+       "httpMethod": "POST",
+       "id": "gmail.users.messages.modify",
+       "parameters": {
+        "id": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        },
+        "userId": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        }
+       },
+       "path": "gmail/v1/users/{userId}/messages/{id}/modify",
+       "request": {
+        "$ref": "ModifyMessageRequest"
+       }
+      },
+      "send": {
+       "httpMethod": "POST",
+       "id": "gmail.users.messages.send",
+       "parameters": {
+        "userId": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        }
+       },
+       "path": "gmail/v1/users/{userId}/messages/send",
+       "request": {
+        "$ref": "Message"
+       },
+       "supportsMediaUpload": true
+      },
+      "trash": {
+       "httpMethod": "POST",
+       "id": "gmail.users.messages.trash",
+       "parameters": {
+        "id": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        },
+        "userId": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        }
+       },
+       "path": "gmail/v1/users/{userId}/messages/{id}/trash"
+      },
+      "untrash": {
+       "httpMethod": "POST",
+       "id": "gmail.users.messages.untrash",
+       "parameters": {
+        "id": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        },
+        "userId": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        }
+       },
+       "path": "gmail/v1/users/{userId}/messages/{id}/untrash"
+      }
+     },
+     "resources": {
+      "attachments": {
+       "methods": {
+        "get": {
+         "httpMethod": "GET",
+         "id": "gmail.users.messages.attachments.get",
+         "parameters": {
+          "id": {
+           "location": "path",
+           "required": true,
+           "type": "string"
+          },
+          "messageId": {
+           "location": "path",
+           "required": true,
+           "type": "string"
+          },
+          "userId": {
+           "location": "path",
+           "required": true,
+           "type": "string"
+          }
+         },
+         "path": "gmail/v1/users/{userId}/messages/{messageId}/attachments/{id}"
+        }
+       }
+      }
+     }
+    },
+    "settings": {
+     "methods": {
+      "getAutoForwarding": {
+       "httpMethod": "GET",
+       "id": "gmail.users.settings.getAutoForwarding",
+       "parameters": {
+        "userId": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        }
+       },
+       "path": "gmail/v1/users/{userId}/settings/autoForwarding"
+      },
+      "getImap": {
+       "httpMethod": "GET",
+       "id": "gmail.users.settings.getImap",
+       "parameters": {
+        "userId": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        }
+       },
+       "path": "gmail/v1/users/{userId}/settings/imap"
+      },
+      "getLanguage": {
+       "httpMethod": "GET",
+       "id": "gmail.users.settings.getLanguage",
+       "parameters": {
+        "userId": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        }
+       },
+       "path": "gmail/v1/users/{userId}/settings/language"
+      },
+      "getPop": {
+       "httpMethod": "GET",
+       "id": "gmail.users.settings.getPop",
+       "parameters": {
+        "userId": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        }
+       },
+       "path": "gmail/v1/users/{userId}/settings/pop"
+      },
+      "getVacation": {
+       "httpMethod": "GET",
+       "id": "gmail.users.settings.getVacation",
+       "parameters": {
+        "userId": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        }
+       },
+       "path": "gmail/v1/users/{userId}/settings/vacation"
+      },
+      "updateAutoForwarding": {
+       "httpMethod": "PUT",
+       "id": "gmail.users.settings.updateAutoForwarding",
+       "parameters": {
+        "userId": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        }
+       },
+       "path": "gmail/v1/users/{userId}/settings/autoForwarding",
+       "request": {
+        "$ref": "AutoForwarding"
+       }
+      },
+      "updateImap": {
+       "httpMethod": "PUT",
+       "id": "gmail.users.settings.updateImap",
+       "parameters": {
+        "userId": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        }
+       },
+       "path": "gmail/v1/users/{userId}/settings/imap",
+       "request": {
+        "$ref": "ImapSettings"
+       }
+      },
+      "updateLanguage": {
+       "httpMethod": "PUT",
+       "id": "gmail.users.settings.updateLanguage",
+       "parameters": {
+        "userId": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        }
+       },
+       "path": "gmail/v1/users/{userId}/settings/language",
+       "request": {
+        "$ref": "LanguageSettings"
+       }
+      },
+      "updatePop": {
+       "httpMethod": "PUT",
+       "id": "gmail.users.settings.updatePop",
+       "parameters": {
+        "userId": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        }
+       },
+       "path": "gmail/v1/users/{userId}/settings/pop",
+       "request": {
+        "$ref": "PopSettings"
+       }
+      },
+      "updateVacation": {
+       "httpMethod": "PUT",
+       "id": "gmail.users.settings.updateVacation",
+       "parameters": {
+        "userId": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        }
+       },
+       "path": "gmail/v1/users/{userId}/settings/vacation",
+       "request": {
+        "$ref": "VacationSettings"
+       }
+      }
+     },
+     "resources": {
+      "cse": {
+       "resources": {
+        "identities": {
+         "methods": {
+          "create": {
+           "httpMethod": "POST",
+           "id": "gmail.users.settings.cse.identities.create",
+           "parameters": {
+            "userId": {
+             "location": "path",
+             "required": true,
+             "type": "string"
+            }
+           },
+           "path": "gmail/v1/users/{userId}/settings/cse/identities",
+           "request": {
+            "$ref": "CseIdentity"
+           }
+          },
+          "delete": {
+           "httpMethod": "DELETE",
+           "id": "gmail.users.settings.cse.identities.delete",
+           "parameters": {
+            "cseEmailAddress": {
+             "location": "path",
+             "required": true,
+             "type": "string"
+            },
+            "userId": {
+             "location": "path",
+             "required": true,
+             "type": "string"
+            }
+           },
+           "path": "gmail/v1/users/{userId}/settings/cse/identities/{cseEmailAddress}"
+          },
+          "get": {
+           "httpMethod": "GET",
+           "id": "gmail.users.settings.cse.identities.get",
+           "parameters": {
+            "cseEmailAddress": {
+             "location": "path",
+             "required": true,
+             "type": "string"
+            },
+            "userId": {
+             "location": "path",
+             "required": true,
+             "type": "string"
+            }
+           },
+           "path": "gmail/v1/users/{userId}/settings/cse/identities/{cseEmailAddress}"
+          },
+          "list": {
+           "httpMethod": "GET",
+           "id": "gmail.users.settings.cse.identities.list",
+           "parameters": {
+            "pageSize": {
+             "location": "query",
+             "type": "integer"
+            },
+            "pageToken": {
+             "location": "query",
+             "type": "string"
+            },
+            "userId": {
+             "location": "path",
+             "required": true,
+             "type": "string"
+            }
+           },
+           "path": "gmail/v1/users/{userId}/settings/cse/identities"
+          },
+          "patch": {
+           "httpMethod": "PATCH",
+           "id": "gmail.users.settings.cse.identities.patch",
+           "parameters": {
+            "emailAddress": {
+             "location": "path",
+             "required": true,
+             "type": "string"
+            },
+            "userId": {
+             "location": "path",
+             "required": true,
+             "type": "string"
+            }
+           },
+           "path": "gmail/v1/users/{userId}/settings/cse/identities/{emailAddress}",
+           "request": {
+            "$ref": "CseIdentity"
+           }
+          }
+         }
+        },
+        "keypairs": {
+         "methods": {
+          "create": {
+           "httpMethod": "POST",
+           "id": "gmail.users.settings.cse.keypairs.create",
+           "parameters": {
+            "chainValidation": {
+             "location": "query",
+             "type": "string"
+            },
+            "userId": {
+             "location": "path",
+             "required": true,
+             "type": "string"
+            }
+           },
+           "path": "gmail/v1/users/{userId}/settings/cse/keypairs",
+           "request": {
+            "$ref": "CseKeyPair"
+           }
+          },
+          "disable": {
+           "httpMethod": "POST",
+           "id": "gmail.users.settings.cse.keypairs.disable",
+           "parameters": {
+            "keyPairId": {
+             "location": "path",
+             "required": true,
+             "type": "string"
+            },
+            "userId": {
+             "location": "path",
+             "required": true,
+             "type": "string"
+            }
+           },
+           "path": "gmail/v1/users/{userId}/settings/cse/keypairs/{keyPairId}:disable",
+           "request": {
+            "$ref": "DisableCseKeyPairRequest"
+           }
+          },
+          "enable": {
+           "httpMethod": "POST",
+           "id": "gmail.users.settings.cse.keypairs.enable",
+           "parameters": {
+            "keyPairId": {
+             "location": "path",
+             "required": true,
+             "type": "string"
+            },
+            "userId": {
+             "location": "path",
+             "required": true,
+             "type": "string"
+            }
+           },
+           "path": "gmail/v1/users/{userId}/settings/cse/keypairs/{keyPairId}:enable",
+           "request": {
+            "$ref": "EnableCseKeyPairRequest"
+           }
+          },
+          "get": {
+           "httpMethod": "GET",
+           "id": "gmail.users.settings.cse.keypairs.get",
+           "parameters": {
+            "keyPairId": {
+             "location": "path",
+             "required": true,
+             "type": "string"
+            },
+            "userId": {
+             "location": "path",
+             "required": true,
+             "type": "string"
+            }
+           },
+           "path": "gmail/v1/users/{userId}/settings/cse/keypairs/{keyPairId}"
+          },
+          "list": {
+           "httpMethod": "GET",
+           "id": "gmail.users.settings.cse.keypairs.list",
+           "parameters": {
+            "pageSize": {
+             "location": "query",
+             "type": "integer"
+            },
+            "pageToken": {
+             "location": "query",
+             "type": "string"
+            },
+            "userId": {
+             "location": "path",
+             "required": true,
+             "type": "string"
+            }
+           },
+           "path": "gmail/v1/users/{userId}/settings/cse/keypairs"
+          },
+          "obliterate": {
+           "httpMethod": "POST",
+           "id": "gmail.users.settings.cse.keypairs.obliterate",
+           "parameters": {
+            "keyPairId": {
+             "location": "path",
+             "required": true,
+             "type": "string"
+            },
+            "userId": {
+             "location": "path",
+             "required": true,
+             "type": "string"
+            }
+           },
+           "path": "gmail/v1/users/{userId}/settings/cse/keypairs/{keyPairId}:obliterate",
+           "request": {
+            "$ref": "ObliterateCseKeyPairRequest"
+           }
+          }
+         }
+        }
+       }
+      },
+      "delegates": {
+       "methods": {
+        "create": {
+         "httpMethod": "POST",
+         "id": "gmail.users.settings.delegates.create",
+         "parameters": {
+          "userId": {
+           "location": "path",
+           "required": true,
+           "type": "string"
+          }
+         },
+         "path": "gmail/v1/users/{userId}/settings/delegates",
+         "request": {
+          "$ref": "Delegate"
+         }
+        },
+        "delete": {
+         "httpMethod": "DELETE",
+         "id": "gmail.users.settings.delegates.delete",
+         "parameters": {
+          "delegateEmail": {
+           "location": "path",
+           "required": true,
+           "type": "string"
+          },
+          "userId": {
+           "location": "path",
+           "required": true,
+           "type": "string"
+          }
+         },
+         "path": "gmail/v1/users/{userId}/settings/delegates/{delegateEmail}"
+        },
+        "get": {
+         "httpMethod": "GET",
+         "id": "gmail.users.settings.delegates.get",
+         "parameters": {
+          "delegateEmail": {
+           "location": "path",
+           "required": true,
+           "type": "string"
+          },
+          "userId": {
+           "location": "path",
+           "required": true,
+           "type": "string"
+          }
+         },
+         "path": "gmail/v1/users/{userId}/settings/delegates/{delegateEmail}"
+        },
+        "list": {
+         "httpMethod": "GET",
+         "id": "gmail.users.settings.delegates.list",
+         "parameters": {
+          "userId": {
+           "location": "path",
+           "required": true,
+           "type": "string"
+          }
+         },
+         "path": "gmail/v1/users/{userId}/settings/delegates"
+        }
+       }
+      },
+      "filters": {
+       "methods": {
+        "create": {
+         "httpMethod": "POST",
+         "id": "gmail.users.settings.filters.create",
+         "parameters": {
+          "userId": {
+           "location": "path",
+           "required": true,
+           "type": "string"
+          }
+         },
+         "path": "gmail/v1/users/{userId}/settings/filters",
+         "request": {
+          "$ref": "Filter"
+         }
+        },
+        "delete": {
+         "httpMethod": "DELETE",
+         "id": "gmail.users.settings.filters.delete",
+         "parameters": {
+          "id": {
+           "location": "path",
+           "required": true,
+           "type": "string"
+          },
+          "userId": {
+           "location": "path",
+           "required": true,
+           "type": "string"
+          }
+         },
+         "path": "gmail/v1/users/{userId}/settings/filters/{id}"
+        },
+        "get": {
+         "httpMethod": "GET",
+         "id": "gmail.users.settings.filters.get",
+         "parameters": {
+          "id": {
+           "location": "path",
+           "required": true,
+           "type": "string"
+          },
+          "userId": {
+           "location": "path",
+           "required": true,
+           "type": "string"
+          }
+         },
+         "path": "gmail/v1/users/{userId}/settings/filters/{id}"
+        },
+        "list": {
+         "httpMethod": "GET",
+         "id": "gmail.users.settings.filters.list",
+         "parameters": {
+          "userId": {
+           "location": "path",
+           "required": true,
+           "type": "string"
+          }
+         },
+         "path": "gmail/v1/users/{userId}/settings/filters"
+        }
+       }
+      },
+      "forwardingAddresses": {
+       "methods": {
+        "create": {
+         "httpMethod": "POST",
+         "id": "gmail.users.settings.forwardingAddresses.create",
+         "parameters": {
+          "userId": {
+           "location": "path",
+           "required": true,
+           "type": "string"
+          }
+         },
+         "path": "gmail/v1/users/{userId}/settings/forwardingAddresses",
+         "request": {
+          "$ref": "ForwardingAddress"
+         }
+        },
+        "delete": {
+         "httpMethod": "DELETE",
+         "id": "gmail.users.settings.forwardingAddresses.delete",
+         "parameters": {
+          "forwardingEmail": {
+           "location": "path",
+           "required": true,
+           "type": "string"
+          },
+          "userId": {
+           "location": "path",
+           "required": true,
+           "type": "string"
+          }
+         },
+         "path": "gmail/v1/users/{userId}/settings/forwardingAddresses/{forwardingEmail}"
+        },
+        "get": {
+         "httpMethod": "GET",
+         "id": "gmail.users.settings.forwardingAddresses.get",
+         "parameters": {
+          "forwardingEmail": {
+           "location": "path",
+           "required": true,
+           "type": "string"
+          },
+          "userId": {
+           "location": "path",
+           "required": true,
+           "type": "string"
+          }
+         },
+         "path": "gmail/v1/users/{userId}/settings/forwardingAddresses/{forwardingEmail}"
+        },
+        "list": {
+         "httpMethod": "GET",
+         "id": "gmail.users.settings.forwardingAddresses.list",
+         "parameters": {
+          "userId": {
+           "location": "path",
+           "required": true,
+           "type": "string"
+          }
+         },
+         "path": "gmail/v1/users/{userId}/settings/forwardingAddresses"
+        }
+       }
+      },
+      "sendAs": {
+       "methods": {
+        "create": {
+         "httpMethod": "POST",
+         "id": "gmail.users.settings.sendAs.create",
+         "parameters": {
+          "userId": {
+           "location": "path",
+           "required": true,
+           "type": "string"
+          }
+         },
+         "path": "gmail/v1/users/{userId}/settings/sendAs",
+         "request": {
+          "$ref": "SendAs"
+         }
+        },
+        "delete": {
+         "httpMethod": "DELETE",
+         "id": "gmail.users.settings.sendAs.delete",
+         "parameters": {
+          "sendAsEmail": {
+           "location": "path",
+           "required": true,
+           "type": "string"
+          },
+          "userId": {
+           "location": "path",
+           "required": true,
+           "type": "string"
+          }
+         },
+         "path": "gmail/v1/users/{userId}/settings/sendAs/{sendAsEmail}"
+        },
+        "get": {
+         "httpMethod": "GET",
+         "id": "gmail.users.settings.sendAs.get",
+         "parameters": {
+          "sendAsEmail": {
+           "location": "path",
+           "required": true,
+           "type": "string"
+          },
+          "userId": {
+           "location": "path",
+           "required": true,
+           "type": "string"
+          }
+         },
+         "path": "gmail/v1/users/{userId}/settings/sendAs/{sendAsEmail}"
+        },
+        "list": {
+         "httpMethod": "GET",
+         "id": "gmail.users.settings.sendAs.list",
+         "parameters": {
+          "userId": {
+           "location": "path",
+           "required": true,
+           "type": "string"
+          }
+         },
+         "path": "gmail/v1/users/{userId}/settings/sendAs"
+        },
+        "patch": {
+         "httpMethod": "PATCH",
+         "id": "gmail.users.settings.sendAs.patch",
+         "parameters": {
+          "sendAsEmail": {
+           "location": "path",
+           "required": true,
+           "type": "string"
+          },
+          "userId": {
+           "location": "path",
+           "required": true,
+           "type": "string"
+          }
+         },
+         "path": "gmail/v1/users/{userId}/settings/sendAs/{sendAsEmail}",
+         "request": {
+          "$ref": "SendAs"
+         }
+        },
+        "update": {
+         "httpMethod": "PUT",
+         "id": "gmail.users.settings.sendAs.update",
+         "parameters": {
+          "sendAsEmail": {
+           "location": "path",
+           "required": true,
+           "type": "string"
+          },
+          "userId": {
+           "location": "path",
+           "required": true,
+           "type": "string"
+          }
+         },
+         "path": "gmail/v1/users/{userId}/settings/sendAs/{sendAsEmail}",
+         "request": {
+          "$ref": "SendAs"
+         }
+        },
+        "verify": {
+         "httpMethod": "POST",
+         "id": "gmail.users.settings.sendAs.verify",
+         "parameters": {
+          "sendAsEmail": {
+           "location": "path",
+           "required": true,
+           "type": "string"
+          },
+          "userId": {
+           "location": "path",
+           "required": true,
+           "type": "string"
+          }
+         },
+         "path": "gmail/v1/users/{userId}/settings/sendAs/{sendAsEmail}/verify"
+        }
+       },
+       "resources": {
+        "smimeInfo": {
+         "methods": {
+          "delete": {
+           "httpMethod": "DELETE",
+           "id": "gmail.users.settings.sendAs.smimeInfo.delete",
+           "parameters": {
+            "id": {
+             "location": "path",
+             "required": true,
+             "type": "string"
+            },
+            "sendAsEmail": {
+             "location": "path",
+             "required": true,
+             "type": "string"
+            },
+            "userId": {
+             "location": "path",
+             "required": true,
+             "type": "string"
+            }
+           },
+           "path": "gmail/v1/users/{userId}/settings/sendAs/{sendAsEmail}/smimeInfo/{id}"
+          },
+          "get": {
+           "httpMethod": "GET",
+           "id": "gmail.users.settings.sendAs.smimeInfo.get",
+           "parameters": {
+            "id": {
+             "location": "path",
+             "required": true,
+             "type": "string"
+            },
+            "sendAsEmail": {
+             "location": "path",
+             "required": true,
+             "type": "string"
+            },
+            "userId": {
+             "location": "path",
+             "required": true,
+             "type": "string"
+            }
+           },
+           "path": "gmail/v1/users/{userId}/settings/sendAs/{sendAsEmail}/smimeInfo/{id}"
+          },
+          "insert": {
+           "httpMethod": "POST",
+           "id": "gmail.users.settings.sendAs.smimeInfo.insert",
+           "parameters": {
+            "sendAsEmail": {
+             "location": "path",
+             "required": true,
+             "type": "string"
+            },
+            "userId": {
+             "location": "path",
+             "required": true,
+             "type": "string"
+            }
+           },
+           "path": "gmail/v1/users/{userId}/settings/sendAs/{sendAsEmail}/smimeInfo",
+           "request": {
+            "$ref": "SmimeInfo"
+           }
+          },
+          "list": {
+           "httpMethod": "GET",
+           "id": "gmail.users.settings.sendAs.smimeInfo.list",
+           "parameters": {
+            "sendAsEmail": {
+             "location": "path",
+             "required": true,
+             "type": "string"
+            },
+            "userId": {
+             "location": "path",
+             "required": true,
+             "type": "string"
+            }
+           },
+           "path": "gmail/v1/users/{userId}/settings/sendAs/{sendAsEmail}/smimeInfo"
+          },
+          "setDefault": {
+           "httpMethod": "POST",
+           "id": "gmail.users.settings.sendAs.smimeInfo.setDefault",
+           "parameters": {
+            "id": {
+             "location": "path",
+             "required": true,
+             "type": "string"
+            },
+            "sendAsEmail": {
+             "location": "path",
+             "required": true,
+             "type": "string"
+            },
+            "userId": {
+             "location": "path",
+             "required": true,
+             "type": "string"
+            }
+           },
+           "path": "gmail/v1/users/{userId}/settings/sendAs/{sendAsEmail}/smimeInfo/{id}/setDefault"
+          }
+         }
+        }
+       }
+      }
+     }
+    },
+    "threads": {
+     "methods": {
+      "delete": {
+       "httpMethod": "DELETE",
+       "id": "gmail.users.threads.delete",
+       "parameters": {
+        "id": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        },
+        "userId": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        }
+       },
+       "path": "gmail/v1/users/{userId}/threads/{id}"
+      },
+      "get": {
+       "httpMethod": "GET",
+       "id": "gmail.users.threads.get",
+       "parameters": {
+        "format": {
+         "location": "query",
+         "type": "string"
+        },
+        "id": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        },
+        "metadataHeaders": {
+         "location": "query",
+         "repeated": true,
+         "type": "string"
+        },
+        "userId": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        }
+       },
+       "path": "gmail/v1/users/{userId}/threads/{id}"
+      },
+      "list": {
+       "httpMethod": "GET",
+       "id": "gmail.users.threads.list",
+       "parameters": {
+        "includeSpamTrash": {
+         "location": "query",
+         "type": "boolean"
+        },
+        "labelIds": {
+         "location": "query",
+         "repeated": true,
+         "type": "string"
+        },
+        "maxResults": {
+         "location": "query",
+         "type": "integer"
+        },
+        "pageToken": {
+         "location": "query",
+         "type": "string"
+        },
+        "q": {
+         "location": "query",
+         "type": "string"
+        },
+        "userId": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        }
+       },
+       "path": "gmail/v1/users/{userId}/threads"
+      },
+      "modify": {
+       "httpMethod": "POST",
+       "id": "gmail.users.threads.modify",
+       "parameters": {
+        "id": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        },
+        "userId": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        }
+       },
+       "path": "gmail/v1/users/{userId}/threads/{id}/modify",
+       "request": {
+        "$ref": "ModifyThreadRequest"
+       }
+      },
+      "trash": {
+       "httpMethod": "POST",
+       "id": "gmail.users.threads.trash",
+       "parameters": {
+        "id": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        },
+        "userId": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        }
+       },
+       "path": "gmail/v1/users/{userId}/threads/{id}/trash"
+      },
+      "untrash": {
+       "httpMethod": "POST",
+       "id": "gmail.users.threads.untrash",
+       "parameters": {
+        "id": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        },
+        "userId": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        }
+       },
+       "path": "gmail/v1/users/{userId}/threads/{id}/untrash"
+      }
+     }
+    }
+   }
+  }
+ },
+ "rootUrl": "https://gmail.googleapis.com/",
+ "servicePath": "",
+ "version": "v1"
+}

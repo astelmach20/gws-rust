@@ -1,83 +1,114 @@
-use super::*;
-use crate::auth::AccessTokenProvider;
-use crate::helpers::PUBSUB_API_BASE;
-use crate::output::sanitize_for_terminal;
-use std::path::PathBuf;
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
-#[derive(Debug, Clone, Default, Builder)]
-#[builder(setter(into))]
-pub struct SubscribeConfig {
-    #[builder(default)]
+//! `events +subscribe`: create (or reuse) a Pub/Sub-backed Workspace Events
+//! subscription and stream CloudEvents as NDJSON.
+
+use super::stream::{
+    PubSubClient, StepError, StreamOptions, StreamStep, cleanup_resources, emit_diagnostic,
+    run_stream,
+};
+use super::{PUBSUB_SCOPE, WORKSPACE_EVENTS_API_BASE, parse_event_types, scopes_for_event_types};
+use crate::auth::{self, AccessTokenProvider};
+use crate::error::GwsError;
+use crate::helpers::modelarmor::{SanitizeConfig, Sanitized, sanitize_value};
+use crate::helpers::rest::{RestClient, Retry, other_error};
+use base64::Engine as _;
+use clap::ArgMatches;
+use serde_json::{Value, json};
+use std::io::Write;
+use std::path::PathBuf;
+use std::time::Duration;
+
+#[derive(Debug, Clone, PartialEq)]
+pub(super) struct SubscribeConfig {
     target: Option<String>,
-    #[builder(default)]
     event_types: Vec<String>,
-    #[builder(default)]
-    project: Option<ProjectId>,
-    #[builder(default)]
-    subscription: Option<SubscriptionName>,
-    #[builder(default = "10")]
+    project: Option<String>,
+    subscription: Option<String>,
     max_messages: u32,
-    #[builder(default = "2")]
     poll_interval: u64,
-    #[builder(default)]
+    max_failures: u32,
     once: bool,
-    #[builder(default)]
     cleanup: bool,
-    #[builder(default)]
     no_ack: bool,
-    #[builder(default)]
     output_dir: Option<PathBuf>,
 }
 
-fn parse_subscribe_args(matches: &ArgMatches) -> Result<SubscribeConfig, GwsError> {
-    let mut builder = SubscribeConfigBuilder::default();
-
-    if let Some(target) = matches.get_one::<String>("target") {
-        builder.target(Some(target.clone()));
-    }
-    if let Some(event_types) = matches.get_one::<String>("event-types") {
-        builder.event_types(
-            event_types
-                .split(',')
-                .map(|t| t.trim().to_string())
-                .collect::<Vec<_>>(),
-        );
-    }
-    if let Some(project) = matches
-        .get_one::<String>("project")
+fn typed<T: Clone + Send + Sync + 'static>(
+    matches: &ArgMatches,
+    name: &str,
+) -> Result<T, GwsError> {
+    matches
+        .get_one::<T>(name)
         .cloned()
-        .or_else(|| std::env::var("GWSR_PROJECT_ID").ok())
-    {
-        builder.project(Some(ProjectId(project)));
-    }
-    if let Some(subscription) = matches.get_one::<String>("subscription") {
-        crate::validate::validate_resource_name(subscription)?;
-        builder.subscription(Some(SubscriptionName(subscription.clone())));
-    }
-    if let Some(max_messages) = matches
-        .get_one::<String>("max-messages")
-        .and_then(|s| s.parse::<u32>().ok())
-    {
-        builder.max_messages(max_messages);
-    }
-    if let Some(poll_interval) = matches
-        .get_one::<String>("poll-interval")
-        .and_then(|s| s.parse::<u64>().ok())
-    {
-        builder.poll_interval(poll_interval);
-    }
-    builder.once(matches.get_flag("once"));
-    builder.cleanup(matches.get_flag("cleanup"));
-    builder.no_ack(matches.get_flag("no-ack"));
-    if let Some(output_dir) = matches.get_one::<String>("output-dir") {
-        builder.output_dir(Some(crate::validate::validate_safe_output_dir(output_dir)?));
-    }
+        .ok_or_else(|| other_error(format!("--{name} has no value (missing default)")))
+}
 
-    let config = builder
-        .build()
-        .map_err(|e| GwsError::Validation(e.to_string()))?;
+fn parse_subscribe_args(matches: &ArgMatches) -> Result<SubscribeConfig, GwsError> {
+    let project = match matches.get_one::<String>("project") {
+        Some(p) => Some(p.clone()),
+        None => match std::env::var("GWSR_PROJECT_ID") {
+            Ok(p) => Some(p),
+            Err(std::env::VarError::NotPresent) => None,
+            Err(std::env::VarError::NotUnicode(_)) => {
+                return Err(GwsError::Validation(
+                    "GWSR_PROJECT_ID is not valid UTF-8".to_string(),
+                ));
+            }
+        },
+    };
+    let config = SubscribeConfig {
+        target: matches
+            .get_one::<String>("target")
+            .map(|t| validate_target(t))
+            .transpose()?,
+        event_types: parse_event_types(matches.get_one::<String>("event-types")),
+        project: project
+            .map(|p| crate::validate::validate_resource_name(&p).map(str::to_string))
+            .transpose()?,
+        subscription: matches
+            .get_one::<String>("subscription")
+            .map(|s| crate::validate::validate_resource_name(s).map(str::to_string))
+            .transpose()?,
+        max_messages: typed::<u32>(matches, "max-messages")?,
+        poll_interval: typed::<u64>(matches, "poll-interval")?,
+        max_failures: typed::<u32>(matches, "max-failures")?,
+        once: matches.get_flag("once"),
+        cleanup: matches.get_flag("cleanup"),
+        no_ack: matches.get_flag("no-ack"),
+        output_dir: matches
+            .get_one::<String>("output-dir")
+            .map(|d| crate::validate::validate_safe_output_dir(d))
+            .transpose()?,
+    };
     validate_subscribe_config(&config)?;
     Ok(config)
+}
+
+/// Validate a Workspace Events target: a full resource name such as
+/// `//chat.googleapis.com/spaces/AAAA`. The leading `//` (service host) is
+/// part of the format; everything after it must be a clean resource name.
+fn validate_target(target: &str) -> Result<String, GwsError> {
+    let rest = target.strip_prefix("//").ok_or_else(|| {
+        GwsError::Validation(format!(
+            "--target must be a full resource name starting with '//' \
+             (e.g. //chat.googleapis.com/spaces/SPACE), got '{target}'"
+        ))
+    })?;
+    crate::validate::validate_resource_name(rest)?;
+    Ok(target.to_string())
 }
 
 fn validate_subscribe_config(config: &SubscribeConfig) -> Result<(), GwsError> {
@@ -98,854 +129,696 @@ fn validate_subscribe_config(config: &SubscribeConfig) -> Result<(), GwsError> {
                     .to_string(),
             ));
         }
+        scopes_for_event_types(&config.event_types)?;
     }
+    Ok(())
+}
+
+/// Decode a Pub/Sub message carrying a CloudEvent. Undecodable data is kept
+/// as `null` with an explicit `dataError` rather than silently dropped.
+fn decode_cloud_event(pubsub_msg: &Value) -> Value {
+    let attributes = pubsub_msg
+        .get("attributes")
+        .cloned()
+        .unwrap_or_else(|| json!({}));
+    let attr = |k: &str| {
+        attributes
+            .get(k)
+            .and_then(Value::as_str)
+            .map(str::to_string)
+    };
+    let mut event = json!({
+        "type": attr("type"),
+        "source": attr("source"),
+        "time": attr("time"),
+        "attributes": attributes,
+        "data": Value::Null,
+    });
+    match pubsub_msg.get("data").and_then(Value::as_str) {
+        None => {}
+        Some(d) => {
+            let decoded = base64::engine::general_purpose::STANDARD
+                .decode(d)
+                .map_err(|e| format!("data is not base64: {e}"))
+                .and_then(|bytes| {
+                    serde_json::from_slice::<Value>(&bytes)
+                        .map_err(|e| format!("data is not JSON: {e}"))
+                });
+            match decoded {
+                Ok(v) => event["data"] = v,
+                Err(msg) => event["dataError"] = json!(msg),
+            }
+        }
+    }
+    event
+}
+
+/// Derives a readable slug from event types for Pub/Sub resource naming.
+/// e.g. ["google.workspace.drive.file.v1.updated"] -> "drive-file-updated".
+/// Multiple types share their common prefix: "drive-file-updated-created".
+fn derive_slug_from_event_types(event_types: &[&str]) -> String {
+    let parts: Vec<Vec<&str>> = event_types
+        .iter()
+        .map(|et| {
+            let stripped = et.strip_prefix("google.workspace.").unwrap_or(et);
+            stripped
+                .split('.')
+                .filter(|s| {
+                    // Drop version segments like "v1".
+                    !(s.len() <= 3
+                        && s.starts_with('v')
+                        && s.len() > 1
+                        && s[1..].chars().all(|c| c.is_ascii_digit()))
+                })
+                .collect()
+        })
+        .collect();
+    let Some(first) = parts.first() else {
+        return "events".to_string();
+    };
+    let common_len = (0..first.len())
+        .take_while(|&i| parts.iter().all(|p| p.get(i) == first.get(i)))
+        .count();
+    let mut segments: Vec<&str> = first[..common_len].to_vec();
+    for p in &parts {
+        segments.extend(p.iter().skip(common_len));
+    }
+    let slug: String = segments
+        .join("-")
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' {
+                c.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .take(40)
+        .collect();
+    let slug = slug.trim_matches('-').to_string();
+    if slug.is_empty() {
+        "events".to_string()
+    } else {
+        slug
+    }
+}
+
+/// Extract the subscription name from a `subscriptions.create` long-running operation.
+fn subscription_from_operation(op: &Value) -> Result<String, GwsError> {
+    if let Some(err) = op.get("error") {
+        return Err(GwsError::Api {
+            code: err
+                .get("code")
+                .and_then(Value::as_u64)
+                .and_then(|c| u16::try_from(c).ok())
+                .unwrap_or(500),
+            message: format!(
+                "Workspace Events subscription creation failed: {}",
+                err.get("message")
+                    .and_then(Value::as_str)
+                    .unwrap_or("unknown error")
+            ),
+            reason: "operationFailed".to_string(),
+            enable_url: None,
+        });
+    }
+    op.get("response")
+        .and_then(|r| r.get("name"))
+        .and_then(Value::as_str)
+        .or_else(|| op.get("metadata").and_then(|m| m.get("subscription")).and_then(Value::as_str))
+        .or_else(|| op.get("name").and_then(Value::as_str).filter(|n| n.starts_with("subscriptions/")))
+        .map(str::to_string)
+        .ok_or_else(|| {
+            other_error(format!(
+                "Workspace Events operation {} did not report a subscription name yet; check it with                  gwsr events operations get",
+                op.get("name").and_then(Value::as_str).unwrap_or("(unnamed)")
+            ))
+        })
+}
+
+struct SubscribeStep<'a> {
+    pubsub: PubSubClient,
+    tokens: &'a dyn AccessTokenProvider,
+    subscription: String,
+    config: SubscribeConfig,
+    sanitize: &'a SanitizeConfig,
+    pull_timeout: Duration,
+    file_counter: u64,
+}
+
+impl SubscribeStep<'_> {
+    fn output(&mut self, event: &Value) -> Result<(), StepError> {
+        let fatal = |e: String| StepError::Fatal(other_error(e));
+        match &self.config.output_dir {
+            Some(dir) => {
+                self.file_counter += 1;
+                let ts = chrono::Utc::now().timestamp_millis();
+                let path = dir.join(format!("{ts}_{}.json", self.file_counter));
+                let text = serde_json::to_string_pretty(event)
+                    .map_err(|e| fatal(format!("Failed to serialize event: {e}")))?;
+                std::fs::write(&path, text)
+                    .map_err(|e| fatal(format!("Failed to write {}: {e}", path.display())))?;
+                emit_diagnostic(
+                    "info",
+                    "wrote",
+                    json!({ "path": path.display().to_string() }),
+                );
+            }
+            None => {
+                let line = serde_json::to_string(event)
+                    .map_err(|e| fatal(format!("Failed to serialize event: {e}")))?;
+                let mut out = std::io::stdout().lock();
+                writeln!(out, "{line}")
+                    .and_then(|()| out.flush())
+                    .map_err(|e| fatal(format!("Failed to write to stdout: {e}")))?;
+            }
+        }
+        Ok(())
+    }
+}
+
+impl StreamStep for SubscribeStep<'_> {
+    async fn step(&mut self) -> Result<(), StepError> {
+        let token = self
+            .tokens
+            .access_token()
+            .await
+            .map_err(|e| StepError::Transient {
+                status: None,
+                message: format!("Failed to get Pub/Sub token: {e}"),
+            })?;
+        let received = self
+            .pubsub
+            .pull(
+                &token,
+                &self.subscription,
+                self.config.max_messages,
+                self.pull_timeout,
+            )
+            .await?;
+        for m in &received {
+            let event = decode_cloud_event(&m.message);
+            // Fail closed: a block-mode sanitization error aborts before emit/ack.
+            match sanitize_value(self.sanitize, event)
+                .await
+                .map_err(|e| StepError::Transient {
+                    status: None,
+                    message: e.to_string(),
+                })? {
+                Sanitized::Pass(v) => self.output(&v)?,
+                Sanitized::Blocked(r) => emit_diagnostic(
+                    "warning",
+                    "blocked",
+                    json!({ "ackId": m.ack_id, "filterMatchState": r.filter_match_state }),
+                ),
+            }
+        }
+        if self.config.no_ack {
+            return Ok(());
+        }
+        let ack_ids: Vec<String> = received.into_iter().map(|m| m.ack_id).collect();
+        self.pubsub.ack(&token, &self.subscription, &ack_ids).await
+    }
+}
+
+/// Resources created for this session.
+struct Created {
+    topic: String,
+    subscription: String,
+    workspace_subscription: String,
+}
+
+async fn create_resources(
+    config: &SubscribeConfig,
+    pubsub: &PubSubClient,
+    pubsub_token: &str,
+) -> Result<Created, GwsError> {
+    let target = config
+        .target
+        .as_deref()
+        .ok_or_else(|| GwsError::Validation("--target is required".to_string()))?;
+    let project = config
+        .project
+        .as_deref()
+        .ok_or_else(|| GwsError::Validation("--project is required".to_string()))?;
+    let types: Vec<&str> = config.event_types.iter().map(String::as_str).collect();
+    let slug = derive_slug_from_event_types(&types);
+    let suffix = format!("{:08x}", rand::random::<u32>());
+    let topic = format!("projects/{project}/topics/gwsr-{slug}-{suffix}");
+    let sub = format!("projects/{project}/subscriptions/gwsr-{slug}-{suffix}");
+
+    emit_diagnostic("info", "creating_topic", json!({ "topic": topic }));
+    pubsub.create_topic(pubsub_token, &topic).await?;
+    emit_diagnostic(
+        "info",
+        "creating_subscription",
+        json!({ "subscription": sub }),
+    );
+    pubsub
+        .create_subscription(pubsub_token, &sub, &topic)
+        .await?;
+
+    let scopes = scopes_for_event_types(&config.event_types)?;
+    let ws_token = auth::get_token(&scopes)
+        .await
+        .map_err(|e| GwsError::Auth(format!("Failed to get Workspace Events token: {e}")))?;
+    let rest = RestClient::new(crate::client::shared_client()?, ws_token);
+    let body = json!({
+        "targetResource": target,
+        "eventTypes": config.event_types,
+        "notificationEndpoint": { "pubsubTopic": topic },
+        "payloadOptions": { "includeResource": true },
+    });
+    let op = rest
+        .json(
+            reqwest::Method::POST,
+            &format!("{WORKSPACE_EVENTS_API_BASE}/subscriptions"),
+            &[],
+            Some(&body),
+            Retry::Never,
+            "Failed to create Workspace Events subscription",
+        )
+        .await?;
+    let workspace_subscription = subscription_from_operation(&op)?;
+    emit_diagnostic(
+        "info",
+        "subscribed",
+        json!({ "workspaceSubscription": workspace_subscription }),
+    );
+    Ok(Created {
+        topic,
+        subscription: sub,
+        workspace_subscription,
+    })
+}
+
+fn dry_run_plan(config: &SubscribeConfig) -> Result<(), GwsError> {
+    let plan = match &config.subscription {
+        Some(sub) => json!({
+            "dry_run": true,
+            "action": "listen to existing subscription",
+            "subscription": sub,
+        }),
+        None => json!({
+            "dry_run": true,
+            "action": "create Pub/Sub topic + subscription and a Workspace Events subscription",
+            "target": config.target,
+            "event_types": config.event_types,
+            "project": config.project,
+        }),
+    };
+    let text = serde_json::to_string_pretty(&plan)
+        .map_err(|e| other_error(format!("Failed to serialize plan: {e}")))?;
+    println!("{text}");
     Ok(())
 }
 
 /// Handles the `+subscribe` command.
 pub(super) async fn handle_subscribe(
-    _doc: &crate::discovery::RestDescription,
     matches: &ArgMatches,
+    sanitize_config: &SanitizeConfig,
 ) -> Result<(), GwsError> {
     let config = parse_subscribe_args(matches)?;
-    let dry_run = matches.get_flag("dry-run");
-
-    if dry_run {
-        eprintln!("🏃 DRY RUN — no changes will be made\n");
+    if crate::helpers::rest::dry_run(matches)? {
+        return dry_run_plan(&config);
+    }
+    if let Some(dir) = &config.output_dir {
+        std::fs::create_dir_all(dir)
+            .map_err(|e| other_error(format!("Failed to create {}: {e}", dir.display())))?;
     }
 
-    if let Some(ref dir) = config.output_dir
-        && !dry_run
-    {
-        std::fs::create_dir_all(dir).context("Failed to create output dir")?;
-    }
+    let http = crate::client::shared_client()?;
+    let pubsub = PubSubClient::new(http);
+    let tokens = auth::token_provider(&[PUBSUB_SCOPE]);
 
-    let client = crate::client::build_client()?;
-    let pubsub_token_provider = auth::token_provider(&[PUBSUB_SCOPE]);
-
-    let (pubsub_subscription, topic_name, ws_subscription_name, created_resources) =
-        if let Some(ref sub_name) = config.subscription {
-            // Use existing subscription — no setup needed
-            // (don't fetch Pub/Sub token since we won't need it for existing subscriptions)
-            if dry_run {
-                eprintln!("Would listen to existing subscription: {}", sub_name.0);
-                let result = json!({
-                    "dry_run": true,
-                    "action": "Would listen to existing subscription",
-                    "subscription": sub_name.0,
-                    "note": "Run without --dry-run to actually start listening"
-                });
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&result)
-                        .context("Failed to serialize dry-run output")?
-                );
-                return Ok(());
-            }
-            (sub_name.0.clone(), None, None, false)
-        } else {
-            // Get Pub/Sub token only when creating new subscription
-            let pubsub_token = if dry_run {
-                None
-            } else {
-                Some(
-                    auth::get_token(&[PUBSUB_SCOPE])
-                        .await
-                        .map_err(|e| GwsError::Auth(format!("Failed to get Pub/Sub token: {e}")))?,
-                )
-            };
-
-            // Full setup: create Pub/Sub topic + subscription + Workspace Events subscription
-            // Validate target before use in both dry-run and actual execution paths
-            let target = crate::validate::validate_resource_name(&config.target.clone().unwrap())?
-                .to_string();
-            let project =
-                crate::validate::validate_resource_name(&config.project.clone().unwrap().0)?
-                    .to_string();
-            let event_types_str: Vec<&str> =
-                config.event_types.iter().map(|s| s.as_str()).collect();
-
-            // Generate descriptive names from event types
-            // e.g. "google.workspace.drive.file.v1.updated" -> "drive-file-updated"
-            let slug = derive_slug_from_event_types(&event_types_str);
-            let suffix = format!("{:08x}", rand::random::<u32>());
-            let topic = format!("projects/{project}/topics/gwsr-{slug}-{suffix}");
-            let sub = format!("projects/{project}/subscriptions/gwsr-{slug}-{suffix}");
-
-            // Dry-run: print what would be created and exit
-            if dry_run {
-                eprintln!("Would create Pub/Sub topic: {topic}");
-                eprintln!("Would create Pub/Sub subscription: {sub}");
-                eprintln!("Would create Workspace Events subscription for target: {target}");
-                eprintln!(
-                    "Would listen for event types: {}",
-                    config.event_types.join(", ")
-                );
-
-                let result = json!({
-                    "dry_run": true,
-                    "action": "Would create Workspace Events subscription",
-                    "pubsub_topic": topic,
-                    "pubsub_subscription": sub,
-                    "target": target,
-                    "event_types": config.event_types,
-                    "note": "Run without --dry-run to actually create subscription"
-                });
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&result)
-                        .context("Failed to serialize dry-run output")?
-                );
-                return Ok(());
-            }
-
-            // 1. Create Pub/Sub topic
-            eprintln!("Creating Pub/Sub topic: {topic}");
-            let token = pubsub_token.as_ref().ok_or_else(|| {
-                GwsError::Auth(
-                    "Token unavailable in non-dry-run mode. This indicates a bug.".to_string(),
-                )
-            })?;
-            let resp = client
-                .put(format!("{PUBSUB_API_BASE}/{topic}"))
-                .bearer_auth(token)
-                .header("Content-Type", "application/json")
-                .body("{}")
-                .send()
+    let (subscription, created) = match &config.subscription {
+        Some(sub) => (sub.clone(), None),
+        None => {
+            let token = tokens
+                .access_token()
                 .await
-                .context("Failed to create topic")?;
-
-            if !resp.status().is_success() {
-                let body = resp.text().await.unwrap_or_default();
-                return Err(GwsError::Api {
-                    code: 400,
-                    message: format!("Failed to create Pub/Sub topic: {body}"),
-                    reason: "pubsubError".to_string(),
-                    enable_url: None,
-                });
-            }
-
-            // 2. Create Pub/Sub subscription
-            eprintln!("Creating Pub/Sub subscription: {sub}");
-            let sub_body = json!({
-                "topic": topic,
-                "ackDeadlineSeconds": 60,
-            });
-            let resp = client
-                .put(format!("{PUBSUB_API_BASE}/{sub}"))
-                .bearer_auth(token)
-                .header("Content-Type", "application/json")
-                .json(&sub_body)
-                .send()
-                .await
-                .context("Failed to create subscription")?;
-
-            if !resp.status().is_success() {
-                let body = resp.text().await.unwrap_or_default();
-                return Err(GwsError::Api {
-                    code: 400,
-                    message: format!("Failed to create Pub/Sub subscription: {body}"),
-                    reason: "pubsubError".to_string(),
-                    enable_url: None,
-                });
-            }
-
-            // 3. Create Workspace Events subscription
-            eprintln!("Creating Workspace Events subscription...");
-            let ws_token = auth::get_token(&[WORKSPACE_EVENTS_SCOPE])
-                .await
-                .map_err(|e| {
-                    GwsError::Auth(format!("Failed to get Workspace Events token: {e}"))
-                })?;
-
-            let ws_body = json!({
-                "targetResource": target,
-                "eventTypes": config.event_types,
-                "notificationEndpoint": {
-                    "pubsubTopic": topic,
-                },
-                "payloadOptions": {
-                    "includeResource": true,
-                },
-            });
-
-            let resp = client
-                .post("https://workspaceevents.googleapis.com/v1/subscriptions")
-                .bearer_auth(&ws_token)
-                .header("Content-Type", "application/json")
-                .json(&ws_body)
-                .send()
-                .await
-                .context("Failed to create Workspace Events subscription")?;
-
-            let resp_body: Value = resp
-                .json()
-                .await
-                .context("Failed to parse subscription response")?;
-
-            let ws_sub_name = resp_body
-                // Direct subscription response
-                .get("name")
-                .and_then(|v| v.as_str())
-                .filter(|s| s.starts_with("subscriptions/"))
-                .or_else(|| {
-                    // LRO response — check response.name
-                    resp_body
-                        .get("response")
-                        .and_then(|r| r.get("name"))
-                        .and_then(|v| v.as_str())
-                })
-                .or_else(|| {
-                    // LRO response — check metadata.subscription
-                    resp_body
-                        .get("metadata")
-                        .and_then(|m| m.get("subscription"))
-                        .and_then(|v| v.as_str())
-                })
-                .or_else(|| {
-                    // Fall back to the operation name itself
-                    resp_body.get("name").and_then(|v| v.as_str())
-                })
-                .unwrap_or("pending")
-                .to_string();
-
-            eprintln!("Workspace Events subscription: {ws_sub_name}");
-            eprintln!("Listening for events...\n");
-
-            (sub, Some(topic), Some(ws_sub_name), true)
-        };
-
-    // Pull loop
-    let result = pull_loop(
-        &client,
-        &pubsub_token_provider,
-        &pubsub_subscription,
-        config.clone(),
-        PUBSUB_API_BASE,
-    )
-    .await;
-
-    // On exit, print reconnection info or cleanup
-    if created_resources {
-        if config.cleanup {
-            eprintln!("\nCleaning up Pub/Sub resources...");
-            // Delete Pub/Sub subscription
-            match pubsub_token_provider.access_token().await {
-                Ok(pubsub_token) => {
-                    let _ = client
-                        .delete(format!("{PUBSUB_API_BASE}/{pubsub_subscription}"))
-                        .bearer_auth(&pubsub_token)
-                        .send()
-                        .await;
-                    // Delete Pub/Sub topic
-                    if let Some(ref topic) = topic_name {
-                        let _ = client
-                            .delete(format!("{PUBSUB_API_BASE}/{topic}"))
-                            .bearer_auth(&pubsub_token)
-                            .send()
-                            .await;
-                    }
-                    eprintln!("Cleanup complete.");
-                }
-                _ => {
-                    eprintln!(
-                        "Warning: failed to refresh token for cleanup. Resources may need manual deletion."
-                    );
-                }
-            }
-        } else {
-            eprintln!("\n--- Reconnection Info ---");
-            eprintln!(
-                "To reconnect later:\n  gwsr events +subscribe --subscription {}",
-                pubsub_subscription
-            );
-            if let Some(ref ws_name) = ws_subscription_name {
-                eprintln!("Workspace Events subscription: {ws_name}");
-            }
-            if let Some(ref topic) = topic_name {
-                eprintln!("Pub/Sub topic: {topic}");
-            }
-            eprintln!("Pub/Sub subscription: {pubsub_subscription}");
-            eprintln!("To clean up manually:");
-            if let Some(ref topic) = topic_name {
-                eprintln!(
-                    "  gcloud pubsub subscriptions delete {}",
-                    pubsub_subscription
-                );
-                eprintln!("  gcloud pubsub topics delete {topic}");
-            }
-        }
-    }
-
-    result
-}
-
-/// Pulls messages from a Pub/Sub subscription in a loop.
-async fn pull_loop(
-    client: &reqwest::Client,
-    token_provider: &dyn auth::AccessTokenProvider,
-    subscription: &str,
-    config: SubscribeConfig,
-    pubsub_api_base: &str,
-) -> Result<(), GwsError> {
-    let mut file_counter: u64 = 0;
-    loop {
-        let token = token_provider
-            .access_token()
-            .await
-            .map_err(|e| GwsError::Auth(format!("Failed to get Pub/Sub token: {e}")))?;
-        let pull_body = json!({
-            "maxMessages": config.max_messages,
-        });
-
-        let pull_future = client
-            .post(format!("{pubsub_api_base}/{subscription}:pull"))
-            .bearer_auth(&token)
-            .header("Content-Type", "application/json")
-            .json(&pull_body)
-            .timeout(std::time::Duration::from_secs(config.poll_interval.max(10)))
-            .send();
-
-        let resp = tokio::select! {
-            result = pull_future => {
-                match result {
-                    Ok(r) => r,
-                    Err(e) if e.is_timeout() => continue,
-                    Err(e) => return Err(anyhow::anyhow!("Pub/Sub pull failed: {e}").into()),
-                }
-            }
-            _ = super::super::shutdown_signal() => {
-                eprintln!("\nReceived shutdown signal, stopping...");
-                return Ok(());
-            }
-        };
-
-        if !resp.status().is_success() {
-            let body = resp.text().await.unwrap_or_default();
-            return Err(GwsError::Api {
-                code: 400,
-                message: format!("Pub/Sub pull failed: {body}"),
-                reason: "pubsubError".to_string(),
-                enable_url: None,
-            });
-        }
-
-        let pull_response: Value = resp.json().await.context("Failed to parse pull response")?;
-
-        let (ack_ids, events) = process_events_pull_response(&pull_response);
-
-        for event in events {
-            let json_str =
-                serde_json::to_string_pretty(&event).unwrap_or_else(|_| "{}".to_string());
-            if let Some(ref dir) = config.output_dir {
-                file_counter += 1;
-                let ts = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_millis())
-                    .unwrap_or(0);
-                let path = dir.join(format!("{ts}_{file_counter}.json"));
-                if let Err(e) = std::fs::write(&path, &json_str) {
-                    eprintln!(
-                        "Warning: failed to write {}: {}",
-                        path.display(),
-                        sanitize_for_terminal(&e.to_string())
-                    );
-                } else {
-                    eprintln!("Wrote {}", path.display());
-                }
-            } else {
-                println!(
-                    "{}",
-                    serde_json::to_string(&event).unwrap_or_else(|_| "{}".to_string())
-                );
-            }
-        }
-
-        // Acknowledge messages
-        if !config.no_ack && !ack_ids.is_empty() {
-            let ack_body = json!({
-                "ackIds": ack_ids,
-            });
-
-            let _ = client
-                .post(format!("{pubsub_api_base}/{subscription}:acknowledge"))
-                .bearer_auth(&token)
-                .header("Content-Type", "application/json")
-                .json(&ack_body)
-                .send()
-                .await;
-        }
-
-        if config.once {
-            break;
-        }
-
-        // Check for SIGINT/SIGTERM between polls
-        tokio::select! {
-            _ = tokio::time::sleep(std::time::Duration::from_secs(config.poll_interval)) => {},
-            _ = super::super::shutdown_signal() => {
-                eprintln!("\nReceived shutdown signal, stopping...");
-                break;
-            }
-        }
-    }
-
-    Ok(())
-}
-
-fn process_events_pull_response(response: &Value) -> (Vec<String>, Vec<Value>) {
-    let mut ack_ids = Vec::new();
-    let mut events = Vec::new();
-
-    if let Some(messages) = response.get("receivedMessages").and_then(|m| m.as_array()) {
-        for msg in messages {
-            if let Some(ack_id) = msg.get("ackId").and_then(|a| a.as_str()) {
-                ack_ids.push(ack_id.to_string());
-            }
-
-            if let Some(pubsub_msg) = msg.get("message") {
-                events.push(decode_cloud_event(pubsub_msg));
-            }
-        }
-    }
-
-    (ack_ids, events)
-}
-
-/// Decodes a Pub/Sub message containing a CloudEvent.
-fn decode_cloud_event(pubsub_msg: &Value) -> Value {
-    use base64::{Engine as _, engine::general_purpose::STANDARD};
-
-    let attributes = pubsub_msg.get("attributes").cloned().unwrap_or(json!({}));
-
-    let event_type = attributes
-        .get("type")
-        .and_then(|v| v.as_str())
-        .unwrap_or("unknown");
-
-    let source = attributes
-        .get("source")
-        .and_then(|v| v.as_str())
-        .unwrap_or("unknown");
-
-    let time = attributes
-        .get("time")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
-
-    // Decode base64 data
-    let data = pubsub_msg
-        .get("data")
-        .and_then(|d| d.as_str())
-        .and_then(|d| STANDARD.decode(d).ok())
-        .and_then(|bytes| String::from_utf8(bytes).ok())
-        .and_then(|s| serde_json::from_str::<Value>(&s).ok())
-        .unwrap_or(json!(null));
-
-    json!({
-        "type": event_type,
-        "source": source,
-        "time": time,
-        "attributes": attributes,
-        "data": data,
-    })
-}
-
-/// Derives a readable slug from event types for Pub/Sub resource naming.
-/// e.g. ["google.workspace.drive.file.v1.updated"] -> "drive-file-updated"
-/// Multiple types are joined: ["...drive.file.v1.updated", "...drive.file.v1.created"] -> "drive-file-updated-created"
-fn derive_slug_from_event_types(event_types: &[&str]) -> String {
-    let parts: Vec<String> = event_types
-        .iter()
-        .map(|et| {
-            // Strip "google.workspace." prefix and version segment
-            let stripped = et.strip_prefix("google.workspace.").unwrap_or(et);
-            // Split by '.', remove version-like segments (e.g. "v1")
-            let segments: Vec<&str> = stripped
-                .split('.')
-                .filter(|s| {
-                    !s.starts_with('v')
-                        || s.len() > 3
-                        || !s[1..].chars().all(|c| c.is_ascii_digit())
-                })
-                .collect();
-            segments.join("-")
-        })
-        .collect();
-
-    let slug = if parts.len() == 1 {
-        parts[0].clone()
-    } else {
-        // Find common prefix across event types, then append distinct suffixes
-        let first_segments: Vec<&str> = parts[0].split('-').collect();
-        let mut common_len = 0;
-        'outer: for i in 0..first_segments.len() {
-            for p in &parts[1..] {
-                let segs: Vec<&str> = p.split('-').collect();
-                if i >= segs.len() || segs[i] != first_segments[i] {
-                    break 'outer;
-                }
-            }
-            common_len = i + 1;
-        }
-        let prefix = first_segments[..common_len].join("-");
-        let suffixes: Vec<String> = parts
-            .iter()
-            .map(|p| {
-                let segs: Vec<&str> = p.split('-').collect();
-                segs[common_len..].join("-")
-            })
-            .filter(|s| !s.is_empty())
-            .collect();
-
-        if suffixes.is_empty() {
-            prefix
-        } else {
-            format!("{}-{}", prefix, suffixes.join("-"))
+                .map_err(|e| GwsError::Auth(format!("Failed to get Pub/Sub token: {e}")))?;
+            let created = create_resources(&config, &pubsub, &token).await?;
+            (created.subscription.clone(), Some(created))
         }
     };
 
-    // Truncate to keep Pub/Sub resource names within limits
-    let slug = if slug.len() > 40 { &slug[..40] } else { &slug };
-    slug.trim_end_matches('-').to_string()
+    let opts = StreamOptions::new(config.once, config.poll_interval, config.max_failures);
+    let mut step = SubscribeStep {
+        pubsub: pubsub.clone(),
+        tokens: &tokens,
+        subscription: subscription.clone(),
+        pull_timeout: Duration::from_secs(config.poll_interval.max(10)),
+        config: config.clone(),
+        sanitize: sanitize_config,
+        file_counter: 0,
+    };
+    let result = run_stream(&opts, &mut step).await;
+
+    let Some(created) = created else {
+        return result;
+    };
+    if config.cleanup {
+        let token = tokens
+            .access_token()
+            .await
+            .map_err(|e| other_error(e.to_string()));
+        let cleaned =
+            cleanup_resources(&pubsub, token, &[&created.subscription, &created.topic]).await;
+        emit_diagnostic(
+            "info",
+            "workspace_subscription_kept",
+            json!({
+                "workspaceSubscription": created.workspace_subscription,
+                "note": "delete it with: gwsr events subscriptions delete",
+            }),
+        );
+        return match (result, cleaned) {
+            (Err(e), Err(c)) => {
+                emit_diagnostic(
+                    "error",
+                    "cleanup_failed",
+                    json!({ "message": c.to_string() }),
+                );
+                Err(e)
+            }
+            (Err(e), Ok(())) => Err(e),
+            (Ok(()), c) => c,
+        };
+    }
+    emit_diagnostic(
+        "info",
+        "reconnect",
+        json!({
+            "command": format!("gwsr events +subscribe --subscription {}", created.subscription),
+            "subscription": created.subscription,
+            "topic": created.topic,
+            "workspaceSubscription": created.workspace_subscription,
+        }),
+    );
+    result
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::auth::FakeTokenProvider;
-    use base64::Engine as _;
-    use std::sync::Arc;
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    use tokio::net::TcpListener;
-    use tokio::sync::Mutex;
-
-    async fn spawn_subscribe_server() -> (
-        String,
-        Arc<Mutex<Vec<(String, String)>>>,
-        tokio::task::JoinHandle<()>,
-    ) {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let requests = Arc::new(Mutex::new(Vec::new()));
-        let recorded_requests = Arc::clone(&requests);
-
-        let handle = tokio::spawn(async move {
-            for _ in 0..2 {
-                let (mut stream, _) = listener.accept().await.unwrap();
-                let mut buf = [0_u8; 8192];
-                let bytes_read = stream.read(&mut buf).await.unwrap();
-                let request = String::from_utf8_lossy(&buf[..bytes_read]);
-                let path = request
-                    .lines()
-                    .next()
-                    .and_then(|line| line.split_whitespace().nth(1))
-                    .unwrap_or("")
-                    .to_string();
-                let auth_header = request
-                    .lines()
-                    .find(|line| line.to_ascii_lowercase().starts_with("authorization:"))
-                    .unwrap_or("")
-                    .trim()
-                    .to_string();
-                recorded_requests
-                    .lock()
-                    .await
-                    .push((path.clone(), auth_header));
-
-                let body = match path.as_str() {
-                    "/v1/projects/test/subscriptions/demo:pull" => json!({
-                        "receivedMessages": [{
-                            "ackId": "ack-1",
-                            "message": {
-                                "attributes": {
-                                    "type": "google.workspace.chat.message.v1.created",
-                                    "source": "//chat/spaces/A"
-                                },
-                                "data": base64::engine::general_purpose::STANDARD
-                                    .encode(json!({ "id": "evt-1" }).to_string())
-                            }
-                        }]
-                    })
-                    .to_string(),
-                    "/v1/projects/test/subscriptions/demo:acknowledge" => json!({}).to_string(),
-                    other => panic!("unexpected request path: {other}"),
-                };
-
-                let response = format!(
-                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{}",
-                    body.len(),
-                    body
-                );
-                stream.write_all(response.as_bytes()).await.unwrap();
-            }
-        });
-
-        (format!("http://{addr}/v1"), requests, handle)
-    }
-
-    fn make_matches_subscribe(args: &[&str]) -> ArgMatches {
-        let cmd = Command::new("test")
-            .arg(Arg::new("target").long("target"))
-            .arg(Arg::new("event-types").long("event-types"))
-            .arg(Arg::new("project").long("project"))
-            .arg(Arg::new("subscription").long("subscription"))
-            .arg(Arg::new("max-messages").long("max-messages"))
-            .arg(Arg::new("poll-interval").long("poll-interval"))
-            .arg(Arg::new("once").long("once").action(ArgAction::SetTrue))
-            .arg(
-                Arg::new("cleanup")
-                    .long("cleanup")
-                    .action(ArgAction::SetTrue),
-            )
-            .arg(Arg::new("no-ack").long("no-ack").action(ArgAction::SetTrue))
-            .arg(Arg::new("output-dir").long("output-dir"));
-        cmd.try_get_matches_from(args).unwrap()
-    }
-
-    #[test]
-    fn test_parse_subscribe_args_invalid_output_dir() {
-        let matches = make_matches_subscribe(&["test", "--output-dir", "bad\x01dir"]);
-        let result = parse_subscribe_args(&matches);
-        assert!(result.is_err());
-        let msg = result.unwrap_err().to_string();
-        assert!(msg.contains("control characters"));
-    }
+    use crate::helpers::events::events_matches;
+    use wiremock::matchers::{header, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
 
     #[test]
     fn test_parse_subscribe_args() {
-        let matches = make_matches_subscribe(&[
-            "test",
+        let m = events_matches(&[
+            "+subscribe",
             "--target",
-            "//chat/spaces/A",
+            "//chat.googleapis.com/spaces/A",
             "--event-types",
-            "type1,type2",
+            "google.workspace.chat.message.v1.created, google.workspace.chat.message.v1.updated",
             "--project",
-            "my-project",
+            "p",
             "--max-messages",
-            "20",
-            "--once",
+            "3",
+            "--poll-interval",
+            "7",
+            "--no-ack",
         ]);
-        let config = parse_subscribe_args(&matches).unwrap();
-
-        assert_eq!(config.target, Some("//chat/spaces/A".to_string()));
-        assert_eq!(config.event_types, vec!["type1", "type2"]);
-        assert_eq!(config.project, Some(ProjectId("my-project".to_string())));
-        assert_eq!(config.max_messages, 20);
-        assert!(config.once);
-        assert!(!config.cleanup);
-    }
-
-    #[test]
-    fn test_parse_subscribe_args_subscription() {
-        let matches = make_matches_subscribe(&["test", "--subscription", "subs/my-sub"]);
-        let config = parse_subscribe_args(&matches).unwrap();
-
+        let c = parse_subscribe_args(&m).unwrap();
+        assert_eq!(c.event_types.len(), 2);
         assert_eq!(
-            config.subscription,
-            Some(SubscriptionName("subs/my-sub".to_string()))
+            (c.max_messages, c.poll_interval, c.max_failures),
+            (3, 7, 10)
         );
-        // Others defaults
-        assert_eq!(config.max_messages, 10);
+        assert!(c.no_ack);
     }
 
     #[test]
-    fn test_slug_single_event_type() {
-        let types = vec!["google.workspace.drive.file.v1.updated"];
-        assert_eq!(derive_slug_from_event_types(&types), "drive-file-updated");
+    fn test_parse_subscribe_args_validation() {
+        let m = events_matches(&[
+            "+subscribe",
+            "--subscription",
+            "projects/p/subscriptions/s",
+            "--output-dir",
+            "bad\x01dir",
+        ]);
+        assert!(parse_subscribe_args(&m).is_err());
+        let m = events_matches(&[
+            "+subscribe",
+            "--target",
+            "chat.googleapis.com/spaces/A",
+            "--event-types",
+            "google.workspace.chat.message.v1.created",
+            "--project",
+            "p",
+        ]);
+        assert!(
+            parse_subscribe_args(&m)
+                .unwrap_err()
+                .to_string()
+                .contains("'//'")
+        );
+        let m = events_matches(&[
+            "+subscribe",
+            "--event-types",
+            "google.workspace.chat.message.v1.created",
+            "--project",
+            "p",
+        ]);
+        assert!(
+            parse_subscribe_args(&m)
+                .unwrap_err()
+                .to_string()
+                .contains("--target")
+        );
+        let m = events_matches(&["+subscribe", "--target", "//chat.googleapis.com/spaces/A", "--project", "p"]);
+        assert!(
+            parse_subscribe_args(&m)
+                .unwrap_err()
+                .to_string()
+                .contains("--event-types")
+        );
+        let m = events_matches(&[
+            "+subscribe",
+            "--target",
+            "//chat.googleapis.com/spaces/A",
+            "--project",
+            "p",
+            "--event-types",
+            "custom.x",
+        ]);
+        assert!(parse_subscribe_args(&m).is_err());
     }
 
     #[test]
-    fn test_slug_single_event_type_chat() {
-        let types = vec!["google.workspace.chat.message.v1.created"];
-        assert_eq!(derive_slug_from_event_types(&types), "chat-message-created");
-    }
-
-    #[test]
-    fn test_slug_multiple_event_types_common_prefix() {
-        let types = vec![
-            "google.workspace.drive.file.v1.updated",
-            "google.workspace.drive.file.v1.created",
-        ];
-        let slug = derive_slug_from_event_types(&types);
-        assert_eq!(slug, "drive-file-updated-created");
-    }
-
-    #[test]
-    fn test_slug_non_workspace_prefix() {
-        let types = vec!["custom.event.type"];
-        let slug = derive_slug_from_event_types(&types);
-        assert_eq!(slug, "custom-event-type");
-    }
-
-    #[test]
-    fn test_slug_truncation() {
-        // Very long event type should be truncated to 40 chars
-        let types = vec!["google.workspace.very.long.service.name.with.many.segments.v1.updated"];
-        let slug = derive_slug_from_event_types(&types);
-        assert!(slug.len() <= 40);
+    fn test_slugs() {
+        assert_eq!(
+            derive_slug_from_event_types(&["google.workspace.drive.file.v1.updated"]),
+            "drive-file-updated"
+        );
+        assert_eq!(
+            derive_slug_from_event_types(&["google.workspace.chat.message.v1.created"]),
+            "chat-message-created"
+        );
+        assert_eq!(
+            derive_slug_from_event_types(&[
+                "google.workspace.drive.file.v1.updated",
+                "google.workspace.drive.file.v1.created"
+            ]),
+            "drive-file-updated-created"
+        );
+        assert_eq!(
+            derive_slug_from_event_types(&["custom.event.type"]),
+            "custom-event-type"
+        );
+        assert!(
+            derive_slug_from_event_types(&[
+                "google.workspace.very.long.service.name.with.many.segments.v1.updated"
+            ])
+            .len()
+                <= 40
+        );
+        // Non-ASCII input must not panic and must yield a valid resource name.
+        let s = derive_slug_from_event_types(&["google.workspace.ünïcødé.thing.v1.x"]);
+        assert!(s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'));
+        assert_eq!(derive_slug_from_event_types(&[]), "events");
     }
 
     #[test]
     fn test_decode_cloud_event() {
-        use base64::{Engine as _, engine::general_purpose::STANDARD};
-
-        let data = json!({"foo": "bar"}).to_string();
-        let encoded = STANDARD.encode(data);
-
         let msg = json!({
-            "attributes": {
-                "type": "google.workspace.chat.message.v1.created",
-                "source": "//chat.googleapis.com/spaces/AAA",
-                "time": "2026-02-13T10:00:00Z"
-            },
-            "data": encoded
+            "attributes": { "type": "google.workspace.chat.message.v1.created", "source": "//chat/spaces/A", "time": "2026-02-13T10:00:00Z" },
+            "data": base64::engine::general_purpose::STANDARD.encode(r#"{"foo":"bar"}"#)
         });
-
-        let event = decode_cloud_event(&msg);
-
-        assert_eq!(event["type"], "google.workspace.chat.message.v1.created");
-        assert_eq!(event["source"], "//chat.googleapis.com/spaces/AAA");
-        assert_eq!(event["data"]["foo"], "bar");
-    }
-
-    #[test]
-    fn test_process_events_pull_response() {
-        use base64::{Engine as _, engine::general_purpose::STANDARD};
-
-        // Mock a Pub/Sub response with two messages
-        let data1 = json!({"id": "1", "content": "hello"}).to_string();
-        let encoded1 = STANDARD.encode(data1);
-
-        let data2 = json!({"id": "2", "content": "world"}).to_string();
-        let encoded2 = STANDARD.encode(data2);
-
-        let response = json!({
-            "receivedMessages": [
-                {
-                    "ackId": "ack1",
-                    "message": {
-                        "attributes": {
-                            "type": "google.workspace.chat.message.v1.created",
-                            "source": "//chat/spaces/A"
-                        },
-                        "data": encoded1,
-                        "messageId": "msg1"
-                    }
-                },
-                {
-                    "ackId": "ack2",
-                    "message": {
-                        "attributes": {
-                            "type": "google.workspace.drive.file.v1.updated",
-                            "source": "//drive/files/B"
-                        },
-                        "data": encoded2,
-                        "messageId": "msg2"
-                    }
-                }
-            ]
-        });
-
-        let (ack_ids, events) = process_events_pull_response(&response);
-
-        assert_eq!(ack_ids.len(), 2);
-        assert_eq!(ack_ids[0], "ack1");
-        assert_eq!(ack_ids[1], "ack2");
-
-        assert_eq!(events.len(), 2);
-        assert_eq!(
-            events[0]["type"],
-            "google.workspace.chat.message.v1.created"
+        let e = decode_cloud_event(&msg);
+        assert_eq!(e["type"], "google.workspace.chat.message.v1.created");
+        assert_eq!(e["data"]["foo"], "bar");
+        assert!(e.get("dataError").is_none());
+        let bad = decode_cloud_event(&json!({ "data": "!!!" }));
+        assert!(bad["data"].is_null());
+        assert!(bad["dataError"].as_str().unwrap().contains("base64"));
+        assert!(
+            bad["type"].is_null(),
+            "missing attributes are null, not 'unknown'"
         );
-        assert_eq!(events[0]["data"]["id"], "1");
-
-        assert_eq!(events[1]["type"], "google.workspace.drive.file.v1.updated");
-        assert_eq!(events[1]["data"]["id"], "2");
     }
 
     #[test]
-    fn test_process_events_pull_response_empty() {
-        let response = json!({});
-        let (ack_ids, events) = process_events_pull_response(&response);
-        assert!(ack_ids.is_empty());
-        assert!(events.is_empty());
+    fn test_subscription_from_operation() {
+        assert_eq!(
+            subscription_from_operation(
+                &json!({"done": true, "response": {"name": "subscriptions/abc"}})
+            )
+            .unwrap(),
+            "subscriptions/abc"
+        );
+        assert_eq!(
+            subscription_from_operation(
+                &json!({"name": "operations/x", "metadata": {"subscription": "subscriptions/s"}})
+            )
+            .unwrap(),
+            "subscriptions/s"
+        );
+        assert_eq!(
+            subscription_from_operation(&json!({"name": "subscriptions/direct"})).unwrap(),
+            "subscriptions/direct"
+        );
+        assert!(subscription_from_operation(&json!({"name": "operations/pending"})).is_err());
+        let err =
+            subscription_from_operation(&json!({"error": {"code": 403, "message": "denied"}}))
+                .unwrap_err();
+        assert!(matches!(err, GwsError::Api { code: 403, .. }));
     }
 
-    #[test]
-    fn test_handle_subscribe_validation_missing_target() {
-        let config = SubscribeConfigBuilder::default()
-            .event_types(vec!["type1".to_string()])
-            .project(Some(ProjectId("p1".to_string())))
-            .build()
-            .unwrap();
-        let result = validate_subscribe_config(&config);
-        assert!(result.is_err());
-        let err_msg = result.unwrap_err().to_string();
-        assert!(err_msg.contains("--target is required"));
+    fn config(no_ack: bool) -> SubscribeConfig {
+        SubscribeConfig {
+            target: None,
+            event_types: vec![],
+            project: None,
+            subscription: Some("projects/test/subscriptions/demo".into()),
+            max_messages: 10,
+            poll_interval: 1,
+            max_failures: 2,
+            once: true,
+            cleanup: false,
+            no_ack,
+            output_dir: None,
+        }
     }
 
-    #[test]
-    fn test_handle_subscribe_validation_missing_events() {
-        let config = SubscribeConfigBuilder::default()
-            .target(Some("target1".to_string()))
-            .project(Some(ProjectId("p1".to_string())))
-            .build()
-            .unwrap();
-        let result = validate_subscribe_config(&config);
-        assert!(result.is_err());
-        let err_msg = result.unwrap_err().to_string();
-        assert!(err_msg.contains("--event-types is required"));
+    async fn run(
+        server: &MockServer,
+        cfg: SubscribeConfig,
+        tokens: &FakeTokenProvider,
+    ) -> Result<(), GwsError> {
+        let sanitize = SanitizeConfig::default();
+        let mut step = SubscribeStep {
+            pubsub: PubSubClient::with_base(
+                reqwest::Client::new(),
+                &format!("{}/v1", server.uri()),
+            ),
+            tokens,
+            subscription: "projects/test/subscriptions/demo".into(),
+            pull_timeout: Duration::from_secs(5),
+            config: cfg,
+            sanitize: &sanitize,
+            file_counter: 0,
+        };
+        let mut opts = StreamOptions::new(true, 1, 2);
+        opts.backoff_base = Duration::from_millis(1);
+        opts.backoff_cap = Duration::from_millis(2);
+        run_stream(&opts, &mut step).await
     }
 
-    #[test]
-    fn test_handle_subscribe_validation_missing_project() {
-        let config = SubscribeConfigBuilder::default()
-            .target(Some("target1".to_string()))
-            .event_types(vec!["type1".to_string()])
-            .build()
-            .unwrap();
-        let result = validate_subscribe_config(&config);
-        assert!(result.is_err());
-        let err_msg = result.unwrap_err().to_string();
-        assert!(err_msg.contains("--project is required"));
+    async fn mount_pull(server: &MockServer) {
+        Mock::given(method("POST"))
+            .and(path("/v1/projects/test/subscriptions/demo:pull"))
+            .and(header("authorization", "Bearer pubsub-1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "receivedMessages": [{ "ackId": "ack-1", "message": {
+                    "attributes": { "type": "t" },
+                    "data": base64::engine::general_purpose::STANDARD.encode(r#"{"id":"evt-1"}"#)
+                }}]
+            })))
+            .mount(server)
+            .await;
     }
 
     #[tokio::test]
-    async fn test_pull_loop_refreshes_pubsub_token_between_requests() {
-        let client = reqwest::Client::new();
-        let token_provider = FakeTokenProvider::new(["pubsub-token"]);
-        let (pubsub_base, requests, server) = spawn_subscribe_server().await;
-        let config = SubscribeConfigBuilder::default()
-            .subscription(Some(SubscriptionName(
-                "projects/test/subscriptions/demo".to_string(),
-            )))
-            .max_messages(1_u32)
-            .poll_interval(1_u64)
-            .once(true)
-            .build()
-            .unwrap();
-
-        pull_loop(
-            &client,
-            &token_provider,
-            "projects/test/subscriptions/demo",
-            config,
-            &pubsub_base,
+    async fn test_pull_emits_and_acks() {
+        let server = MockServer::start().await;
+        mount_pull(&server).await;
+        Mock::given(method("POST"))
+            .and(path("/v1/projects/test/subscriptions/demo:acknowledge"))
+            .and(header("authorization", "Bearer pubsub-1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+            .expect(1)
+            .mount(&server)
+            .await;
+        run(
+            &server,
+            config(false),
+            &FakeTokenProvider::new(["pubsub-1"]),
         )
         .await
         .unwrap();
+    }
 
-        server.await.unwrap();
+    #[tokio::test]
+    async fn test_no_ack_skips_acknowledge() {
+        let server = MockServer::start().await;
+        mount_pull(&server).await;
+        Mock::given(method("POST"))
+            .and(path("/v1/projects/test/subscriptions/demo:acknowledge"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(0)
+            .mount(&server)
+            .await;
+        run(&server, config(true), &FakeTokenProvider::new(["pubsub-1"]))
+            .await
+            .unwrap();
+    }
 
-        let requests = requests.lock().await;
-        assert_eq!(requests.len(), 2);
-        assert_eq!(requests[0].0, "/v1/projects/test/subscriptions/demo:pull");
-        assert_eq!(requests[0].1, "authorization: Bearer pubsub-token");
-        assert_eq!(
-            requests[1].0,
-            "/v1/projects/test/subscriptions/demo:acknowledge"
-        );
-        assert_eq!(requests[1].1, "authorization: Bearer pubsub-token");
+    #[tokio::test]
+    async fn test_transient_errors_are_retried_then_budget_exhausts() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/projects/test/subscriptions/demo:pull"))
+            .respond_with(ResponseTemplate::new(503))
+            .expect(3)
+            .mount(&server)
+            .await;
+        let err = run(
+            &server,
+            config(false),
+            &FakeTokenProvider::new(["a", "b", "c"]),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, GwsError::Api { code: 503, .. }), "{err:?}");
+    }
+
+    #[tokio::test]
+    async fn test_permanent_error_stops_immediately_with_real_status() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/projects/test/subscriptions/demo:pull"))
+            .respond_with(
+                ResponseTemplate::new(404).set_body_json(
+                    json!({"error": {"code": 404, "message": "Resource not found"}}),
+                ),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        let err = run(&server, config(false), &FakeTokenProvider::new(["a"]))
+            .await
+            .unwrap_err();
+        match err {
+            GwsError::Api { code, message, .. } => {
+                assert_eq!(code, 404);
+                assert!(message.contains("Resource not found"));
+            }
+            other => panic!("unexpected {other:?}"),
+        }
     }
 }

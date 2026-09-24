@@ -5,9 +5,9 @@ description = "Apply Gmail labels to matching messages and archive them to keep 
 category = "productivity"
 services = [ "gmail" ]
 steps = [
-  "Search for matching emails: `gwsr gmail users messages list --params '{\"userId\": \"me\", \"q\": \"from:notifications@service.com\"}' --format table`",
-  "Apply a label: `gwsr gmail users messages modify --params '{\"userId\": \"me\", \"id\": \"MESSAGE_ID\"}' --json '{\"addLabelIds\": [\"LABEL_ID\"]}'`",
-  "Archive (remove from inbox): `gwsr gmail users messages modify --params '{\"userId\": \"me\", \"id\": \"MESSAGE_ID\"}' --json '{\"removeLabelIds\": [\"INBOX\"]}'`"
+  "Search for matching emails: `gwsr gmail +search --query 'from:notifications@service.com' --format table`",
+  "Apply a label (by name; it must already exist): `gwsr gmail +label --message-id MESSAGE_ID --add Notifications`",
+  "Archive (remove from inbox): `gwsr gmail +archive --message-id MESSAGE_ID`"
 ]
 
 [[recipes]]
@@ -81,8 +81,8 @@ category = "productivity"
 services = [ "sheets", "drive" ]
 steps = [
   "Create spreadsheet: `gwsr drive files create --json '{\"name\": \"Expense Tracker 2025\", \"mimeType\": \"application/vnd.google-apps.spreadsheet\"}'`",
-  "Add headers: `gwsr sheets +append --spreadsheet SHEET_ID --range 'Sheet1' --values '[\"Date\", \"Category\", \"Description\", \"Amount\"]'`",
-  "Add first entry: `gwsr sheets +append --spreadsheet SHEET_ID --range 'Sheet1' --values '[\"2025-01-15\", \"Travel\", \"Flight to NYC\", \"450.00\"]'`",
+  "Add headers: `gwsr sheets +append --spreadsheet-id SHEET_ID --range 'Sheet1' --json-values '[\"Date\", \"Category\", \"Description\", \"Amount\"]'`",
+  "Add first entry: `gwsr sheets +append --spreadsheet-id SHEET_ID --range 'Sheet1' --json-values '[\"2025-01-15\", \"Travel\", \"Flight to NYC\", \"450.00\"]'`",
   "Share with manager: `gwsr drive permissions create --params '{\"fileId\": \"SHEET_ID\"}' --json '{\"role\": \"reader\", \"type\": \"user\", \"emailAddress\": \"manager@company.com\"}'`"
 ]
 
@@ -130,8 +130,8 @@ services = [ "gmail" ]
 steps = [
   "List existing labels: `gwsr gmail users labels list --params '{\"userId\": \"me\"}' --format table`",
   "Create a new label: `gwsr gmail users labels create --params '{\"userId\": \"me\"}' --json '{\"name\": \"Receipts\"}'`",
-  "Create a filter: `gwsr gmail users settings filters create --params '{\"userId\": \"me\"}' --json '{\"criteria\": {\"from\": \"receipts@example.com\"}, \"action\": {\"addLabelIds\": [\"LABEL_ID\"], \"removeLabelIds\": [\"INBOX\"]}}'`",
-  "Verify filter: `gwsr gmail users settings filters list --params '{\"userId\": \"me\"}' --format table`"
+  "Create a filter: `gwsr gmail +filter create --from receipts@example.com --add-label Receipts --archive`",
+  "Verify filter: `gwsr gmail +filter list`"
 ]
 
 [[recipes]]
@@ -200,8 +200,8 @@ category = "sales"
 services = [ "sheets", "drive" ]
 steps = [
   "Find the tracking sheet: `gwsr drive files list --params '{\"q\": \"name = '\\''Sales Pipeline'\\'' and mimeType = '\\''application/vnd.google-apps.spreadsheet'\\''\"}'`",
-  "Read current data: `gwsr sheets +read --spreadsheet SHEET_ID --range \"Pipeline!A1:F\"`",
-  "Append new row: `gwsr sheets +append --spreadsheet SHEET_ID --range 'Pipeline' --values '[\"2024-03-15\", \"Acme Corp\", \"Proposal Sent\", \"$50,000\", \"Q2\", \"jdoe\"]'`"
+  "Read current data: `gwsr sheets +read --spreadsheet-id SHEET_ID --range \"Pipeline!A1:F\"`",
+  "Append new row: `gwsr sheets +append --spreadsheet-id SHEET_ID --range 'Pipeline' --json-values '[\"2024-03-15\", \"Acme Corp\", \"Proposal Sent\", \"$50,000\", \"Q2\", \"jdoe\"]'`"
 ]
 
 [[recipes]]
@@ -211,7 +211,7 @@ description = "Retrieve and review responses from a Google Form."
 category = "productivity"
 services = [ "forms" ]
 steps = [
-  "List forms: `gwsr forms forms list` (if you don't have the form ID)",
+  "Find the form (the Forms API has no list method): `gwsr drive files list --params '{\"q\": \"mimeType = '\\''application/vnd.google-apps.form'\\''\", \"fields\": \"files(id,name)\"}'`",
   "Get form details: `gwsr forms forms get --params '{\"formId\": \"FORM_ID\"}'`",
   "Get responses: `gwsr forms forms responses list --params '{\"formId\": \"FORM_ID\"}' --format table`"
 ]
@@ -223,9 +223,10 @@ description = "Create a Google Docs post-mortem, schedule a Google Calendar revi
 category = "engineering"
 services = [ "docs", "calendar", "chat" ]
 steps = [
-  "Create post-mortem doc: `gwsr docs +write --title 'Post-Mortem: [Incident]' --body '## Summary\\n\\n## Timeline\\n\\n## Root Cause\\n\\n## Action Items'`",
+  "Create post-mortem doc: `gwsr docs documents create --json '{\"title\": \"Post-Mortem: [Incident]\"}'`",
+  "Add the outline (use the documentId from the response): `gwsr docs +write --document-id DOC_ID --text 'Summary\n\nTimeline\n\nRoot Cause\n\nAction Items'`",
   "Schedule review meeting: `gwsr calendar +insert --summary 'Post-Mortem Review: [Incident]' --attendee team@company.com --start '2026-03-16T14:00:00' --end '2026-03-16T15:00:00'`",
-  "Notify in Chat: `gwsr chat +send --space spaces/ENG_SPACE --text '🔍 Post-mortem scheduled for [Incident].'`"
+  "Notify in Chat: `gwsr chat +send --space-id spaces/ENG_SPACE --text '🔍 Post-mortem scheduled for [Incident].'`"
 ]
 
 [[recipes]]
@@ -261,8 +262,8 @@ category = "engineering"
 services = [ "events" ]
 steps = [
   "Create subscription: `gwsr events subscriptions create --json '{\"targetResource\": \"//drive.googleapis.com/drives/DRIVE_ID\", \"eventTypes\": [\"google.workspace.drive.file.v1.updated\"], \"notificationEndpoint\": {\"pubsubTopic\": \"projects/PROJECT/topics/TOPIC\"}, \"payloadOptions\": {\"includeResource\": true}}'`",
-  "List active subscriptions: `gwsr events subscriptions list`",
-  "Renew before expiry: `gwsr events +renew --subscription SUBSCRIPTION_ID`"
+  "List active subscriptions: `gwsr events subscriptions list --params '{\"filter\": \"event_types:\\\"google.workspace.drive.file.v1.updated\\\"\"}'`",
+  "Renew before expiry: `gwsr events +renew --subscription-id SUBSCRIPTION_ID --event-types google.workspace.drive.file.v1.updated`"
 ]
 
 [[recipes]]
@@ -320,10 +321,9 @@ description = "Find Gmail messages with attachments and save them to a Google Dr
 category = "productivity"
 services = [ "gmail", "drive" ]
 steps = [
-  "Search for emails with attachments: `gwsr gmail users messages list --params '{\"userId\": \"me\", \"q\": \"has:attachment from:client@example.com\"}' --format table`",
-  "Get message details: `gwsr gmail users messages get --params '{\"userId\": \"me\", \"id\": \"MESSAGE_ID\"}'`",
-  "Download attachment: `gwsr gmail users messages attachments get --params '{\"userId\": \"me\", \"messageId\": \"MESSAGE_ID\", \"id\": \"ATTACHMENT_ID\"}'`",
-  "Upload to Drive folder: `gwsr drive +upload --file ./attachment.pdf --parent FOLDER_ID`"
+  "Search for emails with attachments: `gwsr gmail +search --query 'has:attachment from:client@example.com' --format table`",
+  "Download the attachments: `gwsr gmail +attachments --message-id MESSAGE_ID --output-dir ./attachments`",
+  "Upload to Drive folder: `gwsr drive +upload --file ./attachments/report.pdf --folder-id FOLDER_ID`"
 ]
 
 [[recipes]]
@@ -334,7 +334,7 @@ category = "communication"
 services = [ "gmail", "chat" ]
 steps = [
   "Send email: `gwsr gmail +send --to team@company.com --subject 'Important Update' --body 'Please review the attached policy changes.'`",
-  "Post in Chat: `gwsr chat +send --space spaces/TEAM_SPACE --text '📢 Important Update: Please check your email for policy changes.'`"
+  "Post in Chat: `gwsr chat +send --space-id spaces/TEAM_SPACE --text '📢 Important Update: Please check your email for policy changes.'`"
 ]
 
 [[recipes]]
@@ -357,8 +357,8 @@ category = "productivity"
 services = [ "people", "sheets" ]
 steps = [
   "List contacts: `gwsr people people listDirectoryPeople --params '{\"readMask\": \"names,emailAddresses,phoneNumbers\", \"sources\": [\"DIRECTORY_SOURCE_TYPE_DOMAIN_PROFILE\"], \"pageSize\": 100}' --format json`",
-  "Create a sheet: `gwsr sheets +append --spreadsheet SHEET_ID --range 'Contacts' --values '[\"Name\", \"Email\", \"Phone\"]'`",
-  "Append each contact row: `gwsr sheets +append --spreadsheet SHEET_ID --range 'Contacts' --values '[\"Jane Doe\", \"jane@company.com\", \"+1-555-0100\"]'`"
+  "Create a sheet: `gwsr sheets +append --spreadsheet-id SHEET_ID --range 'Contacts' --json-values '[\"Name\", \"Email\", \"Phone\"]'`",
+  "Append each contact row: `gwsr sheets +append --spreadsheet-id SHEET_ID --range 'Contacts' --json-values '[\"Jane Doe\", \"jane@company.com\", \"+1-555-0100\"]'`"
 ]
 
 [[recipes]]
@@ -392,7 +392,7 @@ description = "Read event data from a Google Sheets spreadsheet and create Googl
 category = "productivity"
 services = [ "sheets", "calendar" ]
 steps = [
-  "Read event data: `gwsr sheets +read --spreadsheet SHEET_ID --range \"Events!A2:D\"`",
+  "Read event data: `gwsr sheets +read --spreadsheet-id SHEET_ID --range \"Events!A2:D\"`",
   "For each row, create a calendar event: `gwsr calendar +insert --summary 'Team Standup' --start '2026-01-20T09:00:00' --end '2026-01-20T09:30:00' --attendee alice@company.com --attendee bob@company.com`"
 ]
 
@@ -430,7 +430,7 @@ services = [ "sheets", "drive" ]
 steps = [
   "Get spreadsheet details: `gwsr sheets spreadsheets get --params '{\"spreadsheetId\": \"SHEET_ID\"}'`",
   "Export as CSV: `gwsr drive files export --params '{\"fileId\": \"SHEET_ID\", \"mimeType\": \"text/csv\"}'`",
-  "Or read values directly: `gwsr sheets +read --spreadsheet SHEET_ID --range 'Sheet1' --format csv`"
+  "Or read values directly: `gwsr sheets +read --spreadsheet-id SHEET_ID --range 'Sheet1' --format csv`"
 ]
 
 [[recipes]]
@@ -453,8 +453,8 @@ description = "Read data from two tabs in a Google Sheet to compare and identify
 category = "productivity"
 services = [ "sheets" ]
 steps = [
-  "Read the first tab: `gwsr sheets +read --spreadsheet SHEET_ID --range \"January!A1:D\"`",
-  "Read the second tab: `gwsr sheets +read --spreadsheet SHEET_ID --range \"February!A1:D\"`",
+  "Read the first tab: `gwsr sheets +read --spreadsheet-id SHEET_ID --range \"January!A1:D\"`",
+  "Read the second tab: `gwsr sheets +read --spreadsheet-id SHEET_ID --range \"February!A1:D\"`",
   "Compare the data and identify changes"
 ]
 
@@ -477,9 +477,8 @@ description = "Find Gmail messages with a specific label and forward them to ano
 category = "productivity"
 services = [ "gmail" ]
 steps = [
-  "Find labeled messages: `gwsr gmail users messages list --params '{\"userId\": \"me\", \"q\": \"label:needs-review\"}' --format table`",
-  "Get message content: `gwsr gmail users messages get --params '{\"userId\": \"me\", \"id\": \"MSG_ID\"}'`",
-  "Forward via new email: `gwsr gmail +send --to manager@company.com --subject 'FW: [Original Subject]' --body 'Forwarding for your review:\n\n[Original Message Body]'`"
+  "Find labeled messages: `gwsr gmail +search --query 'label:needs-review' --format table`",
+  "Forward a message: `gwsr gmail +forward --message-id MSG_ID --to manager@company.com --body 'Forwarding for your review.'`"
 ]
 
 [[recipes]]
@@ -489,7 +488,7 @@ description = "Read data from a Google Sheet and create a formatted Google Docs 
 category = "productivity"
 services = [ "sheets", "docs", "drive" ]
 steps = [
-  "Read the data: `gwsr sheets +read --spreadsheet SHEET_ID --range \"Sales!A1:D\"`",
+  "Read the data: `gwsr sheets +read --spreadsheet-id SHEET_ID --range \"Sales!A1:D\"`",
   "Create the report doc: `gwsr docs documents create --json '{\"title\": \"Sales Report - January 2025\"}'`",
   "Write the report: `gwsr docs +write --document-id DOC_ID --text '## Sales Report - January 2025\n\n### Summary\nTotal deals: 45\nRevenue: $125,000\n\n### Top Deals\n1. Acme Corp - $25,000\n2. Widget Inc - $18,000'`",
   "Share with stakeholders: `gwsr drive permissions create --params '{\"fileId\": \"DOC_ID\"}' --json '{\"role\": \"reader\", \"type\": \"user\", \"emailAddress\": \"cfo@company.com\"}'`"

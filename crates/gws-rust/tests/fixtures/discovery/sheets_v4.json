@@ -1,0 +1,417 @@
+{
+ "_note": "Stripped Discovery document used only by the registry validation test. Regenerate from https://www.googleapis.com/discovery/v1/apis/sheets/v4/rest",
+ "name": "sheets",
+ "parameters": {
+  "$.xgafv": {
+   "location": "query",
+   "type": "string"
+  },
+  "access_token": {
+   "location": "query",
+   "type": "string"
+  },
+  "alt": {
+   "location": "query",
+   "type": "string"
+  },
+  "callback": {
+   "location": "query",
+   "type": "string"
+  },
+  "fields": {
+   "location": "query",
+   "type": "string"
+  },
+  "key": {
+   "location": "query",
+   "type": "string"
+  },
+  "oauth_token": {
+   "location": "query",
+   "type": "string"
+  },
+  "prettyPrint": {
+   "location": "query",
+   "type": "boolean"
+  },
+  "quotaUser": {
+   "location": "query",
+   "type": "string"
+  },
+  "uploadType": {
+   "location": "query",
+   "type": "string"
+  },
+  "upload_protocol": {
+   "location": "query",
+   "type": "string"
+  }
+ },
+ "resources": {
+  "spreadsheets": {
+   "methods": {
+    "batchUpdate": {
+     "httpMethod": "POST",
+     "id": "sheets.spreadsheets.batchUpdate",
+     "parameters": {
+      "spreadsheetId": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      }
+     },
+     "path": "v4/spreadsheets/{spreadsheetId}:batchUpdate",
+     "request": {
+      "$ref": "BatchUpdateSpreadsheetRequest"
+     }
+    },
+    "create": {
+     "httpMethod": "POST",
+     "id": "sheets.spreadsheets.create",
+     "path": "v4/spreadsheets",
+     "request": {
+      "$ref": "Spreadsheet"
+     }
+    },
+    "get": {
+     "httpMethod": "GET",
+     "id": "sheets.spreadsheets.get",
+     "parameters": {
+      "excludeTablesInBandedRanges": {
+       "location": "query",
+       "type": "boolean"
+      },
+      "includeGridData": {
+       "location": "query",
+       "type": "boolean"
+      },
+      "ranges": {
+       "location": "query",
+       "repeated": true,
+       "type": "string"
+      },
+      "spreadsheetId": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      }
+     },
+     "path": "v4/spreadsheets/{spreadsheetId}"
+    },
+    "getByDataFilter": {
+     "httpMethod": "POST",
+     "id": "sheets.spreadsheets.getByDataFilter",
+     "parameters": {
+      "spreadsheetId": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      }
+     },
+     "path": "v4/spreadsheets/{spreadsheetId}:getByDataFilter",
+     "request": {
+      "$ref": "GetSpreadsheetByDataFilterRequest"
+     }
+    }
+   },
+   "resources": {
+    "developerMetadata": {
+     "methods": {
+      "get": {
+       "httpMethod": "GET",
+       "id": "sheets.spreadsheets.developerMetadata.get",
+       "parameters": {
+        "metadataId": {
+         "location": "path",
+         "required": true,
+         "type": "integer"
+        },
+        "spreadsheetId": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        }
+       },
+       "path": "v4/spreadsheets/{spreadsheetId}/developerMetadata/{metadataId}"
+      },
+      "search": {
+       "httpMethod": "POST",
+       "id": "sheets.spreadsheets.developerMetadata.search",
+       "parameters": {
+        "spreadsheetId": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        }
+       },
+       "path": "v4/spreadsheets/{spreadsheetId}/developerMetadata:search",
+       "request": {
+        "$ref": "SearchDeveloperMetadataRequest"
+       }
+      }
+     }
+    },
+    "sheets": {
+     "methods": {
+      "copyTo": {
+       "httpMethod": "POST",
+       "id": "sheets.spreadsheets.sheets.copyTo",
+       "parameters": {
+        "sheetId": {
+         "location": "path",
+         "required": true,
+         "type": "integer"
+        },
+        "spreadsheetId": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        }
+       },
+       "path": "v4/spreadsheets/{spreadsheetId}/sheets/{sheetId}:copyTo",
+       "request": {
+        "$ref": "CopySheetToAnotherSpreadsheetRequest"
+       }
+      }
+     }
+    },
+    "values": {
+     "methods": {
+      "append": {
+       "httpMethod": "POST",
+       "id": "sheets.spreadsheets.values.append",
+       "parameters": {
+        "includeValuesInResponse": {
+         "location": "query",
+         "type": "boolean"
+        },
+        "insertDataOption": {
+         "location": "query",
+         "type": "string"
+        },
+        "range": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        },
+        "responseDateTimeRenderOption": {
+         "location": "query",
+         "type": "string"
+        },
+        "responseValueRenderOption": {
+         "location": "query",
+         "type": "string"
+        },
+        "spreadsheetId": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        },
+        "valueInputOption": {
+         "location": "query",
+         "type": "string"
+        }
+       },
+       "path": "v4/spreadsheets/{spreadsheetId}/values/{range}:append",
+       "request": {
+        "$ref": "ValueRange"
+       }
+      },
+      "batchClear": {
+       "httpMethod": "POST",
+       "id": "sheets.spreadsheets.values.batchClear",
+       "parameters": {
+        "spreadsheetId": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        }
+       },
+       "path": "v4/spreadsheets/{spreadsheetId}/values:batchClear",
+       "request": {
+        "$ref": "BatchClearValuesRequest"
+       }
+      },
+      "batchClearByDataFilter": {
+       "httpMethod": "POST",
+       "id": "sheets.spreadsheets.values.batchClearByDataFilter",
+       "parameters": {
+        "spreadsheetId": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        }
+       },
+       "path": "v4/spreadsheets/{spreadsheetId}/values:batchClearByDataFilter",
+       "request": {
+        "$ref": "BatchClearValuesByDataFilterRequest"
+       }
+      },
+      "batchGet": {
+       "httpMethod": "GET",
+       "id": "sheets.spreadsheets.values.batchGet",
+       "parameters": {
+        "dateTimeRenderOption": {
+         "location": "query",
+         "type": "string"
+        },
+        "majorDimension": {
+         "location": "query",
+         "type": "string"
+        },
+        "ranges": {
+         "location": "query",
+         "repeated": true,
+         "type": "string"
+        },
+        "spreadsheetId": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        },
+        "valueRenderOption": {
+         "location": "query",
+         "type": "string"
+        }
+       },
+       "path": "v4/spreadsheets/{spreadsheetId}/values:batchGet"
+      },
+      "batchGetByDataFilter": {
+       "httpMethod": "POST",
+       "id": "sheets.spreadsheets.values.batchGetByDataFilter",
+       "parameters": {
+        "spreadsheetId": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        }
+       },
+       "path": "v4/spreadsheets/{spreadsheetId}/values:batchGetByDataFilter",
+       "request": {
+        "$ref": "BatchGetValuesByDataFilterRequest"
+       }
+      },
+      "batchUpdate": {
+       "httpMethod": "POST",
+       "id": "sheets.spreadsheets.values.batchUpdate",
+       "parameters": {
+        "spreadsheetId": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        }
+       },
+       "path": "v4/spreadsheets/{spreadsheetId}/values:batchUpdate",
+       "request": {
+        "$ref": "BatchUpdateValuesRequest"
+       }
+      },
+      "batchUpdateByDataFilter": {
+       "httpMethod": "POST",
+       "id": "sheets.spreadsheets.values.batchUpdateByDataFilter",
+       "parameters": {
+        "spreadsheetId": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        }
+       },
+       "path": "v4/spreadsheets/{spreadsheetId}/values:batchUpdateByDataFilter",
+       "request": {
+        "$ref": "BatchUpdateValuesByDataFilterRequest"
+       }
+      },
+      "clear": {
+       "httpMethod": "POST",
+       "id": "sheets.spreadsheets.values.clear",
+       "parameters": {
+        "range": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        },
+        "spreadsheetId": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        }
+       },
+       "path": "v4/spreadsheets/{spreadsheetId}/values/{range}:clear",
+       "request": {
+        "$ref": "ClearValuesRequest"
+       }
+      },
+      "get": {
+       "httpMethod": "GET",
+       "id": "sheets.spreadsheets.values.get",
+       "parameters": {
+        "dateTimeRenderOption": {
+         "location": "query",
+         "type": "string"
+        },
+        "majorDimension": {
+         "location": "query",
+         "type": "string"
+        },
+        "range": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        },
+        "spreadsheetId": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        },
+        "valueRenderOption": {
+         "location": "query",
+         "type": "string"
+        }
+       },
+       "path": "v4/spreadsheets/{spreadsheetId}/values/{range}"
+      },
+      "update": {
+       "httpMethod": "PUT",
+       "id": "sheets.spreadsheets.values.update",
+       "parameters": {
+        "includeValuesInResponse": {
+         "location": "query",
+         "type": "boolean"
+        },
+        "range": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        },
+        "responseDateTimeRenderOption": {
+         "location": "query",
+         "type": "string"
+        },
+        "responseValueRenderOption": {
+         "location": "query",
+         "type": "string"
+        },
+        "spreadsheetId": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        },
+        "valueInputOption": {
+         "location": "query",
+         "type": "string"
+        }
+       },
+       "path": "v4/spreadsheets/{spreadsheetId}/values/{range}",
+       "request": {
+        "$ref": "ValueRange"
+       }
+      }
+     }
+    }
+   }
+  }
+ },
+ "rootUrl": "https://sheets.googleapis.com/",
+ "servicePath": "",
+ "version": "v4"
+}

@@ -37,6 +37,8 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::helpers::modelarmor::SanitizeMode;
+
 use serde::Deserialize;
 
 use crate::error::GwsError;
@@ -55,16 +57,6 @@ pub enum JsonStylePref {
     Compact,
     /// Always pretty.
     Pretty,
-}
-
-/// Model Armor sanitize mode.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum SanitizeModePref {
-    /// Annotate matches and continue.
-    #[default]
-    Warn,
-    /// Refuse to print matching content.
-    Block,
 }
 
 /// Raw contents of `config.toml`.
@@ -97,7 +89,7 @@ pub struct Settings {
     /// Default Model Armor template.
     pub sanitize_template: Option<String>,
     /// Model Armor mode.
-    pub sanitize_mode: SanitizeModePref,
+    pub sanitize_mode: SanitizeMode,
     /// HTTP request timeout in seconds (config only; `--timeout` and
     /// `GWSR_TIMEOUT` are resolved by the executor and take precedence).
     pub timeout_secs: Option<u64>,
@@ -132,10 +124,10 @@ fn parse_json_style(value: &str, source: &str) -> Result<JsonStylePref, GwsError
     }
 }
 
-fn parse_sanitize_mode(value: &str, source: &str) -> Result<SanitizeModePref, GwsError> {
+fn parse_sanitize_mode(value: &str, source: &str) -> Result<SanitizeMode, GwsError> {
     match value {
-        "warn" => Ok(SanitizeModePref::Warn),
-        "block" => Ok(SanitizeModePref::Block),
+        "warn" => Ok(SanitizeMode::Warn),
+        "block" => Ok(SanitizeMode::Block),
         other => Err(invalid(source, "sanitize_mode", other, "warn | block")),
     }
 }
@@ -206,7 +198,7 @@ pub fn resolve(
     let sanitize_mode = match (env("GWSR_SANITIZE_MODE"), &file.sanitize_mode) {
         (Some(v), _) => parse_sanitize_mode(&v, "GWSR_SANITIZE_MODE")?,
         (None, Some(v)) => parse_sanitize_mode(v, &origin)?,
-        (None, None) => SanitizeModePref::default(),
+        (None, None) => SanitizeMode::default(),
     };
     let log = file.log.clone();
     if let Some(directive) = &log {
@@ -333,7 +325,7 @@ log_file = "/tmp/logs"
         assert_eq!(s.json_style, JsonStylePref::Compact);
         assert_eq!(s.page_limit, Some(50));
         assert_eq!(s.page_delay_ms, Some(0));
-        assert_eq!(s.sanitize_mode, SanitizeModePref::Block);
+        assert_eq!(s.sanitize_mode, SanitizeMode::Block);
         assert_eq!(s.log.as_deref(), Some("gwsr=info"));
         assert_eq!(s.log_file, Some(PathBuf::from("/tmp/logs")));
     }
