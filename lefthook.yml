@@ -1,19 +1,32 @@
+# Git hooks (https://lefthook.dev). Installed by `pnpm install` via the root `prepare` script.
+# These mirror the CI gates in .github/workflows/ci.yml so a green hook means a green CI lint job.
+min_version: 2.1.14
+
 pre-commit:
-  parallel: false
-  commands:
-    fmt:
+  parallel: true
+  jobs:
+    - name: fmt
       glob: "*.rs"
-      run: cargo fmt -- --check
-    clippy:
+      run: cargo fmt --all -- --check
+    - name: clippy
       glob: "*.rs"
-      run: cargo clippy -- -D warnings
+      run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+    - name: shellcheck
+      glob: "*.sh"
+      run: shellcheck --severity=style {staged_files}
+    - name: actionlint
+      glob: ".github/workflows/*.{yml,yaml}"
+      run: actionlint {staged_files}
 
 pre-push:
   parallel: true
-  commands:
-    test:
+  jobs:
+    - name: test
       glob: "*.rs"
-      run: cargo test
-    check:
-      glob: "*.rs"
-      run: cargo check
+      run: cargo test --workspace --all-targets --all-features --locked
+    - name: deny
+      glob: "{Cargo.toml,Cargo.lock,crates/*/Cargo.toml,deny.toml}"
+      run: cargo deny --all-features --locked check
+    - name: js-test
+      glob: "{npm/**,scripts/**}"
+      run: pnpm test

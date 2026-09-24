@@ -1,0 +1,7 @@
+# pnpm settings for the repo-root dev tooling (changesets, lefthook).
+# lefthook's postinstall only runs `lefthook install`, which the root `prepare` script already does.
+allowBuilds:
+  lefthook: false
+
+# Refuse to resolve package versions published less than a day ago (supply-chain hygiene).
+minimumReleaseAge: 1440
