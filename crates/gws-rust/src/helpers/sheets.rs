@@ -229,6 +229,7 @@ TIPS:
                                 api.emit_text(m, csv.trim_end_matches('\n')).await?;
                             }
                             OutputTarget::File { path, overwrite } => {
+                                api.screen_text(&csv).await?;
                                 http::write_file_atomic(path, csv.as_bytes(), *overwrite)?;
                                 let rows = v
                                     .get("values")

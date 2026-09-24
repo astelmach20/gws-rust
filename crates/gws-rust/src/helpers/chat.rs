@@ -247,7 +247,14 @@ mod tests {
     fn space_name_normalizes_and_validates() {
         assert_eq!(space_name("AAA-1_b").unwrap(), "spaces/AAA-1_b");
         assert_eq!(space_name("spaces/AAA").unwrap(), "spaces/AAA");
-        for bad in ["", "spaces/", "../etc/passwd", "spaces/AAA?key=x", "spaces/A/B", "A%2F"] {
+        for bad in [
+            "",
+            "spaces/",
+            "../etc/passwd",
+            "spaces/AAA?key=x",
+            "spaces/A/B",
+            "A%2F",
+        ] {
             assert!(space_name(bad).is_err(), "{bad}");
         }
     }
@@ -265,7 +272,9 @@ mod tests {
         Mock::given(method("POST"))
             .and(path("/v1/spaces/AAA/messages"))
             .and(body_json(json!({"text": "hi"})))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"name": "spaces/AAA/messages/1"})))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(json!({"name": "spaces/AAA/messages/1"})),
+            )
             .expect(1)
             .mount(&server)
             .await;
@@ -277,9 +286,14 @@ mod tests {
     #[tokio::test]
     async fn send_thread_reply_sets_option() {
         let api = dry_api("");
-        send(&api, "spaces/A", "x", Some("spaces/A/threads/T")).await.unwrap();
+        send(&api, "spaces/A", "x", Some("spaces/A/threads/T"))
+            .await
+            .unwrap();
         let plan = api.planned();
-        assert_eq!(plan[0]["query"]["messageReplyOption"], "REPLY_MESSAGE_FALLBACK_TO_NEW_THREAD");
+        assert_eq!(
+            plan[0]["query"]["messageReplyOption"],
+            "REPLY_MESSAGE_FALLBACK_TO_NEW_THREAD"
+        );
         assert_eq!(plan[0]["body"]["thread"]["name"], "spaces/A/threads/T");
     }
 
@@ -304,6 +318,9 @@ mod tests {
     async fn spaces_filter() {
         let api = dry_api("");
         spaces(&api, Some("group-chat")).await.unwrap();
-        assert_eq!(api.planned()[0]["query"]["filter"], "spaceType = \"GROUP_CHAT\"");
+        assert_eq!(
+            api.planned()[0]["query"]["filter"],
+            "spaceType = \"GROUP_CHAT\""
+        );
     }
 }
