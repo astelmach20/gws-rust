@@ -191,6 +191,33 @@ fn every_registry_command_matches_the_real_command_tree() {
     );
 }
 
+/// Text that says "draft" must show a command that drafts: a send/reply/
+/// forward helper cited there without `--draft` would send the message.
+#[test]
+fn drafting_instructions_pass_draft() {
+    let mut failures = Vec::new();
+    for (file, src) in [("recipes.toml", RECIPES), ("personas.toml", PERSONAS)] {
+        let doc: toml::Value = toml::from_str(src).unwrap();
+        let mut texts = Vec::new();
+        strings(&doc, &mut texts);
+        for t in texts.iter().filter(|t| t.to_lowercase().contains("draft")) {
+            for c in commands_in(t) {
+                let sends = ["+send", "+reply", "+reply-all", "+forward"]
+                    .iter()
+                    .any(|h| c.split_whitespace().any(|w| w == *h));
+                if sends && !c.split_whitespace().any(|w| w == "--draft") {
+                    failures.push(format!("{file}: `{c}` in {t:?}"));
+                }
+            }
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "drafting text cites a sending command without --draft:\n{}",
+        failures.join("\n")
+    );
+}
+
 #[test]
 fn validator_rejects_known_bad_commands() {
     for bad in [
