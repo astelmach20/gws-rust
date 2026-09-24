@@ -27,7 +27,12 @@ fn loader(server: &MockServer, cache_root: Option<&std::path::Path>) -> Discover
     let mut loader = DiscoveryLoader {
         discovery_base: Some(Url::parse(&format!("{}/", server.uri())).unwrap()),
         ..DiscoveryLoader::default()
-    };
+    }
+    .with_retry_policy(crate::client::RetryPolicy {
+        max_attempts: 2,
+        base_delay: Duration::ZERO,
+        ..crate::client::RetryPolicy::default()
+    });
     if let Some(root) = cache_root {
         loader = loader.with_cache(DiscoveryCache::new(root));
     }
@@ -188,8 +193,8 @@ async fn tampered_cache_with_foreign_root_url_is_refetched() {
 #[tokio::test]
 async fn stale_cache_is_used_loudly_when_offline() {
     let server = MockServer::start().await;
-    mount(&server, PRIMARY, 503, "unavailable", 1).await;
-    mount(&server, ALT, 503, "unavailable", 1).await;
+    mount(&server, PRIMARY, 503, "unavailable", 2).await;
+    mount(&server, ALT, 503, "unavailable", 2).await;
     let tmp = tempfile::tempdir().unwrap();
     DiscoveryCache::new(tmp.path())
         .store("drive", "v3", DRIVE.as_bytes())
@@ -225,7 +230,8 @@ async fn stale_cache_is_refreshed_when_online() {
 #[tokio::test]
 async fn fetch_failure_without_cache_reports_every_attempt() {
     let server = MockServer::start().await;
-    mount(&server, PRIMARY, 500, "", 1).await;
+    // 5xx is retried (two attempts in the test policy); 404 is final.
+    mount(&server, PRIMARY, 500, "", 2).await;
     mount(&server, ALT, 404, "", 1).await;
     let err = loader(&server, None).load("drive", "v3").await.unwrap_err();
     match &err {

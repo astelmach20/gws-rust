@@ -104,6 +104,7 @@ pub struct DiscoveryLoader {
     cache: Option<DiscoveryCache>,
     api_base_override: Option<Url>,
     discovery_base: Option<Url>,
+    retry: Option<crate::client::RetryPolicy>,
 }
 
 impl DiscoveryLoader {
@@ -122,6 +123,13 @@ impl DiscoveryLoader {
     /// document endpoints (see [`crate::validate::api_base_override`]).
     pub fn with_api_base_override(mut self, base: Option<Url>) -> Self {
         self.api_base_override = base;
+        self
+    }
+
+    /// Retry policy for Discovery fetches. Defaults to the process-wide
+    /// [`crate::client::RetryPolicy`] with a 60-second response timeout.
+    pub fn with_retry_policy(mut self, policy: crate::client::RetryPolicy) -> Self {
+        self.retry = Some(policy);
         self
     }
 
@@ -284,24 +292,33 @@ impl DiscoveryLoader {
             version: version.to_string(),
             attempts,
         };
-        let client = crate::client::build_client().map_err(|e| fetch_error(vec![e.to_string()]))?;
+        let client =
+            crate::client::shared_client().map_err(|e| fetch_error(vec![e.to_string()]))?;
+        let policy = self
+            .retry
+            .clone()
+            .unwrap_or_else(|| crate::client::RetryPolicy {
+                response_timeout: Some(FETCH_TIMEOUT),
+                ..crate::client::RetryPolicy::default()
+            });
         let mut attempts = Vec::new();
         let mut all_not_found = true;
 
         for url in self.discovery_urls(service, version)? {
             tracing::debug!(%url, "Fetching Discovery Document");
-            let resp = match crate::client::send_with_retry(|| {
-                client.get(url.clone()).timeout(FETCH_TIMEOUT)
-            })
-            .await
-            {
-                Ok(resp) => resp,
-                Err(e) => {
-                    all_not_found = false;
-                    attempts.push(format!("{url}: {}", error_chain(&e)));
-                    continue;
-                }
-            };
+            let resp =
+                match crate::client::send(&policy, crate::client::Idempotency::FromMethod, || {
+                    client.get(url.clone()).timeout(FETCH_TIMEOUT)
+                })
+                .await
+                {
+                    Ok(sent) => sent.response,
+                    Err(e) => {
+                        all_not_found = false;
+                        attempts.push(format!("{url}: {}", error_chain(&e)));
+                        continue;
+                    }
+                };
             let status = resp.status();
             if status == reqwest::StatusCode::NOT_FOUND {
                 attempts.push(format!("{url}: HTTP 404"));
