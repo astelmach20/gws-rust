@@ -63,7 +63,7 @@ fn value_args(cmd: Command) -> Command {
     .arg(
         Arg::new("csv-file")
             .long("csv-file")
-            .help("Import rows from a CSV file under the current directory, or '-' for stdin")
+            .help("Import rows from a CSV file, or '-' for stdin")
             .value_name("PATH"),
     )
     .group(
@@ -109,7 +109,7 @@ TIPS:
                     Arg::new("output")
                         .long("output")
                         .short('o')
-                        .help("Write the values as CSV to this path (under the current directory), or '-' for stdout")
+                        .help("Write the values as CSV to this path, or '-' for stdout")
                         .value_name("PATH"),
                 )
                 .arg(

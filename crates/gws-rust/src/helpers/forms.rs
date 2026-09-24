@@ -51,7 +51,7 @@ impl Helper for FormsHelper {
                     Arg::new("output")
                         .long("output")
                         .short('o')
-                        .help("Write CSV to this path (under the current directory), or '-' for CSV on stdout")
+                        .help("Write CSV to this path, or '-' for CSV on stdout")
                         .value_name("PATH"),
                 )
                 .arg(

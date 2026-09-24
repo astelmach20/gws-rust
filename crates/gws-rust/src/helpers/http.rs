@@ -205,7 +205,8 @@ pub(crate) enum OutputTarget {
 
 impl OutputTarget {
     /// Parse an `--output` value (`-` means stdout). File paths are validated
-    /// to stay under the current directory.
+    /// by the `GWSR_RESTRICT_PATHS` policy (any path by default; `cwd` confines
+    /// them to the current directory).
     pub fn parse(value: &str, overwrite: bool) -> Result<Self, GwsError> {
         if value == "-" {
             return Ok(Self::Stdout);

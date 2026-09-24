@@ -57,7 +57,7 @@ impl Helper for ScriptHelper {
             Command::new("+push")
                 .about("[Helper] Replace a project's files with local files")
                 .arg(script_id_arg())
-                .arg(dir_arg("Directory with the script files (under the current directory)"))
+                .arg(dir_arg("Directory with the script files"))
                 .after_help(
                     "\
 EXAMPLES:
@@ -76,7 +76,7 @@ TIPS:
             Command::new("+pull")
                 .about("[Helper] Download a project's files into a local directory")
                 .arg(script_id_arg())
-                .arg(dir_arg("Destination directory (under the current directory; created if missing)"))
+                .arg(dir_arg("Destination directory (created if missing)"))
                 .arg(
                     Arg::new("overwrite")
                         .long("overwrite")
