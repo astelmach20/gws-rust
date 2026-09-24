@@ -32,28 +32,97 @@ use super::transport::next_chunk;
 use crate::discovery::{JsonSchemaProperty, RestDescription, RestMethod};
 use crate::error::GwsError;
 
-/// Where binary output goes.
+/// Where `-o/--output` sends a response payload.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum BinaryTarget {
+pub enum OutputTarget {
+    /// Write atomically to this file and print a JSON summary.
     File(PathBuf),
+    /// `-o -`: stream the raw payload to stdout (explicit opt-in to non-JSON stdout).
     Stdout,
 }
 
-/// Decide where a binary response goes: `-o` when given; stdout when it is
-/// not a terminal; otherwise refuse (binary on a terminal is never useful).
-pub(crate) fn binary_target(
-    output: Option<&Path>,
-    stdout_is_terminal: bool,
+/// Largest non-JSON text body that is inlined into the JSON output.
+pub(crate) const MAX_INLINE_TEXT: usize = 16 * 1024 * 1024;
+
+/// Whether a content type is text that can be inlined as a JSON string.
+pub(crate) fn is_textual(content_type: &str) -> bool {
+    let ct = content_type.to_ascii_lowercase();
+    let essence = ct.split(';').next().unwrap_or("").trim();
+    essence.starts_with("text/")
+        || essence.ends_with("+json")
+        || essence.ends_with("+xml")
+        || matches!(
+            essence,
+            "application/xml"
+                | "application/javascript"
+                | "application/x-www-form-urlencoded"
+                | "application/vnd.google-apps.script+json"
+        )
+}
+
+/// JSON document describing a non-JSON text body.
+pub(crate) fn wrap_text(status: u16, content_type: &str, raw: &[u8]) -> Result<Value, GwsError> {
+    let text = std::str::from_utf8(raw).map_err(|_| {
+        GwsError::Validation(format!(
+            "The response ({content_type}, {} bytes) is not UTF-8 text. Pass -o PATH to save it \
+             or -o - to stream the raw bytes to stdout.",
+            raw.len()
+        ))
+    })?;
+    Ok(json!({
+        "status": "success",
+        "httpStatus": status,
+        "contentType": content_type,
+        "bytes": raw.len(),
+        "body": text,
+    }))
+}
+
+/// Handle a non-JSON response: stream it to `target`, or inline it as a
+/// JSON string when it is text and no target was given. Binary bodies without
+/// a target are an error, so stdout stays JSON.
+pub(crate) async fn deliver_non_json(
+    response: reqwest::Response,
     content_type: &str,
-) -> Result<BinaryTarget, GwsError> {
-    match output {
-        Some(p) => Ok(BinaryTarget::File(p.to_path_buf())),
-        None if !stdout_is_terminal => Ok(BinaryTarget::Stdout),
-        None => Err(GwsError::Validation(format!(
-            "The response is binary ({content_type}). Pass -o/--output <PATH> to save it, \
-             or redirect stdout to a file or pipe."
-        ))),
+    target: Option<&OutputTarget>,
+    idle: Option<Duration>,
+    emitter: &Emitter,
+) -> Result<Option<Value>, GwsError> {
+    if let Some(t) = target {
+        return stream_binary(response, content_type, t, idle, emitter).await;
     }
+    let status = response.status().as_u16();
+    if !is_textual(content_type) {
+        let size = response
+            .content_length()
+            .map(|n| format!(", {n} bytes"))
+            .unwrap_or_default();
+        return Err(GwsError::Validation(format!(
+            "The response is binary ({content_type}{size}). Pass -o PATH to save it, \
+             or -o - to stream the raw bytes to stdout."
+        )));
+    }
+    let raw = read_limited(response, idle, MAX_INLINE_TEXT).await?;
+    wrap_text(status, content_type, &raw).map(Some)
+}
+
+async fn read_limited(
+    response: reqwest::Response,
+    idle: Option<Duration>,
+    max: usize,
+) -> Result<Vec<u8>, GwsError> {
+    let mut stream = response.bytes_stream();
+    let mut body = Vec::new();
+    while let Some(chunk) = next_chunk(&mut stream, idle).await? {
+        if body.len() + chunk.len() > max {
+            return Err(GwsError::Validation(format!(
+                "The text response is larger than {} MiB; pass -o PATH to save it",
+                max / (1024 * 1024)
+            )));
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
 }
 
 struct AtomicFile {
@@ -127,7 +196,7 @@ pub(crate) async fn write_file_atomic(path: &Path, data: &[u8]) -> Result<(), Gw
 pub(crate) async fn stream_binary(
     response: reqwest::Response,
     content_type: &str,
-    target: &BinaryTarget,
+    target: &OutputTarget,
     idle: Option<Duration>,
     emitter: &Emitter,
 ) -> Result<Option<Value>, GwsError> {
@@ -136,7 +205,7 @@ pub(crate) async fn stream_binary(
     let mut total: u64 = 0;
 
     match target {
-        BinaryTarget::Stdout => {
+        OutputTarget::Stdout => {
             while let Some(chunk) = next_chunk(&mut stream, idle).await? {
                 emitter.bytes(&chunk).await?;
                 total += chunk.len() as u64;
@@ -145,7 +214,7 @@ pub(crate) async fn stream_binary(
             check_length(expected, total)?;
             Ok(None)
         }
-        BinaryTarget::File(path) => {
+        OutputTarget::File(path) => {
             let mut file = AtomicFile::create(path)?;
             while let Some(chunk) = next_chunk(&mut stream, idle).await? {
                 file.write(&chunk).await?;
@@ -218,14 +287,41 @@ fn byte_fields(doc: &RestDescription, method: &RestMethod) -> Vec<String> {
     fields
 }
 
-/// Save a JSON response to `path`.
+/// The base64 payload of a JSON response, decoded.
 ///
-/// * `decode_field` given: that (dotted) field must hold base64 data, which is
-///   decoded and written as raw bytes.
+/// * `decode_field` given: that (dotted) field must hold base64 data.
 /// * Otherwise, if the response schema has exactly one top-level
 ///   `format: byte` field and it is present (e.g. gmail `attachments.get`
 ///   `data`), it is decoded automatically.
-/// * Otherwise the JSON document itself is written.
+/// * Otherwise `None`: the JSON document itself is the payload.
+pub(crate) fn decoded_payload(
+    doc: &RestDescription,
+    method: &RestMethod,
+    value: &Value,
+    decode_field: Option<&str>,
+) -> Result<Option<(String, Vec<u8>)>, GwsError> {
+    let auto = byte_fields(doc, method);
+    let field = match decode_field {
+        Some(f) => f.to_string(),
+        None => match auto.as_slice() {
+            [only] if value.get(only).is_some_and(Value::is_string) => only.clone(),
+            _ => return Ok(None),
+        },
+    };
+    let text = lookup_path(value, &field)
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            GwsError::Validation(format!(
+                "--decode-field '{field}' is not a string field of the response"
+            ))
+        })?;
+    let bytes = decode_base64(text)
+        .map_err(|e| GwsError::Validation(format!("--decode-field '{field}': {e}")))?;
+    Ok(Some((field, bytes)))
+}
+
+/// Save a JSON response to `path`: the decoded payload when there is one
+/// (see [`decoded_payload`]), otherwise the pretty-printed JSON document.
 pub(crate) async fn save_json_response(
     doc: &RestDescription,
     method: &RestMethod,
@@ -233,28 +329,8 @@ pub(crate) async fn save_json_response(
     path: &Path,
     decode_field: Option<&str>,
 ) -> Result<Value, GwsError> {
-    let auto = byte_fields(doc, method);
-    let field = match decode_field {
-        Some(f) => Some(f.to_string()),
-        None => match auto.as_slice() {
-            [only] if value.get(only).is_some_and(Value::is_string) => Some(only.clone()),
-            _ => None,
-        },
-    };
-
-    let (bytes, decoded_from) = match &field {
-        Some(f) => {
-            let text = lookup_path(value, f)
-                .and_then(Value::as_str)
-                .ok_or_else(|| {
-                    GwsError::Validation(format!(
-                        "--decode-field '{f}' is not a string field of the response"
-                    ))
-                })?;
-            let bytes = decode_base64(text)
-                .map_err(|e| GwsError::Validation(format!("--decode-field '{f}': {e}")))?;
-            (bytes, Some(f.clone()))
-        }
+    let (bytes, decoded_from) = match decoded_payload(doc, method, value, decode_field)? {
+        Some((field, bytes)) => (bytes, Some(field)),
         None => {
             let mut text = serde_json::to_vec_pretty(value)
                 .map_err(|e| other(anyhow::anyhow!("failed to serialize response: {e}")))?;
@@ -262,7 +338,6 @@ pub(crate) async fn save_json_response(
             (text, None)
         }
     };
-
     write_file_atomic(path, &bytes).await?;
     let mut summary = json!({
         "status": "success",
@@ -282,18 +357,17 @@ mod tests {
     use std::collections::HashMap;
 
     #[test]
-    fn target_selection() {
-        let p = Path::new("out.bin");
-        assert_eq!(
-            binary_target(Some(p), true, "x").unwrap(),
-            BinaryTarget::File(p.to_path_buf())
-        );
-        assert_eq!(
-            binary_target(None, false, "x").unwrap(),
-            BinaryTarget::Stdout
-        );
-        let err = binary_target(None, true, "application/pdf").unwrap_err();
-        assert!(err.to_string().contains("-o/--output"));
+    fn textual_detection_and_wrapping() {
+        assert!(is_textual("text/csv; charset=utf-8"));
+        assert!(is_textual("application/vnd.google-apps.script+json"));
+        assert!(is_textual("application/xml"));
+        assert!(!is_textual("application/pdf"));
+        assert!(!is_textual("image/png"));
+        let v = wrap_text(200, "text/plain", b"a\x1b[31mb").unwrap();
+        // Control characters stay inside a JSON string, escaped on output.
+        assert!(serde_json::to_string(&v).unwrap().contains("\\u001b"));
+        assert_eq!(v["bytes"], 7);
+        assert!(wrap_text(200, "text/plain", &[0xff, 0xfe]).is_err());
     }
 
     #[test]

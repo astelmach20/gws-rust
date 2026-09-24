@@ -284,7 +284,6 @@ fn options(server: &MockServer) -> ExecOptions {
         allow_unknown_fields: false,
         assume_yes: false,
         confirm: ConfirmPolicy::Interactive,
-        stdout_is_terminal: false,
         interactive: false,
     }
 }
@@ -310,7 +309,7 @@ struct Call<'a> {
     body: Option<Value>,
     credentials: Credentials,
     upload: Option<UploadSource<'a>>,
-    output: Option<std::path::PathBuf>,
+    output: Option<OutputTarget>,
     pagination: PaginationConfig,
     options: ExecOptions,
 }
@@ -339,7 +338,7 @@ impl<'a> Call<'a> {
                 body: self.body,
                 credentials: self.credentials,
                 upload: self.upload,
-                output_path: self.output,
+                output: self.output,
                 pagination: self.pagination,
                 sanitize: SanitizeConfig::default(),
                 format: OutputFormat::Json,
@@ -920,7 +919,7 @@ async fn upload_session_uri_on_foreign_host_is_refused() {
 // ── Downloads ───────────────────────────────────────────────────────────
 
 #[tokio::test]
-async fn binary_download_streams_to_stdout_when_piped() {
+async fn binary_download_streams_to_stdout_only_with_dash_output() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/drive/v3/files/1"))
@@ -932,13 +931,14 @@ async fn binary_download_streams_to_stdout_when_piped() {
     let d = doc(&server.uri());
     let mut call = Call::new(&d, "get", &server);
     call.params = json!({"fileId": "1"});
+    call.output = Some(OutputTarget::Stdout);
     let em = Emitter::capturing();
     call.run(&em).await.unwrap();
     assert_eq!(em.captured_bytes(), b"%PDF-bytes");
 }
 
 #[tokio::test]
-async fn binary_download_on_terminal_requires_output() {
+async fn binary_download_without_output_is_a_json_error() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .respond_with(ResponseTemplate::new(200).set_body_raw(b"x".to_vec(), "image/png"))
@@ -947,9 +947,29 @@ async fn binary_download_on_terminal_requires_output() {
     let d = doc(&server.uri());
     let mut call = Call::new(&d, "get", &server);
     call.params = json!({"fileId": "1"});
-    call.options.stdout_is_terminal = true;
-    let err = call.run(&Emitter::capturing()).await.unwrap_err();
-    assert!(err.to_string().contains("-o/--output"));
+    let em = Emitter::capturing();
+    let err = call.run(&em).await.unwrap_err();
+    assert!(err.to_string().contains("-o PATH"), "{err}");
+    assert!(em.captured_bytes().is_empty(), "nothing raw on stdout");
+}
+
+#[tokio::test]
+async fn text_response_is_wrapped_in_json() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(b"a,b\n1,2\n".to_vec(), "text/csv"))
+        .mount(&server)
+        .await;
+    let d = doc(&server.uri());
+    let mut call = Call::new(&d, "get", &server);
+    call.params = json!({"fileId": "1"});
+    let em = Emitter::capturing();
+    call.run(&em).await.unwrap();
+    let out = lines(&em);
+    assert_eq!(out.len(), 1);
+    assert_eq!(out[0]["contentType"], "text/csv");
+    assert_eq!(out[0]["body"], "a,b\n1,2\n");
+    assert_eq!(out[0]["bytes"], 8);
 }
 
 #[tokio::test]
@@ -964,7 +984,7 @@ async fn binary_download_to_file_is_atomic() {
     let d = doc(&server.uri());
     let mut call = Call::new(&d, "get", &server);
     call.params = json!({"fileId": "1"});
-    call.output = Some(out.clone());
+    call.output = Some(OutputTarget::File(out.clone()));
     let em = Emitter::capturing();
     call.run(&em).await.unwrap();
     assert_eq!(std::fs::read(&out).unwrap(), b"content");
@@ -989,7 +1009,7 @@ async fn json_output_decodes_base64_attachment() {
     let d = doc(&server.uri());
     let mut call = Call::new(&d, "attachment", &server);
     call.params = json!({"id": "a1"});
-    call.output = Some(out.clone());
+    call.output = Some(OutputTarget::File(out.clone()));
     call.run(&Emitter::capturing()).await.unwrap();
     assert_eq!(std::fs::read(&out).unwrap(), b"hi?");
 }
@@ -1030,7 +1050,7 @@ async fn download_operation_is_waited_on_and_followed() {
     let d = doc(&server.uri());
     let mut call = Call::new(&d, "download", &server);
     call.params = json!({"fileId": "f1"});
-    call.output = Some(out.clone());
+    call.output = Some(OutputTarget::File(out.clone()));
     call.options.wait = Some(WaitConfig {
         timeout: Duration::from_secs(5),
         initial_interval: Duration::from_millis(1),

@@ -41,7 +41,6 @@ mod url;
 #[cfg(test)]
 mod tests;
 
-use std::io::IsTerminal;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -50,6 +49,7 @@ use serde_json::{Map, Value, json};
 
 use gws_rust_core::client::{EndpointPolicy, Idempotency, RetryPolicy, Sent};
 
+pub use download::OutputTarget;
 pub use errors::extract_enable_url;
 pub use operation::WaitConfig;
 pub use safety::ConfirmPolicy;
@@ -157,8 +157,6 @@ pub struct ExecOptions {
     /// `--yes`: skip the destructive-operation confirmation.
     pub assume_yes: bool,
     pub confirm: ConfirmPolicy,
-    /// Whether stdout is a terminal (binary output is refused on a terminal).
-    pub stdout_is_terminal: bool,
     /// Whether a human can answer a confirmation prompt.
     pub interactive: bool,
 }
@@ -182,7 +180,6 @@ impl ExecOptions {
             allow_unknown_fields: false,
             assume_yes: false,
             confirm: ConfirmPolicy::from_env()?,
-            stdout_is_terminal: std::io::stdout().is_terminal(),
             interactive: safety::is_interactive(),
         })
     }
@@ -200,7 +197,8 @@ pub struct Invocation<'a> {
     pub body: Option<Value>,
     pub credentials: Credentials,
     pub upload: Option<UploadSource<'a>>,
-    pub output_path: Option<PathBuf>,
+    /// `-o/--output`: where to put the response payload.
+    pub output: Option<OutputTarget>,
     pub pagination: PaginationConfig,
     pub sanitize: SanitizeConfig,
     pub format: OutputFormat,
@@ -243,7 +241,7 @@ pub async fn execute_method(
         body: input::parse_body(body_json)?,
         credentials,
         upload,
-        output_path: output_path.map(PathBuf::from),
+        output: output_path.map(|p| OutputTarget::File(PathBuf::from(p))),
         pagination: pagination.clone(),
         sanitize: SanitizeConfig {
             template: sanitize_template.map(str::to_string),
@@ -421,7 +419,7 @@ pub(crate) async fn execute_to(
         mut body,
         credentials,
         upload,
-        output_path,
+        output,
         pagination,
         sanitize,
         format,
@@ -437,7 +435,7 @@ pub(crate) async fn execute_to(
             "--page-all: {method_id} does not paginate (it has no pageToken parameter)"
         )));
     }
-    if page_all && output_path.is_some() {
+    if page_all && output.is_some() {
         return Err(GwsError::Validation(
             "--output cannot be combined with --page-all; redirect stdout instead".to_string(),
         ));
@@ -588,15 +586,10 @@ pub(crate) async fn execute_to(
         let is_json =
             content_type.contains("application/json") || content_type.contains("text/json");
         if !is_json && !content_type.is_empty() {
-            let target = download::binary_target(
-                output_path.as_deref(),
-                options.stdout_is_terminal,
-                &content_type,
-            )?;
-            if let Some(summary) = download::stream_binary(
+            if let Some(summary) = download::deliver_non_json(
                 sent.response,
                 &content_type,
-                &target,
+                output.as_ref(),
                 options.idle_timeout(),
                 emitter,
             )
@@ -621,13 +614,18 @@ pub(crate) async fn execute_to(
                 )));
             }
             Err(_) => {
-                // No content type and not JSON: pass the payload through untouched.
-                match &output_path {
-                    Some(path) => {
+                // No content type and not JSON: save/stream it when asked,
+                // otherwise wrap it as a JSON string (never raw on stdout).
+                match &output {
+                    Some(OutputTarget::File(path)) => {
                         download::write_file_atomic(path, &raw).await?;
                         out.single(json!({"status": "success", "saved_file": path.display().to_string(), "bytes": raw.len()}))?;
                     }
-                    None => emitter.bytes(&raw).await?,
+                    Some(OutputTarget::Stdout) => {
+                        emitter.bytes(&raw).await?;
+                        emitter.flush().await?;
+                    }
+                    None => out.single(download::wrap_text(status.as_u16(), "(none)", &raw)?)?,
                 }
                 break;
             }
@@ -639,7 +637,7 @@ pub(crate) async fn execute_to(
         }
 
         // Long-running operations.
-        let auto_wait = output_path.is_some() && operation::is_operation(&value);
+        let auto_wait = output.is_some() && operation::is_operation(&value);
         if operation::is_operation(&value) && (options.wait.is_some() || auto_wait) {
             let cfg = options.wait.clone().unwrap_or_default();
             let done = operation::wait(&transport, doc, value, &cfg).await?;
@@ -667,15 +665,10 @@ pub(crate) async fn execute_to(
                     .and_then(|v| v.to_str().ok())
                     .unwrap_or("application/octet-stream")
                     .to_string();
-                let target = download::binary_target(
-                    output_path.as_deref(),
-                    options.stdout_is_terminal,
-                    &ct,
-                )?;
-                if let Some(summary) = download::stream_binary(
+                if let Some(summary) = download::deliver_non_json(
                     dl.response,
                     &ct,
-                    &target,
+                    output.as_ref(),
                     options.idle_timeout(),
                     emitter,
                 )
@@ -687,17 +680,31 @@ pub(crate) async fn execute_to(
             }
         }
 
-        if let Some(path) = &output_path {
-            let summary = download::save_json_response(
-                doc,
-                method,
-                &value,
-                path,
-                options.decode_field.as_deref(),
-            )
-            .await?;
-            out.single(summary)?;
-            break;
+        match &output {
+            Some(OutputTarget::File(path)) => {
+                let summary = download::save_json_response(
+                    doc,
+                    method,
+                    &value,
+                    path,
+                    options.decode_field.as_deref(),
+                )
+                .await?;
+                out.single(summary)?;
+                break;
+            }
+            Some(OutputTarget::Stdout) => {
+                // `-o -` with a base64 payload streams the decoded bytes;
+                // otherwise the JSON is printed as usual.
+                if let Some((_, bytes)) =
+                    download::decoded_payload(doc, method, &value, options.decode_field.as_deref())?
+                {
+                    emitter.bytes(&bytes).await?;
+                    emitter.flush().await?;
+                    break;
+                }
+            }
+            None => {}
         }
 
         let next = pagination::next_token(&value).map(str::to_string);

@@ -17,15 +17,14 @@
 //!
 //! The flag definitions live in `commands.rs`; the ids used here must match.
 
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
 use serde_json::Value;
 
 use super::{
-    Credentials, ExecOptions, Invocation, ItemsMode, PaginationConfig, UploadMode, UploadSource,
-    WaitConfig, execute, input,
+    Credentials, ExecOptions, Invocation, ItemsMode, OutputTarget, PaginationConfig, UploadMode,
+    UploadSource, WaitConfig, execute, input,
 };
 use crate::discovery::{RestDescription, RestMethod};
 use crate::error::GwsError;
@@ -167,9 +166,14 @@ pub async fn run_from_matches(
     let upload_path = get_string(m, "upload")?
         .map(|p| crate::validate::validate_safe_file_path(p, "--upload"))
         .transpose()?;
-    let output_path: Option<PathBuf> = get_string(m, "output")?
-        .map(|p| crate::validate::validate_safe_file_path(p, "--output"))
-        .transpose()?;
+    // `-o -` streams the raw payload to stdout; anything else is a file.
+    let output: Option<OutputTarget> = match get_string(m, "output")? {
+        Some("-") => Some(OutputTarget::Stdout),
+        Some(p) => Some(OutputTarget::File(
+            crate::validate::validate_safe_file_path(p, "--output")?,
+        )),
+        None => None,
+    };
     let upload_path_str = upload_path
         .as_deref()
         .map(|p| {
@@ -185,7 +189,7 @@ pub async fn run_from_matches(
     });
 
     let options = parse_exec_options(m)?;
-    if options.decode_field.is_some() && output_path.is_none() {
+    if options.decode_field.is_some() && output.is_none() {
         return Err(GwsError::Validation(
             "--decode-field requires -o/--output".to_string(),
         ));
@@ -204,7 +208,7 @@ pub async fn run_from_matches(
         body,
         credentials,
         upload,
-        output_path,
+        output,
         pagination: parse_pagination_config(m)?,
         sanitize: sanitize.clone(),
         format: format.clone(),
