@@ -12,146 +12,530 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Structured error types and CLI error output.
+//! Structured error types and CLI error reporting.
 //!
 //! Core error types are re-exported from the `gws_rust_core` library crate.
-//! CLI-specific error formatting (colored terminal output) is defined here.
+//!
+//! # Error output contract
+//!
+//! * **stderr** always receives a human-readable error (`error[kind]: …`),
+//!   followed by `hint:` lines when the failure has a known remedy. Colour is
+//!   used only when stderr is a terminal and `NO_COLOR` is unset.
+//! * **stdout** receives a single-line JSON envelope only when stdout is *not*
+//!   a terminal (piped or redirected), so scripts and agents can parse it:
+//!   `{"error":{"code":403,"message":"…","reason":"…","retryable":false,"hint":"…"}}`.
+//!   `hint` and `enable_url` are present only when known. On a terminal
+//!   nothing is written to stdout, so the error is never shown twice.
+//! * The process exit code identifies the error class (see
+//!   [`EXIT_CODE_DOCUMENTATION`]).
+
+use std::sync::Mutex;
+
+use serde_json::{Value, json};
 
 pub use gws_rust_core::error::*;
 
 use crate::output::{colorize, sanitize_for_terminal};
 
+/// Exit code for API errors that are safe to retry (HTTP 429, 5xx, or a
+/// 403 rate-limit reason). Mirrors `GwsError::EXIT_CODE_API_RETRYABLE` in core.
+pub const EXIT_CODE_API_RETRYABLE: i32 = 6;
+
 /// Human-readable exit code table, keyed by (code, description).
 ///
-/// Used by `print_usage()` so the help text stays in sync with the
-/// constants defined below without requiring manual updates in two places.
+/// Rendered into the top-level `--help` so the documentation cannot drift
+/// from the constants.
 pub const EXIT_CODE_DOCUMENTATION: &[(i32, &str)] = &[
     (0, "Success"),
     (
         GwsError::EXIT_CODE_API,
-        "API error  — Google returned an error response",
+        "API error      — Google rejected the request (permanent; do not retry unchanged)",
     ),
     (
         GwsError::EXIT_CODE_AUTH,
-        "Auth error — credentials missing or invalid",
+        "Auth error     — credentials missing, expired or invalid",
     ),
     (
         GwsError::EXIT_CODE_VALIDATION,
-        "Validation — bad arguments or input",
+        "Validation     — bad arguments, flags, config or input",
     ),
     (
         GwsError::EXIT_CODE_DISCOVERY,
-        "Discovery  — could not fetch API schema",
+        "Discovery      — could not fetch or parse the API schema",
     ),
-    (GwsError::EXIT_CODE_OTHER, "Internal   — unexpected failure"),
+    (
+        GwsError::EXIT_CODE_OTHER,
+        "Internal       — unexpected failure (I/O, serialization, ...)",
+    ),
+    (
+        EXIT_CODE_API_RETRYABLE,
+        "API retryable  — rate limit (429/403 rateLimitExceeded) or server error (5xx); retry with backoff",
+    ),
 ];
 
-/// Format a colored error label for the given error variant.
-fn error_label(err: &GwsError) -> String {
-    match err {
-        GwsError::Api { .. } => colorize("error[api]:", "31"), // red
-        GwsError::Auth(_) => colorize("error[auth]:", "31"),   // red
-        GwsError::Validation(_) => colorize("error[validation]:", "33"), // yellow
-        GwsError::Discovery(_) => colorize("error[discovery]:", "31"), // red
-        GwsError::Other(_) => colorize("error:", "31"),        // red
+/// Any failure that ends a `gwsr` invocation.
+#[derive(Debug)]
+pub enum CliError {
+    /// A domain error from the library, helpers or executor.
+    Gws(GwsError),
+    /// An argument-parsing error from clap (already carries usage and tips).
+    Clap(clap::Error),
+}
+
+impl From<GwsError> for CliError {
+    fn from(e: GwsError) -> Self {
+        CliError::Gws(e)
     }
 }
 
-/// Formats any error as a JSON object and prints to stdout.
-///
-/// A human-readable colored label is printed to stderr when connected to a
-/// TTY. For `accessNotConfigured` errors (HTTP 403, reason
-/// `accessNotConfigured`), additional guidance is printed to stderr.
-/// The JSON output on stdout is unchanged (machine-readable).
-pub fn print_error_json(err: &GwsError) {
-    let json = err.to_json();
-    println!(
-        "{}",
-        serde_json::to_string_pretty(&json).unwrap_or_default()
-    );
-
-    // Print a colored summary to stderr. For accessNotConfigured errors,
-    // print specialized guidance instead of the generic message to avoid
-    // redundant output (the full API error already appears in the JSON).
-    if let GwsError::Api {
-        reason, enable_url, ..
-    } = err
-        && reason == "accessNotConfigured"
-    {
-        eprintln!();
-        let hint = colorize("hint:", "36"); // cyan
-        eprintln!(
-            "{} {hint} API not enabled for your GCP project.",
-            error_label(err)
-        );
-        if let Some(url) = enable_url {
-            eprintln!("      Enable it at: {url}");
-        } else {
-            eprintln!(
-                "      Visit the GCP Console → APIs & Services → Library to enable the required API."
-            );
-        }
-        eprintln!("      After enabling, wait a few seconds and retry your command.");
-        return;
+impl From<clap::Error> for CliError {
+    fn from(e: clap::Error) -> Self {
+        CliError::Clap(e)
     }
-    eprintln!(
-        "{} {}",
-        error_label(err),
-        sanitize_for_terminal(&err.to_string())
-    );
+}
+
+impl CliError {
+    /// Stable process exit code.
+    pub fn exit_code(&self) -> i32 {
+        match self {
+            CliError::Clap(_) => GwsError::EXIT_CODE_VALIDATION,
+            CliError::Gws(e) if is_retryable(e) => EXIT_CODE_API_RETRYABLE,
+            CliError::Gws(e) => e.exit_code(),
+        }
+    }
+}
+
+/// Reasons Google uses for rate limiting (retryable).
+const RATE_LIMIT_REASONS: &[&str] = &[
+    "rateLimitExceeded",
+    "userRateLimitExceeded",
+    "RATE_LIMIT_EXCEEDED",
+];
+
+/// True for API failures that a caller may retry unchanged after a backoff:
+/// HTTP 429, any 5xx, and 403 rate-limit reasons.
+pub fn is_retryable(err: &GwsError) -> bool {
+    match err {
+        GwsError::Api { code, reason, .. } => {
+            *code == 429 || *code >= 500 || RATE_LIMIT_REASONS.contains(&reason.as_str())
+        }
+        #[allow(unreachable_patterns)] // GwsError is #[non_exhaustive] in core
+        _ => false,
+    }
+}
+
+/// Facts about the command that failed, used to make hints specific.
+#[derive(Debug, Clone, Default)]
+pub struct ErrorContext {
+    /// Service alias the user typed (e.g. `gmail`).
+    pub service: Option<String>,
+    /// OAuth scopes the called method accepts (any one suffices).
+    pub required_scopes: Vec<String>,
+    /// Scopes the active credentials were granted, when known.
+    pub granted_scopes: Option<Vec<String>>,
+}
+
+static CONTEXT: Mutex<Option<ErrorContext>> = Mutex::new(None);
+
+/// Record context for error hints. Called by `main` once the target
+/// service/method is known.
+pub fn set_context(ctx: ErrorContext) {
+    let mut guard = CONTEXT
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    *guard = Some(ctx);
+}
+
+fn current_context() -> ErrorContext {
+    CONTEXT
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone()
+        .unwrap_or_default()
+}
+
+/// Google reasons that mean the token lacks a required OAuth scope.
+const SCOPE_REASONS: &[&str] = &[
+    "insufficientPermissions",
+    "ACCESS_TOKEN_SCOPE_INSUFFICIENT",
+    "insufficientScopes",
+];
+
+/// Remedy for a failure, keyed on Google's error `reason`.
+pub fn hint_for(err: &GwsError, ctx: &ErrorContext) -> Option<String> {
+    match err {
+        GwsError::Api {
+            code,
+            message,
+            reason,
+            enable_url,
+        } => api_hint(*code, message, reason, enable_url.as_deref(), ctx),
+        GwsError::Auth(msg) if msg.contains("invalid_grant") => Some(
+            "Your refresh token was revoked or has expired (tokens of OAuth apps in \
+             \"Testing\" status expire after 7 days). Sign in again with `gwsr auth login`."
+                .to_string(),
+        ),
+        #[allow(unreachable_patterns)] // GwsError is #[non_exhaustive] in core
+        _ => None,
+    }
+}
+
+fn api_hint(
+    code: u16,
+    message: &str,
+    reason: &str,
+    enable_url: Option<&str>,
+    ctx: &ErrorContext,
+) -> Option<String> {
+    if SCOPE_REASONS.contains(&reason)
+        || (code == 403 && message.contains("insufficient authentication scopes"))
+    {
+        return Some(scope_hint(ctx));
+    }
+    match reason {
+        "accessNotConfigured" | "SERVICE_DISABLED" => Some(match enable_url {
+            Some(url) => format!(
+                "The API is not enabled for your GCP project. Enable it at {url} , \
+                 wait a minute, then retry."
+            ),
+            None => "The API is not enabled for your GCP project. Enable it in the GCP \
+                     Console (APIs & Services → Library), wait a minute, then retry."
+                .to_string(),
+        }),
+        r if RATE_LIMIT_REASONS.contains(&r) => Some(
+            "Rate limited by Google. Retry after an exponential backoff; for bulk work \
+             add --page-delay or lower concurrency. Exit code 6 marks retryable errors."
+                .to_string(),
+        ),
+        "quotaExceeded" | "dailyLimitExceeded" => Some(
+            "A usage quota is exhausted. Retrying immediately will fail again; wait for \
+             the quota to reset or request more quota in the GCP Console."
+                .to_string(),
+        ),
+        "failedPrecondition" | "FAILED_PRECONDITION" | "conditionNotMet" => Some(
+            "The resource is not in a state that allows this operation (for example it \
+             was modified concurrently, is in trash, or a prerequisite is missing). Fetch \
+             the current state and adjust the request; retrying unchanged will fail again."
+                .to_string(),
+        ),
+        _ if code == 429 => Some(
+            "Rate limited by Google. Retry after an exponential backoff. Exit code 6 \
+             marks retryable errors."
+                .to_string(),
+        ),
+        _ if code == 401 => Some(
+            "The access token was rejected. Sign in again with `gwsr auth login`, or \
+             check GWSR_TOKEN if you set it."
+                .to_string(),
+        ),
+        _ if code >= 500 => Some(
+            "Google returned a server error. It is usually transient: retry after a \
+             backoff (exit code 6 marks retryable errors)."
+                .to_string(),
+        ),
+        _ => None,
+    }
+}
+
+fn scope_hint(ctx: &ErrorContext) -> String {
+    let mut hint = String::from("Your credentials lack an OAuth scope this method needs.");
+    if ctx.required_scopes.is_empty() {
+        hint.push_str(" Required scopes: see `gwsr schema <service>.<resource>.<method>`.");
+    } else {
+        hint.push_str(" Required (any one of): ");
+        hint.push_str(&ctx.required_scopes.join(", "));
+        hint.push('.');
+    }
+    match &ctx.granted_scopes {
+        Some(granted) if !granted.is_empty() => {
+            hint.push_str(" Granted: ");
+            hint.push_str(&granted.join(", "));
+            hint.push('.');
+        }
+        _ => hint.push_str(" Run `gwsr auth status` to see the scopes you granted."),
+    }
+    let fix = match (ctx.required_scopes.first(), ctx.service.as_deref()) {
+        (Some(scope), _) => format!("gwsr auth login --scopes {scope}"),
+        (None, Some(service)) => format!("gwsr auth login -s {service}"),
+        (None, None) => "gwsr auth login -s <service>".to_string(),
+    };
+    hint.push_str(" Fix: `");
+    hint.push_str(&fix);
+    hint.push_str("`.");
+    hint
+}
+
+/// Error kind label used in the human-readable form.
+fn kind_label(err: &CliError) -> &'static str {
+    match err {
+        CliError::Clap(_) => "validation",
+        CliError::Gws(e) => match e {
+            GwsError::Api { .. } => "api",
+            GwsError::Auth(_) => "auth",
+            GwsError::Validation(_) => "validation",
+            GwsError::Discovery(_) => "discovery",
+            #[allow(unreachable_patterns)] // GwsError is #[non_exhaustive] in core
+            _ => "internal",
+        },
+    }
+}
+
+/// Drop a leading `error: ` that some wrapped messages (clap renderings)
+/// already carry, so output never reads `error[validation]: error: …`.
+fn strip_error_prefix(msg: &str) -> &str {
+    msg.trim_start()
+        .strip_prefix("error: ")
+        .unwrap_or(msg)
+        .trim()
+}
+
+/// The machine-readable envelope for `err` (always a single line when
+/// serialized compactly).
+pub fn error_envelope(err: &CliError, ctx: &ErrorContext) -> Value {
+    match err {
+        CliError::Clap(e) => {
+            // The error text up to the first blank line (usage/tips follow).
+            let rendered = e.render().to_string();
+            let summary: Vec<&str> = rendered
+                .lines()
+                .take_while(|l| !l.trim().is_empty())
+                .map(str::trim)
+                .collect();
+            json!({
+                "error": {
+                    "code": 400,
+                    "message": strip_error_prefix(&summary.join(" ")),
+                    "reason": "validationError",
+                    "retryable": false,
+                }
+            })
+        }
+        CliError::Gws(e) => {
+            let mut envelope = e.to_json();
+            if let Some(obj) = envelope.get_mut("error").and_then(Value::as_object_mut) {
+                if let Some(Value::String(m)) = obj.get("message") {
+                    let stripped = strip_error_prefix(m).to_string();
+                    obj.insert("message".into(), Value::String(stripped));
+                }
+                obj.insert("retryable".into(), Value::Bool(is_retryable(e)));
+                if let Some(hint) = hint_for(e, ctx) {
+                    obj.insert("hint".into(), Value::String(hint));
+                }
+            }
+            envelope
+        }
+    }
+}
+
+/// The human-readable report (without trailing newline).
+pub fn human_report(err: &CliError, ctx: &ErrorContext, color: bool) -> String {
+    match err {
+        CliError::Clap(e) => {
+            // clap already prints `error: …` plus usage and tips.
+            let rendered = if color {
+                e.render().ansi().to_string()
+            } else {
+                e.render().to_string()
+            };
+            rendered.trim_end().to_string()
+        }
+        CliError::Gws(e) => {
+            let label = format!("error[{}]:", kind_label(err));
+            let label = if color {
+                crate::output::colorize(&label, "31")
+            } else {
+                label
+            };
+            let mut message = sanitize_for_terminal(strip_error_prefix(&e.to_string()));
+            if let GwsError::Api { code, reason, .. } = e {
+                message.push_str(&format!(
+                    " (HTTP {code}, reason: {})",
+                    sanitize_for_terminal(reason)
+                ));
+            }
+            let mut out = format!("{label} {message}");
+            if let Some(hint) = hint_for(e, ctx) {
+                let prefix = if color {
+                    colorize("hint:", "36")
+                } else {
+                    "hint:".to_string()
+                };
+                out.push_str(&format!("\n{prefix} {}", sanitize_for_terminal(&hint)));
+            }
+            out
+        }
+    }
+}
+
+/// Report `err` following the module-level output contract.
+pub fn report(err: &CliError) {
+    let ctx = current_context();
+    let stdout_tty = crate::output::stdout_is_terminal();
+    if !stdout_tty {
+        let line = match serde_json::to_string(&error_envelope(err, &ctx)) {
+            Ok(line) => line,
+            Err(e) => format!(
+                "{{\"error\":{{\"code\":500,\"message\":\"failed to serialize error: {e}\",\"reason\":\"internalError\",\"retryable\":false}}}}"
+            ),
+        };
+        if crate::output::emit(&line).is_err() {
+            // stdout is closed; stderr below still carries the error.
+        }
+    }
+    let color = crate::output::stderr_supports_color();
+    crate::output::eprint_line(&human_report(err, &ctx, color));
 }
 
 #[cfg(test)]
-#[allow(unsafe_code)] // tests mutate process env; they are serialized with #[serial]
 mod tests {
     use super::*;
 
-    #[test]
-    #[serial_test::serial]
-    fn test_colorize_respects_no_color_env() {
-        // FIXME: Audit that the environment access only happens in single-threaded code.
-        unsafe { std::env::set_var("NO_COLOR", "1") };
-        let result = colorize("hello", "31");
-        // FIXME: Audit that the environment access only happens in single-threaded code.
-        unsafe { std::env::remove_var("NO_COLOR") };
-        assert_eq!(result, "hello");
-    }
-
-    #[test]
-    fn test_error_label_contains_variant_name() {
-        let api_err = GwsError::Api {
-            code: 400,
-            message: "bad".to_string(),
-            reason: "r".to_string(),
+    fn api(code: u16, reason: &str) -> GwsError {
+        GwsError::Api {
+            code,
+            message: "boom".to_string(),
+            reason: reason.to_string(),
             enable_url: None,
-        };
-        let label = error_label(&api_err);
-        assert!(label.contains("error[api]:"));
-
-        let auth_err = GwsError::Auth("fail".to_string());
-        assert!(error_label(&auth_err).contains("error[auth]:"));
-
-        let val_err = GwsError::Validation("bad input".to_string());
-        assert!(error_label(&val_err).contains("error[validation]:"));
-
-        let disc_err = GwsError::Discovery("missing".to_string());
-        assert!(error_label(&disc_err).contains("error[discovery]:"));
-
-        let other_err = GwsError::Other(anyhow::anyhow!("oops"));
-        assert!(error_label(&other_err).contains("error:"));
+        }
     }
 
     #[test]
-    fn test_sanitize_for_terminal_strips_control_chars() {
-        let input = "normal \x1b[31mred text\x1b[0m end";
-        let sanitized = sanitize_for_terminal(input);
-        assert_eq!(sanitized, "normal [31mred text[0m end");
-        assert!(!sanitized.contains('\x1b'));
+    fn retryable_classification() {
+        assert!(is_retryable(&api(429, "rateLimitExceeded")));
+        assert!(is_retryable(&api(503, "backendError")));
+        assert!(is_retryable(&api(403, "userRateLimitExceeded")));
+        assert!(!is_retryable(&api(403, "insufficientPermissions")));
+        assert!(!is_retryable(&api(404, "notFound")));
+        assert!(!is_retryable(&GwsError::Validation("x".into())));
+    }
 
-        let input2 = "line1\nline2\ttab";
-        assert_eq!(sanitize_for_terminal(input2), "line1\nline2\ttab");
+    #[test]
+    fn exit_codes_distinguish_retryable_api_errors() {
+        assert_eq!(CliError::from(api(500, "backendError")).exit_code(), 6);
+        assert_eq!(CliError::from(api(429, "")).exit_code(), 6);
+        assert_eq!(
+            CliError::from(api(404, "notFound")).exit_code(),
+            GwsError::EXIT_CODE_API
+        );
+        let codes: std::collections::HashSet<i32> =
+            EXIT_CODE_DOCUMENTATION.iter().map(|(c, _)| *c).collect();
+        assert_eq!(codes.len(), EXIT_CODE_DOCUMENTATION.len());
+        assert!(codes.contains(&EXIT_CODE_API_RETRYABLE));
+    }
 
-        let input3 = "hello\x07bell\x08backspace";
-        assert_eq!(sanitize_for_terminal(input3), "hellobellbackspace");
+    #[test]
+    fn clap_errors_are_validation() {
+        let e = clap::Command::new("t")
+            .try_get_matches_from(["t", "--nope"])
+            .unwrap_err();
+        let err = CliError::from(e);
+        assert_eq!(err.exit_code(), GwsError::EXIT_CODE_VALIDATION);
+        let env = error_envelope(&err, &ErrorContext::default());
+        let msg = env["error"]["message"].as_str().unwrap();
+        assert!(!msg.starts_with("error:"), "{msg}");
+        assert!(msg.contains("--nope"), "{msg}");
+
+        let e = clap::Command::new("t")
+            .arg(clap::Arg::new("x").long("x").required(true))
+            .try_get_matches_from(["t"])
+            .unwrap_err();
+        let env = error_envelope(&CliError::from(e), &ErrorContext::default());
+        assert_eq!(
+            env["error"]["message"],
+            "the following required arguments were not provided: --x <x>"
+        );
+    }
+
+    #[test]
+    fn no_double_error_prefix() {
+        let err = CliError::from(GwsError::Validation("error: unexpected argument".into()));
+        let text = human_report(&err, &ErrorContext::default(), false);
+        assert_eq!(text, "error[validation]: unexpected argument");
+    }
+
+    #[test]
+    fn envelope_is_single_line_with_retryable_and_hint() {
+        let err = CliError::from(api(429, "rateLimitExceeded"));
+        let line = serde_json::to_string(&error_envelope(&err, &ErrorContext::default())).unwrap();
+        assert!(!line.contains('\n'));
+        let v: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(v["error"]["retryable"], true);
+        assert!(v["error"]["hint"].as_str().unwrap().contains("backoff"));
+    }
+
+    #[test]
+    fn scope_hint_lists_required_granted_and_fix() {
+        let ctx = ErrorContext {
+            service: Some("gmail".into()),
+            required_scopes: vec![
+                "https://www.googleapis.com/auth/gmail.modify".into(),
+                "https://mail.google.com/".into(),
+            ],
+            granted_scopes: Some(vec![
+                "https://www.googleapis.com/auth/gmail.readonly".into(),
+            ]),
+        };
+        let hint = hint_for(&api(403, "insufficientPermissions"), &ctx).unwrap();
+        assert!(
+            hint.contains("gmail.modify, https://mail.google.com/"),
+            "{hint}"
+        );
+        assert!(
+            hint.contains("Granted: https://www.googleapis.com/auth/gmail.readonly"),
+            "{hint}"
+        );
+        assert!(
+            hint.contains(
+                "`gwsr auth login --scopes https://www.googleapis.com/auth/gmail.modify`"
+            ),
+            "{hint}"
+        );
+        // Detail reason form and unknown granted scopes.
+        let ctx = ErrorContext {
+            service: Some("drive".into()),
+            ..Default::default()
+        };
+        let hint = hint_for(&api(403, "ACCESS_TOKEN_SCOPE_INSUFFICIENT"), &ctx).unwrap();
+        assert!(hint.contains("gwsr auth status"), "{hint}");
+        assert!(hint.contains("`gwsr auth login -s drive`"), "{hint}");
+    }
+
+    #[test]
+    fn hint_table() {
+        let ctx = ErrorContext::default();
+        let grant = GwsError::Auth("token refresh failed: invalid_grant".into());
+        assert!(hint_for(&grant, &ctx).unwrap().contains("gwsr auth login"));
+        let pre = hint_for(&api(400, "failedPrecondition"), &ctx).unwrap();
+        assert!(pre.contains("not in a state"), "{pre}");
+        let disabled = GwsError::Api {
+            code: 403,
+            message: "Gmail API has not been used".into(),
+            reason: "accessNotConfigured".into(),
+            enable_url: Some("https://console.developers.google.com/apis/api/gmail.googleapis.com/overview?project=1".into()),
+        };
+        assert!(
+            hint_for(&disabled, &ctx)
+                .unwrap()
+                .contains("gmail.googleapis.com/overview?project=1")
+        );
+        assert!(hint_for(&api(404, "notFound"), &ctx).is_none());
+        assert!(hint_for(&GwsError::Validation("x".into()), &ctx).is_none());
+    }
+
+    #[test]
+    fn human_report_includes_reason_hint_and_strips_control_chars() {
+        let err = CliError::from(GwsError::Api {
+            code: 403,
+            message: "bad\u{1b}[2J".into(),
+            reason: "rateLimitExceeded".into(),
+            enable_url: None,
+        });
+        let text = human_report(&err, &ErrorContext::default(), false);
+        assert!(
+            text.starts_with("error[api]: bad[2J (HTTP 403, reason: rateLimitExceeded)"),
+            "{text}"
+        );
+        assert!(text.contains("\nhint: Rate limited"), "{text}");
+        assert!(!text.contains('\u{1b}'));
     }
 }

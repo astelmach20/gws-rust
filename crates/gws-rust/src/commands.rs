@@ -26,27 +26,7 @@ pub fn build_cli(doc: &RestDescription) -> Command {
         .about(about_text)
         .subcommand_required(true)
         .arg_required_else_help(true)
-        .arg(
-            clap::Arg::new("sanitize")
-                .long("sanitize")
-                .help("Sanitize API responses through a Model Armor template. Requires cloud-platform scope. Format: projects/PROJECT/locations/LOCATION/templates/TEMPLATE. Also reads GWSR_SANITIZE_TEMPLATE env var.")
-                .value_name("TEMPLATE")
-                .global(true),
-        )
-        .arg(
-            clap::Arg::new("dry-run")
-                .long("dry-run")
-                .help("Validate the request locally without sending it to the API")
-                .action(clap::ArgAction::SetTrue)
-                .global(true),
-        )
-        .arg(
-            clap::Arg::new("format")
-                .long("format")
-                .help("Output format: json (default), table, yaml, csv")
-                .value_name("FORMAT")
-                .global(true),
-        );
+        .args(crate::cli_args::global_args());
 
     // Inject helper commands
     let helper = crate::helpers::get_helper(&doc.name);
