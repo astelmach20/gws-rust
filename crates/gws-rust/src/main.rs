@@ -295,6 +295,29 @@ fn emit_value(value: &serde_json::Value, format: OutputFormat) -> Result<(), Cli
 }
 
 #[tracing::instrument(level = "debug", skip_all)]
+/// The `cache clear --dry-run` report: what a real clear would delete.
+fn cache_clear_dry_run(plan: Option<&discovery::ClearPlan>) -> serde_json::Value {
+    let paths = |v: &[std::path::PathBuf]| -> Vec<String> {
+        v.iter().map(|p| p.display().to_string()).collect()
+    };
+    match plan {
+        Some(plan) => serde_json::json!({
+            "dry_run": true,
+            "wouldRemove": plan.documents.len(),
+            "directory": plan.dir.as_ref().map(|d| d.display().to_string()),
+            "documents": paths(&plan.documents),
+            "tempFiles": paths(&plan.temp_files),
+        }),
+        None => serde_json::json!({
+            "dry_run": true,
+            "wouldRemove": 0,
+            "directory": null,
+            "documents": [],
+            "tempFiles": [],
+        }),
+    }
+}
+
 async fn dispatch(
     cli: Cli,
     args: &[OsString],
@@ -349,8 +372,14 @@ async fn dispatch(
         TopCommand::Cache {
             action: CacheCommand::Clear,
         } => {
-            let removed = discovery::loader()?.clear_cache().map_err(GwsError::from)?;
-            emit_value(&serde_json::json!({ "removed": removed }), format)?;
+            let loader = discovery::loader()?;
+            if cli.global.dry_run {
+                let plan = loader.clear_cache_plan().map_err(GwsError::from)?;
+                emit_value(&cache_clear_dry_run(plan.as_ref()), format)?;
+            } else {
+                let removed = loader.clear_cache().map_err(GwsError::from)?;
+                emit_value(&serde_json::json!({ "removed": removed }), format)?;
+            }
         }
         TopCommand::Dev {
             command: DevCommand::GenerateSkills(opts),

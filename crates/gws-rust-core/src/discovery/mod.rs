@@ -31,7 +31,7 @@ use std::time::Duration;
 
 use reqwest::Url;
 
-pub use cache::{CachedDocument, DEFAULT_TTL, DiscoveryCache};
+pub use cache::{CachedDocument, ClearPlan, DEFAULT_TTL, DiscoveryCache};
 pub use error::DiscoveryError;
 pub use model::*;
 
@@ -136,6 +136,14 @@ impl DiscoveryLoader {
     /// The configured cache, if any.
     pub fn cache(&self) -> Option<&DiscoveryCache> {
         self.cache.as_ref()
+    }
+
+    /// What [`DiscoveryLoader::clear_cache`] would remove (`None` without a cache).
+    pub fn clear_cache_plan(&self) -> Result<Option<ClearPlan>, DiscoveryError> {
+        self.cache
+            .as_ref()
+            .map(DiscoveryCache::clear_plan)
+            .transpose()
     }
 
     /// Remove all cached documents. Returns the number removed (0 without a cache).

@@ -57,6 +57,17 @@ pub struct CachedDocument {
     pub is_fresh: bool,
 }
 
+/// The files [`DiscoveryCache::clear`] removes, for a dry run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClearPlan {
+    /// The cache directory, removed last; `None` when it does not exist.
+    pub dir: Option<PathBuf>,
+    /// Cached discovery documents.
+    pub documents: Vec<PathBuf>,
+    /// Temporary files left by an interrupted write.
+    pub temp_files: Vec<PathBuf>,
+}
+
 impl DiscoveryCache {
     /// A cache whose documents live under `root/discovery`.
     pub fn new(root: impl AsRef<Path>) -> Self {
@@ -169,17 +180,26 @@ impl DiscoveryCache {
         Ok(())
     }
 
-    /// Remove every cached document. Returns the number of documents removed.
+    /// What [`DiscoveryCache::clear`] would remove, without removing anything.
     ///
-    /// Only the cache's own `discovery` directory is touched; the root passed
-    /// to [`DiscoveryCache::new`] is left in place.
-    pub fn clear(&self) -> Result<usize, DiscoveryError> {
+    /// # Errors
+    ///
+    /// The cache directory cannot be listed, or holds a subdirectory (which
+    /// `clear` refuses to delete).
+    pub fn clear_plan(&self) -> Result<ClearPlan, DiscoveryError> {
         let entries = match std::fs::read_dir(&self.dir) {
             Ok(entries) => entries,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(ClearPlan {
+                    dir: None,
+                    documents: Vec::new(),
+                    temp_files: Vec::new(),
+                });
+            }
             Err(e) => return Err(DiscoveryError::cache("list", &self.dir, e)),
         };
-        let mut removed = 0;
+        let mut documents = Vec::new();
+        let mut temp_files = Vec::new();
         for entry in entries {
             let entry = entry.map_err(|e| DiscoveryError::cache("list", &self.dir, e))?;
             let path = entry.path();
@@ -193,15 +213,36 @@ impl DiscoveryCache {
                     std::io::Error::other("unexpected directory inside the discovery cache"),
                 ));
             }
-            std::fs::remove_file(&path).map_err(|e| DiscoveryError::cache("remove", &path, e))?;
-            let is_temp = entry.file_name().to_string_lossy().starts_with(TEMP_PREFIX);
-            if !is_temp {
-                removed += 1;
+            if entry.file_name().to_string_lossy().starts_with(TEMP_PREFIX) {
+                temp_files.push(path);
+            } else {
+                documents.push(path);
             }
         }
-        std::fs::remove_dir(&self.dir)
-            .map_err(|e| DiscoveryError::cache("remove", &self.dir, e))?;
-        Ok(removed)
+        documents.sort();
+        temp_files.sort();
+        Ok(ClearPlan {
+            dir: Some(self.dir.clone()),
+            documents,
+            temp_files,
+        })
+    }
+
+    /// Remove every cached document (and leftover temporary files), then the
+    /// cache directory. Returns the number of documents removed.
+    ///
+    /// Only the cache's own `discovery` directory is touched; the root passed
+    /// to [`DiscoveryCache::new`] is left in place.
+    pub fn clear(&self) -> Result<usize, DiscoveryError> {
+        let plan = self.clear_plan()?;
+        let Some(dir) = &plan.dir else {
+            return Ok(0);
+        };
+        for path in plan.documents.iter().chain(&plan.temp_files) {
+            std::fs::remove_file(path).map_err(|e| DiscoveryError::cache("remove", path, e))?;
+        }
+        std::fs::remove_dir(dir).map_err(|e| DiscoveryError::cache("remove", dir, e))?;
+        Ok(plan.documents.len())
     }
 
     fn ensure_dir(&self) -> Result<(), DiscoveryError> {
@@ -388,6 +429,22 @@ mod tests {
         assert_eq!(cache.clear().unwrap(), 2);
         assert!(!cache.dir().exists());
         assert!(tmp.path().join("unrelated.txt").exists());
+    }
+
+    #[test]
+    fn clear_plan_lists_without_removing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cache = DiscoveryCache::new(tmp.path());
+        assert_eq!(cache.clear_plan().unwrap().dir, None);
+        cache.store("drive", "v3", DOC.as_bytes()).unwrap();
+        let leftover = cache.dir().join(format!("{TEMP_PREFIX}x.json"));
+        std::fs::write(&leftover, "x").unwrap();
+        let plan = cache.clear_plan().unwrap();
+        assert_eq!(plan.dir.as_deref(), Some(cache.dir()));
+        assert_eq!(plan.documents.len(), 1);
+        assert_eq!(plan.temp_files, vec![leftover.clone()]);
+        assert!(plan.documents[0].exists());
+        assert!(leftover.exists());
     }
 
     #[test]
