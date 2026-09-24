@@ -115,9 +115,15 @@ fn io_err(context: String, e: std::io::Error) -> GwsError {
 /// Entry point for `gwsr dev generate-skills`.
 ///
 /// Returns a JSON summary of what was written (printed by `main`):
-/// `{"output_dir": .., "index": ..|null, "count": N, "skills": [{"name", "category", "path"}]}`.
+/// `{"output_dir": .., "index": ..|null, "count": N, "skills": [{"name", "category", "path"}],
+/// "pruned": [..], "unmanaged": [..]}`.
+///
+/// With `dry_run` (the global `--dry-run`) nothing is created, written or
+/// deleted: the summary gains `"dry_run": true`, `skills` lists what would be
+/// written and `wouldPrune` replaces `pruned`.
 pub async fn handle_generate_skills(
     args: &GenerateSkillsArgs,
+    dry_run: bool,
 ) -> Result<serde_json::Value, GwsError> {
     // Validate output_dir to prevent path traversal
     let output_path_buf = crate::validate::validate_safe_output_dir(&args.output_dir)?;
@@ -132,7 +138,7 @@ pub async fn handle_generate_skills(
 
     if filter.has("shared") {
         matched.insert("shared".to_string());
-        generate_shared_skill(output_path)?;
+        generate_shared_skill(output_path, dry_run)?;
         index.push(SkillIndexEntry {
             name: "gwsr-shared".to_string(),
             description:
@@ -197,7 +203,7 @@ pub async fn handle_generate_skills(
             matched.insert(alias.to_string());
             let service_md =
                 render_service_skill(alias, entry, &helpers, &resources, &product_name, &doc);
-            write_skill(output_path, &skill_name, &service_md)?;
+            write_skill(output_path, &skill_name, &service_md, dry_run)?;
             index.push(SkillIndexEntry {
                 name: skill_name.clone(),
                 description: service_description(&product_name, entry.description),
@@ -220,7 +226,7 @@ pub async fn handle_generate_skills(
                 let about_clean = about_raw.strip_prefix("[Helper] ").unwrap_or(about_raw);
                 let helper_md =
                     render_helper_skill(alias, helper_name, helper, entry, &product_name);
-                write_skill(output_path, &helper_skill_name, &helper_md)?;
+                write_skill(output_path, &helper_skill_name, &helper_md, dry_run)?;
                 index.push(SkillIndexEntry {
                     name: helper_skill_name,
                     description: truncate_desc(&format!(
@@ -246,7 +252,7 @@ pub async fn handle_generate_skills(
         if all_personas || filter.0.contains(&name) {
             matched.insert(name.clone());
             let md = render_persona_skill(&persona);
-            write_skill(output_path, &name, &md)?;
+            write_skill(output_path, &name, &md, dry_run)?;
             index.push(SkillIndexEntry {
                 name: name.clone(),
                 description: truncate_desc(&persona.description),
@@ -267,7 +273,7 @@ pub async fn handle_generate_skills(
         if all_recipes || filter.0.contains(&name) {
             matched.insert(name.clone());
             let md = render_recipe_skill(&recipe);
-            write_skill(output_path, &name, &md)?;
+            write_skill(output_path, &name, &md, dry_run)?;
             index.push(SkillIndexEntry {
                 name: name.clone(),
                 description: truncate_desc(&recipe.description),
@@ -291,7 +297,7 @@ pub async fn handle_generate_skills(
     }
 
     if let Some(path) = &index_path {
-        write_skills_index(&index, path)?;
+        write_skills_index(&index, path, dry_run)?;
     }
 
     // Only a full run knows every skill that should exist; a filtered run
@@ -299,7 +305,7 @@ pub async fn handle_generate_skills(
     let tidy = if filter.is_empty() {
         let produced: std::collections::HashSet<&str> =
             index.iter().map(|e| e.name.as_str()).collect();
-        prune_stale_skills(output_path, &produced)?
+        prune_stale_skills(output_path, &produced, dry_run)?
     } else {
         Tidy::default()
     };
@@ -310,6 +316,7 @@ pub async fn handle_generate_skills(
         index_path.as_deref(),
         &index,
         &tidy,
+        dry_run,
     ))
 }
 
@@ -337,7 +344,8 @@ fn with_generated_marker(content: &str) -> Result<String, GwsError> {
 /// Directories removed or left alone by [`prune_stale_skills`].
 #[derive(Debug, Default)]
 struct Tidy {
-    /// Generated skill directories that are no longer produced, now deleted.
+    /// Generated skill directories that are no longer produced: deleted, or
+    /// on a dry run the ones that would be deleted.
     pruned: Vec<String>,
     /// Directories in the output dir that this run did not produce and that
     /// carry no generator marker; never touched, reported so leftovers from
@@ -348,10 +356,12 @@ struct Tidy {
 /// Delete generated skill directories under `base` that `produced` no longer
 /// contains. A directory is deleted only when its sole entry is a `SKILL.md`
 /// carrying [`GENERATED_MARKER`]; a marked directory holding anything else is
-/// an error rather than a partial delete.
+/// an error rather than a partial delete. With `dry_run` the same checks run
+/// but nothing is deleted.
 fn prune_stale_skills(
     base: &Path,
     produced: &std::collections::HashSet<&str>,
+    dry_run: bool,
 ) -> Result<Tidy, GwsError> {
     let mut tidy = Tidy::default();
     let entries = match std::fs::read_dir(base) {
@@ -401,10 +411,12 @@ fn prune_stale_skills(
                 others.join(", ")
             )));
         }
-        std::fs::remove_file(&skill)
-            .map_err(|e| io_err(format!("failed to remove {}", skill.display()), e))?;
-        std::fs::remove_dir(&dir)
-            .map_err(|e| io_err(format!("failed to remove {}", dir.display()), e))?;
+        if !dry_run {
+            std::fs::remove_file(&skill)
+                .map_err(|e| io_err(format!("failed to remove {}", skill.display()), e))?;
+            std::fs::remove_dir(&dir)
+                .map_err(|e| io_err(format!("failed to remove {}", dir.display()), e))?;
+        }
         tidy.pruned.push(name);
     }
     Ok(tidy)
@@ -415,6 +427,7 @@ fn skills_summary(
     index_path: Option<&Path>,
     index: &[SkillIndexEntry],
     tidy: &Tidy,
+    dry_run: bool,
 ) -> serde_json::Value {
     let skills: Vec<serde_json::Value> = index
         .iter()
@@ -426,27 +439,51 @@ fn skills_summary(
             })
         })
         .collect();
-    serde_json::json!({
+    let mut summary = serde_json::json!({
         "output_dir": output_path.display().to_string(),
         "index": index_path.map(|p| p.display().to_string()),
         "count": skills.len(),
         "skills": skills,
-        "pruned": tidy.pruned,
         "unmanaged": tidy.unmanaged,
-    })
+    });
+    let (pruned_key, extra) = if dry_run {
+        (
+            "wouldPrune",
+            Some(("dry_run", serde_json::Value::Bool(true))),
+        )
+    } else {
+        ("pruned", None)
+    };
+    if let Some(map) = summary.as_object_mut() {
+        map.insert(pruned_key.to_string(), serde_json::json!(tidy.pruned));
+        if let Some((k, v)) = extra {
+            map.insert(k.to_string(), v);
+        }
+    }
+    summary
 }
 
-fn write_skill(base: &Path, name: &str, content: &str) -> Result<(), GwsError> {
+/// Write one skill; on a dry run only render it (so render errors still
+/// surface) and touch nothing on disk.
+fn write_skill(base: &Path, name: &str, content: &str, dry_run: bool) -> Result<(), GwsError> {
+    let content = with_generated_marker(content)?;
+    if dry_run {
+        return Ok(());
+    }
     let dir = base.join(name);
     std::fs::create_dir_all(&dir)
         .map_err(|e| io_err(format!("failed to create directory {}", dir.display()), e))?;
     let path = dir.join("SKILL.md");
-    std::fs::write(&path, with_generated_marker(content)?)
+    std::fs::write(&path, content)
         .map_err(|e| io_err(format!("failed to write {}", path.display()), e))?;
     Ok(())
 }
 
-fn write_skills_index(entries: &[SkillIndexEntry], path: &Path) -> Result<(), GwsError> {
+fn write_skills_index(
+    entries: &[SkillIndexEntry],
+    path: &Path,
+    dry_run: bool,
+) -> Result<(), GwsError> {
     let mut out = String::new();
     out.push_str("# Skills Index\n\n");
     out.push_str("> Auto-generated by `gwsr dev generate-skills`. Do not edit manually.\n\n");
@@ -486,6 +523,9 @@ fn write_skills_index(entries: &[SkillIndexEntry], path: &Path) -> Result<(), Gw
         out.push('\n');
     }
 
+    if dry_run {
+        return Ok(());
+    }
     if let Some(parent) = path.parent()
         && !parent.as_os_str().is_empty()
     {
@@ -816,7 +856,7 @@ metadata:
     out
 }
 
-fn generate_shared_skill(base: &Path) -> Result<(), GwsError> {
+fn generate_shared_skill(base: &Path, dry_run: bool) -> Result<(), GwsError> {
     let content = r#"---
 name: gwsr-shared
 description: "gwsr CLI: Shared patterns for authentication, global flags, and output formatting."
@@ -934,7 +974,7 @@ to see what a method accepts.
 "#
     .replace("__VERSION__", env!("CARGO_PKG_VERSION"));
 
-    write_skill(base, "gwsr-shared", &content)
+    write_skill(base, "gwsr-shared", &content, dry_run)
 }
 
 fn render_persona_skill(persona: &PersonaEntry) -> String {
@@ -1231,19 +1271,65 @@ mod tests {
             pruned: vec!["gwsr-old".into()],
             unmanaged: vec!["notes".into()],
         };
-        let v = skills_summary(Path::new("/out"), Some(Path::new("/idx.md")), &index, &tidy);
+        let v = skills_summary(
+            Path::new("/out"),
+            Some(Path::new("/idx.md")),
+            &index,
+            &tidy,
+            false,
+        );
         assert_eq!(v["count"], 1);
         assert_eq!(v["pruned"][0], "gwsr-old");
         assert_eq!(v["unmanaged"][0], "notes");
         assert_eq!(v["output_dir"], "/out");
         assert_eq!(v["index"], "/idx.md");
         assert_eq!(v["skills"][0]["path"], "/out/gwsr-shared/SKILL.md");
+        assert!(v.get("dry_run").is_none() && v.get("wouldPrune").is_none());
+
+        let dry = skills_summary(Path::new("/out"), None, &index, &tidy, true);
+        assert_eq!(dry["dry_run"], true);
+        assert_eq!(dry["wouldPrune"][0], "gwsr-old");
+        assert!(dry.get("pruned").is_none());
+        assert_eq!(dry["skills"][0]["path"], "/out/gwsr-shared/SKILL.md");
+    }
+
+    #[test]
+    fn dry_run_writes_no_skill_or_index() {
+        let dir = tempfile::tempdir().unwrap();
+        write_skill(dir.path(), "gwsr-x", "---\nname: gwsr-x\n---\n", true).unwrap();
+        assert!(!dir.path().join("gwsr-x").exists());
+        // Render errors still surface on a dry run.
+        assert!(write_skill(dir.path(), "gwsr-y", "# no front matter", true).is_err());
+        let index = dir.path().join("docs/skills.md");
+        write_skills_index(&[], &index, true).unwrap();
+        assert!(!dir.path().join("docs").exists());
+        generate_shared_skill(dir.path(), true).unwrap();
+        assert!(!dir.path().join("gwsr-shared").exists());
+    }
+
+    #[test]
+    fn dry_run_prune_reports_but_deletes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path();
+        write_skill(base, "gwsr-stale", "---\nname: s\n---\n", false).unwrap();
+        let tidy = prune_stale_skills(base, &std::collections::HashSet::new(), true).unwrap();
+        assert_eq!(tidy.pruned, vec!["gwsr-stale"]);
+        assert!(base.join("gwsr-stale/SKILL.md").exists());
+        // The safety check still applies: a dry run reports the same error.
+        std::fs::write(base.join("gwsr-stale/notes.txt"), "mine").unwrap();
+        assert!(prune_stale_skills(base, &std::collections::HashSet::new(), true).is_err());
     }
 
     #[test]
     fn generated_skills_carry_the_marker_after_the_front_matter() {
         let dir = tempfile::tempdir().unwrap();
-        write_skill(dir.path(), "gwsr-x", "---\nname: gwsr-x\n---\n\n# x\n").unwrap();
+        write_skill(
+            dir.path(),
+            "gwsr-x",
+            "---\nname: gwsr-x\n---\n\n# x\n",
+            false,
+        )
+        .unwrap();
         let text = std::fs::read_to_string(dir.path().join("gwsr-x/SKILL.md")).unwrap();
         assert_eq!(
             text,
@@ -1257,8 +1343,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let base = dir.path();
         let skill = "---\nname: s\n---\n\n# s\n";
-        write_skill(base, "gwsr-kept", skill).unwrap();
-        write_skill(base, "gwsr-stale", skill).unwrap();
+        write_skill(base, "gwsr-kept", skill, false).unwrap();
+        write_skill(base, "gwsr-stale", skill, false).unwrap();
         // Not generated: no marker, or no SKILL.md at all, or not a directory.
         std::fs::create_dir(base.join("hand-written")).unwrap();
         std::fs::write(base.join("hand-written/SKILL.md"), skill).unwrap();
@@ -1266,7 +1352,7 @@ mod tests {
         std::fs::write(base.join("README.md"), "x").unwrap();
 
         let produced: std::collections::HashSet<&str> = ["gwsr-kept"].into();
-        let tidy = prune_stale_skills(base, &produced).unwrap();
+        let tidy = prune_stale_skills(base, &produced, false).unwrap();
         assert_eq!(tidy.pruned, vec!["gwsr-stale"]);
         assert_eq!(tidy.unmanaged, vec!["empty", "hand-written"]);
         assert!(!base.join("gwsr-stale").exists());
@@ -1279,9 +1365,9 @@ mod tests {
     fn prune_refuses_a_generated_dir_holding_other_files() {
         let dir = tempfile::tempdir().unwrap();
         let base = dir.path();
-        write_skill(base, "gwsr-stale", "---\nname: s\n---\n").unwrap();
+        write_skill(base, "gwsr-stale", "---\nname: s\n---\n", false).unwrap();
         std::fs::write(base.join("gwsr-stale/notes.txt"), "mine").unwrap();
-        let err = prune_stale_skills(base, &std::collections::HashSet::new()).unwrap_err();
+        let err = prune_stale_skills(base, &std::collections::HashSet::new(), false).unwrap_err();
         assert!(err.to_string().contains("notes.txt"), "{err}");
         assert!(base.join("gwsr-stale/notes.txt").exists());
         assert!(base.join("gwsr-stale/SKILL.md").exists());
@@ -1299,8 +1385,12 @@ mod tests {
     #[test]
     fn prune_of_a_missing_output_dir_is_empty() {
         let dir = tempfile::tempdir().unwrap();
-        let tidy = prune_stale_skills(&dir.path().join("nope"), &std::collections::HashSet::new())
-            .unwrap();
+        let tidy = prune_stale_skills(
+            &dir.path().join("nope"),
+            &std::collections::HashSet::new(),
+            false,
+        )
+        .unwrap();
         assert!(tidy.pruned.is_empty() && tidy.unmanaged.is_empty());
     }
 
@@ -1543,7 +1633,7 @@ mod tests {
     #[test]
     fn test_shared_skill_frontmatter_uses_block_sequences() {
         let tmp = tempfile::tempdir().unwrap();
-        generate_shared_skill(tmp.path()).unwrap();
+        generate_shared_skill(tmp.path(), false).unwrap();
         let content = std::fs::read_to_string(tmp.path().join("gwsr-shared/SKILL.md")).unwrap();
         let fm = extract_frontmatter(&content);
         assert_block_style_sequences(fm);

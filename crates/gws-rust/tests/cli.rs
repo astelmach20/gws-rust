@@ -795,6 +795,58 @@ fn generate_skills_requires_output_dir() {
 }
 
 #[test]
+fn dev_commands_honor_dry_run() {
+    let env = Env::new();
+    let out = env
+        .cmd()
+        .args([
+            "--dry-run",
+            "dev",
+            "generate-skills",
+            "--output-dir",
+            "out",
+            "--index",
+            "docs/skills.md",
+            "--filter",
+            "shared",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+    let summary: Value = serde_json::from_str(&stdout_of(&out)).unwrap();
+    assert_eq!(summary["dry_run"], true);
+    assert_eq!(summary["count"], 1);
+    assert_eq!(summary["skills"][0]["name"], "gwsr-shared");
+    assert_eq!(summary["wouldPrune"], json!([]));
+    assert!(summary.get("pruned").is_none());
+
+    let out = env
+        .cmd()
+        .args(["dev", "man", "--output-dir", "man", "--dry-run"])
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+    let summary: Value = serde_json::from_str(&stdout_of(&out)).unwrap();
+    assert_eq!(summary["dry_run"], true);
+    assert!(
+        summary["wouldWrite"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|p| p.as_str().unwrap().ends_with("gwsr.1"))
+    );
+    assert!(summary.get("written").is_none());
+
+    // Neither command created or wrote anything.
+    assert!(
+        std::fs::read_dir(env.work_dir()).unwrap().next().is_none(),
+        "--dry-run must not write files"
+    );
+}
+
+#[test]
 fn filtered_generate_skills_run_prunes_nothing() {
     let env = Env::new();
     let run = || {
