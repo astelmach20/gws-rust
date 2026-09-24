@@ -34,7 +34,7 @@ pub struct TasksHelper;
 fn list_id_arg() -> Arg {
     Arg::new("list-id")
         .long("list-id")
-        .help("Task list ID (default: your default list)")
+        .help("Task list ID (@default is your default list)")
         .default_value("@default")
         .value_name("ID")
 }

@@ -37,7 +37,7 @@ pub struct CalendarHelper;
 fn calendar_id_arg() -> Arg {
     Arg::new("calendar-id")
         .long("calendar-id")
-        .help("Calendar ID (default: primary)")
+        .help("Calendar ID")
         .default_value("primary")
         .value_name("ID")
 }
