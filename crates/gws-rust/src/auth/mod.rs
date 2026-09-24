@@ -420,24 +420,16 @@ pub fn scopes_for_method(
 ///
 /// Priority: `GWSR_PROJECT_ID`, then the OAuth client configuration's project,
 /// then `quota_project_id` from Application Default Credentials.
-pub fn get_quota_project() -> Option<String> {
-    match profiles::env_string("GWSR_PROJECT_ID") {
-        Ok(Some(project_id)) => return Some(project_id),
-        Ok(None) => {}
-        Err(e) => tracing::warn!("ignoring GWSR_PROJECT_ID: {e:#}"),
-    }
-    match client_config::load_saved() {
-        Ok(Some(config)) => {
-            if let Some(project) = config.project_id.filter(|p| !p.is_empty()) {
-                return Some(project);
-            }
-        }
-        Ok(None) => {}
-        Err(e) => {
-            tracing::warn!("ignoring the OAuth client config for the quota project: {e:#}")
-        }
-    }
-    let path = std::env::var_os("GOOGLE_APPLICATION_CREDENTIALS")
+///
+/// # Errors
+///
+/// A source that exists but cannot be used is an error, not skipped: skipping
+/// it would silently bill a different project (or none). That covers a
+/// `GWSR_PROJECT_ID` that is not valid UTF-8 (exit 8), an unreadable or
+/// invalid OAuth client config, and an unreadable or invalid ADC file.
+/// `GWSR_NO_QUOTA_PROJECT` / `--no-quota-project` skip the lookup entirely.
+pub fn get_quota_project() -> Result<Option<String>, GwsError> {
+    let adc = std::env::var_os("GOOGLE_APPLICATION_CREDENTIALS")
         .filter(|v| !v.is_empty())
         .map(std::path::PathBuf::from)
         .or_else(|| {
@@ -446,31 +438,54 @@ pub fn get_quota_project() -> Option<String> {
                     .join("gcloud")
                     .join("application_default_credentials.json")
             })
-        })?;
-    let content = match std::fs::read_to_string(&path) {
+        });
+    resolve_quota_project(
+        profiles::env_string("GWSR_PROJECT_ID"),
+        client_config::load_saved,
+        adc.as_deref(),
+    )
+}
+
+fn resolve_quota_project(
+    env_project: anyhow::Result<Option<String>>,
+    load_client_config: impl FnOnce() -> anyhow::Result<Option<client_config::ClientConfig>>,
+    adc_path: Option<&std::path::Path>,
+) -> Result<Option<String>, GwsError> {
+    let skip = "set GWSR_PROJECT_ID, or pass --no-quota-project to send no quota project";
+    if let Some(project) = env_project.map_err(|e| GwsError::Config(format!("{e:#}")))? {
+        return Ok(Some(project));
+    }
+    let client = load_client_config().map_err(|e| {
+        to_gws_error(e.context(format!(
+            "cannot read the OAuth client config for the quota project ({skip})"
+        )))
+    })?;
+    if let Some(project) = client.and_then(|c| c.project_id).filter(|p| !p.is_empty()) {
+        return Ok(Some(project));
+    }
+    let Some(path) = adc_path else {
+        return Ok(None);
+    };
+    let content = match std::fs::read_to_string(path) {
         Ok(c) => c,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(e) => {
-            tracing::warn!(
-                "cannot read '{}' for the quota project: {e}",
+            return Err(GwsError::Config(format!(
+                "cannot read '{}' for the quota project ({skip}): {e}",
                 path.display()
-            );
-            return None;
+            )));
         }
     };
-    match serde_json::from_str::<serde_json::Value>(&content) {
-        Ok(json) => json
-            .get("quota_project_id")
-            .and_then(|v| v.as_str())
-            .map(str::to_string),
-        Err(e) => {
-            tracing::warn!(
-                "'{}' is not valid JSON; ignoring it for the quota project: {e}",
-                path.display()
-            );
-            None
-        }
-    }
+    let json: serde_json::Value = serde_json::from_str(&content).map_err(|e| {
+        GwsError::Config(format!(
+            "'{}' is not valid JSON, so its quota_project_id cannot be read ({skip}): {e}",
+            path.display()
+        ))
+    })?;
+    Ok(json
+        .get("quota_project_id")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string))
 }
 
 #[cfg(test)]
@@ -481,6 +496,87 @@ mod tests {
     use super::*;
     use wiremock::matchers::{body_string_contains, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn client_with_project(project: Option<&str>) -> client_config::ClientConfig {
+        client_config::ClientConfig {
+            client_id: "id".to_string(),
+            client_secret: secrecy::SecretString::from("secret".to_string()),
+            project_id: project.map(str::to_string),
+            source: client_config::ClientSource::BuiltIn,
+        }
+    }
+
+    #[test]
+    fn quota_project_priority_env_then_client_then_adc() {
+        let dir = tempfile::tempdir().unwrap();
+        let adc = dir.path().join("adc.json");
+        std::fs::write(&adc, r#"{"quota_project_id":"from-adc"}"#).unwrap();
+        let got = |env: Option<&str>, client: Option<&str>| {
+            resolve_quota_project(
+                Ok(env.map(str::to_string)),
+                || Ok(Some(client_with_project(client))),
+                Some(&adc),
+            )
+            .unwrap()
+        };
+        assert_eq!(
+            got(Some("from-env"), Some("c")).as_deref(),
+            Some("from-env")
+        );
+        assert_eq!(
+            got(None, Some("from-client")).as_deref(),
+            Some("from-client")
+        );
+        assert_eq!(got(None, None).as_deref(), Some("from-adc"));
+        let missing = dir.path().join("missing.json");
+        assert_eq!(
+            resolve_quota_project(Ok(None), || Ok(None), Some(&missing)).unwrap(),
+            None
+        );
+        assert_eq!(
+            resolve_quota_project(Ok(None), || Ok(None), None).unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn unusable_quota_project_sources_are_errors_not_skipped() {
+        let dir = tempfile::tempdir().unwrap();
+        // GWSR_PROJECT_ID not valid UTF-8.
+        let err = resolve_quota_project(
+            Err(anyhow::anyhow!(
+                "environment variable GWSR_PROJECT_ID is not valid UTF-8"
+            )),
+            || Ok(None),
+            None,
+        )
+        .unwrap_err();
+        assert!(matches!(err, GwsError::Config(_)), "{err:?}");
+        assert_eq!(err.exit_code(), 8);
+        // Unreadable OAuth client config.
+        let err = resolve_quota_project(
+            Ok(None),
+            || Err(anyhow::anyhow!("client_secret.json: expected value")),
+            None,
+        )
+        .unwrap_err();
+        assert!(matches!(err, GwsError::Config(_)), "{err:?}");
+        assert!(err.to_string().contains("OAuth client config"), "{err}");
+        let err = resolve_quota_project(
+            Ok(None),
+            || Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied).into()),
+            None,
+        )
+        .unwrap_err();
+        assert!(matches!(err, GwsError::CredentialStore(_)), "{err:?}");
+        // Invalid or unreadable ADC.
+        let adc = dir.path().join("adc.json");
+        std::fs::write(&adc, "not json").unwrap();
+        let err = resolve_quota_project(Ok(None), || Ok(None), Some(&adc)).unwrap_err();
+        assert!(err.to_string().contains("not valid JSON"), "{err}");
+        let err = resolve_quota_project(Ok(None), || Ok(None), Some(dir.path())).unwrap_err();
+        assert!(matches!(err, GwsError::Config(_)), "{err:?}");
+    }
 
     #[test]
     fn auth_errors_map_to_distinct_cli_errors_and_exit_codes() {

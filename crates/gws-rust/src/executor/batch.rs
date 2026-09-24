@@ -428,7 +428,7 @@ pub(crate) async fn run_batch(
         options.retry.clone(),
         options.endpoints.clone(),
         if options.quota_project {
-            crate::auth::get_quota_project()
+            crate::auth::get_quota_project()?
         } else {
             None
         },
