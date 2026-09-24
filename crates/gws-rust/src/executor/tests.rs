@@ -764,9 +764,10 @@ async fn destructive_call_requires_yes_when_policy_always() {
     call.options.assume_yes = true;
     let em = Emitter::capturing();
     call.run(&em).await.unwrap();
-    assert!(
-        em.captured_text().is_empty(),
-        "204 prints nothing and writes no file"
+    assert_eq!(
+        lines(&em),
+        vec![json!({"status": "success", "httpStatus": 204})],
+        "204 prints a JSON status and writes no file"
     );
 }
 
