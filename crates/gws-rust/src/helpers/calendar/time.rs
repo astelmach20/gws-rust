@@ -40,6 +40,8 @@ const LOCAL_FORMATS: &[&str] = &[
 
 pub(super) fn parse_when(s: &str, flag: &str) -> Result<When, GwsError> {
     let s = s.trim();
+    // Try each accepted form in turn; only when none matches is the input
+    // wrong, and that is reported below with every accepted form.
     if let Ok(d) = NaiveDate::parse_from_str(s, "%Y-%m-%d") {
         return Ok(When::Date(d));
     }

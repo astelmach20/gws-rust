@@ -331,18 +331,23 @@ pub(crate) async fn resumable_upload(
     if !init.response.status().is_success() {
         return Ok(init);
     }
+    let status = init.response.status();
     let session = init
         .response
         .headers()
         .get(LOCATION)
-        .and_then(|v| v.to_str().ok())
-        .map(str::to_string)
         .ok_or_else(|| {
             GwsError::other(anyhow::anyhow!(
-                "resumable upload session started (HTTP {}) but no Location header was returned",
-                init.response.status()
+                "resumable upload session started (HTTP {status}) but no Location header was returned"
             ))
-        })?;
+        })?
+        .to_str()
+        .map_err(|e| {
+            GwsError::other(anyhow::anyhow!(
+                "resumable upload session Location header is not valid ASCII: {e}"
+            ))
+        })?
+        .to_string();
     ensure_same_origin(req.url, &session)?;
 
     // Chunks are retried by the resume logic below, not by the transport:

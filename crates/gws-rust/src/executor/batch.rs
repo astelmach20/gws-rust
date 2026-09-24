@@ -458,6 +458,8 @@ pub(crate) async fn run_batch(
             .response
             .headers()
             .get(reqwest::header::CONTENT_TYPE)
+            // A missing or non-ASCII Content-Type is "unknown"; the multipart
+            // parser below then reports the body as malformed.
             .and_then(|v| v.to_str().ok())
             .unwrap_or("")
             .to_string();

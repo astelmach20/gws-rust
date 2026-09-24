@@ -65,6 +65,8 @@ fn read_cache(path: &std::path::Path) -> Option<Tz> {
             return None;
         }
     };
+    // A cache whose age cannot be determined (no mtime support, or an mtime
+    // in the future) is treated as stale and refetched, which is always safe.
     let fresh = metadata
         .modified()
         .ok()

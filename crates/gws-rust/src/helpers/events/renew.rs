@@ -136,6 +136,7 @@ fn filter_subscriptions_to_renew(
             .map_err(|e| GwsError::other(format!("{name}: invalid expireTime '{expire}': {e}")))?
             .timestamp();
         let remaining = expire.saturating_sub(now);
+        // Saturating: a window beyond i64 seconds covers every subscription.
         if remaining < i64::try_from(within_secs).unwrap_or(i64::MAX) {
             result.push(name.to_string());
         }

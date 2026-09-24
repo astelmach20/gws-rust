@@ -58,6 +58,7 @@ pub(super) async fn search(
     let mut next_page_token = None;
 
     loop {
+        // Saturating: more than u32::MAX collected IDs means none remain.
         let remaining = params
             .max
             .saturating_sub(u32::try_from(ids.len()).unwrap_or(u32::MAX));
@@ -91,6 +92,7 @@ pub(super) async fn search(
             .and_then(Value::as_str)
             .map(str::to_string);
         match token {
+            // Saturating, as above.
             Some(t) if u32::try_from(ids.len()).unwrap_or(u32::MAX) >= params.max => {
                 next_page_token = Some(t);
                 break;
@@ -120,7 +122,9 @@ pub(super) fn header<'a>(msg: &'a Value, name: &str) -> &'a str {
         .unwrap_or("")
 }
 
-/// Convert `internalDate` (epoch millis as a string) to RFC 3339.
+/// Convert `internalDate` (epoch millis as a string) to RFC 3339. The field
+/// is informational in the summary: when Gmail omits it or it is not a
+/// timestamp, the output shows `null` rather than failing the whole search.
 fn internal_date_rfc3339(msg: &Value) -> Option<String> {
     let millis: i64 = msg.get("internalDate")?.as_str()?.parse().ok()?;
     chrono::DateTime::from_timestamp_millis(millis).map(|d| d.to_rfc3339())

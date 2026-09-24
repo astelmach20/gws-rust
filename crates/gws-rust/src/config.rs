@@ -272,16 +272,64 @@ pub fn set_profile_in(path: &Path, name: &str) -> Result<(), GwsError> {
     })
 }
 
+/// Environment variables [`resolve`] reads.
+const SETTINGS_ENV_VARS: &[&str] = &[
+    "GWSR_FORMAT",
+    "GWSR_JSON_STYLE",
+    "GWSR_PAGE_LIMIT",
+    "GWSR_PAGE_DELAY_MS",
+    "GWSR_SANITIZE_MODE",
+    "GWSR_SANITIZE_TEMPLATE",
+    "GWSR_LOG_FILE",
+];
+
+/// Read an environment variable. Unset and blank are `None`; a value that is
+/// not valid UTF-8 is a configuration error rather than silently unset.
+pub(crate) fn env_var(name: &str) -> Result<Option<String>, GwsError> {
+    match std::env::var(name) {
+        Ok(v) if v.trim().is_empty() => Ok(None),
+        Ok(v) => Ok(Some(v)),
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(std::env::VarError::NotUnicode(_)) => Err(GwsError::Config(format!(
+            "environment variable {name} is not valid UTF-8"
+        ))),
+    }
+}
+
 /// Load and resolve settings from the real environment and config file.
 pub fn load() -> Result<Settings, GwsError> {
     let path = config_path()?;
     let file = load_config_file(&path)?;
-    resolve(file.as_ref(), &path, &|name| std::env::var(name).ok())
+    let mut vars = std::collections::HashMap::new();
+    for name in SETTINGS_ENV_VARS {
+        if let Some(value) = env_var(name)? {
+            vars.insert(*name, value);
+        }
+    }
+    resolve(file.as_ref(), &path, &|name| vars.get(name).cloned())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resolve_reads_only_the_env_vars_load_snapshots() {
+        let asked = std::cell::RefCell::new(Vec::new());
+        let file = ConfigFile::default();
+        resolve(Some(&file), &origin(), &|name| {
+            asked.borrow_mut().push(name.to_string());
+            None
+        })
+        .unwrap();
+        for name in asked.borrow().iter() {
+            assert!(
+                SETTINGS_ENV_VARS.contains(&name.as_str()),
+                "resolve reads {name}, which load() does not snapshot"
+            );
+        }
+        assert!(!asked.borrow().is_empty());
+    }
     use std::collections::HashMap;
 
     fn env_of(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {

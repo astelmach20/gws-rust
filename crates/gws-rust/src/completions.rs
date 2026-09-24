@@ -84,6 +84,9 @@ pub fn complete_if_requested() -> Result<bool, clap::Error> {
         Some(i) => args[i + 1..].to_vec(),
         None => Vec::new(),
     };
+    // The working directory only seeds file-path completion; when it cannot
+    // be read, clap completes paths without it (a completion script has no
+    // channel to report an error to the user's shell prompt).
     let cwd = std::env::current_dir().ok();
     CompleteEnv::with_factory(move || completion_command(&words))
         .var(COMPLETE_VAR)

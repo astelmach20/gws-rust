@@ -461,6 +461,8 @@ pub(crate) async fn execute_to(
         };
         let status = sent.response.status();
         let note = sent.retry_note();
+        // A missing or non-ASCII Content-Type is "unknown" (treated as JSON
+        // and then reported if the body does not parse).
         let content_type = sent
             .response
             .headers()
@@ -570,6 +572,7 @@ pub(crate) async fn execute_to(
                         note.as_deref(),
                     ));
                 }
+                // A missing or non-ASCII Content-Type is plain bytes.
                 let ct = dl
                     .response
                     .headers()

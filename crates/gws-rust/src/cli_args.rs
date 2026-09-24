@@ -382,6 +382,7 @@ pub fn prescan(args: &[OsString]) -> PreScan {
                 && !a.starts_with("--")
                 && a[1..].chars().all(|c| c == 'v') =>
             {
+                // Saturating: `-vvvv…` beyond i8::MAX is simply maximal.
                 let n = i8::try_from(a.len() - 1).unwrap_or(i8::MAX);
                 verbose = verbose.saturating_add(n);
             }

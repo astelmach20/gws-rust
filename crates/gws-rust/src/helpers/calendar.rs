@@ -647,7 +647,9 @@ fn summarize_event(event: &Value, calendar_id: &str, calendar: &str) -> Value {
     })
 }
 
-/// Sort key: all-day dates sort at local midnight of their day.
+/// Sort key: all-day dates sort at local midnight of their day. An event
+/// whose start cannot be parsed still appears (its raw `start` is in the
+/// output); it only sorts last, so ordering never hides an event.
 fn start_key(event: &Value, tz: Tz) -> i64 {
     let s = event.get("start").and_then(Value::as_str).unwrap_or("");
     time::parse_when(s, "start")

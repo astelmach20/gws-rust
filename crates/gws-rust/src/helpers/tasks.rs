@@ -170,6 +170,7 @@ TIPS:
 /// Convert `--due` into the RFC 3339 midnight-UTC form the API expects.
 fn parse_due(s: &str) -> Result<String, GwsError> {
     use chrono::{NaiveDate, NaiveDateTime, Timelike};
+    // Each accepted form is tried in turn; input matching none is reported.
     let date = if let Ok(d) = NaiveDate::parse_from_str(s, "%Y-%m-%d") {
         d
     } else {

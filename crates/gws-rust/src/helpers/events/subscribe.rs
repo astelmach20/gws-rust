@@ -225,6 +225,8 @@ fn subscription_from_operation(op: &Value) -> Result<String, GwsError> {
             code: err
                 .get("code")
                 .and_then(Value::as_u64)
+                // A missing or out-of-range code is reported as 500; the
+                // message below still carries the operation's own error.
                 .and_then(|c| u16::try_from(c).ok())
                 .unwrap_or(500),
             message: format!(

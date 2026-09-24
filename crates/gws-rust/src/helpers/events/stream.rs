@@ -112,6 +112,7 @@ impl FailureBudget {
         let full = self.base.saturating_mul(1u32 << exp).min(self.cap);
         // Equal jitter: half fixed, half random, to avoid synchronized retries.
         let half = full / 2;
+        // Saturating; `half` is bounded by `cap`, so this never clamps.
         let jitter_ms = u64::try_from(half.as_millis()).unwrap_or(u64::MAX);
         let random = if jitter_ms == 0 {
             0
@@ -214,6 +215,7 @@ pub(crate) async fn run_stream<S: StreamStep>(
                         "message": message,
                         "attempt": budget.consecutive(),
                         "maxFailures": opts.max_failures,
+                        // Saturating conversion for display only.
                         "retryInMs": u64::try_from(delay.as_millis()).unwrap_or(u64::MAX),
                     }),
                 );
