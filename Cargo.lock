@@ -1438,6 +1438,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serial_test",
+ "strsim",
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
@@ -1447,6 +1448,7 @@ dependencies = [
  "tracing-appender",
  "tracing-subscriber",
  "uuid",
+ "wiremock",
  "yup-oauth2",
  "zeroize",
 ]
@@ -1456,11 +1458,16 @@ name = "gws-rust-core"
 version = "0.22.5"
 dependencies = [
  "anyhow",
+ "bytes",
+ "http",
+ "httpdate",
  "percent-encoding",
  "proptest",
+ "rand 0.10.3",
  "reqwest",
  "serde",
  "serde_json",
+ "serial_test",
  "strsim",
  "tempfile",
  "thiserror 2.0.21",
