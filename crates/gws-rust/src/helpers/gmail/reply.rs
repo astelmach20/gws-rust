@@ -12,42 +12,39 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use super::*;
+//! `gmail +reply` / `+reply-all`: threaded replies with the original quoted.
+
+use super::dispatch::{Delivery, deliver};
+use super::prelude::*;
+use super::sender::resolve_sender;
 
 /// Handle the `+reply` and `+reply-all` subcommands.
-pub(super) async fn handle_reply(
-    doc: &crate::discovery::RestDescription,
-    matches: &ArgMatches,
-    reply_all: bool,
-) -> Result<(), GwsError> {
+pub(super) async fn handle_reply(matches: &ArgMatches, reply_all: bool) -> Result<(), GwsError> {
     let mut config = parse_reply_args(matches)?;
-    let dry_run = matches.get_flag("dry-run");
+    let delivery = Delivery::from_matches(matches)?;
+    delivery.confirm(
+        matches,
+        &format!("send a reply to message {}", config.message_id),
+    )?;
 
-    let (original, token, self_email, client) = if dry_run {
+    let (original, api, self_email) = if delivery.dry_run {
         (
             OriginalMessage::dry_run_placeholder(&config.message_id),
             None,
             None,
-            None,
         )
     } else {
-        let t = auth::get_token(&[GMAIL_SCOPE])
-            .await
-            .map_err(|e| GwsError::Auth(format!("Gmail auth failed: {e}")))?;
-        let c = crate::client::build_client()?;
-        let orig = fetch_message_metadata(&c, &t, &config.message_id).await?;
-        config.from = resolve_sender(&c, &t, config.from.as_deref()).await?;
-        // For reply-all, always fetch the primary email for self-dedup and
-        // self-reply detection. The resolved sender may be an alias that differs from the primary
-        // address — both must be excluded from recipients. from_alias_email
-        // (extracted from config.from below) handles the alias; self_email
-        // handles the primary.
+        let api = super::api::authenticated(&[GMAIL_SCOPE]).await?;
+        let orig = api.get_original_message(&config.message_id).await?;
+        config.from = resolve_sender(&api, config.from.as_deref()).await?;
+        // For reply-all, fetch the primary address for self-dedup and
+        // self-reply detection. The --from alias (if any) is handled separately.
         let self_addr = if reply_all {
-            Some(fetch_user_email(&c, &t).await?)
+            Some(fetch_user_email(&api).await?)
         } else {
             None
         };
-        (orig, Some(t), self_addr, Some(c))
+        (orig, Some(api), self_addr)
     };
 
     let self_email = self_email.as_deref();
@@ -96,7 +93,6 @@ pub(super) async fn handle_reply(
         cc: non_empty_slice(&cc),
         bcc: non_empty_slice(&bcc),
         from: config.from.as_deref(),
-
         subject: &subject,
         threading: ThreadingHeaders {
             in_reply_to: &original.message_id,
@@ -107,20 +103,17 @@ pub(super) async fn handle_reply(
     };
 
     // Fetch inline images for HTML replies only. In plain-text mode, inline
-    // images are dropped entirely — matching Gmail web, which strips them from
-    // both plain-text replies and plain-text forwards.
+    // images are dropped entirely, matching Gmail web.
     let mut all_attachments = config.attachments;
-    if let (true, Some(client), Some(token)) = (config.html, &client, &token) {
+    if let (true, Some(api)) = (config.html, &api) {
         let inline_parts: Vec<_> = original
             .parts
             .iter()
             .filter(|p| p.is_inline())
             .cloned()
             .collect();
-
         fetch_and_merge_original_parts(
-            client,
-            token,
+            api,
             &config.message_id,
             &inline_parts,
             &mut all_attachments,
@@ -129,15 +122,7 @@ pub(super) async fn handle_reply(
     }
 
     let raw = create_reply_raw_message(&envelope, &original, &all_attachments)?;
-
-    super::dispatch_raw_email(
-        doc,
-        matches,
-        &raw,
-        original.thread_id.as_deref(),
-        token.as_deref(),
-    )
-    .await
+    deliver(api.as_ref(), delivery, &raw, original.thread_id.as_deref()).await
 }
 
 // --- Data structures ---
@@ -174,38 +159,13 @@ pub(super) struct ReplyConfig {
 /// Fetch the authenticated user's primary email from the Gmail profile API.
 /// Used in reply-all for self-dedup (excluding the user from recipients) and
 /// self-reply detection (switching to original-To-based addressing).
-async fn fetch_user_email(client: &reqwest::Client, token: &str) -> Result<String, GwsError> {
-    let resp = crate::client::send_with_retry(|| {
-        client
-            .get("https://gmail.googleapis.com/gmail/v1/users/me/profile")
-            .bearer_auth(token)
-    })
-    .await
-    .map_err(|e| GwsError::Other(anyhow::anyhow!("Failed to fetch user profile: {e}")))?;
-
-    if !resp.status().is_success() {
-        let status = resp.status().as_u16();
-        let body = resp
-            .text()
-            .await
-            .unwrap_or_else(|_| "(error body unreadable)".to_string());
-        return Err(super::build_api_error(
-            status,
-            &body,
-            "Failed to fetch user profile",
-        ));
-    }
-
-    let profile: Value = resp
-        .json()
-        .await
-        .map_err(|e| GwsError::Other(anyhow::anyhow!("Failed to parse profile: {e}")))?;
-
+async fn fetch_user_email(api: &GmailApi) -> Result<String, GwsError> {
+    let profile = api.profile().await?;
     profile
         .get("emailAddress")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
-        .ok_or_else(|| GwsError::Other(anyhow::anyhow!("Profile missing emailAddress")))
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .ok_or_else(|| other_error("Gmail profile response is missing emailAddress"))
 }
 
 // --- Message construction ---
@@ -350,7 +310,7 @@ fn build_reply_subject(original_subject: &str) -> String {
 }
 
 fn create_reply_raw_message(
-    envelope: &ReplyEnvelope,
+    envelope: &ReplyEnvelope<'_>,
     original: &OriginalMessage,
     attachments: &[Attachment],
 ) -> Result<String, GwsError> {
@@ -416,6 +376,8 @@ fn format_quoted_original_html(original: &OriginalMessage) -> String {
 
 // --- Argument parsing ---
 
+use super::cli::{parse_optional_mailboxes, required_str};
+
 fn parse_reply_args(matches: &ArgMatches) -> Result<ReplyConfig, GwsError> {
     // try_get_one because +reply doesn't define --remove (only +reply-all does).
     // Explicit match distinguishes "arg not defined" from unexpected errors.
@@ -427,15 +389,15 @@ fn parse_reply_args(matches: &ArgMatches) -> Result<ReplyConfig, GwsError> {
             .filter(|v| !v.is_empty()),
         Err(clap::parser::MatchesError::UnknownArgument { .. }) => None,
         Err(e) => {
-            return Err(GwsError::Other(anyhow::anyhow!(
+            return Err(other_error(format!(
                 "Unexpected error reading --remove argument: {e}"
             )));
         }
     };
 
     Ok(ReplyConfig {
-        message_id: matches.get_one::<String>("message-id").unwrap().to_string(),
-        body: matches.get_one::<String>("body").unwrap().to_string(),
+        message_id: required_str(matches, "message-id")?,
+        body: required_str(matches, "body")?,
         from: parse_optional_mailboxes(matches, "from"),
         extra_to: parse_optional_mailboxes(matches, "to"),
         cc: parse_optional_mailboxes(matches, "cc"),
@@ -448,8 +410,10 @@ fn parse_reply_args(matches: &ArgMatches) -> Result<ReplyConfig, GwsError> {
 
 #[cfg(test)]
 mod tests {
-    use super::super::tests::{extract_header, strip_qp_soft_breaks};
     use super::*;
+    use crate::helpers::gmail::test_support::{
+        extract_header, helper_matches, strip_qp_soft_breaks,
+    };
 
     #[test]
     fn test_build_reply_subject_without_prefix() {
@@ -674,28 +638,9 @@ mod tests {
     }
 
     fn make_reply_matches(args: &[&str]) -> ArgMatches {
-        let cmd = Command::new("test")
-            .arg(Arg::new("message-id").long("message-id"))
-            .arg(Arg::new("body").long("body"))
-            .arg(Arg::new("from").long("from"))
-            .arg(Arg::new("to").long("to"))
-            .arg(Arg::new("cc").long("cc"))
-            .arg(Arg::new("bcc").long("bcc"))
-            .arg(Arg::new("remove").long("remove"))
-            .arg(Arg::new("html").long("html").action(ArgAction::SetTrue))
-            .arg(
-                Arg::new("attach")
-                    .short('a')
-                    .long("attach")
-                    .action(ArgAction::Append),
-            )
-            .arg(
-                Arg::new("dry-run")
-                    .long("dry-run")
-                    .action(ArgAction::SetTrue),
-            )
-            .arg(Arg::new("draft").long("draft").action(ArgAction::SetTrue));
-        cmd.try_get_matches_from(args).unwrap()
+        let mut full = vec!["+reply-all"];
+        full.extend_from_slice(&args[1..]);
+        helper_matches(&full)
     }
 
     #[test]
@@ -781,24 +726,8 @@ mod tests {
 
     #[test]
     fn test_parse_reply_args_without_remove_defined() {
-        // Simulates +reply which doesn't define --remove (only +reply-all does).
-        let cmd = Command::new("test")
-            .arg(Arg::new("message-id").long("message-id"))
-            .arg(Arg::new("body").long("body"))
-            .arg(Arg::new("from").long("from"))
-            .arg(Arg::new("to").long("to"))
-            .arg(Arg::new("cc").long("cc"))
-            .arg(Arg::new("bcc").long("bcc"))
-            .arg(Arg::new("html").long("html").action(ArgAction::SetTrue))
-            .arg(
-                Arg::new("attach")
-                    .short('a')
-                    .long("attach")
-                    .action(ArgAction::Append),
-            );
-        let matches = cmd
-            .try_get_matches_from(["test", "--message-id", "abc", "--body", "hi"])
-            .unwrap();
+        // +reply doesn't define --remove (only +reply-all does).
+        let matches = helper_matches(&["+reply", "--message-id", "abc", "--body", "hi"]);
         let config = parse_reply_args(&matches).unwrap();
         assert!(config.remove.is_none());
     }

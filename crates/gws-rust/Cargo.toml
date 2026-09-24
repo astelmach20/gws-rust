@@ -65,9 +65,12 @@ uuid = { version = "1.26.1", features = ["v4", "v5"] }
 yup-oauth2 = "12"
 keyring = "4.2.0"
 zeroize = { version = "1.9.0", features = ["derive"] }
+html2text = "0.17.1"
 
 [dev-dependencies]
 serial_test.workspace = true
+shell-words = "1.1.1"
+wiremock = "0.6.5"
 
 [lints]
 workspace = true

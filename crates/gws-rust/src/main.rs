@@ -191,9 +191,16 @@ async fn run() -> Result<(), GwsError> {
         .cloned()
         .or_else(|| std::env::var("GWSR_SANITIZE_TEMPLATE").ok());
 
-    let sanitize_mode = std::env::var("GWSR_SANITIZE_MODE")
-        .map(|v| helpers::modelarmor::SanitizeMode::from_str(&v))
-        .unwrap_or(helpers::modelarmor::SanitizeMode::Warn);
+    // Unknown modes are an error (SEC-14): never silently fall back to `warn`.
+    let sanitize_mode = match std::env::var("GWSR_SANITIZE_MODE") {
+        Ok(v) => v.parse::<helpers::modelarmor::SanitizeMode>()?,
+        Err(std::env::VarError::NotPresent) => helpers::modelarmor::SanitizeMode::default(),
+        Err(std::env::VarError::NotUnicode(_)) => {
+            return Err(GwsError::Validation(
+                "GWSR_SANITIZE_MODE is not valid UTF-8".to_string(),
+            ));
+        }
+    };
 
     let sanitize_config = parse_sanitize_config(sanitize_template, &sanitize_mode)?;
 
@@ -371,6 +378,11 @@ fn parse_sanitize_config(
     template: Option<String>,
     mode: &helpers::modelarmor::SanitizeMode,
 ) -> Result<helpers::modelarmor::SanitizeConfig, GwsError> {
+    // Validate the template grammar up front (SEC-05) so a malformed value
+    // fails before any request is made.
+    if let Some(t) = &template {
+        helpers::modelarmor::ModelArmorTemplate::parse(t)?;
+    }
     Ok(helpers::modelarmor::SanitizeConfig {
         template,
         mode: mode.clone(),
@@ -573,12 +585,20 @@ mod tests {
 
     #[test]
     fn test_parse_sanitize_config_valid() {
+        let tpl = "projects/my-project/locations/us-central1/templates/t";
         let config = parse_sanitize_config(
-            Some("tpl".to_string()),
+            Some(tpl.to_string()),
             &helpers::modelarmor::SanitizeMode::Warn,
         )
         .unwrap();
-        assert_eq!(config.template.as_deref(), Some("tpl"));
+        assert_eq!(config.template.as_deref(), Some(tpl));
+        assert!(
+            parse_sanitize_config(
+                Some("tpl".to_string()),
+                &helpers::modelarmor::SanitizeMode::Warn
+            )
+            .is_err()
+        );
     }
 
     #[test]
