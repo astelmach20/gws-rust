@@ -175,6 +175,9 @@ TIPS:
             let Some((name, m)) = matches.subcommand() else {
                 return Ok(false);
             };
+            if !["+push", "+pull", "+run", "+logs"].contains(&name) {
+                return Ok(false);
+            }
             let dry = http::dry_run(m);
             let script_id = required(m, "script-id")?;
             let (api, value) = match name {
