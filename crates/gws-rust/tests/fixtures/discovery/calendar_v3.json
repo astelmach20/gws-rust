@@ -1,0 +1,1051 @@
+{
+ "_note": "Stripped Discovery document used only by the registry validation test. Regenerate from https://www.googleapis.com/discovery/v1/apis/calendar/v3/rest",
+ "name": "calendar",
+ "parameters": {
+  "alt": {
+   "location": "query",
+   "type": "string"
+  },
+  "fields": {
+   "location": "query",
+   "type": "string"
+  },
+  "key": {
+   "location": "query",
+   "type": "string"
+  },
+  "oauth_token": {
+   "location": "query",
+   "type": "string"
+  },
+  "prettyPrint": {
+   "location": "query",
+   "type": "boolean"
+  },
+  "quotaUser": {
+   "location": "query",
+   "type": "string"
+  },
+  "userIp": {
+   "location": "query",
+   "type": "string"
+  }
+ },
+ "resources": {
+  "acl": {
+   "methods": {
+    "delete": {
+     "httpMethod": "DELETE",
+     "id": "calendar.acl.delete",
+     "parameters": {
+      "calendarId": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      },
+      "ruleId": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      }
+     },
+     "path": "calendars/{calendarId}/acl/{ruleId}"
+    },
+    "get": {
+     "httpMethod": "GET",
+     "id": "calendar.acl.get",
+     "parameters": {
+      "calendarId": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      },
+      "ruleId": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      }
+     },
+     "path": "calendars/{calendarId}/acl/{ruleId}"
+    },
+    "insert": {
+     "httpMethod": "POST",
+     "id": "calendar.acl.insert",
+     "parameters": {
+      "calendarId": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      },
+      "sendNotifications": {
+       "location": "query",
+       "type": "boolean"
+      }
+     },
+     "path": "calendars/{calendarId}/acl",
+     "request": {
+      "$ref": "AclRule"
+     }
+    },
+    "list": {
+     "httpMethod": "GET",
+     "id": "calendar.acl.list",
+     "parameters": {
+      "calendarId": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      },
+      "maxResults": {
+       "location": "query",
+       "type": "integer"
+      },
+      "pageToken": {
+       "location": "query",
+       "type": "string"
+      },
+      "showDeleted": {
+       "location": "query",
+       "type": "boolean"
+      },
+      "syncToken": {
+       "location": "query",
+       "type": "string"
+      }
+     },
+     "path": "calendars/{calendarId}/acl"
+    },
+    "patch": {
+     "httpMethod": "PATCH",
+     "id": "calendar.acl.patch",
+     "parameters": {
+      "calendarId": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      },
+      "ruleId": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      },
+      "sendNotifications": {
+       "location": "query",
+       "type": "boolean"
+      }
+     },
+     "path": "calendars/{calendarId}/acl/{ruleId}",
+     "request": {
+      "$ref": "AclRule"
+     }
+    },
+    "update": {
+     "httpMethod": "PUT",
+     "id": "calendar.acl.update",
+     "parameters": {
+      "calendarId": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      },
+      "ruleId": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      },
+      "sendNotifications": {
+       "location": "query",
+       "type": "boolean"
+      }
+     },
+     "path": "calendars/{calendarId}/acl/{ruleId}",
+     "request": {
+      "$ref": "AclRule"
+     }
+    },
+    "watch": {
+     "httpMethod": "POST",
+     "id": "calendar.acl.watch",
+     "parameters": {
+      "calendarId": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      },
+      "maxResults": {
+       "location": "query",
+       "type": "integer"
+      },
+      "pageToken": {
+       "location": "query",
+       "type": "string"
+      },
+      "showDeleted": {
+       "location": "query",
+       "type": "boolean"
+      },
+      "syncToken": {
+       "location": "query",
+       "type": "string"
+      }
+     },
+     "path": "calendars/{calendarId}/acl/watch",
+     "request": {
+      "$ref": "Channel"
+     }
+    }
+   }
+  },
+  "calendarList": {
+   "methods": {
+    "delete": {
+     "httpMethod": "DELETE",
+     "id": "calendar.calendarList.delete",
+     "parameters": {
+      "calendarId": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      }
+     },
+     "path": "users/me/calendarList/{calendarId}"
+    },
+    "get": {
+     "httpMethod": "GET",
+     "id": "calendar.calendarList.get",
+     "parameters": {
+      "calendarId": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      }
+     },
+     "path": "users/me/calendarList/{calendarId}"
+    },
+    "insert": {
+     "httpMethod": "POST",
+     "id": "calendar.calendarList.insert",
+     "parameters": {
+      "colorRgbFormat": {
+       "location": "query",
+       "type": "boolean"
+      }
+     },
+     "path": "users/me/calendarList",
+     "request": {
+      "$ref": "CalendarListEntry"
+     }
+    },
+    "list": {
+     "httpMethod": "GET",
+     "id": "calendar.calendarList.list",
+     "parameters": {
+      "maxResults": {
+       "location": "query",
+       "type": "integer"
+      },
+      "minAccessRole": {
+       "location": "query",
+       "type": "string"
+      },
+      "pageToken": {
+       "location": "query",
+       "type": "string"
+      },
+      "showDeleted": {
+       "location": "query",
+       "type": "boolean"
+      },
+      "showHidden": {
+       "location": "query",
+       "type": "boolean"
+      },
+      "showOwnOrganizationOnly": {
+       "location": "query",
+       "type": "boolean"
+      },
+      "syncToken": {
+       "location": "query",
+       "type": "string"
+      }
+     },
+     "path": "users/me/calendarList"
+    },
+    "patch": {
+     "httpMethod": "PATCH",
+     "id": "calendar.calendarList.patch",
+     "parameters": {
+      "calendarId": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      },
+      "colorRgbFormat": {
+       "location": "query",
+       "type": "boolean"
+      }
+     },
+     "path": "users/me/calendarList/{calendarId}",
+     "request": {
+      "$ref": "CalendarListEntry"
+     }
+    },
+    "update": {
+     "httpMethod": "PUT",
+     "id": "calendar.calendarList.update",
+     "parameters": {
+      "calendarId": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      },
+      "colorRgbFormat": {
+       "location": "query",
+       "type": "boolean"
+      }
+     },
+     "path": "users/me/calendarList/{calendarId}",
+     "request": {
+      "$ref": "CalendarListEntry"
+     }
+    },
+    "watch": {
+     "httpMethod": "POST",
+     "id": "calendar.calendarList.watch",
+     "parameters": {
+      "maxResults": {
+       "location": "query",
+       "type": "integer"
+      },
+      "minAccessRole": {
+       "location": "query",
+       "type": "string"
+      },
+      "pageToken": {
+       "location": "query",
+       "type": "string"
+      },
+      "showDeleted": {
+       "location": "query",
+       "type": "boolean"
+      },
+      "showHidden": {
+       "location": "query",
+       "type": "boolean"
+      },
+      "showOwnOrganizationOnly": {
+       "location": "query",
+       "type": "boolean"
+      },
+      "syncToken": {
+       "location": "query",
+       "type": "string"
+      }
+     },
+     "path": "users/me/calendarList/watch",
+     "request": {
+      "$ref": "Channel"
+     }
+    }
+   }
+  },
+  "calendars": {
+   "methods": {
+    "clear": {
+     "httpMethod": "POST",
+     "id": "calendar.calendars.clear",
+     "parameters": {
+      "calendarId": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      }
+     },
+     "path": "calendars/{calendarId}/clear"
+    },
+    "delete": {
+     "httpMethod": "DELETE",
+     "id": "calendar.calendars.delete",
+     "parameters": {
+      "calendarId": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      }
+     },
+     "path": "calendars/{calendarId}"
+    },
+    "get": {
+     "httpMethod": "GET",
+     "id": "calendar.calendars.get",
+     "parameters": {
+      "calendarId": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      }
+     },
+     "path": "calendars/{calendarId}"
+    },
+    "insert": {
+     "httpMethod": "POST",
+     "id": "calendar.calendars.insert",
+     "path": "calendars",
+     "request": {
+      "$ref": "Calendar"
+     }
+    },
+    "patch": {
+     "httpMethod": "PATCH",
+     "id": "calendar.calendars.patch",
+     "parameters": {
+      "calendarId": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      }
+     },
+     "path": "calendars/{calendarId}",
+     "request": {
+      "$ref": "Calendar"
+     }
+    },
+    "transferOwnership": {
+     "httpMethod": "POST",
+     "id": "calendar.calendars.transferOwnership",
+     "parameters": {
+      "calendarId": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      },
+      "newDataOwner": {
+       "location": "query",
+       "required": true,
+       "type": "string"
+      },
+      "useAdminAccess": {
+       "location": "query",
+       "required": true,
+       "type": "boolean"
+      }
+     },
+     "path": "calendars/{calendarId}/transferOwnership"
+    },
+    "update": {
+     "httpMethod": "PUT",
+     "id": "calendar.calendars.update",
+     "parameters": {
+      "calendarId": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      }
+     },
+     "path": "calendars/{calendarId}",
+     "request": {
+      "$ref": "Calendar"
+     }
+    }
+   }
+  },
+  "channels": {
+   "methods": {
+    "stop": {
+     "httpMethod": "POST",
+     "id": "calendar.channels.stop",
+     "path": "channels/stop",
+     "request": {
+      "$ref": "Channel"
+     }
+    }
+   }
+  },
+  "colors": {
+   "methods": {
+    "get": {
+     "httpMethod": "GET",
+     "id": "calendar.colors.get",
+     "path": "colors"
+    }
+   }
+  },
+  "events": {
+   "methods": {
+    "delete": {
+     "httpMethod": "DELETE",
+     "id": "calendar.events.delete",
+     "parameters": {
+      "calendarId": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      },
+      "eventId": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      },
+      "sendNotifications": {
+       "location": "query",
+       "type": "boolean"
+      },
+      "sendUpdates": {
+       "location": "query",
+       "type": "string"
+      }
+     },
+     "path": "calendars/{calendarId}/events/{eventId}"
+    },
+    "get": {
+     "httpMethod": "GET",
+     "id": "calendar.events.get",
+     "parameters": {
+      "alwaysIncludeEmail": {
+       "location": "query",
+       "type": "boolean"
+      },
+      "calendarId": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      },
+      "eventId": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      },
+      "maxAttendees": {
+       "location": "query",
+       "type": "integer"
+      },
+      "timeZone": {
+       "location": "query",
+       "type": "string"
+      }
+     },
+     "path": "calendars/{calendarId}/events/{eventId}"
+    },
+    "import": {
+     "httpMethod": "POST",
+     "id": "calendar.events.import",
+     "parameters": {
+      "calendarId": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      },
+      "conferenceDataVersion": {
+       "location": "query",
+       "type": "integer"
+      },
+      "eventLabelVersion": {
+       "location": "query",
+       "type": "integer"
+      },
+      "supportsAttachments": {
+       "location": "query",
+       "type": "boolean"
+      }
+     },
+     "path": "calendars/{calendarId}/events/import",
+     "request": {
+      "$ref": "Event"
+     }
+    },
+    "insert": {
+     "httpMethod": "POST",
+     "id": "calendar.events.insert",
+     "parameters": {
+      "calendarId": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      },
+      "conferenceDataVersion": {
+       "location": "query",
+       "type": "integer"
+      },
+      "eventLabelVersion": {
+       "location": "query",
+       "type": "integer"
+      },
+      "maxAttendees": {
+       "location": "query",
+       "type": "integer"
+      },
+      "sendNotifications": {
+       "location": "query",
+       "type": "boolean"
+      },
+      "sendUpdates": {
+       "location": "query",
+       "type": "string"
+      },
+      "supportsAttachments": {
+       "location": "query",
+       "type": "boolean"
+      }
+     },
+     "path": "calendars/{calendarId}/events",
+     "request": {
+      "$ref": "Event"
+     }
+    },
+    "instances": {
+     "httpMethod": "GET",
+     "id": "calendar.events.instances",
+     "parameters": {
+      "alwaysIncludeEmail": {
+       "location": "query",
+       "type": "boolean"
+      },
+      "calendarId": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      },
+      "eventId": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      },
+      "maxAttendees": {
+       "location": "query",
+       "type": "integer"
+      },
+      "maxResults": {
+       "location": "query",
+       "type": "integer"
+      },
+      "originalStart": {
+       "location": "query",
+       "type": "string"
+      },
+      "pageToken": {
+       "location": "query",
+       "type": "string"
+      },
+      "showDeleted": {
+       "location": "query",
+       "type": "boolean"
+      },
+      "timeMax": {
+       "location": "query",
+       "type": "string"
+      },
+      "timeMin": {
+       "location": "query",
+       "type": "string"
+      },
+      "timeZone": {
+       "location": "query",
+       "type": "string"
+      }
+     },
+     "path": "calendars/{calendarId}/events/{eventId}/instances"
+    },
+    "list": {
+     "httpMethod": "GET",
+     "id": "calendar.events.list",
+     "parameters": {
+      "alwaysIncludeEmail": {
+       "location": "query",
+       "type": "boolean"
+      },
+      "calendarId": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      },
+      "eventTypes": {
+       "location": "query",
+       "repeated": true,
+       "type": "string"
+      },
+      "iCalUID": {
+       "location": "query",
+       "type": "string"
+      },
+      "maxAttendees": {
+       "location": "query",
+       "type": "integer"
+      },
+      "maxResults": {
+       "location": "query",
+       "type": "integer"
+      },
+      "orderBy": {
+       "location": "query",
+       "type": "string"
+      },
+      "pageToken": {
+       "location": "query",
+       "type": "string"
+      },
+      "privateExtendedProperty": {
+       "location": "query",
+       "repeated": true,
+       "type": "string"
+      },
+      "q": {
+       "location": "query",
+       "type": "string"
+      },
+      "sharedExtendedProperty": {
+       "location": "query",
+       "repeated": true,
+       "type": "string"
+      },
+      "showDeleted": {
+       "location": "query",
+       "type": "boolean"
+      },
+      "showHiddenInvitations": {
+       "location": "query",
+       "type": "boolean"
+      },
+      "singleEvents": {
+       "location": "query",
+       "type": "boolean"
+      },
+      "syncToken": {
+       "location": "query",
+       "type": "string"
+      },
+      "timeMax": {
+       "location": "query",
+       "type": "string"
+      },
+      "timeMin": {
+       "location": "query",
+       "type": "string"
+      },
+      "timeZone": {
+       "location": "query",
+       "type": "string"
+      },
+      "updatedMin": {
+       "location": "query",
+       "type": "string"
+      }
+     },
+     "path": "calendars/{calendarId}/events"
+    },
+    "move": {
+     "httpMethod": "POST",
+     "id": "calendar.events.move",
+     "parameters": {
+      "calendarId": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      },
+      "destination": {
+       "location": "query",
+       "required": true,
+       "type": "string"
+      },
+      "eventId": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      },
+      "sendNotifications": {
+       "location": "query",
+       "type": "boolean"
+      },
+      "sendUpdates": {
+       "location": "query",
+       "type": "string"
+      }
+     },
+     "path": "calendars/{calendarId}/events/{eventId}/move"
+    },
+    "patch": {
+     "httpMethod": "PATCH",
+     "id": "calendar.events.patch",
+     "parameters": {
+      "alwaysIncludeEmail": {
+       "location": "query",
+       "type": "boolean"
+      },
+      "calendarId": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      },
+      "conferenceDataVersion": {
+       "location": "query",
+       "type": "integer"
+      },
+      "eventId": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      },
+      "eventLabelVersion": {
+       "location": "query",
+       "type": "integer"
+      },
+      "maxAttendees": {
+       "location": "query",
+       "type": "integer"
+      },
+      "sendNotifications": {
+       "location": "query",
+       "type": "boolean"
+      },
+      "sendUpdates": {
+       "location": "query",
+       "type": "string"
+      },
+      "supportsAttachments": {
+       "location": "query",
+       "type": "boolean"
+      }
+     },
+     "path": "calendars/{calendarId}/events/{eventId}",
+     "request": {
+      "$ref": "Event"
+     }
+    },
+    "quickAdd": {
+     "httpMethod": "POST",
+     "id": "calendar.events.quickAdd",
+     "parameters": {
+      "calendarId": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      },
+      "sendNotifications": {
+       "location": "query",
+       "type": "boolean"
+      },
+      "sendUpdates": {
+       "location": "query",
+       "type": "string"
+      },
+      "text": {
+       "location": "query",
+       "required": true,
+       "type": "string"
+      }
+     },
+     "path": "calendars/{calendarId}/events/quickAdd"
+    },
+    "update": {
+     "httpMethod": "PUT",
+     "id": "calendar.events.update",
+     "parameters": {
+      "alwaysIncludeEmail": {
+       "location": "query",
+       "type": "boolean"
+      },
+      "calendarId": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      },
+      "conferenceDataVersion": {
+       "location": "query",
+       "type": "integer"
+      },
+      "eventId": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      },
+      "eventLabelVersion": {
+       "location": "query",
+       "type": "integer"
+      },
+      "maxAttendees": {
+       "location": "query",
+       "type": "integer"
+      },
+      "sendNotifications": {
+       "location": "query",
+       "type": "boolean"
+      },
+      "sendUpdates": {
+       "location": "query",
+       "type": "string"
+      },
+      "supportsAttachments": {
+       "location": "query",
+       "type": "boolean"
+      }
+     },
+     "path": "calendars/{calendarId}/events/{eventId}",
+     "request": {
+      "$ref": "Event"
+     }
+    },
+    "watch": {
+     "httpMethod": "POST",
+     "id": "calendar.events.watch",
+     "parameters": {
+      "alwaysIncludeEmail": {
+       "location": "query",
+       "type": "boolean"
+      },
+      "calendarId": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      },
+      "eventTypes": {
+       "location": "query",
+       "repeated": true,
+       "type": "string"
+      },
+      "iCalUID": {
+       "location": "query",
+       "type": "string"
+      },
+      "maxAttendees": {
+       "location": "query",
+       "type": "integer"
+      },
+      "maxResults": {
+       "location": "query",
+       "type": "integer"
+      },
+      "orderBy": {
+       "location": "query",
+       "type": "string"
+      },
+      "pageToken": {
+       "location": "query",
+       "type": "string"
+      },
+      "privateExtendedProperty": {
+       "location": "query",
+       "repeated": true,
+       "type": "string"
+      },
+      "q": {
+       "location": "query",
+       "type": "string"
+      },
+      "sharedExtendedProperty": {
+       "location": "query",
+       "repeated": true,
+       "type": "string"
+      },
+      "showDeleted": {
+       "location": "query",
+       "type": "boolean"
+      },
+      "showHiddenInvitations": {
+       "location": "query",
+       "type": "boolean"
+      },
+      "singleEvents": {
+       "location": "query",
+       "type": "boolean"
+      },
+      "syncToken": {
+       "location": "query",
+       "type": "string"
+      },
+      "timeMax": {
+       "location": "query",
+       "type": "string"
+      },
+      "timeMin": {
+       "location": "query",
+       "type": "string"
+      },
+      "timeZone": {
+       "location": "query",
+       "type": "string"
+      },
+      "updatedMin": {
+       "location": "query",
+       "type": "string"
+      }
+     },
+     "path": "calendars/{calendarId}/events/watch",
+     "request": {
+      "$ref": "Channel"
+     }
+    }
+   }
+  },
+  "freebusy": {
+   "methods": {
+    "query": {
+     "httpMethod": "POST",
+     "id": "calendar.freebusy.query",
+     "path": "freeBusy",
+     "request": {
+      "$ref": "FreeBusyRequest"
+     }
+    }
+   }
+  },
+  "settings": {
+   "methods": {
+    "get": {
+     "httpMethod": "GET",
+     "id": "calendar.settings.get",
+     "parameters": {
+      "setting": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      }
+     },
+     "path": "users/me/settings/{setting}"
+    },
+    "list": {
+     "httpMethod": "GET",
+     "id": "calendar.settings.list",
+     "parameters": {
+      "maxResults": {
+       "location": "query",
+       "type": "integer"
+      },
+      "pageToken": {
+       "location": "query",
+       "type": "string"
+      },
+      "syncToken": {
+       "location": "query",
+       "type": "string"
+      }
+     },
+     "path": "users/me/settings"
+    },
+    "watch": {
+     "httpMethod": "POST",
+     "id": "calendar.settings.watch",
+     "parameters": {
+      "maxResults": {
+       "location": "query",
+       "type": "integer"
+      },
+      "pageToken": {
+       "location": "query",
+       "type": "string"
+      },
+      "syncToken": {
+       "location": "query",
+       "type": "string"
+      }
+     },
+     "path": "users/me/settings/watch",
+     "request": {
+      "$ref": "Channel"
+     }
+    }
+   }
+  }
+ },
+ "rootUrl": "https://www.googleapis.com/",
+ "servicePath": "calendar/v3/",
+ "version": "v3"
+}

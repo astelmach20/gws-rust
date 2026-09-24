@@ -1,0 +1,142 @@
+{
+ "_note": "Stripped Discovery document used only by the registry validation test. Regenerate from https://www.googleapis.com/discovery/v1/apis/slides/v1/rest",
+ "name": "slides",
+ "parameters": {
+  "$.xgafv": {
+   "location": "query",
+   "type": "string"
+  },
+  "access_token": {
+   "location": "query",
+   "type": "string"
+  },
+  "alt": {
+   "location": "query",
+   "type": "string"
+  },
+  "callback": {
+   "location": "query",
+   "type": "string"
+  },
+  "fields": {
+   "location": "query",
+   "type": "string"
+  },
+  "key": {
+   "location": "query",
+   "type": "string"
+  },
+  "oauth_token": {
+   "location": "query",
+   "type": "string"
+  },
+  "prettyPrint": {
+   "location": "query",
+   "type": "boolean"
+  },
+  "quotaUser": {
+   "location": "query",
+   "type": "string"
+  },
+  "uploadType": {
+   "location": "query",
+   "type": "string"
+  },
+  "upload_protocol": {
+   "location": "query",
+   "type": "string"
+  }
+ },
+ "resources": {
+  "presentations": {
+   "methods": {
+    "batchUpdate": {
+     "httpMethod": "POST",
+     "id": "slides.presentations.batchUpdate",
+     "parameters": {
+      "presentationId": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      }
+     },
+     "path": "v1/presentations/{presentationId}:batchUpdate",
+     "request": {
+      "$ref": "BatchUpdatePresentationRequest"
+     }
+    },
+    "create": {
+     "httpMethod": "POST",
+     "id": "slides.presentations.create",
+     "path": "v1/presentations",
+     "request": {
+      "$ref": "Presentation"
+     }
+    },
+    "get": {
+     "httpMethod": "GET",
+     "id": "slides.presentations.get",
+     "parameters": {
+      "presentationId": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      }
+     },
+     "path": "v1/presentations/{+presentationId}"
+    }
+   },
+   "resources": {
+    "pages": {
+     "methods": {
+      "get": {
+       "httpMethod": "GET",
+       "id": "slides.presentations.pages.get",
+       "parameters": {
+        "pageObjectId": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        },
+        "presentationId": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        }
+       },
+       "path": "v1/presentations/{presentationId}/pages/{pageObjectId}"
+      },
+      "getThumbnail": {
+       "httpMethod": "GET",
+       "id": "slides.presentations.pages.getThumbnail",
+       "parameters": {
+        "pageObjectId": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        },
+        "presentationId": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        },
+        "thumbnailProperties.mimeType": {
+         "location": "query",
+         "type": "string"
+        },
+        "thumbnailProperties.thumbnailSize": {
+         "location": "query",
+         "type": "string"
+        }
+       },
+       "path": "v1/presentations/{presentationId}/pages/{pageObjectId}/thumbnail"
+      }
+     }
+    }
+   }
+  }
+ },
+ "rootUrl": "https://slides.googleapis.com/",
+ "servicePath": "",
+ "version": "v1"
+}

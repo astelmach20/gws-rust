@@ -1,0 +1,477 @@
+{
+ "_note": "Stripped Discovery document used only by the registry validation test. Regenerate from https://www.googleapis.com/discovery/v1/apis/meet/v2/rest",
+ "name": "meet",
+ "parameters": {
+  "$.xgafv": {
+   "location": "query",
+   "type": "string"
+  },
+  "access_token": {
+   "location": "query",
+   "type": "string"
+  },
+  "alt": {
+   "location": "query",
+   "type": "string"
+  },
+  "callback": {
+   "location": "query",
+   "type": "string"
+  },
+  "fields": {
+   "location": "query",
+   "type": "string"
+  },
+  "key": {
+   "location": "query",
+   "type": "string"
+  },
+  "oauth_token": {
+   "location": "query",
+   "type": "string"
+  },
+  "prettyPrint": {
+   "location": "query",
+   "type": "boolean"
+  },
+  "quotaUser": {
+   "location": "query",
+   "type": "string"
+  },
+  "uploadType": {
+   "location": "query",
+   "type": "string"
+  },
+  "upload_protocol": {
+   "location": "query",
+   "type": "string"
+  }
+ },
+ "resources": {
+  "conferenceRecords": {
+   "methods": {
+    "get": {
+     "httpMethod": "GET",
+     "id": "meet.conferenceRecords.get",
+     "parameters": {
+      "name": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      }
+     },
+     "path": "v2/{+name}"
+    },
+    "list": {
+     "httpMethod": "GET",
+     "id": "meet.conferenceRecords.list",
+     "parameters": {
+      "filter": {
+       "location": "query",
+       "type": "string"
+      },
+      "pageSize": {
+       "location": "query",
+       "type": "integer"
+      },
+      "pageToken": {
+       "location": "query",
+       "type": "string"
+      }
+     },
+     "path": "v2/conferenceRecords"
+    }
+   },
+   "resources": {
+    "participants": {
+     "methods": {
+      "get": {
+       "httpMethod": "GET",
+       "id": "meet.conferenceRecords.participants.get",
+       "parameters": {
+        "name": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        }
+       },
+       "path": "v2/{+name}"
+      },
+      "list": {
+       "httpMethod": "GET",
+       "id": "meet.conferenceRecords.participants.list",
+       "parameters": {
+        "filter": {
+         "location": "query",
+         "type": "string"
+        },
+        "pageSize": {
+         "location": "query",
+         "type": "integer"
+        },
+        "pageToken": {
+         "location": "query",
+         "type": "string"
+        },
+        "parent": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        }
+       },
+       "path": "v2/{+parent}/participants"
+      }
+     },
+     "resources": {
+      "participantSessions": {
+       "methods": {
+        "get": {
+         "httpMethod": "GET",
+         "id": "meet.conferenceRecords.participants.participantSessions.get",
+         "parameters": {
+          "name": {
+           "location": "path",
+           "required": true,
+           "type": "string"
+          }
+         },
+         "path": "v2/{+name}"
+        },
+        "list": {
+         "httpMethod": "GET",
+         "id": "meet.conferenceRecords.participants.participantSessions.list",
+         "parameters": {
+          "filter": {
+           "location": "query",
+           "type": "string"
+          },
+          "pageSize": {
+           "location": "query",
+           "type": "integer"
+          },
+          "pageToken": {
+           "location": "query",
+           "type": "string"
+          },
+          "parent": {
+           "location": "path",
+           "required": true,
+           "type": "string"
+          }
+         },
+         "path": "v2/{+parent}/participantSessions"
+        }
+       }
+      }
+     }
+    },
+    "recordings": {
+     "methods": {
+      "get": {
+       "httpMethod": "GET",
+       "id": "meet.conferenceRecords.recordings.get",
+       "parameters": {
+        "name": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        }
+       },
+       "path": "v2/{+name}"
+      },
+      "list": {
+       "httpMethod": "GET",
+       "id": "meet.conferenceRecords.recordings.list",
+       "parameters": {
+        "pageSize": {
+         "location": "query",
+         "type": "integer"
+        },
+        "pageToken": {
+         "location": "query",
+         "type": "string"
+        },
+        "parent": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        }
+       },
+       "path": "v2/{+parent}/recordings"
+      }
+     }
+    },
+    "smartNotes": {
+     "methods": {
+      "get": {
+       "httpMethod": "GET",
+       "id": "meet.conferenceRecords.smartNotes.get",
+       "parameters": {
+        "name": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        }
+       },
+       "path": "v2/{+name}"
+      },
+      "list": {
+       "httpMethod": "GET",
+       "id": "meet.conferenceRecords.smartNotes.list",
+       "parameters": {
+        "pageSize": {
+         "location": "query",
+         "type": "integer"
+        },
+        "pageToken": {
+         "location": "query",
+         "type": "string"
+        },
+        "parent": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        }
+       },
+       "path": "v2/{+parent}/smartNotes"
+      }
+     }
+    },
+    "transcripts": {
+     "methods": {
+      "get": {
+       "httpMethod": "GET",
+       "id": "meet.conferenceRecords.transcripts.get",
+       "parameters": {
+        "name": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        }
+       },
+       "path": "v2/{+name}"
+      },
+      "list": {
+       "httpMethod": "GET",
+       "id": "meet.conferenceRecords.transcripts.list",
+       "parameters": {
+        "pageSize": {
+         "location": "query",
+         "type": "integer"
+        },
+        "pageToken": {
+         "location": "query",
+         "type": "string"
+        },
+        "parent": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        }
+       },
+       "path": "v2/{+parent}/transcripts"
+      }
+     },
+     "resources": {
+      "entries": {
+       "methods": {
+        "get": {
+         "httpMethod": "GET",
+         "id": "meet.conferenceRecords.transcripts.entries.get",
+         "parameters": {
+          "name": {
+           "location": "path",
+           "required": true,
+           "type": "string"
+          }
+         },
+         "path": "v2/{+name}"
+        },
+        "list": {
+         "httpMethod": "GET",
+         "id": "meet.conferenceRecords.transcripts.entries.list",
+         "parameters": {
+          "pageSize": {
+           "location": "query",
+           "type": "integer"
+          },
+          "pageToken": {
+           "location": "query",
+           "type": "string"
+          },
+          "parent": {
+           "location": "path",
+           "required": true,
+           "type": "string"
+          }
+         },
+         "path": "v2/{+parent}/entries"
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "spaces": {
+   "methods": {
+    "create": {
+     "httpMethod": "POST",
+     "id": "meet.spaces.create",
+     "path": "v2/spaces",
+     "request": {
+      "$ref": "Space"
+     }
+    },
+    "endActiveConference": {
+     "httpMethod": "POST",
+     "id": "meet.spaces.endActiveConference",
+     "parameters": {
+      "name": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      }
+     },
+     "path": "v2/{+name}:endActiveConference",
+     "request": {
+      "$ref": "EndActiveConferenceRequest"
+     }
+    },
+    "get": {
+     "httpMethod": "GET",
+     "id": "meet.spaces.get",
+     "parameters": {
+      "name": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      }
+     },
+     "path": "v2/{+name}"
+    },
+    "patch": {
+     "httpMethod": "PATCH",
+     "id": "meet.spaces.patch",
+     "parameters": {
+      "name": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      },
+      "updateMask": {
+       "location": "query",
+       "type": "string"
+      }
+     },
+     "path": "v2/{+name}",
+     "request": {
+      "$ref": "Space"
+     }
+    }
+   },
+   "resources": {
+    "members": {
+     "methods": {
+      "batchUpdate": {
+       "httpMethod": "POST",
+       "id": "meet.spaces.members.batchUpdate",
+       "parameters": {
+        "parent": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        }
+       },
+       "path": "v2/{+parent}/members:batchUpdate",
+       "request": {
+        "$ref": "BatchUpdateMembersRequest"
+       }
+      },
+      "create": {
+       "httpMethod": "POST",
+       "id": "meet.spaces.members.create",
+       "parameters": {
+        "parent": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        }
+       },
+       "path": "v2/{+parent}/members",
+       "request": {
+        "$ref": "Member"
+       }
+      },
+      "delete": {
+       "httpMethod": "DELETE",
+       "id": "meet.spaces.members.delete",
+       "parameters": {
+        "name": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        }
+       },
+       "path": "v2/{+name}"
+      },
+      "get": {
+       "httpMethod": "GET",
+       "id": "meet.spaces.members.get",
+       "parameters": {
+        "name": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        }
+       },
+       "path": "v2/{+name}"
+      },
+      "list": {
+       "httpMethod": "GET",
+       "id": "meet.spaces.members.list",
+       "parameters": {
+        "pageSize": {
+         "location": "query",
+         "type": "integer"
+        },
+        "pageToken": {
+         "location": "query",
+         "type": "string"
+        },
+        "parent": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        }
+       },
+       "path": "v2/{+parent}/members"
+      },
+      "patch": {
+       "httpMethod": "PATCH",
+       "id": "meet.spaces.members.patch",
+       "parameters": {
+        "name": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        },
+        "updateMask": {
+         "location": "query",
+         "type": "string"
+        }
+       },
+       "path": "v2/{+name}",
+       "request": {
+        "$ref": "Member"
+       }
+      }
+     }
+    }
+   }
+  }
+ },
+ "rootUrl": "https://meet.googleapis.com/",
+ "servicePath": "",
+ "version": "v2"
+}

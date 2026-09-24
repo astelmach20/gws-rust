@@ -1,0 +1,334 @@
+{
+ "_note": "Stripped Discovery document used only by the registry validation test. Regenerate from https://www.googleapis.com/discovery/v1/apis/workspaceevents/v1/rest",
+ "name": "workspaceevents",
+ "parameters": {
+  "$.xgafv": {
+   "location": "query",
+   "type": "string"
+  },
+  "access_token": {
+   "location": "query",
+   "type": "string"
+  },
+  "alt": {
+   "location": "query",
+   "type": "string"
+  },
+  "callback": {
+   "location": "query",
+   "type": "string"
+  },
+  "fields": {
+   "location": "query",
+   "type": "string"
+  },
+  "key": {
+   "location": "query",
+   "type": "string"
+  },
+  "oauth_token": {
+   "location": "query",
+   "type": "string"
+  },
+  "prettyPrint": {
+   "location": "query",
+   "type": "boolean"
+  },
+  "quotaUser": {
+   "location": "query",
+   "type": "string"
+  },
+  "uploadType": {
+   "location": "query",
+   "type": "string"
+  },
+  "upload_protocol": {
+   "location": "query",
+   "type": "string"
+  }
+ },
+ "resources": {
+  "message": {
+   "methods": {
+    "stream": {
+     "httpMethod": "POST",
+     "id": "workspaceevents.message.stream",
+     "path": "v1/message:stream",
+     "request": {
+      "$ref": "SendMessageRequest"
+     }
+    }
+   }
+  },
+  "operations": {
+   "methods": {
+    "get": {
+     "httpMethod": "GET",
+     "id": "workspaceevents.operations.get",
+     "parameters": {
+      "name": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      }
+     },
+     "path": "v1/{+name}"
+    }
+   }
+  },
+  "subscriptions": {
+   "methods": {
+    "create": {
+     "httpMethod": "POST",
+     "id": "workspaceevents.subscriptions.create",
+     "parameters": {
+      "validateOnly": {
+       "location": "query",
+       "type": "boolean"
+      }
+     },
+     "path": "v1/subscriptions",
+     "request": {
+      "$ref": "Subscription"
+     }
+    },
+    "delete": {
+     "httpMethod": "DELETE",
+     "id": "workspaceevents.subscriptions.delete",
+     "parameters": {
+      "allowMissing": {
+       "location": "query",
+       "type": "boolean"
+      },
+      "etag": {
+       "location": "query",
+       "type": "string"
+      },
+      "name": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      },
+      "validateOnly": {
+       "location": "query",
+       "type": "boolean"
+      }
+     },
+     "path": "v1/{+name}"
+    },
+    "get": {
+     "httpMethod": "GET",
+     "id": "workspaceevents.subscriptions.get",
+     "parameters": {
+      "name": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      }
+     },
+     "path": "v1/{+name}"
+    },
+    "list": {
+     "httpMethod": "GET",
+     "id": "workspaceevents.subscriptions.list",
+     "parameters": {
+      "filter": {
+       "location": "query",
+       "type": "string"
+      },
+      "pageSize": {
+       "location": "query",
+       "type": "integer"
+      },
+      "pageToken": {
+       "location": "query",
+       "type": "string"
+      }
+     },
+     "path": "v1/subscriptions"
+    },
+    "patch": {
+     "httpMethod": "PATCH",
+     "id": "workspaceevents.subscriptions.patch",
+     "parameters": {
+      "name": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      },
+      "updateMask": {
+       "location": "query",
+       "type": "string"
+      },
+      "validateOnly": {
+       "location": "query",
+       "type": "boolean"
+      }
+     },
+     "path": "v1/{+name}",
+     "request": {
+      "$ref": "Subscription"
+     }
+    },
+    "reactivate": {
+     "httpMethod": "POST",
+     "id": "workspaceevents.subscriptions.reactivate",
+     "parameters": {
+      "name": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      }
+     },
+     "path": "v1/{+name}:reactivate",
+     "request": {
+      "$ref": "ReactivateSubscriptionRequest"
+     }
+    }
+   }
+  },
+  "tasks": {
+   "methods": {
+    "cancel": {
+     "httpMethod": "POST",
+     "id": "workspaceevents.tasks.cancel",
+     "parameters": {
+      "name": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      }
+     },
+     "path": "v1/{+name}:cancel",
+     "request": {
+      "$ref": "CancelTaskRequest"
+     }
+    },
+    "get": {
+     "httpMethod": "GET",
+     "id": "workspaceevents.tasks.get",
+     "parameters": {
+      "historyLength": {
+       "location": "query",
+       "type": "integer"
+      },
+      "name": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      },
+      "tenant": {
+       "location": "query",
+       "type": "string"
+      }
+     },
+     "path": "v1/{+name}"
+    },
+    "subscribe": {
+     "httpMethod": "GET",
+     "id": "workspaceevents.tasks.subscribe",
+     "parameters": {
+      "name": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      },
+      "tenant": {
+       "location": "query",
+       "type": "string"
+      }
+     },
+     "path": "v1/{+name}:subscribe"
+    }
+   },
+   "resources": {
+    "pushNotificationConfigs": {
+     "methods": {
+      "create": {
+       "httpMethod": "POST",
+       "id": "workspaceevents.tasks.pushNotificationConfigs.create",
+       "parameters": {
+        "configId": {
+         "location": "query",
+         "type": "string"
+        },
+        "parent": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        },
+        "tenant": {
+         "location": "query",
+         "type": "string"
+        }
+       },
+       "path": "v1/{+parent}",
+       "request": {
+        "$ref": "TaskPushNotificationConfig"
+       }
+      },
+      "delete": {
+       "httpMethod": "DELETE",
+       "id": "workspaceevents.tasks.pushNotificationConfigs.delete",
+       "parameters": {
+        "name": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        },
+        "tenant": {
+         "location": "query",
+         "type": "string"
+        }
+       },
+       "path": "v1/{+name}"
+      },
+      "get": {
+       "httpMethod": "GET",
+       "id": "workspaceevents.tasks.pushNotificationConfigs.get",
+       "parameters": {
+        "name": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        },
+        "tenant": {
+         "location": "query",
+         "type": "string"
+        }
+       },
+       "path": "v1/{+name}"
+      },
+      "list": {
+       "httpMethod": "GET",
+       "id": "workspaceevents.tasks.pushNotificationConfigs.list",
+       "parameters": {
+        "pageSize": {
+         "location": "query",
+         "type": "integer"
+        },
+        "pageToken": {
+         "location": "query",
+         "type": "string"
+        },
+        "parent": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        },
+        "tenant": {
+         "location": "query",
+         "type": "string"
+        }
+       },
+       "path": "v1/{+parent}/pushNotificationConfigs"
+      }
+     }
+    }
+   }
+  }
+ },
+ "rootUrl": "https://workspaceevents.googleapis.com/",
+ "servicePath": "",
+ "version": "v1"
+}

@@ -1,0 +1,2477 @@
+{
+ "_note": "Stripped Discovery document used only by the registry validation test. Regenerate from https://www.googleapis.com/discovery/v1/apis/classroom/v1/rest",
+ "name": "classroom",
+ "parameters": {
+  "$.xgafv": {
+   "location": "query",
+   "type": "string"
+  },
+  "access_token": {
+   "location": "query",
+   "type": "string"
+  },
+  "alt": {
+   "location": "query",
+   "type": "string"
+  },
+  "callback": {
+   "location": "query",
+   "type": "string"
+  },
+  "fields": {
+   "location": "query",
+   "type": "string"
+  },
+  "key": {
+   "location": "query",
+   "type": "string"
+  },
+  "oauth_token": {
+   "location": "query",
+   "type": "string"
+  },
+  "prettyPrint": {
+   "location": "query",
+   "type": "boolean"
+  },
+  "quotaUser": {
+   "location": "query",
+   "type": "string"
+  },
+  "uploadType": {
+   "location": "query",
+   "type": "string"
+  },
+  "upload_protocol": {
+   "location": "query",
+   "type": "string"
+  }
+ },
+ "resources": {
+  "courses": {
+   "methods": {
+    "create": {
+     "httpMethod": "POST",
+     "id": "classroom.courses.create",
+     "path": "v1/courses",
+     "request": {
+      "$ref": "Course"
+     }
+    },
+    "delete": {
+     "httpMethod": "DELETE",
+     "id": "classroom.courses.delete",
+     "parameters": {
+      "id": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      }
+     },
+     "path": "v1/courses/{id}"
+    },
+    "get": {
+     "httpMethod": "GET",
+     "id": "classroom.courses.get",
+     "parameters": {
+      "id": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      }
+     },
+     "path": "v1/courses/{id}"
+    },
+    "getGradingPeriodSettings": {
+     "httpMethod": "GET",
+     "id": "classroom.courses.getGradingPeriodSettings",
+     "parameters": {
+      "courseId": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      }
+     },
+     "path": "v1/courses/{courseId}/gradingPeriodSettings"
+    },
+    "list": {
+     "httpMethod": "GET",
+     "id": "classroom.courses.list",
+     "parameters": {
+      "courseStates": {
+       "location": "query",
+       "repeated": true,
+       "type": "string"
+      },
+      "pageSize": {
+       "location": "query",
+       "type": "integer"
+      },
+      "pageToken": {
+       "location": "query",
+       "type": "string"
+      },
+      "studentId": {
+       "location": "query",
+       "type": "string"
+      },
+      "teacherId": {
+       "location": "query",
+       "type": "string"
+      }
+     },
+     "path": "v1/courses"
+    },
+    "patch": {
+     "httpMethod": "PATCH",
+     "id": "classroom.courses.patch",
+     "parameters": {
+      "id": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      },
+      "updateMask": {
+       "location": "query",
+       "type": "string"
+      }
+     },
+     "path": "v1/courses/{id}",
+     "request": {
+      "$ref": "Course"
+     }
+    },
+    "update": {
+     "httpMethod": "PUT",
+     "id": "classroom.courses.update",
+     "parameters": {
+      "id": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      }
+     },
+     "path": "v1/courses/{id}",
+     "request": {
+      "$ref": "Course"
+     }
+    },
+    "updateGradingPeriodSettings": {
+     "httpMethod": "PATCH",
+     "id": "classroom.courses.updateGradingPeriodSettings",
+     "parameters": {
+      "courseId": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      },
+      "updateMask": {
+       "location": "query",
+       "type": "string"
+      }
+     },
+     "path": "v1/courses/{courseId}/gradingPeriodSettings",
+     "request": {
+      "$ref": "GradingPeriodSettings"
+     }
+    }
+   },
+   "resources": {
+    "aliases": {
+     "methods": {
+      "create": {
+       "httpMethod": "POST",
+       "id": "classroom.courses.aliases.create",
+       "parameters": {
+        "courseId": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        }
+       },
+       "path": "v1/courses/{courseId}/aliases",
+       "request": {
+        "$ref": "CourseAlias"
+       }
+      },
+      "delete": {
+       "httpMethod": "DELETE",
+       "id": "classroom.courses.aliases.delete",
+       "parameters": {
+        "alias": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        },
+        "courseId": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        }
+       },
+       "path": "v1/courses/{courseId}/aliases/{alias}"
+      },
+      "list": {
+       "httpMethod": "GET",
+       "id": "classroom.courses.aliases.list",
+       "parameters": {
+        "courseId": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        },
+        "pageSize": {
+         "location": "query",
+         "type": "integer"
+        },
+        "pageToken": {
+         "location": "query",
+         "type": "string"
+        }
+       },
+       "path": "v1/courses/{courseId}/aliases"
+      }
+     }
+    },
+    "announcements": {
+     "methods": {
+      "create": {
+       "httpMethod": "POST",
+       "id": "classroom.courses.announcements.create",
+       "parameters": {
+        "courseId": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        }
+       },
+       "path": "v1/courses/{courseId}/announcements",
+       "request": {
+        "$ref": "Announcement"
+       }
+      },
+      "delete": {
+       "httpMethod": "DELETE",
+       "id": "classroom.courses.announcements.delete",
+       "parameters": {
+        "courseId": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        },
+        "id": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        }
+       },
+       "path": "v1/courses/{courseId}/announcements/{id}"
+      },
+      "get": {
+       "httpMethod": "GET",
+       "id": "classroom.courses.announcements.get",
+       "parameters": {
+        "courseId": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        },
+        "id": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        }
+       },
+       "path": "v1/courses/{courseId}/announcements/{id}"
+      },
+      "getAddOnContext": {
+       "httpMethod": "GET",
+       "id": "classroom.courses.announcements.getAddOnContext",
+       "parameters": {
+        "addOnToken": {
+         "location": "query",
+         "type": "string"
+        },
+        "attachmentId": {
+         "location": "query",
+         "type": "string"
+        },
+        "courseId": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        },
+        "itemId": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        },
+        "postId": {
+         "location": "query",
+         "type": "string"
+        }
+       },
+       "path": "v1/courses/{courseId}/announcements/{itemId}/addOnContext"
+      },
+      "list": {
+       "httpMethod": "GET",
+       "id": "classroom.courses.announcements.list",
+       "parameters": {
+        "announcementStates": {
+         "location": "query",
+         "repeated": true,
+         "type": "string"
+        },
+        "courseId": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        },
+        "orderBy": {
+         "location": "query",
+         "type": "string"
+        },
+        "pageSize": {
+         "location": "query",
+         "type": "integer"
+        },
+        "pageToken": {
+         "location": "query",
+         "type": "string"
+        }
+       },
+       "path": "v1/courses/{courseId}/announcements"
+      },
+      "modifyAssignees": {
+       "httpMethod": "POST",
+       "id": "classroom.courses.announcements.modifyAssignees",
+       "parameters": {
+        "courseId": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        },
+        "id": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        }
+       },
+       "path": "v1/courses/{courseId}/announcements/{id}:modifyAssignees",
+       "request": {
+        "$ref": "ModifyAnnouncementAssigneesRequest"
+       }
+      },
+      "patch": {
+       "httpMethod": "PATCH",
+       "id": "classroom.courses.announcements.patch",
+       "parameters": {
+        "courseId": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        },
+        "id": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        },
+        "updateMask": {
+         "location": "query",
+         "type": "string"
+        }
+       },
+       "path": "v1/courses/{courseId}/announcements/{id}",
+       "request": {
+        "$ref": "Announcement"
+       }
+      }
+     },
+     "resources": {
+      "addOnAttachments": {
+       "methods": {
+        "create": {
+         "httpMethod": "POST",
+         "id": "classroom.courses.announcements.addOnAttachments.create",
+         "parameters": {
+          "addOnToken": {
+           "location": "query",
+           "type": "string"
+          },
+          "courseId": {
+           "location": "path",
+           "required": true,
+           "type": "string"
+          },
+          "itemId": {
+           "location": "path",
+           "required": true,
+           "type": "string"
+          },
+          "postId": {
+           "location": "query",
+           "type": "string"
+          }
+         },
+         "path": "v1/courses/{courseId}/announcements/{itemId}/addOnAttachments",
+         "request": {
+          "$ref": "AddOnAttachment"
+         }
+        },
+        "delete": {
+         "httpMethod": "DELETE",
+         "id": "classroom.courses.announcements.addOnAttachments.delete",
+         "parameters": {
+          "attachmentId": {
+           "location": "path",
+           "required": true,
+           "type": "string"
+          },
+          "courseId": {
+           "location": "path",
+           "required": true,
+           "type": "string"
+          },
+          "itemId": {
+           "location": "path",
+           "required": true,
+           "type": "string"
+          },
+          "postId": {
+           "location": "query",
+           "type": "string"
+          }
+         },
+         "path": "v1/courses/{courseId}/announcements/{itemId}/addOnAttachments/{attachmentId}"
+        },
+        "get": {
+         "httpMethod": "GET",
+         "id": "classroom.courses.announcements.addOnAttachments.get",
+         "parameters": {
+          "attachmentId": {
+           "location": "path",
+           "required": true,
+           "type": "string"
+          },
+          "courseId": {
+           "location": "path",
+           "required": true,
+           "type": "string"
+          },
+          "itemId": {
+           "location": "path",
+           "required": true,
+           "type": "string"
+          },
+          "postId": {
+           "location": "query",
+           "type": "string"
+          }
+         },
+         "path": "v1/courses/{courseId}/announcements/{itemId}/addOnAttachments/{attachmentId}"
+        },
+        "list": {
+         "httpMethod": "GET",
+         "id": "classroom.courses.announcements.addOnAttachments.list",
+         "parameters": {
+          "courseId": {
+           "location": "path",
+           "required": true,
+           "type": "string"
+          },
+          "itemId": {
+           "location": "path",
+           "required": true,
+           "type": "string"
+          },
+          "pageSize": {
+           "location": "query",
+           "type": "integer"
+          },
+          "pageToken": {
+           "location": "query",
+           "type": "string"
+          },
+          "postId": {
+           "location": "query",
+           "type": "string"
+          }
+         },
+         "path": "v1/courses/{courseId}/announcements/{itemId}/addOnAttachments"
+        },
+        "patch": {
+         "httpMethod": "PATCH",
+         "id": "classroom.courses.announcements.addOnAttachments.patch",
+         "parameters": {
+          "attachmentId": {
+           "location": "path",
+           "required": true,
+           "type": "string"
+          },
+          "courseId": {
+           "location": "path",
+           "required": true,
+           "type": "string"
+          },
+          "itemId": {
+           "location": "path",
+           "required": true,
+           "type": "string"
+          },
+          "postId": {
+           "location": "query",
+           "type": "string"
+          },
+          "updateMask": {
+           "location": "query",
+           "type": "string"
+          }
+         },
+         "path": "v1/courses/{courseId}/announcements/{itemId}/addOnAttachments/{attachmentId}",
+         "request": {
+          "$ref": "AddOnAttachment"
+         }
+        }
+       }
+      }
+     }
+    },
+    "courseWork": {
+     "methods": {
+      "create": {
+       "httpMethod": "POST",
+       "id": "classroom.courses.courseWork.create",
+       "parameters": {
+        "courseId": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        }
+       },
+       "path": "v1/courses/{courseId}/courseWork",
+       "request": {
+        "$ref": "CourseWork"
+       }
+      },
+      "delete": {
+       "httpMethod": "DELETE",
+       "id": "classroom.courses.courseWork.delete",
+       "parameters": {
+        "courseId": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        },
+        "id": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        }
+       },
+       "path": "v1/courses/{courseId}/courseWork/{id}"
+      },
+      "get": {
+       "httpMethod": "GET",
+       "id": "classroom.courses.courseWork.get",
+       "parameters": {
+        "courseId": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        },
+        "id": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        }
+       },
+       "path": "v1/courses/{courseId}/courseWork/{id}"
+      },
+      "getAddOnContext": {
+       "httpMethod": "GET",
+       "id": "classroom.courses.courseWork.getAddOnContext",
+       "parameters": {
+        "addOnToken": {
+         "location": "query",
+         "type": "string"
+        },
+        "attachmentId": {
+         "location": "query",
+         "type": "string"
+        },
+        "courseId": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        },
+        "itemId": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        },
+        "postId": {
+         "location": "query",
+         "type": "string"
+        }
+       },
+       "path": "v1/courses/{courseId}/courseWork/{itemId}/addOnContext"
+      },
+      "list": {
+       "httpMethod": "GET",
+       "id": "classroom.courses.courseWork.list",
+       "parameters": {
+        "courseId": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        },
+        "courseWorkStates": {
+         "location": "query",
+         "repeated": true,
+         "type": "string"
+        },
+        "orderBy": {
+         "location": "query",
+         "type": "string"
+        },
+        "pageSize": {
+         "location": "query",
+         "type": "integer"
+        },
+        "pageToken": {
+         "location": "query",
+         "type": "string"
+        }
+       },
+       "path": "v1/courses/{courseId}/courseWork"
+      },
+      "modifyAssignees": {
+       "httpMethod": "POST",
+       "id": "classroom.courses.courseWork.modifyAssignees",
+       "parameters": {
+        "courseId": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        },
+        "id": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        }
+       },
+       "path": "v1/courses/{courseId}/courseWork/{id}:modifyAssignees",
+       "request": {
+        "$ref": "ModifyCourseWorkAssigneesRequest"
+       }
+      },
+      "patch": {
+       "httpMethod": "PATCH",
+       "id": "classroom.courses.courseWork.patch",
+       "parameters": {
+        "courseId": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        },
+        "id": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        },
+        "updateMask": {
+         "location": "query",
+         "type": "string"
+        }
+       },
+       "path": "v1/courses/{courseId}/courseWork/{id}",
+       "request": {
+        "$ref": "CourseWork"
+       }
+      },
+      "updateRubric": {
+       "httpMethod": "PATCH",
+       "id": "classroom.courses.courseWork.updateRubric",
+       "parameters": {
+        "courseId": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        },
+        "courseWorkId": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        },
+        "id": {
+         "location": "query",
+         "type": "string"
+        },
+        "updateMask": {
+         "location": "query",
+         "type": "string"
+        }
+       },
+       "path": "v1/courses/{courseId}/courseWork/{courseWorkId}/rubric",
+       "request": {
+        "$ref": "Rubric"
+       }
+      }
+     },
+     "resources": {
+      "addOnAttachments": {
+       "methods": {
+        "create": {
+         "httpMethod": "POST",
+         "id": "classroom.courses.courseWork.addOnAttachments.create",
+         "parameters": {
+          "addOnToken": {
+           "location": "query",
+           "type": "string"
+          },
+          "courseId": {
+           "location": "path",
+           "required": true,
+           "type": "string"
+          },
+          "itemId": {
+           "location": "path",
+           "required": true,
+           "type": "string"
+          },
+          "postId": {
+           "location": "query",
+           "type": "string"
+          }
+         },
+         "path": "v1/courses/{courseId}/courseWork/{itemId}/addOnAttachments",
+         "request": {
+          "$ref": "AddOnAttachment"
+         }
+        },
+        "delete": {
+         "httpMethod": "DELETE",
+         "id": "classroom.courses.courseWork.addOnAttachments.delete",
+         "parameters": {
+          "attachmentId": {
+           "location": "path",
+           "required": true,
+           "type": "string"
+          },
+          "courseId": {
+           "location": "path",
+           "required": true,
+           "type": "string"
+          },
+          "itemId": {
+           "location": "path",
+           "required": true,
+           "type": "string"
+          },
+          "postId": {
+           "location": "query",
+           "type": "string"
+          }
+         },
+         "path": "v1/courses/{courseId}/courseWork/{itemId}/addOnAttachments/{attachmentId}"
+        },
+        "get": {
+         "httpMethod": "GET",
+         "id": "classroom.courses.courseWork.addOnAttachments.get",
+         "parameters": {
+          "attachmentId": {
+           "location": "path",
+           "required": true,
+           "type": "string"
+          },
+          "courseId": {
+           "location": "path",
+           "required": true,
+           "type": "string"
+          },
+          "itemId": {
+           "location": "path",
+           "required": true,
+           "type": "string"
+          },
+          "postId": {
+           "location": "query",
+           "type": "string"
+          }
+         },
+         "path": "v1/courses/{courseId}/courseWork/{itemId}/addOnAttachments/{attachmentId}"
+        },
+        "list": {
+         "httpMethod": "GET",
+         "id": "classroom.courses.courseWork.addOnAttachments.list",
+         "parameters": {
+          "courseId": {
+           "location": "path",
+           "required": true,
+           "type": "string"
+          },
+          "itemId": {
+           "location": "path",
+           "required": true,
+           "type": "string"
+          },
+          "pageSize": {
+           "location": "query",
+           "type": "integer"
+          },
+          "pageToken": {
+           "location": "query",
+           "type": "string"
+          },
+          "postId": {
+           "location": "query",
+           "type": "string"
+          }
+         },
+         "path": "v1/courses/{courseId}/courseWork/{itemId}/addOnAttachments"
+        },
+        "patch": {
+         "httpMethod": "PATCH",
+         "id": "classroom.courses.courseWork.addOnAttachments.patch",
+         "parameters": {
+          "attachmentId": {
+           "location": "path",
+           "required": true,
+           "type": "string"
+          },
+          "courseId": {
+           "location": "path",
+           "required": true,
+           "type": "string"
+          },
+          "itemId": {
+           "location": "path",
+           "required": true,
+           "type": "string"
+          },
+          "postId": {
+           "location": "query",
+           "type": "string"
+          },
+          "updateMask": {
+           "location": "query",
+           "type": "string"
+          }
+         },
+         "path": "v1/courses/{courseId}/courseWork/{itemId}/addOnAttachments/{attachmentId}",
+         "request": {
+          "$ref": "AddOnAttachment"
+         }
+        }
+       },
+       "resources": {
+        "studentSubmissions": {
+         "methods": {
+          "get": {
+           "httpMethod": "GET",
+           "id": "classroom.courses.courseWork.addOnAttachments.studentSubmissions.get",
+           "parameters": {
+            "attachmentId": {
+             "location": "path",
+             "required": true,
+             "type": "string"
+            },
+            "courseId": {
+             "location": "path",
+             "required": true,
+             "type": "string"
+            },
+            "itemId": {
+             "location": "path",
+             "required": true,
+             "type": "string"
+            },
+            "postId": {
+             "location": "query",
+             "type": "string"
+            },
+            "submissionId": {
+             "location": "path",
+             "required": true,
+             "type": "string"
+            }
+           },
+           "path": "v1/courses/{courseId}/courseWork/{itemId}/addOnAttachments/{attachmentId}/studentSubmissions/{submissionId}"
+          },
+          "patch": {
+           "httpMethod": "PATCH",
+           "id": "classroom.courses.courseWork.addOnAttachments.studentSubmissions.patch",
+           "parameters": {
+            "attachmentId": {
+             "location": "path",
+             "required": true,
+             "type": "string"
+            },
+            "courseId": {
+             "location": "path",
+             "required": true,
+             "type": "string"
+            },
+            "itemId": {
+             "location": "path",
+             "required": true,
+             "type": "string"
+            },
+            "postId": {
+             "location": "query",
+             "type": "string"
+            },
+            "submissionId": {
+             "location": "path",
+             "required": true,
+             "type": "string"
+            },
+            "updateMask": {
+             "location": "query",
+             "type": "string"
+            }
+           },
+           "path": "v1/courses/{courseId}/courseWork/{itemId}/addOnAttachments/{attachmentId}/studentSubmissions/{submissionId}",
+           "request": {
+            "$ref": "AddOnAttachmentStudentSubmission"
+           }
+          }
+         }
+        }
+       }
+      },
+      "rubrics": {
+       "methods": {
+        "create": {
+         "httpMethod": "POST",
+         "id": "classroom.courses.courseWork.rubrics.create",
+         "parameters": {
+          "courseId": {
+           "location": "path",
+           "required": true,
+           "type": "string"
+          },
+          "courseWorkId": {
+           "location": "path",
+           "required": true,
+           "type": "string"
+          }
+         },
+         "path": "v1/courses/{courseId}/courseWork/{courseWorkId}/rubrics",
+         "request": {
+          "$ref": "Rubric"
+         }
+        },
+        "delete": {
+         "httpMethod": "DELETE",
+         "id": "classroom.courses.courseWork.rubrics.delete",
+         "parameters": {
+          "courseId": {
+           "location": "path",
+           "required": true,
+           "type": "string"
+          },
+          "courseWorkId": {
+           "location": "path",
+           "required": true,
+           "type": "string"
+          },
+          "id": {
+           "location": "path",
+           "required": true,
+           "type": "string"
+          }
+         },
+         "path": "v1/courses/{courseId}/courseWork/{courseWorkId}/rubrics/{id}"
+        },
+        "get": {
+         "httpMethod": "GET",
+         "id": "classroom.courses.courseWork.rubrics.get",
+         "parameters": {
+          "courseId": {
+           "location": "path",
+           "required": true,
+           "type": "string"
+          },
+          "courseWorkId": {
+           "location": "path",
+           "required": true,
+           "type": "string"
+          },
+          "id": {
+           "location": "path",
+           "required": true,
+           "type": "string"
+          }
+         },
+         "path": "v1/courses/{courseId}/courseWork/{courseWorkId}/rubrics/{id}"
+        },
+        "list": {
+         "httpMethod": "GET",
+         "id": "classroom.courses.courseWork.rubrics.list",
+         "parameters": {
+          "courseId": {
+           "location": "path",
+           "required": true,
+           "type": "string"
+          },
+          "courseWorkId": {
+           "location": "path",
+           "required": true,
+           "type": "string"
+          },
+          "pageSize": {
+           "location": "query",
+           "type": "integer"
+          },
+          "pageToken": {
+           "location": "query",
+           "type": "string"
+          }
+         },
+         "path": "v1/courses/{courseId}/courseWork/{courseWorkId}/rubrics"
+        },
+        "patch": {
+         "httpMethod": "PATCH",
+         "id": "classroom.courses.courseWork.rubrics.patch",
+         "parameters": {
+          "courseId": {
+           "location": "path",
+           "required": true,
+           "type": "string"
+          },
+          "courseWorkId": {
+           "location": "path",
+           "required": true,
+           "type": "string"
+          },
+          "id": {
+           "location": "path",
+           "required": true,
+           "type": "string"
+          },
+          "updateMask": {
+           "location": "query",
+           "type": "string"
+          }
+         },
+         "path": "v1/courses/{courseId}/courseWork/{courseWorkId}/rubrics/{id}",
+         "request": {
+          "$ref": "Rubric"
+         }
+        }
+       }
+      },
+      "studentSubmissions": {
+       "methods": {
+        "get": {
+         "httpMethod": "GET",
+         "id": "classroom.courses.courseWork.studentSubmissions.get",
+         "parameters": {
+          "courseId": {
+           "location": "path",
+           "required": true,
+           "type": "string"
+          },
+          "courseWorkId": {
+           "location": "path",
+           "required": true,
+           "type": "string"
+          },
+          "id": {
+           "location": "path",
+           "required": true,
+           "type": "string"
+          }
+         },
+         "path": "v1/courses/{courseId}/courseWork/{courseWorkId}/studentSubmissions/{id}"
+        },
+        "list": {
+         "httpMethod": "GET",
+         "id": "classroom.courses.courseWork.studentSubmissions.list",
+         "parameters": {
+          "courseId": {
+           "location": "path",
+           "required": true,
+           "type": "string"
+          },
+          "courseWorkId": {
+           "location": "path",
+           "required": true,
+           "type": "string"
+          },
+          "late": {
+           "location": "query",
+           "type": "string"
+          },
+          "pageSize": {
+           "location": "query",
+           "type": "integer"
+          },
+          "pageToken": {
+           "location": "query",
+           "type": "string"
+          },
+          "states": {
+           "location": "query",
+           "repeated": true,
+           "type": "string"
+          },
+          "userId": {
+           "location": "query",
+           "type": "string"
+          }
+         },
+         "path": "v1/courses/{courseId}/courseWork/{courseWorkId}/studentSubmissions"
+        },
+        "modifyAttachments": {
+         "httpMethod": "POST",
+         "id": "classroom.courses.courseWork.studentSubmissions.modifyAttachments",
+         "parameters": {
+          "courseId": {
+           "location": "path",
+           "required": true,
+           "type": "string"
+          },
+          "courseWorkId": {
+           "location": "path",
+           "required": true,
+           "type": "string"
+          },
+          "id": {
+           "location": "path",
+           "required": true,
+           "type": "string"
+          }
+         },
+         "path": "v1/courses/{courseId}/courseWork/{courseWorkId}/studentSubmissions/{id}:modifyAttachments",
+         "request": {
+          "$ref": "ModifyAttachmentsRequest"
+         }
+        },
+        "patch": {
+         "httpMethod": "PATCH",
+         "id": "classroom.courses.courseWork.studentSubmissions.patch",
+         "parameters": {
+          "courseId": {
+           "location": "path",
+           "required": true,
+           "type": "string"
+          },
+          "courseWorkId": {
+           "location": "path",
+           "required": true,
+           "type": "string"
+          },
+          "id": {
+           "location": "path",
+           "required": true,
+           "type": "string"
+          },
+          "updateMask": {
+           "location": "query",
+           "type": "string"
+          }
+         },
+         "path": "v1/courses/{courseId}/courseWork/{courseWorkId}/studentSubmissions/{id}",
+         "request": {
+          "$ref": "StudentSubmission"
+         }
+        },
+        "reclaim": {
+         "httpMethod": "POST",
+         "id": "classroom.courses.courseWork.studentSubmissions.reclaim",
+         "parameters": {
+          "courseId": {
+           "location": "path",
+           "required": true,
+           "type": "string"
+          },
+          "courseWorkId": {
+           "location": "path",
+           "required": true,
+           "type": "string"
+          },
+          "id": {
+           "location": "path",
+           "required": true,
+           "type": "string"
+          }
+         },
+         "path": "v1/courses/{courseId}/courseWork/{courseWorkId}/studentSubmissions/{id}:reclaim",
+         "request": {
+          "$ref": "ReclaimStudentSubmissionRequest"
+         }
+        },
+        "return": {
+         "httpMethod": "POST",
+         "id": "classroom.courses.courseWork.studentSubmissions.return",
+         "parameters": {
+          "courseId": {
+           "location": "path",
+           "required": true,
+           "type": "string"
+          },
+          "courseWorkId": {
+           "location": "path",
+           "required": true,
+           "type": "string"
+          },
+          "id": {
+           "location": "path",
+           "required": true,
+           "type": "string"
+          }
+         },
+         "path": "v1/courses/{courseId}/courseWork/{courseWorkId}/studentSubmissions/{id}:return",
+         "request": {
+          "$ref": "ReturnStudentSubmissionRequest"
+         }
+        },
+        "turnIn": {
+         "httpMethod": "POST",
+         "id": "classroom.courses.courseWork.studentSubmissions.turnIn",
+         "parameters": {
+          "courseId": {
+           "location": "path",
+           "required": true,
+           "type": "string"
+          },
+          "courseWorkId": {
+           "location": "path",
+           "required": true,
+           "type": "string"
+          },
+          "id": {
+           "location": "path",
+           "required": true,
+           "type": "string"
+          }
+         },
+         "path": "v1/courses/{courseId}/courseWork/{courseWorkId}/studentSubmissions/{id}:turnIn",
+         "request": {
+          "$ref": "TurnInStudentSubmissionRequest"
+         }
+        }
+       }
+      }
+     }
+    },
+    "courseWorkMaterials": {
+     "methods": {
+      "create": {
+       "httpMethod": "POST",
+       "id": "classroom.courses.courseWorkMaterials.create",
+       "parameters": {
+        "courseId": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        }
+       },
+       "path": "v1/courses/{courseId}/courseWorkMaterials",
+       "request": {
+        "$ref": "CourseWorkMaterial"
+       }
+      },
+      "delete": {
+       "httpMethod": "DELETE",
+       "id": "classroom.courses.courseWorkMaterials.delete",
+       "parameters": {
+        "courseId": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        },
+        "id": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        }
+       },
+       "path": "v1/courses/{courseId}/courseWorkMaterials/{id}"
+      },
+      "get": {
+       "httpMethod": "GET",
+       "id": "classroom.courses.courseWorkMaterials.get",
+       "parameters": {
+        "courseId": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        },
+        "id": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        }
+       },
+       "path": "v1/courses/{courseId}/courseWorkMaterials/{id}"
+      },
+      "getAddOnContext": {
+       "httpMethod": "GET",
+       "id": "classroom.courses.courseWorkMaterials.getAddOnContext",
+       "parameters": {
+        "addOnToken": {
+         "location": "query",
+         "type": "string"
+        },
+        "attachmentId": {
+         "location": "query",
+         "type": "string"
+        },
+        "courseId": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        },
+        "itemId": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        },
+        "postId": {
+         "location": "query",
+         "type": "string"
+        }
+       },
+       "path": "v1/courses/{courseId}/courseWorkMaterials/{itemId}/addOnContext"
+      },
+      "list": {
+       "httpMethod": "GET",
+       "id": "classroom.courses.courseWorkMaterials.list",
+       "parameters": {
+        "courseId": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        },
+        "courseWorkMaterialStates": {
+         "location": "query",
+         "repeated": true,
+         "type": "string"
+        },
+        "materialDriveId": {
+         "location": "query",
+         "type": "string"
+        },
+        "materialLink": {
+         "location": "query",
+         "type": "string"
+        },
+        "orderBy": {
+         "location": "query",
+         "type": "string"
+        },
+        "pageSize": {
+         "location": "query",
+         "type": "integer"
+        },
+        "pageToken": {
+         "location": "query",
+         "type": "string"
+        }
+       },
+       "path": "v1/courses/{courseId}/courseWorkMaterials"
+      },
+      "patch": {
+       "httpMethod": "PATCH",
+       "id": "classroom.courses.courseWorkMaterials.patch",
+       "parameters": {
+        "courseId": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        },
+        "id": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        },
+        "updateMask": {
+         "location": "query",
+         "type": "string"
+        }
+       },
+       "path": "v1/courses/{courseId}/courseWorkMaterials/{id}",
+       "request": {
+        "$ref": "CourseWorkMaterial"
+       }
+      }
+     },
+     "resources": {
+      "addOnAttachments": {
+       "methods": {
+        "create": {
+         "httpMethod": "POST",
+         "id": "classroom.courses.courseWorkMaterials.addOnAttachments.create",
+         "parameters": {
+          "addOnToken": {
+           "location": "query",
+           "type": "string"
+          },
+          "courseId": {
+           "location": "path",
+           "required": true,
+           "type": "string"
+          },
+          "itemId": {
+           "location": "path",
+           "required": true,
+           "type": "string"
+          },
+          "postId": {
+           "location": "query",
+           "type": "string"
+          }
+         },
+         "path": "v1/courses/{courseId}/courseWorkMaterials/{itemId}/addOnAttachments",
+         "request": {
+          "$ref": "AddOnAttachment"
+         }
+        },
+        "delete": {
+         "httpMethod": "DELETE",
+         "id": "classroom.courses.courseWorkMaterials.addOnAttachments.delete",
+         "parameters": {
+          "attachmentId": {
+           "location": "path",
+           "required": true,
+           "type": "string"
+          },
+          "courseId": {
+           "location": "path",
+           "required": true,
+           "type": "string"
+          },
+          "itemId": {
+           "location": "path",
+           "required": true,
+           "type": "string"
+          },
+          "postId": {
+           "location": "query",
+           "type": "string"
+          }
+         },
+         "path": "v1/courses/{courseId}/courseWorkMaterials/{itemId}/addOnAttachments/{attachmentId}"
+        },
+        "get": {
+         "httpMethod": "GET",
+         "id": "classroom.courses.courseWorkMaterials.addOnAttachments.get",
+         "parameters": {
+          "attachmentId": {
+           "location": "path",
+           "required": true,
+           "type": "string"
+          },
+          "courseId": {
+           "location": "path",
+           "required": true,
+           "type": "string"
+          },
+          "itemId": {
+           "location": "path",
+           "required": true,
+           "type": "string"
+          },
+          "postId": {
+           "location": "query",
+           "type": "string"
+          }
+         },
+         "path": "v1/courses/{courseId}/courseWorkMaterials/{itemId}/addOnAttachments/{attachmentId}"
+        },
+        "list": {
+         "httpMethod": "GET",
+         "id": "classroom.courses.courseWorkMaterials.addOnAttachments.list",
+         "parameters": {
+          "courseId": {
+           "location": "path",
+           "required": true,
+           "type": "string"
+          },
+          "itemId": {
+           "location": "path",
+           "required": true,
+           "type": "string"
+          },
+          "pageSize": {
+           "location": "query",
+           "type": "integer"
+          },
+          "pageToken": {
+           "location": "query",
+           "type": "string"
+          },
+          "postId": {
+           "location": "query",
+           "type": "string"
+          }
+         },
+         "path": "v1/courses/{courseId}/courseWorkMaterials/{itemId}/addOnAttachments"
+        },
+        "patch": {
+         "httpMethod": "PATCH",
+         "id": "classroom.courses.courseWorkMaterials.addOnAttachments.patch",
+         "parameters": {
+          "attachmentId": {
+           "location": "path",
+           "required": true,
+           "type": "string"
+          },
+          "courseId": {
+           "location": "path",
+           "required": true,
+           "type": "string"
+          },
+          "itemId": {
+           "location": "path",
+           "required": true,
+           "type": "string"
+          },
+          "postId": {
+           "location": "query",
+           "type": "string"
+          },
+          "updateMask": {
+           "location": "query",
+           "type": "string"
+          }
+         },
+         "path": "v1/courses/{courseId}/courseWorkMaterials/{itemId}/addOnAttachments/{attachmentId}",
+         "request": {
+          "$ref": "AddOnAttachment"
+         }
+        }
+       }
+      }
+     }
+    },
+    "posts": {
+     "methods": {
+      "getAddOnContext": {
+       "httpMethod": "GET",
+       "id": "classroom.courses.posts.getAddOnContext",
+       "parameters": {
+        "addOnToken": {
+         "location": "query",
+         "type": "string"
+        },
+        "attachmentId": {
+         "location": "query",
+         "type": "string"
+        },
+        "courseId": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        },
+        "itemId": {
+         "location": "query",
+         "type": "string"
+        },
+        "postId": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        }
+       },
+       "path": "v1/courses/{courseId}/posts/{postId}/addOnContext"
+      }
+     },
+     "resources": {
+      "addOnAttachments": {
+       "methods": {
+        "create": {
+         "httpMethod": "POST",
+         "id": "classroom.courses.posts.addOnAttachments.create",
+         "parameters": {
+          "addOnToken": {
+           "location": "query",
+           "type": "string"
+          },
+          "courseId": {
+           "location": "path",
+           "required": true,
+           "type": "string"
+          },
+          "itemId": {
+           "location": "query",
+           "type": "string"
+          },
+          "postId": {
+           "location": "path",
+           "required": true,
+           "type": "string"
+          }
+         },
+         "path": "v1/courses/{courseId}/posts/{postId}/addOnAttachments",
+         "request": {
+          "$ref": "AddOnAttachment"
+         }
+        },
+        "delete": {
+         "httpMethod": "DELETE",
+         "id": "classroom.courses.posts.addOnAttachments.delete",
+         "parameters": {
+          "attachmentId": {
+           "location": "path",
+           "required": true,
+           "type": "string"
+          },
+          "courseId": {
+           "location": "path",
+           "required": true,
+           "type": "string"
+          },
+          "itemId": {
+           "location": "query",
+           "type": "string"
+          },
+          "postId": {
+           "location": "path",
+           "required": true,
+           "type": "string"
+          }
+         },
+         "path": "v1/courses/{courseId}/posts/{postId}/addOnAttachments/{attachmentId}"
+        },
+        "get": {
+         "httpMethod": "GET",
+         "id": "classroom.courses.posts.addOnAttachments.get",
+         "parameters": {
+          "attachmentId": {
+           "location": "path",
+           "required": true,
+           "type": "string"
+          },
+          "courseId": {
+           "location": "path",
+           "required": true,
+           "type": "string"
+          },
+          "itemId": {
+           "location": "query",
+           "type": "string"
+          },
+          "postId": {
+           "location": "path",
+           "required": true,
+           "type": "string"
+          }
+         },
+         "path": "v1/courses/{courseId}/posts/{postId}/addOnAttachments/{attachmentId}"
+        },
+        "list": {
+         "httpMethod": "GET",
+         "id": "classroom.courses.posts.addOnAttachments.list",
+         "parameters": {
+          "courseId": {
+           "location": "path",
+           "required": true,
+           "type": "string"
+          },
+          "itemId": {
+           "location": "query",
+           "type": "string"
+          },
+          "pageSize": {
+           "location": "query",
+           "type": "integer"
+          },
+          "pageToken": {
+           "location": "query",
+           "type": "string"
+          },
+          "postId": {
+           "location": "path",
+           "required": true,
+           "type": "string"
+          }
+         },
+         "path": "v1/courses/{courseId}/posts/{postId}/addOnAttachments"
+        },
+        "patch": {
+         "httpMethod": "PATCH",
+         "id": "classroom.courses.posts.addOnAttachments.patch",
+         "parameters": {
+          "attachmentId": {
+           "location": "path",
+           "required": true,
+           "type": "string"
+          },
+          "courseId": {
+           "location": "path",
+           "required": true,
+           "type": "string"
+          },
+          "itemId": {
+           "location": "query",
+           "type": "string"
+          },
+          "postId": {
+           "location": "path",
+           "required": true,
+           "type": "string"
+          },
+          "updateMask": {
+           "location": "query",
+           "type": "string"
+          }
+         },
+         "path": "v1/courses/{courseId}/posts/{postId}/addOnAttachments/{attachmentId}",
+         "request": {
+          "$ref": "AddOnAttachment"
+         }
+        }
+       },
+       "resources": {
+        "studentSubmissions": {
+         "methods": {
+          "get": {
+           "httpMethod": "GET",
+           "id": "classroom.courses.posts.addOnAttachments.studentSubmissions.get",
+           "parameters": {
+            "attachmentId": {
+             "location": "path",
+             "required": true,
+             "type": "string"
+            },
+            "courseId": {
+             "location": "path",
+             "required": true,
+             "type": "string"
+            },
+            "itemId": {
+             "location": "query",
+             "type": "string"
+            },
+            "postId": {
+             "location": "path",
+             "required": true,
+             "type": "string"
+            },
+            "submissionId": {
+             "location": "path",
+             "required": true,
+             "type": "string"
+            }
+           },
+           "path": "v1/courses/{courseId}/posts/{postId}/addOnAttachments/{attachmentId}/studentSubmissions/{submissionId}"
+          },
+          "patch": {
+           "httpMethod": "PATCH",
+           "id": "classroom.courses.posts.addOnAttachments.studentSubmissions.patch",
+           "parameters": {
+            "attachmentId": {
+             "location": "path",
+             "required": true,
+             "type": "string"
+            },
+            "courseId": {
+             "location": "path",
+             "required": true,
+             "type": "string"
+            },
+            "itemId": {
+             "location": "query",
+             "type": "string"
+            },
+            "postId": {
+             "location": "path",
+             "required": true,
+             "type": "string"
+            },
+            "submissionId": {
+             "location": "path",
+             "required": true,
+             "type": "string"
+            },
+            "updateMask": {
+             "location": "query",
+             "type": "string"
+            }
+           },
+           "path": "v1/courses/{courseId}/posts/{postId}/addOnAttachments/{attachmentId}/studentSubmissions/{submissionId}",
+           "request": {
+            "$ref": "AddOnAttachmentStudentSubmission"
+           }
+          }
+         }
+        }
+       }
+      }
+     }
+    },
+    "studentGroups": {
+     "methods": {
+      "create": {
+       "httpMethod": "POST",
+       "id": "classroom.courses.studentGroups.create",
+       "parameters": {
+        "courseId": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        }
+       },
+       "path": "v1/courses/{courseId}/studentGroups",
+       "request": {
+        "$ref": "StudentGroup"
+       }
+      },
+      "delete": {
+       "httpMethod": "DELETE",
+       "id": "classroom.courses.studentGroups.delete",
+       "parameters": {
+        "courseId": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        },
+        "id": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        }
+       },
+       "path": "v1/courses/{courseId}/studentGroups/{id}"
+      },
+      "list": {
+       "httpMethod": "GET",
+       "id": "classroom.courses.studentGroups.list",
+       "parameters": {
+        "courseId": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        },
+        "pageSize": {
+         "location": "query",
+         "type": "integer"
+        },
+        "pageToken": {
+         "location": "query",
+         "type": "string"
+        }
+       },
+       "path": "v1/courses/{courseId}/studentGroups"
+      },
+      "patch": {
+       "httpMethod": "PATCH",
+       "id": "classroom.courses.studentGroups.patch",
+       "parameters": {
+        "courseId": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        },
+        "id": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        },
+        "updateMask": {
+         "location": "query",
+         "type": "string"
+        }
+       },
+       "path": "v1/courses/{courseId}/studentGroups/{id}",
+       "request": {
+        "$ref": "StudentGroup"
+       }
+      }
+     },
+     "resources": {
+      "studentGroupMembers": {
+       "methods": {
+        "create": {
+         "httpMethod": "POST",
+         "id": "classroom.courses.studentGroups.studentGroupMembers.create",
+         "parameters": {
+          "courseId": {
+           "location": "path",
+           "required": true,
+           "type": "string"
+          },
+          "studentGroupId": {
+           "location": "path",
+           "required": true,
+           "type": "string"
+          }
+         },
+         "path": "v1/courses/{courseId}/studentGroups/{studentGroupId}/studentGroupMembers",
+         "request": {
+          "$ref": "StudentGroupMember"
+         }
+        },
+        "delete": {
+         "httpMethod": "DELETE",
+         "id": "classroom.courses.studentGroups.studentGroupMembers.delete",
+         "parameters": {
+          "courseId": {
+           "location": "path",
+           "required": true,
+           "type": "string"
+          },
+          "studentGroupId": {
+           "location": "path",
+           "required": true,
+           "type": "string"
+          },
+          "userId": {
+           "location": "path",
+           "required": true,
+           "type": "string"
+          }
+         },
+         "path": "v1/courses/{courseId}/studentGroups/{studentGroupId}/studentGroupMembers/{userId}"
+        },
+        "list": {
+         "httpMethod": "GET",
+         "id": "classroom.courses.studentGroups.studentGroupMembers.list",
+         "parameters": {
+          "courseId": {
+           "location": "path",
+           "required": true,
+           "type": "string"
+          },
+          "pageSize": {
+           "location": "query",
+           "type": "integer"
+          },
+          "pageToken": {
+           "location": "query",
+           "type": "string"
+          },
+          "studentGroupId": {
+           "location": "path",
+           "required": true,
+           "type": "string"
+          }
+         },
+         "path": "v1/courses/{courseId}/studentGroups/{studentGroupId}/studentGroupMembers"
+        }
+       }
+      }
+     }
+    },
+    "students": {
+     "methods": {
+      "create": {
+       "httpMethod": "POST",
+       "id": "classroom.courses.students.create",
+       "parameters": {
+        "courseId": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        },
+        "enrollmentCode": {
+         "location": "query",
+         "type": "string"
+        }
+       },
+       "path": "v1/courses/{courseId}/students",
+       "request": {
+        "$ref": "Student"
+       }
+      },
+      "delete": {
+       "httpMethod": "DELETE",
+       "id": "classroom.courses.students.delete",
+       "parameters": {
+        "courseId": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        },
+        "userId": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        }
+       },
+       "path": "v1/courses/{courseId}/students/{userId}"
+      },
+      "get": {
+       "httpMethod": "GET",
+       "id": "classroom.courses.students.get",
+       "parameters": {
+        "courseId": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        },
+        "userId": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        }
+       },
+       "path": "v1/courses/{courseId}/students/{userId}"
+      },
+      "list": {
+       "httpMethod": "GET",
+       "id": "classroom.courses.students.list",
+       "parameters": {
+        "courseId": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        },
+        "pageSize": {
+         "location": "query",
+         "type": "integer"
+        },
+        "pageToken": {
+         "location": "query",
+         "type": "string"
+        }
+       },
+       "path": "v1/courses/{courseId}/students"
+      }
+     }
+    },
+    "teachers": {
+     "methods": {
+      "create": {
+       "httpMethod": "POST",
+       "id": "classroom.courses.teachers.create",
+       "parameters": {
+        "courseId": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        }
+       },
+       "path": "v1/courses/{courseId}/teachers",
+       "request": {
+        "$ref": "Teacher"
+       }
+      },
+      "delete": {
+       "httpMethod": "DELETE",
+       "id": "classroom.courses.teachers.delete",
+       "parameters": {
+        "courseId": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        },
+        "userId": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        }
+       },
+       "path": "v1/courses/{courseId}/teachers/{userId}"
+      },
+      "get": {
+       "httpMethod": "GET",
+       "id": "classroom.courses.teachers.get",
+       "parameters": {
+        "courseId": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        },
+        "userId": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        }
+       },
+       "path": "v1/courses/{courseId}/teachers/{userId}"
+      },
+      "list": {
+       "httpMethod": "GET",
+       "id": "classroom.courses.teachers.list",
+       "parameters": {
+        "courseId": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        },
+        "pageSize": {
+         "location": "query",
+         "type": "integer"
+        },
+        "pageToken": {
+         "location": "query",
+         "type": "string"
+        }
+       },
+       "path": "v1/courses/{courseId}/teachers"
+      }
+     }
+    },
+    "topics": {
+     "methods": {
+      "create": {
+       "httpMethod": "POST",
+       "id": "classroom.courses.topics.create",
+       "parameters": {
+        "courseId": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        }
+       },
+       "path": "v1/courses/{courseId}/topics",
+       "request": {
+        "$ref": "Topic"
+       }
+      },
+      "delete": {
+       "httpMethod": "DELETE",
+       "id": "classroom.courses.topics.delete",
+       "parameters": {
+        "courseId": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        },
+        "id": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        }
+       },
+       "path": "v1/courses/{courseId}/topics/{id}"
+      },
+      "get": {
+       "httpMethod": "GET",
+       "id": "classroom.courses.topics.get",
+       "parameters": {
+        "courseId": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        },
+        "id": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        }
+       },
+       "path": "v1/courses/{courseId}/topics/{id}"
+      },
+      "list": {
+       "httpMethod": "GET",
+       "id": "classroom.courses.topics.list",
+       "parameters": {
+        "courseId": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        },
+        "pageSize": {
+         "location": "query",
+         "type": "integer"
+        },
+        "pageToken": {
+         "location": "query",
+         "type": "string"
+        }
+       },
+       "path": "v1/courses/{courseId}/topics"
+      },
+      "patch": {
+       "httpMethod": "PATCH",
+       "id": "classroom.courses.topics.patch",
+       "parameters": {
+        "courseId": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        },
+        "id": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        },
+        "updateMask": {
+         "location": "query",
+         "type": "string"
+        }
+       },
+       "path": "v1/courses/{courseId}/topics/{id}",
+       "request": {
+        "$ref": "Topic"
+       }
+      }
+     }
+    }
+   }
+  },
+  "invitations": {
+   "methods": {
+    "accept": {
+     "httpMethod": "POST",
+     "id": "classroom.invitations.accept",
+     "parameters": {
+      "id": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      }
+     },
+     "path": "v1/invitations/{id}:accept"
+    },
+    "create": {
+     "httpMethod": "POST",
+     "id": "classroom.invitations.create",
+     "path": "v1/invitations",
+     "request": {
+      "$ref": "Invitation"
+     }
+    },
+    "delete": {
+     "httpMethod": "DELETE",
+     "id": "classroom.invitations.delete",
+     "parameters": {
+      "id": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      }
+     },
+     "path": "v1/invitations/{id}"
+    },
+    "get": {
+     "httpMethod": "GET",
+     "id": "classroom.invitations.get",
+     "parameters": {
+      "id": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      }
+     },
+     "path": "v1/invitations/{id}"
+    },
+    "list": {
+     "httpMethod": "GET",
+     "id": "classroom.invitations.list",
+     "parameters": {
+      "courseId": {
+       "location": "query",
+       "type": "string"
+      },
+      "pageSize": {
+       "location": "query",
+       "type": "integer"
+      },
+      "pageToken": {
+       "location": "query",
+       "type": "string"
+      },
+      "userId": {
+       "location": "query",
+       "type": "string"
+      }
+     },
+     "path": "v1/invitations"
+    }
+   }
+  },
+  "registrations": {
+   "methods": {
+    "create": {
+     "httpMethod": "POST",
+     "id": "classroom.registrations.create",
+     "path": "v1/registrations",
+     "request": {
+      "$ref": "Registration"
+     }
+    },
+    "delete": {
+     "httpMethod": "DELETE",
+     "id": "classroom.registrations.delete",
+     "parameters": {
+      "registrationId": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      }
+     },
+     "path": "v1/registrations/{registrationId}"
+    }
+   }
+  },
+  "userProfiles": {
+   "methods": {
+    "get": {
+     "httpMethod": "GET",
+     "id": "classroom.userProfiles.get",
+     "parameters": {
+      "userId": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      }
+     },
+     "path": "v1/userProfiles/{userId}"
+    }
+   },
+   "resources": {
+    "guardianInvitations": {
+     "methods": {
+      "create": {
+       "httpMethod": "POST",
+       "id": "classroom.userProfiles.guardianInvitations.create",
+       "parameters": {
+        "studentId": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        }
+       },
+       "path": "v1/userProfiles/{studentId}/guardianInvitations",
+       "request": {
+        "$ref": "GuardianInvitation"
+       }
+      },
+      "get": {
+       "httpMethod": "GET",
+       "id": "classroom.userProfiles.guardianInvitations.get",
+       "parameters": {
+        "invitationId": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        },
+        "studentId": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        }
+       },
+       "path": "v1/userProfiles/{studentId}/guardianInvitations/{invitationId}"
+      },
+      "list": {
+       "httpMethod": "GET",
+       "id": "classroom.userProfiles.guardianInvitations.list",
+       "parameters": {
+        "invitedEmailAddress": {
+         "location": "query",
+         "type": "string"
+        },
+        "pageSize": {
+         "location": "query",
+         "type": "integer"
+        },
+        "pageToken": {
+         "location": "query",
+         "type": "string"
+        },
+        "states": {
+         "location": "query",
+         "repeated": true,
+         "type": "string"
+        },
+        "studentId": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        }
+       },
+       "path": "v1/userProfiles/{studentId}/guardianInvitations"
+      },
+      "patch": {
+       "httpMethod": "PATCH",
+       "id": "classroom.userProfiles.guardianInvitations.patch",
+       "parameters": {
+        "invitationId": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        },
+        "studentId": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        },
+        "updateMask": {
+         "location": "query",
+         "type": "string"
+        }
+       },
+       "path": "v1/userProfiles/{studentId}/guardianInvitations/{invitationId}",
+       "request": {
+        "$ref": "GuardianInvitation"
+       }
+      }
+     }
+    },
+    "guardians": {
+     "methods": {
+      "delete": {
+       "httpMethod": "DELETE",
+       "id": "classroom.userProfiles.guardians.delete",
+       "parameters": {
+        "guardianId": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        },
+        "studentId": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        }
+       },
+       "path": "v1/userProfiles/{studentId}/guardians/{guardianId}"
+      },
+      "get": {
+       "httpMethod": "GET",
+       "id": "classroom.userProfiles.guardians.get",
+       "parameters": {
+        "guardianId": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        },
+        "studentId": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        }
+       },
+       "path": "v1/userProfiles/{studentId}/guardians/{guardianId}"
+      },
+      "list": {
+       "httpMethod": "GET",
+       "id": "classroom.userProfiles.guardians.list",
+       "parameters": {
+        "invitedEmailAddress": {
+         "location": "query",
+         "type": "string"
+        },
+        "pageSize": {
+         "location": "query",
+         "type": "integer"
+        },
+        "pageToken": {
+         "location": "query",
+         "type": "string"
+        },
+        "studentId": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        }
+       },
+       "path": "v1/userProfiles/{studentId}/guardians"
+      }
+     }
+    }
+   }
+  }
+ },
+ "rootUrl": "https://classroom.googleapis.com/",
+ "servicePath": "",
+ "version": "v1"
+}
