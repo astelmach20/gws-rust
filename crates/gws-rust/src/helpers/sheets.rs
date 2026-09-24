@@ -16,7 +16,8 @@
 //! import (`--csv-file`) and export (`+read --output`).
 
 use super::Helper;
-use super::http::{self, Api, ApiRequest, OutputTarget, flag, many, optional, required};
+use super::http::{self, Api, ApiRequest, OutputTarget};
+use crate::args::{flag, many, optional, required};
 use crate::confirm::{self, Impact, with_yes};
 use crate::error::GwsError;
 use crate::validate::encode_path_segment;
@@ -199,25 +200,26 @@ TIPS:
             let Some((name, m)) = matches.subcommand() else {
                 return Ok(false);
             };
-            let dry = http::dry_run(m);
+            let dry = crate::args::dry_run(m)?;
             let id = || required(m, "spreadsheet-id");
             let (api, value) = match name {
                 "+append" => {
                     let rows = parse_values(m)?;
                     let api = Api::new(doc, &[SCOPE_SHEETS], dry, sanitize).await?;
-                    let range = optional(m, "range").unwrap_or("A1");
-                    let v = append(&api, id()?, range, rows, flag(m, "raw")).await?;
+                    let range = optional(m, "range")?.unwrap_or("A1");
+                    let v = append(&api, id()?, range, rows, flag(m, "raw")?).await?;
                     (api, v)
                 }
                 "+write" => {
                     let rows = parse_values(m)?;
                     let api = Api::new(doc, &[SCOPE_SHEETS], dry, sanitize).await?;
-                    let v = write(&api, id()?, required(m, "range")?, rows, flag(m, "raw")).await?;
+                    let v =
+                        write(&api, id()?, required(m, "range")?, rows, flag(m, "raw")?).await?;
                     (api, v)
                 }
                 "+read" => {
-                    let target = optional(m, "output")
-                        .map(|o| OutputTarget::parse(o, flag(m, "overwrite")))
+                    let target = optional(m, "output")?
+                        .map(|o| OutputTarget::parse(o, flag(m, "overwrite")?))
                         .transpose()?;
                     let api = Api::new(doc, &[SCOPE_SHEETS_READONLY], dry, sanitize).await?;
                     let v = read(&api, id()?, required(m, "range")?).await?;
@@ -258,7 +260,7 @@ TIPS:
                 }
                 "+create" => {
                     let api = Api::new(doc, &[SCOPE_SHEETS], dry, sanitize).await?;
-                    let v = create(&api, required(m, "title")?, &many(m, "sheet")).await?;
+                    let v = create(&api, required(m, "title")?, &many(m, "sheet")?).await?;
                     (api, v)
                 }
                 _ => return Ok(false),
@@ -344,7 +346,7 @@ fn parse_csv(text: &str, what: &str) -> Result<Vec<Vec<Value>>, GwsError> {
 }
 
 fn parse_values(m: &ArgMatches) -> Result<Vec<Vec<Value>>, GwsError> {
-    if let Some(row) = optional(m, "values") {
+    if let Some(row) = optional(m, "values")? {
         let rows = parse_csv(row, "--values")?;
         if rows.len() != 1 {
             return Err(GwsError::Validation(
@@ -354,10 +356,10 @@ fn parse_values(m: &ArgMatches) -> Result<Vec<Vec<Value>>, GwsError> {
         }
         return Ok(rows);
     }
-    if let Some(json) = optional(m, "json-values") {
+    if let Some(json) = optional(m, "json-values")? {
         return parse_json_rows(json);
     }
-    if let Some(path) = optional(m, "csv-file") {
+    if let Some(path) = optional(m, "csv-file")? {
         return parse_csv(&http::read_text_input(path, "--csv-file")?, "--csv-file");
     }
     Err(GwsError::Validation(

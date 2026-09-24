@@ -15,7 +15,8 @@
 //! Slides helpers: `+create`, `+read` (slide text and speaker notes).
 
 use super::Helper;
-use super::http::{self, Api, ApiRequest, required};
+use super::http::{self, Api, ApiRequest};
+use crate::args::required;
 use crate::error::GwsError;
 use crate::validate::encode_path_segment;
 use clap::{Arg, ArgMatches, Command};
@@ -75,7 +76,7 @@ TIPS:
             let Some((name, m)) = matches.subcommand() else {
                 return Ok(false);
             };
-            let dry = http::dry_run(m);
+            let dry = crate::args::dry_run(m)?;
             let (api, value) = match name {
                 "+create" => {
                     let api = Api::new(doc, &[SCOPE_PRESENTATIONS], dry, sanitize).await?;

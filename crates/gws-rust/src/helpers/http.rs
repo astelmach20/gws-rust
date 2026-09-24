@@ -759,13 +759,15 @@ pub(crate) fn safe_filename(raw: &str, fallback: &str) -> String {
 
 /// The output format: `--format` > `GWSR_FORMAT` > config file > JSON
 /// (clap has already rejected unknown `--format` values).
-pub(crate) fn output_format(matches: &ArgMatches) -> crate::formatter::OutputFormat {
+pub(crate) fn output_format(
+    matches: &ArgMatches,
+) -> Result<crate::formatter::OutputFormat, GwsError> {
     crate::formatter::OutputFormat::from_matches(matches)
 }
 
 /// Print `value` in the requested output format.
 pub(crate) fn print_value(matches: &ArgMatches, value: &Value) -> Result<(), GwsError> {
-    let format = output_format(matches);
+    let format = output_format(matches)?;
     print_text(&crate::formatter::format_value(value, &format)?)
 }
 
@@ -802,57 +804,9 @@ pub(crate) fn print_dry_run(matches: &ArgMatches, requests: Vec<Value>) -> Resul
     print_value(matches, &json!({ "dry_run": true, "requests": requests }))
 }
 
-/// Whether the global `--dry-run` flag is set.
-pub(crate) fn dry_run(matches: &ArgMatches) -> bool {
-    matches
-        .try_get_one::<bool>("dry-run")
-        .ok()
-        .flatten()
-        .copied()
-        .unwrap_or(false)
-}
-
-/// Fetch a required string argument without panicking.
-pub(crate) fn required<'a>(matches: &'a ArgMatches, name: &str) -> Result<&'a str, GwsError> {
-    matches
-        .try_get_one::<String>(name)
-        .map_err(|e| other_err(anyhow::anyhow!("argument '{name}' is not defined: {e}")))?
-        .map(String::as_str)
-        .ok_or_else(|| GwsError::Validation(format!("--{name} is required")))
-}
-
-/// Fetch an optional string argument.
-pub(crate) fn optional<'a>(matches: &'a ArgMatches, name: &str) -> Option<&'a str> {
-    matches
-        .try_get_one::<String>(name)
-        .ok()
-        .flatten()
-        .map(String::as_str)
-}
-
-/// Fetch all values of a repeatable argument.
-pub(crate) fn many(matches: &ArgMatches, name: &str) -> Vec<String> {
-    matches
-        .try_get_many::<String>(name)
-        .ok()
-        .flatten()
-        .map(|v| v.cloned().collect())
-        .unwrap_or_default()
-}
-
-/// Fetch a boolean flag.
-pub(crate) fn flag(matches: &ArgMatches, name: &str) -> bool {
-    matches
-        .try_get_one::<bool>(name)
-        .ok()
-        .flatten()
-        .copied()
-        .unwrap_or(false)
-}
-
 /// Parse an optional `--limit`-style positive integer argument.
 pub(crate) fn limit(matches: &ArgMatches, name: &str) -> Result<Option<usize>, GwsError> {
-    optional(matches, name)
+    crate::args::optional(matches, name)?
         .map(|s| {
             s.parse::<usize>().ok().filter(|n| *n > 0).ok_or_else(|| {
                 GwsError::Validation(format!("--{name} must be a positive integer, got '{s}'"))

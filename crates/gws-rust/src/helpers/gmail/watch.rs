@@ -53,19 +53,16 @@ struct WatchConfig {
 }
 
 fn parse_watch_args(matches: &ArgMatches) -> Result<WatchConfig, GwsError> {
-    let output_dir = matches
-        .get_one::<String>("output-dir")
+    let output_dir = crate::args::value::<String>(matches, "output-dir")?
         .map(|dir| crate::validate::validate_safe_output_dir(dir))
         .transpose()?;
-    let subscription = matches
-        .get_one::<String>("subscription")
+    let subscription = crate::args::value::<String>(matches, "subscription")?
         .map(|s| crate::validate::validate_resource_name(s).map(str::to_string))
         .transpose()?;
-    let topic = matches
-        .get_one::<String>("topic")
+    let topic = crate::args::value::<String>(matches, "topic")?
         .map(|s| crate::validate::validate_resource_name(s).map(str::to_string))
         .transpose()?;
-    let project = match matches.get_one::<String>("project") {
+    let project = match crate::args::value::<String>(matches, "project")? {
         Some(p) => Some(p.clone()),
         None => match std::env::var("GWSR_PROJECT_ID") {
             Ok(p) => Some(p),
@@ -89,13 +86,13 @@ fn parse_watch_args(matches: &ArgMatches) -> Result<WatchConfig, GwsError> {
         project,
         subscription,
         topic,
-        label_ids: super::cli::list_values(matches, "label-ids"),
+        label_ids: super::cli::list_values(matches, "label-ids")?,
         max_messages: value_or_default::<u32>(matches, "max-messages")?,
         poll_interval: value_or_default::<u64>(matches, "poll-interval")?,
         max_failures: value_or_default::<u32>(matches, "max-failures")?,
         format: required_str(matches, "msg-format")?,
-        once: matches.get_flag("once"),
-        cleanup: matches.get_flag("cleanup"),
+        once: crate::args::flag(matches, "once")?,
+        cleanup: crate::args::flag(matches, "cleanup")?,
         output_dir,
     })
 }
@@ -384,7 +381,7 @@ pub(super) async fn handle_watch(
     sanitize_config: &SanitizeConfig,
 ) -> Result<(), GwsError> {
     let config = parse_watch_args(matches)?;
-    if crate::helpers::http::dry_run(matches) {
+    if crate::args::dry_run(matches)? {
         return dry_run_plan(matches, &config);
     }
     if let Some(dir) = &config.output_dir {

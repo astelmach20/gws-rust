@@ -19,7 +19,8 @@
 //! date and rejects a non-midnight time instead of losing it.
 
 use super::Helper;
-use super::http::{self, Api, ApiRequest, flag, optional, required};
+use super::http::{self, Api, ApiRequest};
+use crate::args::{flag, optional, required};
 use crate::error::GwsError;
 use crate::validate::encode_path_segment;
 use clap::{Arg, ArgAction, ArgMatches, Command};
@@ -119,16 +120,16 @@ TIPS:
             let Some((name, m)) = matches.subcommand() else {
                 return Ok(false);
             };
-            let dry = http::dry_run(m);
+            let dry = crate::args::dry_run(m)?;
             let (api, value) = match name {
                 "+add" => {
-                    let due = optional(m, "due").map(parse_due).transpose()?;
+                    let due = optional(m, "due")?.map(parse_due).transpose()?;
                     let api = Api::new(doc, &[SCOPE_TASKS], dry, sanitize).await?;
                     let v = add(
                         &api,
                         required(m, "list-id")?,
                         required(m, "title")?,
-                        optional(m, "notes"),
+                        optional(m, "notes")?,
                         due.as_deref(),
                     )
                     .await?;
@@ -140,7 +141,7 @@ TIPS:
                     let v = list(
                         &api,
                         required(m, "list-id")?,
-                        flag(m, "show-completed"),
+                        flag(m, "show-completed")?,
                         limit,
                     )
                     .await?;

@@ -77,7 +77,7 @@ pub(crate) struct LoginArgs {
 }
 
 pub(crate) fn parse_args(m: &clap::ArgMatches) -> Result<LoginArgs, GwsError> {
-    let scope_mode = if let Some(list) = m.get_one::<String>("scopes") {
+    let scope_mode = if let Some(list) = crate::args::value::<String>(m, "scopes")? {
         let scopes: Vec<String> = list
             .split(',')
             .map(str::trim)
@@ -90,34 +90,33 @@ pub(crate) fn parse_args(m: &clap::ArgMatches) -> Result<LoginArgs, GwsError> {
             ));
         }
         ScopeMode::Custom(scopes)
-    } else if m.get_flag("full") {
+    } else if crate::args::flag(m, "full")? {
         ScopeMode::Full
-    } else if m.get_flag("write") {
+    } else if crate::args::flag(m, "write")? {
         ScopeMode::Write
     } else {
         ScopeMode::Default
     };
-    let services = m.get_one::<String>("services").map(|v| {
+    let services = crate::args::value::<String>(m, "services")?.map(|v| {
         v.split(',')
             .map(|s| s.trim().to_lowercase())
             .filter(|s| !s.is_empty())
             .collect::<HashSet<String>>()
     });
-    let timeout = m
-        .get_one::<u64>("timeout")
+    let timeout = crate::args::value::<u64>(m, "timeout")?
         .copied()
         .ok_or_else(|| GwsError::Validation("--timeout is required".into()))?;
     Ok(LoginArgs {
         scope_mode,
         services,
-        open_browser: !m.get_flag("no-browser"),
-        mode: if m.get_flag("no-localhost") {
+        open_browser: !crate::args::flag(m, "no-browser")?,
+        mode: if crate::args::flag(m, "no-localhost")? {
             RedirectMode::Manual
         } else {
             RedirectMode::Loopback
         },
         timeout: Duration::from_secs(timeout),
-        login_hint: m.get_one::<String>("login-hint").cloned(),
+        login_hint: crate::args::value::<String>(m, "login-hint")?.cloned(),
     })
 }
 

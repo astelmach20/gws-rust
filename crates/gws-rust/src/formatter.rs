@@ -62,25 +62,23 @@ impl OutputFormat {
         }
     }
 
-    /// Parse a `--format` value that clap has already validated against
-    /// [`FORMAT_NAMES`].
-    ///
-    /// An unknown value can only reach this function through a programming
-    /// error (an argument declared without the value parser); it is reported
-    /// loudly on stderr and JSON is used.
-    pub fn from_str(s: &str) -> Self {
-        Self::parse(s).unwrap_or_else(|unknown| {
-            tracing::warn!(format = %unknown, "internal: unvalidated output format, using json");
-            Self::Json
+    /// Parse a `--format` value, reporting an unknown one as a validation
+    /// error (clap normally rejects it first).
+    pub fn from_str(s: &str) -> Result<Self, GwsError> {
+        Self::parse(s).map_err(|unknown| {
+            GwsError::Validation(format!(
+                "unknown output format '{unknown}'; use one of: {}",
+                FORMAT_NAMES.join(", ")
+            ))
         })
     }
 
     /// Resolve the effective output format from parsed arguments: the
     /// `--format` flag when present, otherwise the configured default.
-    pub fn from_matches(matches: &clap::ArgMatches) -> Self {
-        match matches.try_get_one::<String>("format") {
-            Ok(Some(s)) => Self::from_str(s),
-            _ => settings().default_format,
+    pub fn from_matches(matches: &clap::ArgMatches) -> Result<Self, GwsError> {
+        match crate::args::optional(matches, "format")? {
+            Some(s) => Self::from_str(s),
+            None => Ok(settings().default_format),
         }
     }
 }

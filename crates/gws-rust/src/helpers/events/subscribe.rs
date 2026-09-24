@@ -51,14 +51,11 @@ fn typed<T: Clone + Send + Sync + 'static>(
     matches: &ArgMatches,
     name: &str,
 ) -> Result<T, GwsError> {
-    matches
-        .get_one::<T>(name)
-        .cloned()
-        .ok_or_else(|| GwsError::other(format!("--{name} has no value (missing default)")))
+    crate::args::defaulted(matches, name)
 }
 
 fn parse_subscribe_args(matches: &ArgMatches) -> Result<SubscribeConfig, GwsError> {
-    let project = match matches.get_one::<String>("project") {
+    let project = match crate::args::value::<String>(matches, "project")? {
         Some(p) => Some(p.clone()),
         None => match std::env::var("GWSR_PROJECT_ID") {
             Ok(p) => Some(p),
@@ -71,26 +68,23 @@ fn parse_subscribe_args(matches: &ArgMatches) -> Result<SubscribeConfig, GwsErro
         },
     };
     let config = SubscribeConfig {
-        target: matches
-            .get_one::<String>("target")
+        target: crate::args::value::<String>(matches, "target")?
             .map(|t| validate_target(t))
             .transpose()?,
-        event_types: parse_event_types(matches.get_one::<String>("event-types")),
+        event_types: parse_event_types(crate::args::value::<String>(matches, "event-types")?),
         project: project
             .map(|p| crate::validate::validate_resource_name(&p).map(str::to_string))
             .transpose()?,
-        subscription: matches
-            .get_one::<String>("subscription")
+        subscription: crate::args::value::<String>(matches, "subscription")?
             .map(|s| crate::validate::validate_resource_name(s).map(str::to_string))
             .transpose()?,
         max_messages: typed::<u32>(matches, "max-messages")?,
         poll_interval: typed::<u64>(matches, "poll-interval")?,
         max_failures: typed::<u32>(matches, "max-failures")?,
-        once: matches.get_flag("once"),
-        cleanup: matches.get_flag("cleanup"),
-        no_ack: matches.get_flag("no-ack"),
-        output_dir: matches
-            .get_one::<String>("output-dir")
+        once: crate::args::flag(matches, "once")?,
+        cleanup: crate::args::flag(matches, "cleanup")?,
+        no_ack: crate::args::flag(matches, "no-ack")?,
+        output_dir: crate::args::value::<String>(matches, "output-dir")?
             .map(|d| crate::validate::validate_safe_output_dir(d))
             .transpose()?,
     };
@@ -421,7 +415,7 @@ pub(super) async fn handle_subscribe(
     sanitize_config: &SanitizeConfig,
 ) -> Result<(), GwsError> {
     let config = parse_subscribe_args(matches)?;
-    if crate::helpers::http::dry_run(matches) {
+    if crate::args::dry_run(matches)? {
         return dry_run_plan(matches, &config);
     }
     if let Some(dir) = &config.output_dir {

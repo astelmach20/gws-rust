@@ -539,15 +539,12 @@ async fn handle_sanitize(matches: &ArgMatches, method: SanitizeMethod) -> Result
 }
 
 fn required(matches: &ArgMatches, name: &str) -> Result<String, GwsError> {
-    matches
-        .get_one::<String>(name)
-        .cloned()
-        .ok_or_else(|| GwsError::Validation(format!("--{name} is required")))
+    Ok(crate::args::required(matches, name)?.to_string())
 }
 
 /// POST a JSON body to a Model Armor endpoint and print the response.
 async fn model_armor_post(matches: &ArgMatches, url: &str, body: &Value) -> Result<(), GwsError> {
-    if crate::helpers::http::dry_run(matches) {
+    if crate::args::dry_run(matches)? {
         return crate::helpers::http::print_dry_run(
             matches,
             vec![crate::helpers::http::dry_run_request(
@@ -590,12 +587,11 @@ fn parse_create_template_args(matches: &ArgMatches) -> Result<CreateTemplateConf
         "projects/{project}/locations/{location}/templates/{template_id}"
     ))?;
 
-    let body = match matches.get_one::<String>("json") {
+    let body = match crate::args::value::<String>(matches, "json")? {
         Some(json_str) => serde_json::from_str(json_str)
             .map_err(|e| GwsError::Validation(format!("--json is not valid JSON: {e}")))?,
         None => {
-            let preset = matches
-                .get_one::<String>("preset")
+            let preset = crate::args::value::<String>(matches, "preset")?
                 .map(String::as_str)
                 .unwrap_or("jailbreak");
             load_preset_template(preset)?
@@ -645,11 +641,11 @@ fn load_preset_template(name: &str) -> Result<Value, GwsError> {
 }
 
 fn parse_sanitize_args(matches: &ArgMatches, data_field: &str) -> Result<Value, GwsError> {
-    if let Some(json_str) = matches.get_one::<String>("json") {
+    if let Some(json_str) = crate::args::value::<String>(matches, "json")? {
         return serde_json::from_str(json_str)
             .map_err(|e| GwsError::Validation(format!("--json is not valid JSON: {e}")));
     }
-    let text = match matches.get_one::<String>("text") {
+    let text = match crate::args::value::<String>(matches, "text")? {
         Some(text) => text.clone(),
         None => {
             let stdin_text = std::io::read_to_string(std::io::stdin())

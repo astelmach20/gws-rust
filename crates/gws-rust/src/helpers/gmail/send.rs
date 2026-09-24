@@ -85,10 +85,10 @@ fn parse_send_args(matches: &ArgMatches) -> Result<SendConfig, GwsError> {
         to,
         subject: super::cli::required_str(matches, "subject")?,
         body: super::cli::required_str(matches, "body")?,
-        from: super::cli::parse_optional_mailboxes(matches, "from"),
-        cc: super::cli::parse_optional_mailboxes(matches, "cc"),
-        bcc: super::cli::parse_optional_mailboxes(matches, "bcc"),
-        html: matches.get_flag("html"),
+        from: super::cli::parse_optional_mailboxes(matches, "from")?,
+        cc: super::cli::parse_optional_mailboxes(matches, "cc")?,
+        bcc: super::cli::parse_optional_mailboxes(matches, "bcc")?,
+        html: crate::args::flag(matches, "html")?,
         attachments: parse_attachments(matches)?,
     })
 }

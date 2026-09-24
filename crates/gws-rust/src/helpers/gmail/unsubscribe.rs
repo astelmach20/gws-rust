@@ -185,7 +185,7 @@ async fn post_one_click(url: &reqwest::Url) -> Result<u16, GwsError> {
 /// Handle `+unsubscribe`.
 pub(super) async fn handle_unsubscribe(matches: &ArgMatches) -> Result<(), GwsError> {
     let message_id = required_str(matches, "message-id")?;
-    let dry_run = crate::helpers::http::dry_run(matches);
+    let dry_run = crate::args::dry_run(matches)?;
     // Reading the headers is always a real (read-only) request, so --dry-run can
     // show exactly which URL would receive the one-click POST.
     let api = super::api::authenticated(&[GMAIL_READONLY_SCOPE]).await?;
@@ -241,7 +241,7 @@ pub(super) async fn handle_unsubscribe(matches: &ArgMatches) -> Result<(), GwsEr
         "url": target.as_str(),
         "status": status,
     });
-    let format = crate::helpers::http::output_format(matches);
+    let format = crate::helpers::http::output_format(matches)?;
     crate::output::emit(&crate::formatter::format_value(&out, &format)?)?;
     Ok(())
 }

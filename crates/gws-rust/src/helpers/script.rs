@@ -17,7 +17,8 @@
 //! Script IDs are encoded per RFC 3986 so `-`/`_` stay literal (#842).
 
 use super::Helper;
-use super::http::{self, Api, ApiRequest, flag, many, optional, required};
+use super::http::{self, Api, ApiRequest};
+use crate::args::{flag, many, optional, required};
 use crate::confirm::{self, Impact, with_yes};
 use crate::error::GwsError;
 use crate::validate::encode_path_segment;
@@ -179,7 +180,7 @@ TIPS:
             if !["+push", "+pull", "+run", "+logs"].contains(&name) {
                 return Ok(false);
             }
-            let dry = http::dry_run(m);
+            let dry = crate::args::dry_run(m)?;
             let script_id = required(m, "script-id")?;
             let (api, value) = match name {
                 "+push" => {
@@ -200,12 +201,12 @@ TIPS:
                 "+pull" => {
                     let dir = crate::validate::validate_safe_output_dir(required(m, "dir")?)?;
                     let api = Api::new(doc, &[SCOPE_PROJECTS_READONLY], dry, sanitize).await?;
-                    let v = pull(&api, script_id, &dir, flag(m, "overwrite")).await?;
+                    let v = pull(&api, script_id, &dir, flag(m, "overwrite")?).await?;
                     (api, v)
                 }
                 "+run" => {
                     let function = required(m, "function")?;
-                    let args = parse_args(optional(m, "args"))?;
+                    let args = parse_args(optional(m, "args")?)?;
                     confirm::confirm(
                         m,
                         Impact::Outbound,
@@ -213,19 +214,19 @@ TIPS:
                             "run {function}() in script {script_id} with your account's permissions"
                         ),
                     )?;
-                    let mut scopes = many(m, "scope");
+                    let mut scopes = many(m, "scope")?;
                     if scopes.is_empty() {
                         scopes = run_scopes(doc);
                     }
                     let scope_refs: Vec<&str> = scopes.iter().map(String::as_str).collect();
                     let api = Api::new(doc, &scope_refs, dry, sanitize).await?;
-                    let v = run(&api, script_id, function, args, flag(m, "dev-mode")).await?;
+                    let v = run(&api, script_id, function, args, flag(m, "dev-mode")?).await?;
                     (api, v)
                 }
                 "+logs" => {
                     let limit = http::limit(m, "limit")?;
                     let api = Api::new(doc, &[SCOPE_PROCESSES], dry, sanitize).await?;
-                    let v = logs(&api, script_id, optional(m, "function"), limit).await?;
+                    let v = logs(&api, script_id, optional(m, "function")?, limit).await?;
                     (api, v)
                 }
                 _ => return Ok(false),
