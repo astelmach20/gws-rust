@@ -31,14 +31,30 @@ pub(super) async fn handle(no_revoke: bool) -> Result<(), GwsError> {
     let env = AuthEnv::from_process().map_err(|e| auth_err(format!("{e:#}")))?;
     let outcome = logout(&env, no_revoke).await?;
     crate::timezone::invalidate_cache()?;
-    print_json(&outcome.report)?;
     match outcome.revoke_error {
-        Some(e) => Err(GwsError::Auth(format!(
-            "local credentials were removed, but revoking the refresh token at Google failed: \
-             {e}. Revoke gwsr's access manually at https://myaccount.google.com/permissions"
-        ))),
-        None => Ok(()),
+        // A failure leaves stdout empty; the error says what was removed.
+        Some(e) => Err(revoke_failed(&e, &outcome.report)),
+        None => print_json(&outcome.report),
     }
+}
+
+fn revoke_failed(error: &str, report: &serde_json::Value) -> GwsError {
+    let removed = report["removed"]
+        .as_array()
+        .map(|files| {
+            files
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .collect::<Vec<_>>()
+                .join(", ")
+        })
+        .filter(|list| !list.is_empty())
+        .unwrap_or_else(|| "none".to_string());
+    GwsError::Auth(format!(
+        "revoking the refresh token at Google failed: {error}. Local credentials were removed \
+         (files: {removed}). Revoke gwsr's access manually at \
+         https://myaccount.google.com/permissions"
+    ))
 }
 
 pub(super) struct Outcome {
@@ -282,8 +298,16 @@ mod tests {
             .await;
         let env = logged_in_env(dir.path(), &server);
         let out = logout(&env, false).await.unwrap();
-        assert!(out.revoke_error.unwrap().contains("503"));
+        let revoke_error = out.revoke_error.clone().unwrap();
+        assert!(revoke_error.contains("503"));
         assert_eq!(out.report["status"], "partial");
+        let err = revoke_failed(&revoke_error, &out.report);
+        let GwsError::Auth(msg) = err else {
+            panic!("expected an auth error, got {err:?}")
+        };
+        assert!(msg.contains("503"), "{msg}");
+        let credentials = env.paths.credentials.display().to_string();
+        assert!(msg.contains(&credentials), "{msg}");
         assert!(!env.paths.credentials.exists());
         assert!(!env.paths.dir.exists(), "empty profile dir is removed");
     }

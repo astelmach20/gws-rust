@@ -155,14 +155,24 @@ pub fn hint_for(err: &GwsError, ctx: &ErrorContext) -> Option<String> {
              Exit code 7 marks unconfirmed actions."
                 .to_string(),
         ),
-        GwsError::Auth(msg) if msg.contains("invalid_grant") => Some(
-            "Your refresh token was revoked or has expired (tokens of OAuth apps in \
-             \"Testing\" status expire after 7 days). Sign in again with `gwsr auth login`."
-                .to_string(),
-        ),
+        GwsError::Auth(_) => Some(auth_hint(ctx)),
         #[allow(unreachable_patterns)] // GwsError is #[non_exhaustive] in core
         _ => None,
     }
+}
+
+/// Whether `err` is an API error caused by a missing OAuth scope.
+fn is_scope_error(err: &CliError) -> bool {
+    matches!(
+        err,
+        CliError::Gws(GwsError::Api { code, message, reason, .. })
+            if lacks_scope(*code, message, reason)
+    )
+}
+
+fn lacks_scope(code: u16, message: &str, reason: &str) -> bool {
+    SCOPE_REASONS.contains(&reason)
+        || (code == 403 && message.contains("insufficient authentication scopes"))
 }
 
 fn api_hint(
@@ -172,9 +182,7 @@ fn api_hint(
     enable_url: Option<&str>,
     ctx: &ErrorContext,
 ) -> Option<String> {
-    if SCOPE_REASONS.contains(&reason)
-        || (code == 403 && message.contains("insufficient authentication scopes"))
-    {
+    if lacks_scope(code, message, reason) {
         return Some(scope_hint(ctx));
     }
     match reason {
@@ -239,15 +247,30 @@ fn scope_hint(ctx: &ErrorContext) -> String {
         }
         _ => hint.push_str(" Run `gwsr auth status` to see the scopes you granted."),
     }
-    let fix = match (ctx.required_scopes.first(), ctx.service.as_deref()) {
-        (Some(scope), _) => format!("gwsr auth login --scopes {scope}"),
-        (None, Some(service)) => format!("gwsr auth login -s {service}"),
-        (None, None) => "gwsr auth login -s <service>".to_string(),
-    };
     hint.push_str(" Fix: `");
-    hint.push_str(&fix);
+    hint.push_str(&login_fix(ctx));
     hint.push_str("`.");
     hint
+}
+
+/// The `gwsr auth login` command that grants what the failed call needed.
+fn login_fix(ctx: &ErrorContext) -> String {
+    match (ctx.required_scopes.first(), ctx.service.as_deref()) {
+        (Some(scope), _) => crate::auth::scopes::login_command_hint(std::slice::from_ref(scope)),
+        (None, Some(service)) => format!("gwsr auth login -s {service}"),
+        (None, None) => "gwsr auth login -s <service>".to_string(),
+    }
+}
+
+/// Hint for an authentication failure. The message itself names the specific
+/// fix for classified failures (expired grant, refused scopes, missing
+/// profile); the hint adds how to inspect and repair the credentials.
+fn auth_hint(ctx: &ErrorContext) -> String {
+    format!(
+        "Check the active profile and its granted scopes with `gwsr auth status`; sign in \
+         again with `{}`. Exit code 2 marks authentication failures.",
+        login_fix(ctx)
+    )
 }
 
 /// Error kind label used in the human-readable form.
@@ -376,7 +399,14 @@ pub fn render(err: &CliError, ctx: &ErrorContext, human: bool, color: bool) -> S
 /// Report `err` on stderr following the module-level output contract.
 /// `human` selects the human-readable form (a non-JSON output format).
 pub fn report(err: &CliError, human: bool) {
-    let ctx = current_context();
+    let mut ctx = current_context();
+    if ctx.granted_scopes.is_none() && is_scope_error(err) {
+        // Best effort: the hint says to run `gwsr auth status` when unknown.
+        match crate::auth::granted_scopes() {
+            Ok(granted) => ctx.granted_scopes = granted,
+            Err(e) => tracing::debug!(error = %format!("{e:#}"), "granted scopes unavailable"),
+        }
+    }
     let color = crate::output::stderr_supports_color();
     crate::output::eprint_line(&render(err, &ctx, human, color));
 }
@@ -485,9 +515,7 @@ mod tests {
             "{hint}"
         );
         assert!(
-            hint.contains(
-                "`gwsr auth login --scopes https://www.googleapis.com/auth/gmail.modify`"
-            ),
+            hint.contains("`gwsr auth login --scopes gmail.modify`"),
             "{hint}"
         );
         // Detail reason form and unknown granted scopes.
@@ -503,8 +531,19 @@ mod tests {
     #[test]
     fn hint_table() {
         let ctx = ErrorContext::default();
-        let grant = GwsError::Auth("token refresh failed: invalid_grant".into());
-        assert!(hint_for(&grant, &ctx).unwrap().contains("gwsr auth login"));
+        let grant = GwsError::Auth("token refresh failed".into());
+        let hint = hint_for(&grant, &ctx).unwrap();
+        assert!(hint.contains("gwsr auth status"), "{hint}");
+        assert!(hint.contains("`gwsr auth login -s <service>`"), "{hint}");
+        let scoped = ErrorContext {
+            required_scopes: vec!["https://www.googleapis.com/auth/drive.readonly".into()],
+            ..Default::default()
+        };
+        let hint = hint_for(&grant, &scoped).unwrap();
+        assert!(
+            hint.contains("`gwsr auth login --scopes drive.readonly`"),
+            "{hint}"
+        );
         let pre = hint_for(&api(400, "failedPrecondition"), &ctx).unwrap();
         assert!(pre.contains("not in a state"), "{pre}");
         let disabled = GwsError::Api {
