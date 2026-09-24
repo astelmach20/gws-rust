@@ -51,11 +51,6 @@ async fn main() {
 }
 
 async fn run() -> Result<(), GwsError> {
-    // Secrets live in this process's memory: keep them out of core dumps.
-    if let Err(e) = auth::hardening::disable_core_dumps() {
-        eprintln!("warning: could not disable core dumps: {e}");
-    }
-
     let mut args: Vec<String> = std::env::args().collect();
     // Global auth flags (--profile, --impersonate) may appear anywhere.
     auth::apply_global_flags(&mut args)?;
