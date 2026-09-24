@@ -69,9 +69,6 @@ secrecy = { version = "0.10", features = ["serde"] }
 webbrowser = "1"
 aws-lc-rs = "1"
 
-[target.'cfg(unix)'.dependencies]
-rustix = { version = "1", features = ["process"] }
-
 [dev-dependencies]
 serial_test.workspace = true
 wiremock = "0.6"

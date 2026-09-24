@@ -27,7 +27,6 @@ pub mod client_config;
 pub mod commands;
 pub mod credentials;
 pub mod flow;
-pub mod hardening;
 pub mod http;
 pub mod keystore;
 pub mod profiles;
