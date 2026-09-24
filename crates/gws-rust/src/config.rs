@@ -28,7 +28,8 @@
 //! sanitize_template = "projects/p/locations/l/templates/t"     # (GWSR_SANITIZE_TEMPLATE)
 //! sanitize_mode = "warn"    # warn | block                       (GWSR_SANITIZE_MODE)
 //! profile = "work"          # credential profile                 (GWSR_PROFILE)
-//! timeout_secs = 60         # HTTP request timeout               (GWSR_TIMEOUT_SECS)
+//! timeout_secs = 60         # HTTP request timeout; the executor's --timeout flag and
+//!                           # GWSR_TIMEOUT take precedence (read by the executor)
 //! log = "gwsr=info"         # stderr log filter                  (GWSR_LOG, RUST_LOG)
 //! log_file = "/var/log/gwsr" # JSON log directory                (GWSR_LOG_FILE)
 //! ```
@@ -98,7 +99,8 @@ pub struct Settings {
     pub sanitize_mode: SanitizeModePref,
     /// Credential profile name.
     pub profile: Option<String>,
-    /// HTTP request timeout in seconds.
+    /// HTTP request timeout in seconds (config only; `--timeout` and
+    /// `GWSR_TIMEOUT` are resolved by the executor and take precedence).
     pub timeout_secs: Option<u64>,
     /// stderr log filter from the config file (env handled by logging).
     pub log: Option<String>,
@@ -202,10 +204,6 @@ pub fn resolve(
         Some(v) => Some(parse_number(&v, "page_delay_ms", "GWSR_PAGE_DELAY_MS")?),
         None => file.page_delay_ms,
     };
-    let timeout_secs = match env("GWSR_TIMEOUT_SECS") {
-        Some(v) => Some(parse_number(&v, "timeout_secs", "GWSR_TIMEOUT_SECS")?),
-        None => file.timeout_secs,
-    };
     let sanitize_mode = match (env("GWSR_SANITIZE_MODE"), &file.sanitize_mode) {
         (Some(v), _) => parse_sanitize_mode(&v, "GWSR_SANITIZE_MODE")?,
         (None, Some(v)) => parse_sanitize_mode(v, &origin)?,
@@ -231,7 +229,8 @@ pub fn resolve(
         sanitize_template: env("GWSR_SANITIZE_TEMPLATE").or_else(|| file.sanitize_template.clone()),
         sanitize_mode,
         profile: env("GWSR_PROFILE").or_else(|| file.profile.clone()),
-        timeout_secs,
+        // GWSR_TIMEOUT is owned and read by the executor; config is the fallback.
+        timeout_secs: file.timeout_secs,
         log,
         log_file: env("GWSR_LOG_FILE")
             .map(PathBuf::from)
