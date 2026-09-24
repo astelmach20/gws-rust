@@ -289,8 +289,17 @@ pub const ENVIRONMENT: &[(&str, &str)] = &[
         "Pre-obtained OAuth2 access token (highest priority)",
     ),
     (
+        "GWSR_TOKEN_FILE",
+        "File holding a pre-obtained access token",
+    ),
+    (
         "GWSR_CREDENTIALS_FILE",
         "Path to an OAuth or service-account credentials JSON file",
+    ),
+    ("GWSR_PROFILE", "Credential profile (same as --profile)"),
+    (
+        "GWSR_IMPERSONATE",
+        "Service accounts: user to act as (same as --impersonate)",
     ),
     ("GWSR_CLIENT_ID", "OAuth client ID (for gwsr auth login)"),
     (
@@ -302,10 +311,34 @@ pub const ENVIRONMENT: &[(&str, &str)] = &[
         "Config directory (default: ~/.config/gwsr)",
     ),
     (
+        "GWSR_CACHE_DIR",
+        "Cache directory, absolute (default: platform cache dir + /gwsr)",
+    ),
+    (
         "GWSR_KEYRING_BACKEND",
         "Keyring backend: keyring (default) or file",
     ),
     ("GWSR_PROJECT_ID", "GCP project for quota and billing"),
+    (
+        "GWSR_NO_QUOTA_PROJECT",
+        "1: never send x-goog-user-project (same as --no-quota-project)",
+    ),
+    (
+        "GWSR_TIMEOUT",
+        "Request timeout in seconds (default 60; 0 disables; same as --timeout)",
+    ),
+    (
+        "GWSR_REQUIRE_CONFIRM",
+        "1: also require --yes for sending, sharing and running scripts",
+    ),
+    (
+        "GWSR_RESTRICT_PATHS",
+        "cwd: confine file flags (--output, --upload, ...) to the current directory",
+    ),
+    (
+        "GWSR_API_BASE_URL",
+        "Trusted API endpoint override (https, or http on localhost)",
+    ),
     (
         "GWSR_FORMAT",
         "Default output format (json, table, yaml, csv)",

@@ -14,7 +14,7 @@
 
 //! Structured Logging
 //!
-//! Diagnostics go to stderr (human-readable) and optionally to a JSON-lines
+//! Diagnostics go to stderr and optionally to a JSON-lines
 //! file with daily rotation. stdout stays reserved for command output.
 //!
 //! ## stderr filter, highest precedence first

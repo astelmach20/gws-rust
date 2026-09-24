@@ -16,7 +16,7 @@
 //!
 //! Resolves the authenticated user's timezone with the following priority:
 //! 1. Explicit `--timezone` CLI flag (hard error if invalid)
-//! 2. Cached value from config dir (24h TTL)
+//! 2. Cached value in the gwsr cache directory (24h TTL)
 //! 3. Google Calendar Settings API (`users/me/settings/timezone`)
 //! 4. Machine-local timezone (fallback with warning)
 

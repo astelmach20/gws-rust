@@ -698,7 +698,7 @@ fn attachments_cmd() -> Command {
         .arg(
             Arg::new("output-dir")
                 .long("output-dir")
-                .help("Directory to write files into (relative to the current directory)")
+                .help("Directory to write files into")
                 .default_value(".")
                 .value_name("DIR"),
         )

@@ -50,7 +50,7 @@ fn content_args(cmd: Command, required: bool) -> Command {
     .arg(
         Arg::new("text-file")
             .long("text-file")
-            .help("Read the content from a file under the current directory, or '-' for stdin")
+            .help("Read the content from a file, or '-' for stdin")
             .value_name("PATH"),
     )
     .group(
@@ -105,7 +105,7 @@ TIPS:
                     Arg::new("output")
                         .long("output")
                         .short('o')
-                        .help("Write the rendered body to this file (under the current directory), or '-' for raw text on stdout")
+                        .help("Write the rendered body to this file, or '-' for raw text on stdout")
                         .value_name("PATH"),
                 )
                 .arg(

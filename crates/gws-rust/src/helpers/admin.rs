@@ -154,7 +154,7 @@ fn directory_commands(cmd: Command) -> Command {
             .arg(
                 Arg::new("password-file")
                     .long("password-file")
-                    .help("Read the initial password from a file under the current directory, or '-' for stdin (default: generate one)")
+                    .help("Read the initial password from a file, or '-' for stdin (default: generate one)")
                     .value_name("PATH"),
             )
             .arg(

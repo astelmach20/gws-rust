@@ -47,7 +47,7 @@ fn output_args(cmd: Command) -> Command {
         Arg::new("output")
             .long("output")
             .short('o')
-            .help("Local path to write (must be under the current directory), or '-' for stdout. Defaults to the Drive file name")
+            .help("Local path to write, or '-' for stdout. Defaults to the Drive file name")
             .value_name("PATH"),
     )
     .arg(
@@ -260,7 +260,7 @@ TIPS:
                 .arg(
                     Arg::new("dir")
                         .long("dir")
-                        .help("Local directory under the current directory (created if missing)")
+                        .help("Local directory to mirror into (created if missing)")
                         .required(true)
                         .value_name("DIR"),
                 )

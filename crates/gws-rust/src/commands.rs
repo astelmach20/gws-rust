@@ -103,7 +103,7 @@ pub fn method_args(doc: &RestDescription, method: &RestMethod) -> Vec<Arg> {
             .help_heading(HEADING_REQUEST),
         Arg::new("no-quota-project")
             .long("no-quota-project")
-            .help("Do not send the ADC quota project as x-goog-user-project [env: GWSR_NO_QUOTA_PROJECT=1]")
+            .help("Do not send the quota project (GWSR_PROJECT_ID, the OAuth client's project or ADC) as x-goog-user-project [env: GWSR_NO_QUOTA_PROJECT=1]")
             .action(ArgAction::SetTrue)
             .help_heading(HEADING_REQUEST),
         Arg::new("output")
