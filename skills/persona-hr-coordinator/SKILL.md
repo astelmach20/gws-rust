@@ -14,6 +14,7 @@ metadata:
         - gwsr-drive
         - gwsr-chat
 ---
+<!-- gwsr generated skill: do not edit by hand -->
 
 # HR Coordinator
 

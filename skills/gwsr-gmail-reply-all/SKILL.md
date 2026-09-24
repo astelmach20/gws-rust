@@ -10,6 +10,7 @@ metadata:
         - gwsr
     cliHelp: "gwsr gmail +reply-all --help"
 ---
+<!-- gwsr generated skill: do not edit by hand -->
 
 # gmail +reply-all
 

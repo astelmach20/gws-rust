@@ -10,6 +10,7 @@ metadata:
         - gwsr
     cliHelp: "gwsr gmail +attachments --help"
 ---
+<!-- gwsr generated skill: do not edit by hand -->
 
 # gmail +attachments
 

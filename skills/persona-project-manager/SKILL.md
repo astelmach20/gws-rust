@@ -15,6 +15,7 @@ metadata:
         - gwsr-gmail
         - gwsr-chat
 ---
+<!-- gwsr generated skill: do not edit by hand -->
 
 # Project Manager
 

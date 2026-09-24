@@ -10,6 +10,7 @@ metadata:
         - gwsr
     cliHelp: "gwsr workflow +email-to-task --help"
 ---
+<!-- gwsr generated skill: do not edit by hand -->
 
 # workflow +email-to-task
 

@@ -12,6 +12,7 @@ metadata:
       skills:
         - gwsr-tasks
 ---
+<!-- gwsr generated skill: do not edit by hand -->
 
 # Create a Task List and Add Tasks
 

@@ -10,6 +10,7 @@ metadata:
         - gwsr
     cliHelp: "gwsr sheets +clear --help"
 ---
+<!-- gwsr generated skill: do not edit by hand -->
 
 # sheets +clear
 

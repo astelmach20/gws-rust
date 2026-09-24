@@ -13,6 +13,7 @@ metadata:
         - gwsr-gmail
         - gwsr-docs
 ---
+<!-- gwsr generated skill: do not edit by hand -->
 
 # Save a Gmail Message to Google Docs
 

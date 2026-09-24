@@ -10,6 +10,7 @@ metadata:
         - gwsr
     cliHelp: "gwsr admin +user-create --help"
 ---
+<!-- gwsr generated skill: do not edit by hand -->
 
 # admin +user-create
 

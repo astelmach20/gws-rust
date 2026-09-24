@@ -10,6 +10,7 @@ metadata:
         - gwsr
     cliHelp: "gwsr events +subscribe --help"
 ---
+<!-- gwsr generated skill: do not edit by hand -->
 
 # events +subscribe
 

@@ -10,6 +10,7 @@ metadata:
         - gwsr
     cliHelp: "gwsr workflow +weekly-digest --help"
 ---
+<!-- gwsr generated skill: do not edit by hand -->
 
 # workflow +weekly-digest
 

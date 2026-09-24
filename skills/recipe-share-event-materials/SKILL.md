@@ -13,6 +13,7 @@ metadata:
         - gwsr-calendar
         - gwsr-drive
 ---
+<!-- gwsr generated skill: do not edit by hand -->
 
 # Share Files with Meeting Attendees
 

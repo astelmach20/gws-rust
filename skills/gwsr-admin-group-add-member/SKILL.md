@@ -10,6 +10,7 @@ metadata:
         - gwsr
     cliHelp: "gwsr admin +group-add-member --help"
 ---
+<!-- gwsr generated skill: do not edit by hand -->
 
 # admin +group-add-member
 

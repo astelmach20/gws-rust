@@ -12,6 +12,7 @@ metadata:
       skills:
         - gwsr-gmail
 ---
+<!-- gwsr generated skill: do not edit by hand -->
 
 # Set Up a Gmail Vacation Responder
 

@@ -10,6 +10,7 @@ metadata:
         - gwsr
     cliHelp: "gwsr docs +replace --help"
 ---
+<!-- gwsr generated skill: do not edit by hand -->
 
 # docs +replace
 

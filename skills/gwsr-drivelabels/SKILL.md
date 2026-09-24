@@ -10,6 +10,7 @@ metadata:
         - gwsr
     cliHelp: "gwsr drivelabels --help"
 ---
+<!-- gwsr generated skill: do not edit by hand -->
 
 # drivelabels (v2)
 

@@ -10,6 +10,7 @@ metadata:
         - gwsr
     cliHelp: "gwsr workflow +file-announce --help"
 ---
+<!-- gwsr generated skill: do not edit by hand -->
 
 # workflow +file-announce
 

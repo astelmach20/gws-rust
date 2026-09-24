@@ -10,6 +10,7 @@ metadata:
         - gwsr
     cliHelp: "gwsr sheets +create --help"
 ---
+<!-- gwsr generated skill: do not edit by hand -->
 
 # sheets +create
 

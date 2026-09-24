@@ -14,6 +14,7 @@ metadata:
         - gwsr-sheets
         - gwsr-gmail
 ---
+<!-- gwsr generated skill: do not edit by hand -->
 
 # Researcher
 

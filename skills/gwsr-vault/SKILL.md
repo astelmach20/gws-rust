@@ -10,6 +10,7 @@ metadata:
         - gwsr
     cliHelp: "gwsr vault --help"
 ---
+<!-- gwsr generated skill: do not edit by hand -->
 
 # vault (v1)
 

@@ -10,6 +10,7 @@ metadata:
         - gwsr
     cliHelp: "gwsr cloudsearch --help"
 ---
+<!-- gwsr generated skill: do not edit by hand -->
 
 # cloudsearch (v1)
 

@@ -13,6 +13,7 @@ metadata:
         - gwsr-drive
         - gwsr-calendar
 ---
+<!-- gwsr generated skill: do not edit by hand -->
 
 # IT Administrator
 

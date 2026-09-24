@@ -10,6 +10,7 @@ metadata:
         - gwsr
     cliHelp: "gwsr drive --help"
 ---
+<!-- gwsr generated skill: do not edit by hand -->
 
 # drive (v3)
 

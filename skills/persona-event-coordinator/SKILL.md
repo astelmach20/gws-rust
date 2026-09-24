@@ -15,6 +15,7 @@ metadata:
         - gwsr-chat
         - gwsr-sheets
 ---
+<!-- gwsr generated skill: do not edit by hand -->
 
 # Event Coordinator
 

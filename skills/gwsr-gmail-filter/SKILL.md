@@ -10,6 +10,7 @@ metadata:
         - gwsr
     cliHelp: "gwsr gmail +filter --help"
 ---
+<!-- gwsr generated skill: do not edit by hand -->
 
 # gmail +filter
 

@@ -14,6 +14,7 @@ metadata:
         - gwsr-sheets
         - gwsr-drive
 ---
+<!-- gwsr generated skill: do not edit by hand -->
 
 # Sales Operations
 

@@ -10,6 +10,7 @@ metadata:
         - gwsr
     cliHelp: "gwsr drive +sync --help"
 ---
+<!-- gwsr generated skill: do not edit by hand -->
 
 # drive +sync
 

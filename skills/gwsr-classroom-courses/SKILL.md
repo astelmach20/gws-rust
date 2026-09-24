@@ -10,6 +10,7 @@ metadata:
         - gwsr
     cliHelp: "gwsr classroom +courses --help"
 ---
+<!-- gwsr generated skill: do not edit by hand -->
 
 # classroom +courses
 

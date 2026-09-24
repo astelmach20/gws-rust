@@ -13,6 +13,7 @@ metadata:
         - gwsr-gmail
         - gwsr-chat
 ---
+<!-- gwsr generated skill: do not edit by hand -->
 
 # Announce via Gmail and Google Chat
 

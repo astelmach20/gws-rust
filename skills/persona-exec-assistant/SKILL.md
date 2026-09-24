@@ -14,6 +14,7 @@ metadata:
         - gwsr-drive
         - gwsr-chat
 ---
+<!-- gwsr generated skill: do not edit by hand -->
 
 # Executive Assistant
 
@@ -31,7 +32,7 @@ Manage an executive's schedule, inbox, and communications.
 - Before each meeting, run `gwsr workflow +meeting-prep` to see attendees, description, and linked docs.
 - Triage the inbox with `gwsr gmail +triage --max 10` — prioritize emails from direct reports and leadership.
 - Schedule meetings with `gwsr calendar +insert` — always check for conflicts first using `gwsr calendar +agenda`.
-- Draft replies with `gwsr gmail +send` — keep tone professional and concise.
+- Draft replies with `gwsr gmail +reply --message-id MESSAGE_ID --body 'TEXT' --draft` for the executive to review — keep tone professional and concise.
 
 ## Tips
 - Always confirm calendar changes with the executive before committing.

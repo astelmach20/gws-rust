@@ -12,6 +12,7 @@ metadata:
       skills:
         - gwsr-slides
 ---
+<!-- gwsr generated skill: do not edit by hand -->
 
 # Create a Google Slides Presentation
 

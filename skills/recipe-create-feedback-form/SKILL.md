@@ -13,6 +13,7 @@ metadata:
         - gwsr-forms
         - gwsr-gmail
 ---
+<!-- gwsr generated skill: do not edit by hand -->
 
 # Create and Share a Google Form
 

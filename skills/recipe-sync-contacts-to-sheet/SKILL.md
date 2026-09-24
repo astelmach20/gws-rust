@@ -13,6 +13,7 @@ metadata:
         - gwsr-people
         - gwsr-sheets
 ---
+<!-- gwsr generated skill: do not edit by hand -->
 
 # Export Google Contacts to Sheets
 

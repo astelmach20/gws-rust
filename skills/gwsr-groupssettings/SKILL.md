@@ -10,6 +10,7 @@ metadata:
         - gwsr
     cliHelp: "gwsr groupssettings --help"
 ---
+<!-- gwsr generated skill: do not edit by hand -->
 
 # groupssettings (v1)
 

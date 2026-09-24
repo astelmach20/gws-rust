@@ -14,6 +14,7 @@ metadata:
         - gwsr-docs
         - gwsr-drive
 ---
+<!-- gwsr generated skill: do not edit by hand -->
 
 # Generate a Google Docs Report from Sheet Data
 

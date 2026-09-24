@@ -10,6 +10,7 @@ metadata:
         - gwsr
     cliHelp: "gwsr people --help"
 ---
+<!-- gwsr generated skill: do not edit by hand -->
 
 # people (v1)
 

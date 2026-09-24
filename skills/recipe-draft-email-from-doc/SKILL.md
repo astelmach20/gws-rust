@@ -13,6 +13,7 @@ metadata:
         - gwsr-docs
         - gwsr-gmail
 ---
+<!-- gwsr generated skill: do not edit by hand -->
 
 # Draft a Gmail Message from a Google Doc
 
