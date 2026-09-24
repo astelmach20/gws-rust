@@ -2,6 +2,8 @@
 /target/
 **/*.rs.bk
 bin/
+# The npm launcher is source, not a build output.
+!/npm/bin/
 lcov.info
 
 
