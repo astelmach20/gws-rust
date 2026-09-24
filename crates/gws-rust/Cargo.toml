@@ -1,0 +1,94 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+[package]
+name = "gws-rust"
+version.workspace = true
+edition.workspace = true
+description = "Google Workspace CLI — dynamic command surface from Discovery Service"
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "README.md"
+authors.workspace = true
+rust-version.workspace = true
+keywords = ["cli", "google-workspace", "google", "drive", "gmail"]
+categories = ["command-line-utilities", "web-programming"]
+
+[[bin]]
+name = "gwsr"
+path = "src/main.rs"
+
+[dependencies]
+gws-rust-core = { version = "0.22.5", path = "../gws-rust-core", features = ["anyhow"] }
+aes-gcm = { version = "0.11", features = ["getrandom", "zeroize"] }
+anyhow.workspace = true
+async-trait = "0.1.92"
+base64 = "0.23.1"
+bytes = "1"
+chrono = "0.4.45"
+chrono-tz = "0.10"
+clap = { version = "4", features = ["derive", "string"] }
+crossterm = "0.29.0"
+dirs = "7"
+futures-util = "0.3"
+iana-time-zone = "0.1"
+mail-builder = "1.0"
+mime_guess2 = "2.3.1"
+percent-encoding.workspace = true
+rand = "0.10"
+ratatui = "0.30.2"
+reqwest = { workspace = true, features = ["stream", "socks"] }
+serde.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-util = { version = "0.7", features = ["io"] }
+toml = "1.1"
+tracing.workspace = true
+tracing-appender = "0.2"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+uuid = { version = "1.26.1", features = ["v4", "v5"] }
+keyring = "4.2.0"
+zeroize = { version = "1.9.0", features = ["derive"] }
+strsim = "0.11.1"
+oauth2 = { version = "5", default-features = false }
+secrecy = { version = "0.10", features = ["serde"] }
+webbrowser = "1"
+aws-lc-rs = "1"
+clap_complete = { version = "4.6", features = ["unstable-dynamic"] }
+clap_mangen = "0.3"
+jaq-core = "3"
+jaq-std = "3"
+jaq-json = "2"
+serde-saphyr = "1"
+csv = { version = "1.4.0", default-features = false }
+pulldown-cmark = { version = "0.13.4", default-features = false }
+html2text = "0.17.1"
+toml_edit = "0.25.15"
+
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "1.1", features = ["process", "fs"] }
+
+[dev-dependencies]
+assert_cmd = "2.2.2"
+insta = "1"
+predicates = "3"
+serial_test.workspace = true
+shell-words = "1.1.1"
+wiremock = "0.6.5"
+
+[lints]
+workspace = true

@@ -1,0 +1,102 @@
+{
+ "_note": "Stripped Discovery document used only by the registry validation test. Regenerate from https://www.googleapis.com/discovery/v1/apis/docs/v1/rest",
+ "name": "docs",
+ "parameters": {
+  "$.xgafv": {
+   "location": "query",
+   "type": "string"
+  },
+  "access_token": {
+   "location": "query",
+   "type": "string"
+  },
+  "alt": {
+   "location": "query",
+   "type": "string"
+  },
+  "callback": {
+   "location": "query",
+   "type": "string"
+  },
+  "fields": {
+   "location": "query",
+   "type": "string"
+  },
+  "key": {
+   "location": "query",
+   "type": "string"
+  },
+  "oauth_token": {
+   "location": "query",
+   "type": "string"
+  },
+  "prettyPrint": {
+   "location": "query",
+   "type": "boolean"
+  },
+  "quotaUser": {
+   "location": "query",
+   "type": "string"
+  },
+  "uploadType": {
+   "location": "query",
+   "type": "string"
+  },
+  "upload_protocol": {
+   "location": "query",
+   "type": "string"
+  }
+ },
+ "resources": {
+  "documents": {
+   "methods": {
+    "batchUpdate": {
+     "httpMethod": "POST",
+     "id": "docs.documents.batchUpdate",
+     "parameters": {
+      "documentId": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      }
+     },
+     "path": "v1/documents/{documentId}:batchUpdate",
+     "request": {
+      "$ref": "BatchUpdateDocumentRequest"
+     }
+    },
+    "create": {
+     "httpMethod": "POST",
+     "id": "docs.documents.create",
+     "path": "v1/documents",
+     "request": {
+      "$ref": "Document"
+     }
+    },
+    "get": {
+     "httpMethod": "GET",
+     "id": "docs.documents.get",
+     "parameters": {
+      "documentId": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      },
+      "includeTabsContent": {
+       "location": "query",
+       "type": "boolean"
+      },
+      "suggestionsViewMode": {
+       "location": "query",
+       "type": "string"
+      }
+     },
+     "path": "v1/documents/{documentId}"
+    }
+   }
+  }
+ },
+ "rootUrl": "https://docs.googleapis.com/",
+ "servicePath": "",
+ "version": "v1"
+}

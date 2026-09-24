@@ -1,0 +1,58 @@
+# Dependency update automation. Updates are grouped so each ecosystem produces at most one
+# routine PR per week, and new releases must age for a week first (cooldown) so a
+# compromised or yanked release is usually caught before it reaches a PR.
+version: 2
+
+updates:
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    cooldown:
+      default-days: 7
+    open-pull-requests-limit: 10
+    labels: [dependencies, rust]
+    commit-message:
+      prefix: "chore(deps)"
+    groups:
+      cargo-minor-patch:
+        update-types: [minor, patch]
+      cargo-major:
+        update-types: [major]
+
+  - package-ecosystem: npm
+    directories:
+      - /
+      - /npm
+    schedule:
+      interval: weekly
+      day: monday
+    cooldown:
+      default-days: 7
+    labels: [dependencies, javascript]
+    commit-message:
+      prefix: "chore(deps)"
+    groups:
+      npm-tooling:
+        patterns: ["*"]
+    ignore:
+      # The platform packages are published by our own release workflow at the same version
+      # as gws-rust; version-sync.sh manages them.
+      - dependency-name: "gws-rust-*"
+
+  - package-ecosystem: github-actions
+    directories:
+      - /
+      - /.github/actions/*
+    schedule:
+      interval: weekly
+      day: monday
+    cooldown:
+      default-days: 7
+    labels: [dependencies, github-actions]
+    commit-message:
+      prefix: "chore(ci)"
+    groups:
+      github-actions:
+        patterns: ["*"]

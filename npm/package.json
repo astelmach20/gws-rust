@@ -1,79 +1,54 @@
 {
-  "name": "@googleworkspace/cli",
-  "description": "Google Workspace CLI — dynamic command surface from Discovery Service",
+  "name": "gws-rust",
   "version": "0.22.5",
+  "description": "Google Workspace CLI (gwsr) — dynamic command surface from the Google Discovery Service",
   "license": "Apache-2.0",
-  "author": "Justin Poehnelt",
+  "author": "The gws-rust Authors",
   "repository": {
     "type": "git",
-    "url": "https://github.com/googleworkspace/cli.git"
+    "url": "git+https://github.com/astelmach20/gws-rust.git",
+    "directory": "npm"
   },
-  "homepage": "https://github.com/googleworkspace/cli",
+  "homepage": "https://github.com/astelmach20/gws-rust",
   "bugs": {
-    "url": "https://github.com/googleworkspace/cli/issues"
+    "url": "https://github.com/astelmach20/gws-rust/issues"
   },
   "bin": {
-    "gws": "run.js"
+    "gwsr": "bin/gwsr.js"
   },
-  "scripts": {
-    "postinstall": "node install.js"
-  },
+  "files": [
+    "bin/",
+    "lib/",
+    "platforms.json"
+  ],
   "engines": {
-    "node": ">=18"
+    "node": ">=22"
   },
-  "preferUnplugged": true,
+  "optionalDependencies": {
+    "gws-rust-darwin-arm64": "0.22.5",
+    "gws-rust-darwin-x64": "0.22.5",
+    "gws-rust-linux-arm64": "0.22.5",
+    "gws-rust-linux-x64": "0.22.5",
+    "gws-rust-win32-x64": "0.22.5"
+  },
   "keywords": [
     "cli",
     "google-workspace",
-    "google",
     "google-api",
     "google-drive",
-    "google-gmail",
+    "gmail",
     "google-sheets",
     "google-calendar",
     "google-docs",
-    "google-chat",
-    "google-admin",
-    "gsuite",
     "discovery-api",
     "ai-agent",
     "agent-skills",
     "automation",
-    "oauth2",
     "rust"
   ],
   "publishConfig": {
+    "access": "public",
     "provenance": true,
-    "registry": "https://wombat-dressing-room.appspot.com"
-  },
-  "supportedPlatforms": {
-    "aarch64-apple-darwin": {
-      "artifact": "google-workspace-cli-aarch64-apple-darwin.tar.gz",
-      "binary": "gws"
-    },
-    "x86_64-apple-darwin": {
-      "artifact": "google-workspace-cli-x86_64-apple-darwin.tar.gz",
-      "binary": "gws"
-    },
-    "aarch64-unknown-linux-gnu": {
-      "artifact": "google-workspace-cli-aarch64-unknown-linux-gnu.tar.gz",
-      "binary": "gws"
-    },
-    "aarch64-unknown-linux-musl": {
-      "artifact": "google-workspace-cli-aarch64-unknown-linux-musl.tar.gz",
-      "binary": "gws"
-    },
-    "x86_64-unknown-linux-gnu": {
-      "artifact": "google-workspace-cli-x86_64-unknown-linux-gnu.tar.gz",
-      "binary": "gws"
-    },
-    "x86_64-unknown-linux-musl": {
-      "artifact": "google-workspace-cli-x86_64-unknown-linux-musl.tar.gz",
-      "binary": "gws"
-    },
-    "x86_64-pc-windows-msvc": {
-      "artifact": "google-workspace-cli-x86_64-pc-windows-msvc.zip",
-      "binary": "gws.exe"
-    }
+    "registry": "https://registry.npmjs.org/"
   }
 }

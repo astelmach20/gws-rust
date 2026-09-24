@@ -1,6 +1,6 @@
 {
-  "name": "google-workspace-cli",
-  "version": "latest",
-  "description": "CLI tool for managing Google Workspace resources dynamically using Discovery APIs.",
+  "name": "gws-rust",
+  "version": "0.22.5",
+  "description": "gwsr: Google Workspace CLI with a dynamic command surface built from the Google Discovery Service.",
   "contextFileName": "CONTEXT.md"
 }

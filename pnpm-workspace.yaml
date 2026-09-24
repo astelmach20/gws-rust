@@ -1,0 +1,7 @@
+# pnpm settings for the repo-root dev tooling (changesets, lefthook).
+# lefthook's postinstall would run `lefthook install`; hooks are opt-in via `pnpm run hooks` instead.
+allowBuilds:
+  lefthook: false
+
+# Refuse to resolve package versions published less than a day ago (supply-chain hygiene).
+minimumReleaseAge: 1440

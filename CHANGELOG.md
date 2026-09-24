@@ -1,4 +1,7 @@
-# @googleworkspace/cli
+# gws-rust
+
+> Entries from 0.22.5 down are the history of the upstream project,
+> [googleworkspace/cli](https://github.com/googleworkspace/cli), from which gws-rust was forked.
 
 ## 0.22.5
 

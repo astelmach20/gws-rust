@@ -1,0 +1,11 @@
+---
+source: crates/gws-rust/tests/cli.rs
+expression: stdout_of(&out)
+---
+body
+dry_run       true
+method        GET
+page_all      false
+query_params  pageSize, 5
+upload
+url           https://www.googleapis.com/drive/v3/files

@@ -1,17 +1,17 @@
-#!/bin/bash
-# Copyright 2026 Google LLC
+#!/usr/bin/env bash
+# Clears the terminal and prints an ASCII-art title card (used by docs/demo.tape).
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+#   scripts/show-art.sh art/intro.txt
+set -euo pipefail
+
+if [[ $# -ne 1 ]]; then
+  echo "usage: $0 <art-file>" >&2
+  exit 2
+fi
+if [[ ! -r "$1" ]]; then
+  echo "error: cannot read art file: $1" >&2
+  exit 1
+fi
 
 clear
-cat "$1"
+cat -- "$1"
