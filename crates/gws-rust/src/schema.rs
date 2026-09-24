@@ -21,30 +21,30 @@
 use serde_json::{Value, json};
 
 use crate::discovery::{
-    JsonSchema, MethodParameter, RestDescription, RestMethod, RestResource,
+    JsonSchema, MethodParameter, PageTokenLocation, RestDescription, RestMethod, RestResource,
     fetch_discovery_document,
 };
 use crate::error::GwsError;
-use crate::services::resolve_service;
+use crate::services::resolve_service_spec;
 
-/// Handles the `gwsr schema <dotted.path>` command.
+/// Handles the `gwsr schema <dotted.path>` command and returns the schema as
+/// JSON (the caller formats and prints it).
 ///
-/// Path format: `service.resource[.subresource].method`
-/// Example: `drive.files.list` or `drive.files.permissions.list`
-pub async fn handle_schema_command(path: &str, resolve_refs: bool) -> Result<(), GwsError> {
+/// Path format: `service.resource[.subresource].method` or `service.Type`,
+/// where `service` is a registered alias, `alias:version`, or any Discovery
+/// API as `<api>:<version>`.
+/// Examples: `drive.files.list`, `drive.File`, `admin:directory_v1.users.list`.
+pub async fn handle_schema_command(path: &str, resolve_refs: bool) -> Result<Value, GwsError> {
     let parts: Vec<&str> = path.split('.').collect();
-    if parts.len() < 2 {
+    if parts.len() < 2 || parts.iter().any(|p| p.is_empty()) {
         return Err(GwsError::Validation(format!(
-            "Schema path must be at least 'service.Message' or 'service.resource.method', got '{path}'"
+            "Schema path must be 'service.Type' or 'service.resource.method' (e.g. 'drive.files.list', 'youtube:v3.videos.list'), got '{path}'"
         )));
     }
 
     let service_name = parts[0];
-    let (api_name, version) = resolve_service(service_name)?;
-
-    let doc = fetch_discovery_document(&api_name, &version)
-        .await
-        .map_err(|e| GwsError::Discovery(format!("{e:#}")))?;
+    let resolved = resolve_service_spec(service_name, None)?;
+    let doc = fetch_discovery_document(&resolved.api_name, &resolved.version).await?;
 
     // Case 1: Schema lookup (e.g., "drive.File")
     if parts.len() == 2 {
@@ -57,28 +57,18 @@ pub async fn handle_schema_command(path: &str, resolve_refs: bool) -> Result<(),
                 seen.insert(schema_name.to_string());
                 resolve_schema_refs(&mut output, &doc, &mut seen);
             }
-
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&output).unwrap_or_default()
-            );
-            return Ok(());
-        } else {
-            // It might be a resource path that is incomplete, but let's see if it's a schema typo first
-            // or perhaps the user meant "drive.files" (resource) which we don't support dumping yet.
-            // Let's check if it matches a resource name to give a better error.
-            if doc.resources.contains_key(schema_name) {
-                return Err(GwsError::Validation(format!(
-                    "'{schema_name}' is a resource. To see its methods, try 'gwsr schema {service_name}.{schema_name}.list' (or similar). To see a type definition, try 'gwsr schema {service_name}.<Type>'."
-                )));
-            }
-
-            let available: Vec<&String> = doc.schemas.keys().collect();
+            return Ok(output);
+        }
+        if doc.resources.contains_key(schema_name) {
             return Err(GwsError::Validation(format!(
-                "Schema or resource '{schema_name}' not found. Available schemas: {:?}",
-                available
+                "'{schema_name}' is a resource. To see its methods, try 'gwsr schema {service_name}.{schema_name}.list' (or similar). To see a type definition, try 'gwsr schema {service_name}.<Type>'."
             )));
         }
+        let mut available: Vec<&String> = doc.schemas.keys().collect();
+        available.sort();
+        return Err(GwsError::Validation(format!(
+            "Schema or resource '{schema_name}' not found. Available schemas: {available:?}"
+        )));
     }
 
     // Case 2: Method lookup (e.g., "drive.files.list")
@@ -92,12 +82,7 @@ pub async fn handle_schema_command(path: &str, resolve_refs: bool) -> Result<(),
         let mut seen = std::collections::HashSet::new();
         resolve_schema_refs(&mut output, &doc, &mut seen);
     }
-    println!(
-        "{}",
-        serde_json::to_string_pretty(&output).unwrap_or_default()
-    );
-
-    Ok(())
+    Ok(output)
 }
 
 /// Walks the resource tree to find a method.
@@ -114,10 +99,10 @@ fn find_method<'a>(
 
     let first_resource_name = resource_path[0];
     let resource = doc.resources.get(first_resource_name).ok_or_else(|| {
-        let available: Vec<&String> = doc.resources.keys().collect();
+        let mut available: Vec<&String> = doc.resources.keys().collect();
+        available.sort();
         GwsError::Validation(format!(
-            "Resource '{}' not found. Available resources: {:?}",
-            first_resource_name, available
+            "Resource '{first_resource_name}' not found. Available resources: {available:?}"
         ))
     })?;
 
@@ -125,19 +110,19 @@ fn find_method<'a>(
     let mut current_resource: &RestResource = resource;
     for &sub_name in &resource_path[1..] {
         current_resource = current_resource.resources.get(sub_name).ok_or_else(|| {
-            let available: Vec<&String> = current_resource.resources.keys().collect();
+            let mut available: Vec<&String> = current_resource.resources.keys().collect();
+            available.sort();
             GwsError::Validation(format!(
-                "Sub-resource '{}' not found. Available: {:?}",
-                sub_name, available
+                "Sub-resource '{sub_name}' not found. Available: {available:?}"
             ))
         })?;
     }
 
     current_resource.methods.get(method_name).ok_or_else(|| {
-        let available: Vec<&String> = current_resource.methods.keys().collect();
+        let mut available: Vec<&String> = current_resource.methods.keys().collect();
+        available.sort();
         GwsError::Validation(format!(
-            "Method '{}' not found. Available methods: {:?}",
-            method_name, available
+            "Method '{method_name}' not found. Available methods: {available:?}"
         ))
     })
 }
@@ -184,6 +169,37 @@ fn build_schema_output(doc: &RestDescription, method: &RestMethod) -> Value {
         if let Some(schema) = doc.schemas.get(schema_name) {
             output["response"]["schema"] = schema_to_json(schema);
         }
+    }
+
+    if let Some(pagination) = method.pagination(doc) {
+        let location = match pagination.token_location {
+            PageTokenLocation::Body => "body",
+            _ => "query",
+        };
+        output["pagination"] = json!({
+            "tokenLocation": location,
+            "requestField": pagination.request_field,
+            "responseField": pagination.response_field,
+        });
+    }
+
+    if method.supports_media_upload {
+        let mut upload = json!({});
+        if let Some(path) = method.simple_upload_path() {
+            upload["simplePath"] = json!(path);
+        }
+        if let Some(path) = method.resumable_upload_path() {
+            upload["resumablePath"] = json!(path);
+        }
+        if let Some(media) = &method.media_upload {
+            if let Some(max) = &media.max_size {
+                upload["maxSize"] = json!(max);
+            }
+            if let Some(accept) = &media.accept {
+                upload["accept"] = json!(accept);
+            }
+        }
+        output["mediaUpload"] = upload;
     }
 
     output
@@ -464,5 +480,77 @@ mod tests {
 
         let f_node = &val["properties"]["f"];
         assert_eq!(f_node["type"], "integer");
+    }
+
+    #[test]
+    fn test_build_schema_output_includes_pagination_and_upload() {
+        let doc: RestDescription = serde_json::from_value(json!({
+            "name": "x", "version": "v1", "rootUrl": "https://x.googleapis.com/",
+            "resources": { "items": { "methods": {
+                "search": { "httpMethod": "POST", "path": "items:search",
+                    "request": { "$ref": "Req" }, "response": { "$ref": "Resp" } },
+                "upload": { "httpMethod": "POST", "path": "items",
+                    "supportsMediaUpload": true,
+                    "mediaUpload": { "maxSize": "10MB", "accept": ["*/*"], "protocols": {
+                        "simple": { "path": "/upload/x/v1/items", "multipart": true },
+                        "resumable": { "path": "/resumable/upload/x/v1/items", "multipart": true } } } }
+            } } },
+            "schemas": {
+                "Req": { "type": "object", "properties": { "pageToken": { "type": "string" } } },
+                "Resp": { "type": "object", "properties": { "nextPageToken": { "type": "string" } } }
+            }
+        }))
+        .unwrap();
+        let search = find_method(&doc, &["items"], "search").unwrap();
+        let out = build_schema_output(&doc, search);
+        assert_eq!(out["pagination"]["tokenLocation"], "body");
+        assert_eq!(out["pagination"]["responseField"], "nextPageToken");
+        assert!(out.get("mediaUpload").is_none());
+
+        let upload = find_method(&doc, &["items"], "upload").unwrap();
+        let out = build_schema_output(&doc, upload);
+        assert_eq!(out["mediaUpload"]["simplePath"], "/upload/x/v1/items");
+        assert_eq!(
+            out["mediaUpload"]["resumablePath"],
+            "/resumable/upload/x/v1/items"
+        );
+        assert_eq!(out["mediaUpload"]["maxSize"], "10MB");
+        assert!(out.get("pagination").is_none());
+    }
+
+    #[test]
+    fn test_find_method_errors_list_sorted_alternatives() {
+        let doc: RestDescription = serde_json::from_value(json!({
+            "name": "x", "version": "v1", "rootUrl": "https://x.googleapis.com/",
+            "resources": { "b": {}, "a": { "methods": { "z": { "httpMethod": "GET", "path": "z" },
+                                                          "y": { "httpMethod": "GET", "path": "y" } } } }
+        }))
+        .unwrap();
+        let err = find_method(&doc, &["c"], "list").unwrap_err().to_string();
+        assert!(err.contains(r#"["a", "b"]"#), "{err}");
+        let err = find_method(&doc, &["a"], "list").unwrap_err().to_string();
+        assert!(err.contains(r#"["y", "z"]"#), "{err}");
+        assert!(find_method(&doc, &[], "list").is_err());
+    }
+
+    #[tokio::test]
+    async fn test_handle_schema_command_rejects_malformed_paths() {
+        for bad in ["drive", "drive.", ".files.list", "drive..list"] {
+            assert!(matches!(
+                handle_schema_command(bad, false).await,
+                Err(GwsError::Validation(_))
+            ));
+        }
+        // Unknown services fail before any network access, with a suggestion.
+        let err = handle_schema_command("drvie.files.list", false)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("Did you mean 'drive'?"), "{err}");
+        // Invalid <api>:<version> identifiers are rejected up front.
+        assert!(matches!(
+            handle_schema_command("../x:v1.a.b", false).await,
+            Err(GwsError::Validation(_))
+        ));
     }
 }

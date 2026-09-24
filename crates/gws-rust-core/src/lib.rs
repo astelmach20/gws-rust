@@ -19,11 +19,17 @@
 //!
 //! # Modules
 //!
-//! - [`discovery`] — Discovery Document types and fetching
+//! - [`discovery`] — Discovery Document types, fetching, and caching
 //! - [`error`] — Structured error types
 //! - [`services`] — Service name registry and resolution
-//! - [`validate`] — Input validation and URL encoding utilities
+//! - [`validate`] — Input, path, and endpoint validation; URL encoding
 //! - [`client`] — HTTP client with retry logic
+//!
+//! # Features
+//!
+//! - `anyhow` — implements `From<anyhow::Error>` for [`error::GwsError`].
+
+#![forbid(unsafe_code)]
 
 pub mod client;
 pub mod discovery;
