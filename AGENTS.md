@@ -2,10 +2,10 @@
 
 ## Project Overview
 
-`gws` is a Rust CLI tool for interacting with Google Workspace APIs. It dynamically generates its command surface at runtime by parsing Google Discovery Service JSON documents.
+`gwsr` is a Rust CLI tool for interacting with Google Workspace APIs. It dynamically generates its command surface at runtime by parsing Google Discovery Service JSON documents.
 
 > [!IMPORTANT]
-> **Dynamic Discovery**: This project does NOT use generated Rust crates (e.g., `google-drive3`) for API interaction. Instead, it fetches the Discovery JSON at runtime and builds `clap` commands dynamically. When adding a new service, you only need to register it in `crates/google-workspace/src/services.rs` and verify the Discovery URL pattern in `crates/google-workspace/src/discovery.rs`. Do NOT add new crates to `Cargo.toml` for standard Google APIs.
+> **Dynamic Discovery**: This project does NOT use generated Rust crates (e.g., `google-drive3`) for API interaction. Instead, it fetches the Discovery JSON at runtime and builds `clap` commands dynamically. When adding a new service, you only need to register it in `crates/gws-rust-core/src/services.rs` and verify the Discovery URL pattern in `crates/gws-rust-core/src/discovery.rs`. Do NOT add new crates to `Cargo.toml` for standard Google APIs.
 
 > [!NOTE]
 > **Package Manager**: Use `pnpm` instead of `npm` for Node.js package management in this repository.
@@ -27,7 +27,7 @@ Every PR must include a changeset file. Create one at `.changeset/<descriptive-n
 
 ```markdown
 ---
-"@googleworkspace/cli": patch
+"gws-rust": patch
 ---
 
 Brief description of the change
@@ -48,10 +48,10 @@ The repository is a Cargo workspace with two crates:
 
 | Crate                          | Package                 | Purpose                                           |
 | ------------------------------ | ----------------------- | ------------------------------------------------- |
-| `crates/google-workspace/`     | `google-workspace`      | Publishable library — core types and helpers       |
-| `crates/google-workspace-cli/` | `google-workspace-cli`  | Binary crate — the `gws` CLI                       |
+| `crates/gws-rust-core/`     | `gws-rust-core`      | Publishable library — core types and helpers       |
+| `crates/gws-rust/` | `gws-rust`  | Binary crate — the `gwsr` CLI                       |
 
-#### Library (`crates/google-workspace/src/`)
+#### Library (`crates/gws-rust-core/src/`)
 
 | File             | Purpose                                                    |
 | ---------------- | ---------------------------------------------------------- |
@@ -61,17 +61,17 @@ The repository is a Cargo workspace with two crates:
 | `validate.rs`    | Path/URL/resource validators, `encode_path_segment()`      |
 | `client.rs`      | HTTP client with retry logic                               |
 
-#### CLI (`crates/google-workspace-cli/src/`)
+#### CLI (`crates/gws-rust/src/`)
 
 | File                | Purpose                                                                  |
 | ------------------- | ------------------------------------------------------------------------ |
 | `main.rs`           | Entrypoint, two-phase CLI parsing, method resolution                     |
 | `auth.rs`           | OAuth2 token acquisition via env vars, encrypted credentials, or ADC     |
 | `credential_store.rs` | AES-256-GCM encryption/decryption of credential files                  |
-| `auth_commands.rs`  | `gws auth` subcommands: `login`, `logout`, `setup`, `status`, `export`   |
+| `auth_commands.rs`  | `gwsr auth` subcommands: `login`, `logout`, `setup`, `status`, `export`   |
 | `commands.rs`       | Recursive `clap::Command` builder from Discovery resources               |
 | `executor.rs`       | HTTP request construction, response handling, schema validation          |
-| `schema.rs`         | `gws schema` command — introspect API method schemas                     |
+| `schema.rs`         | `gwsr schema` command — introspect API method schemas                     |
 | `logging.rs`        | Opt-in structured logging (stderr + file) via `tracing`                  |
 | `timezone.rs`       | Account timezone resolution: `--timezone` flag, Calendar Settings API    |
 
@@ -85,10 +85,10 @@ vhs docs/demo.tape
 
 ### VHS quoting rules
 
-- Use **double quotes** for simple strings: `Type "gws --help" Enter`
+- Use **double quotes** for simple strings: `Type "gwsr --help" Enter`
 - Use **backtick quotes** when the typed text contains JSON with double quotes:
   ```
-  Type `gws drive files list --params '{"pageSize":5}'` Enter
+  Type `gwsr drive files list --params '{"pageSize":5}'` Enter
   ```
   `\"` escapes inside double-quoted `Type` strings are **not supported** by VHS and will cause parse errors.
 
@@ -102,9 +102,9 @@ ASCII art title cards live in `art/`. The `scripts/show-art.sh` helper clears th
 > This CLI is frequently invoked by AI/LLM agents. Always assume inputs can be adversarial — validate paths against traversal (`../../.ssh`), restrict format strings to allowlists, reject control characters, and encode user values before embedding them in URLs.
 
 > [!NOTE]
-> **Environment variables are trusted inputs.** The validation rules above apply to **CLI arguments** that may be passed by untrusted AI agents. Environment variables (e.g. `GOOGLE_WORKSPACE_CLI_CONFIG_DIR`) are set by the user themselves — in their shell profile, `.env` file, or deployment config — and are not subject to path traversal validation. This is consistent with standard conventions like `XDG_CONFIG_HOME`, `CARGO_HOME`, etc.
+> **Environment variables are trusted inputs.** The validation rules above apply to **CLI arguments** that may be passed by untrusted AI agents. Environment variables (e.g. `GWSR_CONFIG_DIR`) are set by the user themselves — in their shell profile, `.env` file, or deployment config — and are not subject to path traversal validation. This is consistent with standard conventions like `XDG_CONFIG_HOME`, `CARGO_HOME`, etc.
 
-### Path Safety (`crates/google-workspace/src/validate.rs`)
+### Path Safety (`crates/gws-rust-core/src/validate.rs`)
 
 When adding new helpers or CLI flags that accept file paths, **always validate** using the shared helpers:
 
@@ -122,7 +122,7 @@ if let Some(output_dir) = matches.get_one::<String>("output-dir") {
 }
 ```
 
-### URL Encoding (`crates/google-workspace-cli/src/helpers/mod.rs`)
+### URL Encoding (`crates/gws-rust/src/helpers/mod.rs`)
 
 User-supplied values embedded in URL **path segments** must be percent-encoded. Use the shared helper:
 
@@ -147,7 +147,7 @@ client.get(url).query(&[("q", user_query)]).send().await?;
 let url = format!("{}?q={}", base_url, user_query);
 ```
 
-### Resource Name Validation (`crates/google-workspace-cli/src/helpers/mod.rs`)
+### Resource Name Validation (`crates/gws-rust/src/helpers/mod.rs`)
 
 When a user-supplied string is used as a GCP resource identifier (project ID, topic name, space name, etc.) that gets embedded in a URL path, validate it first:
 
@@ -189,7 +189,7 @@ Helpers are handwritten commands prefixed with `+` that provide value the schema
 > [!IMPORTANT]
 > **Do NOT add a helper that** wraps a single API call already available via Discovery, adds flags to expose data already in the API response, or re-implements Discovery parameters as custom flags. Helper flags must control orchestration logic — use `--params` and `--format`/`jq` for API parameters and output filtering.
 
-See [`src/helpers/README.md`](crates/google-workspace-cli/src/helpers/README.md) for full guidelines, anti-patterns, and a checklist for new helpers.
+See [`src/helpers/README.md`](crates/gws-rust/src/helpers/README.md) for full guidelines, anti-patterns, and a checklist for new helpers.
 
 ## Environment Variables
 
@@ -197,43 +197,43 @@ See [`src/helpers/README.md`](crates/google-workspace-cli/src/helpers/README.md)
 
 | Variable | Description |
 |---|---|
-| `GOOGLE_WORKSPACE_CLI_TOKEN` | Pre-obtained OAuth2 access token (highest priority; bypasses all credential file loading) |
-| `GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE` | Path to OAuth credentials JSON (no default; if unset, falls back to encrypted credentials in `~/.config/gws/`) |
-| `GOOGLE_WORKSPACE_CLI_KEYRING_BACKEND` | Keyring backend: `keyring` (default, uses OS keyring with file fallback) or `file` (file only, for Docker/CI/headless) |
+| `GWSR_TOKEN` | Pre-obtained OAuth2 access token (highest priority; bypasses all credential file loading) |
+| `GWSR_CREDENTIALS_FILE` | Path to OAuth credentials JSON (no default; if unset, falls back to encrypted credentials in `~/.config/gwsr/`) |
+| `GWSR_KEYRING_BACKEND` | Keyring backend: `keyring` (default, uses OS keyring with file fallback) or `file` (file only, for Docker/CI/headless) |
 
-| `GOOGLE_APPLICATION_CREDENTIALS` | Standard Google ADC path; used as fallback when no gws-specific credentials are configured |
+| `GOOGLE_APPLICATION_CREDENTIALS` | Standard Google ADC path; used as fallback when no gwsr-specific credentials are configured |
 
 ### Configuration
 
 | Variable | Description |
 |---|---|
-| `GOOGLE_WORKSPACE_CLI_CONFIG_DIR` | Override the config directory (default: `~/.config/gws`) |
+| `GWSR_CONFIG_DIR` | Override the config directory (default: `~/.config/gwsr`) |
 
 ### OAuth Client
 
 | Variable | Description |
 |---|---|
-| `GOOGLE_WORKSPACE_CLI_CLIENT_ID` | OAuth client ID (for `gws auth login` when no `client_secret.json` is saved) |
-| `GOOGLE_WORKSPACE_CLI_CLIENT_SECRET` | OAuth client secret (paired with `CLIENT_ID` above) |
+| `GWSR_CLIENT_ID` | OAuth client ID (for `gwsr auth login` when no `client_secret.json` is saved) |
+| `GWSR_CLIENT_SECRET` | OAuth client secret (paired with `CLIENT_ID` above) |
 
 ### Sanitization (Model Armor)
 
 | Variable | Description |
 |---|---|
-| `GOOGLE_WORKSPACE_CLI_SANITIZE_TEMPLATE` | Default Model Armor template (overridden by `--sanitize` flag) |
-| `GOOGLE_WORKSPACE_CLI_SANITIZE_MODE` | `warn` (default) or `block` |
+| `GWSR_SANITIZE_TEMPLATE` | Default Model Armor template (overridden by `--sanitize` flag) |
+| `GWSR_SANITIZE_MODE` | `warn` (default) or `block` |
 
 ### Helpers
 
 | Variable | Description |
 |---|---|
-| `GOOGLE_WORKSPACE_PROJECT_ID` | GCP project ID override for quota/billing and fallback for helper commands (overridden by `--project` flag) |
+| `GWSR_PROJECT_ID` | GCP project ID override for quota/billing and fallback for helper commands (overridden by `--project` flag) |
 
 ### Logging
 
 | Variable | Description |
 |---|---|
-| `GOOGLE_WORKSPACE_CLI_LOG` | Log level filter for stderr output (e.g., `gws=debug`). Off by default. |
-| `GOOGLE_WORKSPACE_CLI_LOG_FILE` | Directory for JSON-line log files with daily rotation. Off by default. |
+| `GWSR_LOG` | Log level filter for stderr output (e.g., `gwsr=debug`). Off by default. |
+| `GWSR_LOG_FILE` | Directory for JSON-line log files with daily rotation. Off by default. |
 
 All variables can also live in a `.env` file (loaded via `dotenvy`).

@@ -14,9 +14,9 @@
           ║                                                ║
           ╚════════════════════════════════════════════════╝
         
-                  ⭐ github.com/googleworkspace/cli
+                  ⭐ github.com/astelmach20/gws-rust
         
-                    npm i -g @googleworkspace/cli
+                    npm i -g gws-rust
         
                   ────────────────────────────────
                          Built with Rust. 🦀

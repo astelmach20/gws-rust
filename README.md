@@ -1,22 +1,22 @@
-<h1 align="center">gws</h1>
+<h1 align="center">gwsr</h1>
 
 **One CLI for all of Google Workspace — built for humans and AI agents.**<br>
 Drive, Gmail, Calendar, and every Workspace API. Zero boilerplate. Structured JSON output. 40+ agent skills included.
 
 > [!NOTE]
-> This is **not** an officially supported Google product.
+> This is **not** an officially supported Google product. `gws-rust` is a community-maintained fork of [googleworkspace/cli](https://github.com/googleworkspace/cli) (`gws`), which is no longer maintained. It is not compatible with `gws` config, credentials, or environment variables: run `gwsr auth setup` fresh.
 
 <p>
-  <a href="https://www.npmjs.com/package/@googleworkspace/cli"><img src="https://img.shields.io/npm/v/@googleworkspace/cli" alt="npm version"></a>
-  <a href="https://github.com/googleworkspace/cli/blob/main/LICENSE"><img src="https://img.shields.io/github/license/googleworkspace/cli" alt="license"></a>
-  <a href="https://github.com/googleworkspace/cli/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/googleworkspace/cli/ci.yml?branch=main&label=CI" alt="CI status"></a>
-  <a href="https://www.npmjs.com/package/@googleworkspace/cli"><img src="https://img.shields.io/npm/unpacked-size/@googleworkspace/cli" alt="install size"></a>
+  <a href="https://www.npmjs.com/package/gws-rust"><img src="https://img.shields.io/npm/v/gws-rust" alt="npm version"></a>
+  <a href="https://github.com/astelmach20/gws-rust/blob/main/LICENSE"><img src="https://img.shields.io/github/license/astelmach20/gws-rust" alt="license"></a>
+  <a href="https://github.com/astelmach20/gws-rust/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/astelmach20/gws-rust/ci.yml?branch=main&label=CI" alt="CI status"></a>
+  <a href="https://www.npmjs.com/package/gws-rust"><img src="https://img.shields.io/npm/unpacked-size/gws-rust" alt="install size"></a>
 </p>
 <br>
 
-⬇️ **[Download the latest release for your OS](https://github.com/googleworkspace/cli/releases)**
+⬇️ **[Download the latest release for your OS](https://github.com/astelmach20/gws-rust/releases)**
 
-`gws` doesn't ship a static list of commands. It reads Google's own [Discovery Service](https://developers.google.com/discovery) at runtime and builds its entire command surface dynamically. When Google Workspace adds an API endpoint or method, `gws` picks it up automatically.
+`gwsr` doesn't ship a static list of commands. It reads Google's own [Discovery Service](https://developers.google.com/discovery) at runtime and builds its entire command surface dynamically. When Google Workspace adds an API endpoint or method, `gwsr` picks it up automatically.
 
 > [!IMPORTANT]
 > This project is under active development. Expect breaking changes as we march toward v1.0.
@@ -26,7 +26,7 @@ Drive, Gmail, Calendar, and every Workspace API. Zero boilerplate. Structured JS
 - [Prerequisites](#prerequisites)
 - [Installation](#installation)
 - [Quick Start](#quick-start)
-- [Why gws?](#why-gws)
+- [Why gwsr?](#why-gwsr)
 - [Authentication](#authentication)
 - [AI Agent Skills](#ai-agent-skills)
 - [Advanced Usage](#advanced-usage)
@@ -38,30 +38,30 @@ Drive, Gmail, Calendar, and every Workspace API. Zero boilerplate. Structured JS
 
 ## Prerequisites
 
-- **Node.js 18+** — for `npm install` (or download a pre-built binary from [GitHub Releases](https://github.com/googleworkspace/cli/releases))
-- **A Google Cloud project** — required for OAuth credentials. You can create one via the [Google Cloud Console](https://console.cloud.google.com/) or with the [`gcloud` CLI](https://cloud.google.com/sdk/docs/install) or with the `gws auth setup` command.
+- **Node.js 18+** — for `npm install` (or download a pre-built binary from [GitHub Releases](https://github.com/astelmach20/gws-rust/releases))
+- **A Google Cloud project** — required for OAuth credentials. You can create one via the [Google Cloud Console](https://console.cloud.google.com/) or with the [`gcloud` CLI](https://cloud.google.com/sdk/docs/install) or with the `gwsr auth setup` command.
 - **A Google account** with access to Google Workspace
 
 ## Installation
 
-The recommended way to install `gws` is to download the pre-built binary for your OS and architecture from the **[GitHub Releases](https://github.com/googleworkspace/cli/releases)** page. Extract the archive and place the `gws` binary in your `$PATH`.
+The recommended way to install `gwsr` is to download the pre-built binary for your OS and architecture from the **[GitHub Releases](https://github.com/astelmach20/gws-rust/releases)** page. Extract the archive and place the `gwsr` binary in your `$PATH`.
 
 For convenience, you can also use `npm` to automate downloading the appropriate binary from GitHub Releases:
 
 ```bash
-npm install -g @googleworkspace/cli
+npm install -g gws-rust
 ```
 
 Or build from source:
 
 ```bash
-cargo install --git https://github.com/googleworkspace/cli --locked
+cargo install --git https://github.com/astelmach20/gws-rust --locked
 ```
 
-A Nix flake is also available at `github:googleworkspace/cli`
+A Nix flake is also available at `github:astelmach20/gws-rust`
 
 ```bash
-nix run github:googleworkspace/cli
+nix run github:astelmach20/gws-rust
 ```
 
 On macOS and Linux, you can also install via [Homebrew](https://brew.sh/):
@@ -73,35 +73,35 @@ brew install googleworkspace-cli
 ## Quick Start
 
 ```bash
-gws auth setup     # walks you through Google Cloud project config
-gws auth login     # subsequent OAuth login
-gws drive files list --params '{"pageSize": 5}'
+gwsr auth setup     # walks you through Google Cloud project config
+gwsr auth login     # subsequent OAuth login
+gwsr drive files list --params '{"pageSize": 5}'
 ```
 
-## Why gws?
+## Why gwsr?
 
-**For humans** — stop writing `curl` calls against REST docs. `gws` gives you `--help` on every resource, `--dry-run` to preview requests, and auto‑pagination.
+**For humans** — stop writing `curl` calls against REST docs. `gwsr` gives you `--help` on every resource, `--dry-run` to preview requests, and auto‑pagination.
 
 **For AI agents** — every response is structured JSON. Pair it with the included agent skills and your LLM can manage Workspace without custom tooling.
 
 ```bash
 # List the 10 most recent files
-gws drive files list --params '{"pageSize": 10}'
+gwsr drive files list --params '{"pageSize": 10}'
 
 # Create a spreadsheet
-gws sheets spreadsheets create --json '{"properties": {"title": "Q1 Budget"}}'
+gwsr sheets spreadsheets create --json '{"properties": {"title": "Q1 Budget"}}'
 
 # Send a Chat message
-gws chat spaces messages create \
+gwsr chat spaces messages create \
   --params '{"parent": "spaces/xyz"}' \
   --json '{"text": "Deploy complete."}' \
   --dry-run
 
 # Introspect any method's request/response schema
-gws schema drive.files.list
+gwsr schema drive.files.list
 
 # Stream paginated results as NDJSON
-gws drive files list --params '{"pageSize": 100}' --page-all | jq -r '.files[].name'
+gwsr drive files list --params '{"pageSize": 100}' --page-all | jq -r '.files[].name'
 ```
 
 ## Authentication
@@ -112,21 +112,21 @@ The CLI supports multiple auth workflows so it works on your laptop, in CI, and 
 
 | I have… | Use |
 |---|---|
-| `gcloud` installed and authenticated | [`gws auth setup`](#interactive-local-desktop) (fastest) |
+| `gcloud` installed and authenticated | [`gwsr auth setup`](#interactive-local-desktop) (fastest) |
 | A GCP project but no `gcloud` | [Manual OAuth setup](#manual-oauth-setup-google-cloud-console) |
-| An existing OAuth access token | [`GOOGLE_WORKSPACE_CLI_TOKEN`](#pre-obtained-access-token) |
-| Existing Credentials | [`GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE`](#service-account-server-to-server) |
+| An existing OAuth access token | [`GWSR_TOKEN`](#pre-obtained-access-token) |
+| Existing Credentials | [`GWSR_CREDENTIALS_FILE`](#service-account-server-to-server) |
 
 ### Interactive (local desktop)
 
-Credentials are encrypted at rest (AES-256-GCM) with the key stored in your OS keyring (or `~/.config/gws/.encryption_key` when `GOOGLE_WORKSPACE_CLI_KEYRING_BACKEND=file`).
+Credentials are encrypted at rest (AES-256-GCM) with the key stored in your OS keyring (or `~/.config/gwsr/.encryption_key` when `GWSR_KEYRING_BACKEND=file`).
 
 ```bash
-gws auth setup       # one-time: creates a Cloud project, enables APIs, logs you in
-gws auth login       # subsequent scope selection and login
+gwsr auth setup       # one-time: creates a Cloud project, enables APIs, logs you in
+gwsr auth login       # subsequent scope selection and login
 ```
 
-> `gws auth setup` requires the [`gcloud` CLI](https://cloud.google.com/sdk/docs/install). If you don't have `gcloud`, use the [manual setup](#manual-oauth-setup-google-cloud-console) below instead.
+> `gwsr auth setup` requires the [`gcloud` CLI](https://cloud.google.com/sdk/docs/install). If you don't have `gcloud`, use the [manual setup](#manual-oauth-setup-google-cloud-console) below instead.
 
 > [!WARNING]
 > **Scope limits in testing mode:** If your OAuth app is unverified (testing mode),
@@ -134,13 +134,13 @@ gws auth login       # subsequent scope selection and login
 > scopes and **will fail** for unverified apps (especially for `@gmail.com` accounts).
 > Choose individual services instead to filter the scope picker:
 > ```bash
-> gws auth login -s drive,gmail,sheets
+> gwsr auth login -s drive,gmail,sheets
 > ```
 
 
 ### Manual OAuth setup (Google Cloud Console)
 
-Use this when `gws auth setup` cannot automate project/client creation, or when you want explicit control.
+Use this when `gwsr auth setup` cannot automate project/client creation, or when you want explicit control.
 
 1. Open Google Cloud Console in the target project:
    - OAuth consent screen: `https://console.cloud.google.com/apis/credentials/consent?project=<PROJECT_ID>`
@@ -151,7 +151,7 @@ Use this when `gws auth setup` cannot automate project/client creation, or when 
 4. Create an OAuth client:
    - Type: **Desktop app**
 5. Download the client JSON and save it to:
-   - `~/.config/gws/client_secret.json`
+   - `~/.config/gwsr/client_secret.json`
 
 > [!IMPORTANT]
 > **You must add yourself as a test user.** In the OAuth consent screen, click
@@ -161,14 +161,14 @@ Use this when `gws auth setup` cannot automate project/client creation, or when 
 Then run:
 
 ```bash
-gws auth login
+gwsr auth login
 ```
 
 ### Browser-assisted auth (human or agent)
 
 You can complete OAuth either manually or with browser automation.
 
-- **Human flow**: run `gws auth login`, open the printed URL, approve scopes.
+- **Human flow**: run `gwsr auth login`, open the printed URL, approve scopes.
 - **Agent-assisted flow**: the agent opens the URL, selects account, handles consent prompts, and returns control once the localhost callback succeeds.
 
 If consent shows **"Google hasn't verified this app"** (testing mode), click **Continue**.
@@ -179,12 +179,12 @@ If scope checkboxes appear, select required scopes (or **Select all**) before co
 1. Complete interactive auth on a machine with a browser.
 2. Export credentials:
    ```bash
-   gws auth export --unmasked > credentials.json
+   gwsr auth export --unmasked > credentials.json
    ```
 3. On the headless machine:
    ```bash
-   export GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE=/path/to/credentials.json
-   gws drive files list   # just works
+   export GWSR_CREDENTIALS_FILE=/path/to/credentials.json
+   gwsr drive files list   # just works
    ```
 
 ### Service Account (server-to-server)
@@ -192,8 +192,8 @@ If scope checkboxes appear, select required scopes (or **Select all**) before co
 Point to your key file; no login needed.
 
 ```bash
-export GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE=/path/to/service-account.json
-gws drive files list
+export GWSR_CREDENTIALS_FILE=/path/to/service-account.json
+gwsr drive files list
 ```
 
 ### Pre-obtained Access Token
@@ -201,17 +201,17 @@ gws drive files list
 Useful when another tool (e.g. `gcloud`) already mints tokens for your environment.
 
 ```bash
-export GOOGLE_WORKSPACE_CLI_TOKEN=$(gcloud auth print-access-token)
+export GWSR_TOKEN=$(gcloud auth print-access-token)
 ```
 
 ### Precedence
 
 | Priority | Source                 | Set via                                 |
 | -------- | ---------------------- | --------------------------------------- |
-| 1        | Access token           | `GOOGLE_WORKSPACE_CLI_TOKEN`            |
-| 2        | Credentials file       | `GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE` |
-| 3        | Encrypted credentials  | `gws auth login`                        |
-| 4        | Plaintext credentials  | `~/.config/gws/credentials.json`        |
+| 1        | Access token           | `GWSR_TOKEN`            |
+| 2        | Credentials file       | `GWSR_CREDENTIALS_FILE` |
+| 3        | Encrypted credentials  | `gwsr auth login`                        |
+| 4        | Plaintext credentials  | `~/.config/gwsr/credentials.json`        |
 
 Environment variables can also live in a `.env` file.
 
@@ -221,11 +221,11 @@ The repo ships 100+ Agent Skills (`SKILL.md` files) — one for every supported 
 
 ```bash
 # Install all skills at once
-npx skills add https://github.com/googleworkspace/cli
+npx skills add https://github.com/astelmach20/gws-rust
 
 # Or pick only what you need
-npx skills add https://github.com/googleworkspace/cli/tree/main/skills/gws-drive
-npx skills add https://github.com/googleworkspace/cli/tree/main/skills/gws-gmail
+npx skills add https://github.com/astelmach20/gws-rust/tree/main/skills/gwsr-drive
+npx skills add https://github.com/astelmach20/gws-rust/tree/main/skills/gwsr-gmail
 ```
 
 <details>
@@ -233,13 +233,13 @@ npx skills add https://github.com/googleworkspace/cli/tree/main/skills/gws-gmail
 
 ```bash
 # Symlink all skills (stays in sync with repo)
-ln -s $(pwd)/skills/gws-* ~/.openclaw/skills/
+ln -s $(pwd)/skills/gwsr-* ~/.openclaw/skills/
 
 # Or copy specific skills
-cp -r skills/gws-drive skills/gws-gmail ~/.openclaw/skills/
+cp -r skills/gwsr-drive skills/gwsr-gmail ~/.openclaw/skills/
 ```
 
-The `gws-shared` skill includes an `install` block so OpenClaw auto-installs the CLI via `npm` if `gws` isn't on PATH.
+The `gwsr-shared` skill includes an `install` block so OpenClaw auto-installs the CLI via `npm` if `gwsr` isn't on PATH.
 
 </details>
 
@@ -248,22 +248,22 @@ The `gws-shared` skill includes an `install` block so OpenClaw auto-installs the
 1. Authenticate the CLI first:
 
    ```bash
-   gws auth setup
+   gwsr auth setup
    ```
 
 2. Install the extension into the Gemini CLI:
    ```bash
-   gemini extensions install https://github.com/googleworkspace/cli
+   gemini extensions install https://github.com/astelmach20/gws-rust
    ```
 
-Installing this extension gives your Gemini CLI agent direct access to all `gws` commands and Google Workspace agent skills. Because `gws` handles its own authentication securely, you simply need to authenticate your terminal once prior to using the agent, and the extension will automatically inherit your credentials.
+Installing this extension gives your Gemini CLI agent direct access to all `gwsr` commands and Google Workspace agent skills. Because `gwsr` handles its own authentication securely, you simply need to authenticate your terminal once prior to using the agent, and the extension will automatically inherit your credentials.
 
 ## Advanced Usage
 
 ### Multipart Uploads
 
 ```bash
-gws drive files create --json '{"name": "report.pdf"}' --upload ./report.pdf
+gwsr drive files create --json '{"name": "report.pdf"}' --upload ./report.pdf
 ```
 
 ### Pagination
@@ -280,11 +280,11 @@ Sheets ranges use `!` which bash interprets as history expansion. Always wrap va
 
 ```bash
 # Read cells A1:C10 from "Sheet1"
-gws sheets spreadsheets values get \
+gwsr sheets spreadsheets values get \
   --params '{"spreadsheetId": "SPREADSHEET_ID", "range": "Sheet1!A1:C10"}'
 
 # Append rows
-gws sheets spreadsheets values append \
+gwsr sheets spreadsheets values append \
   --params '{"spreadsheetId": "ID", "range": "Sheet1!A1", "valueInputOption": "USER_ENTERED"}' \
   --json '{"values": [["Name", "Score"], ["Alice", 95]]}'
 ```
@@ -295,12 +295,12 @@ Some services ship hand-crafted helper commands alongside the auto-generated Dis
 
 Time-aware helpers (`+agenda`, `+standup-report`, `+weekly-digest`, `+meeting-prep`) automatically use your **Google account timezone** (fetched from Calendar Settings API and cached for 24 hours). Override with `--timezone`/`--tz` on `+agenda`, or set the `--timezone` flag for explicit control.
 
-Run `gws <service> --help` to see both Discovery methods and helper commands together.
+Run `gwsr <service> --help` to see both Discovery methods and helper commands together.
 
 ```bash
-gws gmail --help      # shows +send, +reply, +reply-all, +forward, +triage, +watch …
-gws calendar --help   # shows +insert, +agenda …
-gws drive --help      # shows +upload …
+gwsr gmail --help      # shows +send, +reply, +reply-all, +forward, +triage, +watch …
+gwsr calendar --help   # shows +insert, +agenda …
+gwsr drive --help      # shows +upload …
 ```
 
 **Full helper reference:**
@@ -336,25 +336,25 @@ gws drive --help      # shows +upload …
 
 ```bash
 # Send an email
-gws gmail +send --to alice@example.com --subject "Hello" --body "Hi there"
+gwsr gmail +send --to alice@example.com --subject "Hello" --body "Hi there"
 
 # Reply to a message
-gws gmail +reply --message-id MESSAGE_ID --body "Thanks!"
+gwsr gmail +reply --message-id MESSAGE_ID --body "Thanks!"
 
 # Append a row to a spreadsheet
-gws sheets +append --spreadsheet SPREADSHEET_ID --values "Alice,95"
+gwsr sheets +append --spreadsheet SPREADSHEET_ID --values "Alice,95"
 
 # Show today's calendar agenda
-gws calendar +agenda
+gwsr calendar +agenda
 
 # Upload a file to Drive
-gws drive +upload ./report.pdf --name "Q1 Report"
+gwsr drive +upload ./report.pdf --name "Q1 Report"
 
 # Morning standup summary
-gws workflow +standup-report
+gwsr workflow +standup-report
 
 # Show today's agenda in a specific timezone
-gws calendar +agenda --today --timezone America/New_York
+gwsr calendar +agenda --today --timezone America/New_York
 ```
 
 ### Model Armor (Response Sanitization)
@@ -362,14 +362,14 @@ gws calendar +agenda --today --timezone America/New_York
 Integrate [Google Cloud Model Armor](https://cloud.google.com/security/products/model-armor) to scan API responses for prompt injection before they reach your agent.
 
 ```bash
-gws gmail users messages get --params '...' \
+gwsr gmail users messages get --params '...' \
   --sanitize "projects/P/locations/L/templates/T"
 ```
 
 | Variable                                 | Description                  |
 | ---------------------------------------- | ---------------------------- |
-| `GOOGLE_WORKSPACE_CLI_SANITIZE_TEMPLATE` | Default Model Armor template |
-| `GOOGLE_WORKSPACE_CLI_SANITIZE_MODE`     | `warn` (default) or `block`  |
+| `GWSR_SANITIZE_TEMPLATE` | Default Model Armor template |
+| `GWSR_SANITIZE_MODE`     | `warn` (default) or `block`  |
 
 ## Environment Variables
 
@@ -377,22 +377,22 @@ All variables are optional. See [`.env.example`](.env.example) for a copy-paste 
 
 | Variable | Description |
 |---|---|
-| `GOOGLE_WORKSPACE_CLI_TOKEN` | Pre-obtained OAuth2 access token (highest priority) |
-| `GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE` | Path to OAuth credentials JSON (user or service account) |
-| `GOOGLE_WORKSPACE_CLI_CLIENT_ID` | OAuth client ID (alternative to `client_secret.json`) |
-| `GOOGLE_WORKSPACE_CLI_CLIENT_SECRET` | OAuth client secret (paired with `CLIENT_ID`) |
-| `GOOGLE_WORKSPACE_CLI_CONFIG_DIR` | Override config directory (default: `~/.config/gws`) |
-| `GOOGLE_WORKSPACE_CLI_SANITIZE_TEMPLATE` | Default Model Armor template |
-| `GOOGLE_WORKSPACE_CLI_SANITIZE_MODE` | `warn` (default) or `block` |
-| `GOOGLE_WORKSPACE_CLI_LOG` | Log level for stderr (e.g., `gws=debug`). Off by default. |
-| `GOOGLE_WORKSPACE_CLI_LOG_FILE` | Directory for JSON log files with daily rotation. Off by default. |
-| `GOOGLE_WORKSPACE_PROJECT_ID` | GCP project ID override for quota/billing and fallback for helper commands |
+| `GWSR_TOKEN` | Pre-obtained OAuth2 access token (highest priority) |
+| `GWSR_CREDENTIALS_FILE` | Path to OAuth credentials JSON (user or service account) |
+| `GWSR_CLIENT_ID` | OAuth client ID (alternative to `client_secret.json`) |
+| `GWSR_CLIENT_SECRET` | OAuth client secret (paired with `CLIENT_ID`) |
+| `GWSR_CONFIG_DIR` | Override config directory (default: `~/.config/gwsr`) |
+| `GWSR_SANITIZE_TEMPLATE` | Default Model Armor template |
+| `GWSR_SANITIZE_MODE` | `warn` (default) or `block` |
+| `GWSR_LOG` | Log level for stderr (e.g., `gwsr=debug`). Off by default. |
+| `GWSR_LOG_FILE` | Directory for JSON log files with daily rotation. Off by default. |
+| `GWSR_PROJECT_ID` | GCP project ID override for quota/billing and fallback for helper commands |
 
 Environment variables can also be set in a `.env` file (loaded via [dotenvy](https://crates.io/crates/dotenvy)).
 
 ## Exit Codes
 
-`gws` uses structured exit codes so scripts can branch on the failure type without parsing error output.
+`gwsr` uses structured exit codes so scripts can branch on the failure type without parsing error output.
 
 | Code | Meaning | Example cause |
 |------|---------|---------------|
@@ -404,16 +404,16 @@ Environment variables can also be set in a `.env` file (loaded via [dotenvy](htt
 | `5` | Internal error | Unexpected failure |
 
 ```bash
-gws drive files list --params '{"fileId": "bad"}'
+gwsr drive files list --params '{"fileId": "bad"}'
 echo $?   # 1 — API error
 
-gws unknown-service files list
+gwsr unknown-service files list
 echo $?   # 3 — validation error (unknown service)
 ```
 
 ## Architecture
 
-`gws` uses a **two-phase parsing** strategy:
+`gwsr` uses a **two-phase parsing** strategy:
 
 1. Read `argv[1]` to identify the service (e.g. `drive`)
 2. Fetch the service's Discovery Document (cached 24 h)
@@ -429,7 +429,7 @@ All output — success, errors, download metadata — is structured JSON.
 
 Your OAuth app is in **testing mode** and your account is not listed as a test user.
 
-**Fix:** Open the [OAuth consent screen](https://console.cloud.google.com/apis/credentials/consent) in your GCP project → **Test users** → **Add users** → enter your Google account email. Then retry `gws auth login`.
+**Fix:** Open the [OAuth consent screen](https://console.cloud.google.com/apis/credentials/consent) in your GCP project → **Test users** → **Add users** → enter your Google account email. Then retry `gwsr auth login`.
 
 ### "Google hasn't verified this app"
 
@@ -442,15 +442,15 @@ Unverified (testing mode) apps are limited to ~25 OAuth scopes. The `recommended
 **Fix:** Select only the scopes you need:
 
 ```bash
-gws auth login --scopes drive,gmail,calendar
+gwsr auth login --scopes drive,gmail,calendar
 ```
 
 ### `gcloud` CLI not found
 
-`gws auth setup` requires the `gcloud` CLI to automate project creation. You have three options:
+`gwsr auth setup` requires the `gcloud` CLI to automate project creation. You have three options:
 
 1. [Install gcloud](https://cloud.google.com/sdk/docs/install) and use `gcloud` directly.
-2. Re-run `gws auth setup` which wraps `gcloud` calls.
+2. Re-run `gwsr auth setup` which wraps `gcloud` calls.
 3. Skip `gcloud` entirely — set up OAuth credentials manually in the [Cloud Console](#manual-oauth-setup-google-cloud-console)
 
 ### `redirect_uri_mismatch`
@@ -473,7 +473,7 @@ If a required Google API is not enabled for your GCP project, you will see a
 }
 ```
 
-`gws` also prints an actionable hint to **stderr**:
+`gwsr` also prints an actionable hint to **stderr**:
 
 ```
 💡 API not enabled for your GCP project.
@@ -485,10 +485,10 @@ If a required Google API is not enabled for your GCP project, you will see a
 
 1. Click the `enable_url` link (or copy it from the `enable_url` JSON field).
 2. In the GCP Console, click **Enable**.
-3. Wait ~10 seconds, then retry your `gws` command.
+3. Wait ~10 seconds, then retry your `gwsr` command.
 
 > [!TIP]
-> You can also run `gws auth setup` which walks you through enabling all required
+> You can also run `gwsr auth setup` which walks you through enabling all required
 > APIs for your project automatically.
 
 ## Development

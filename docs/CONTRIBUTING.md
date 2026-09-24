@@ -38,7 +38,7 @@ If the OAuth refresh token used in the GitHub Actions smoketest expires or needs
 
 1. **Set the credentials file path to output plaintext JSON**:
    ```bash
-   export GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE=smoketest-creds.json
+   export GWSR_CREDENTIALS_FILE=smoketest-creds.json
    ```
 
 2. **Authenticate with the required scopes**:
@@ -54,7 +54,7 @@ If the OAuth refresh token used in the GitHub Actions smoketest expires or needs
 4. **Clean up**:
    ```bash
    rm smoketest-creds.json
-   unset GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE
+   unset GWSR_CREDENTIALS_FILE
    ```
 
 ## Development Patterns
@@ -65,7 +65,7 @@ Every PR must include a changeset file at `.changeset/<descriptive-name>.md`:
 
 ```markdown
 ---
-"@googleworkspace/cli": patch
+"gws-rust": patch
 ---
 
 Brief description of the change

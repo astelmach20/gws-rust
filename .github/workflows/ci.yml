@@ -270,8 +270,8 @@ jobs:
       - name: Upload binary
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: gws-linux-x86_64
-          path: target/x86_64-unknown-linux-gnu/release/gws
+          name: gwsr-linux-x86_64
+          path: target/x86_64-unknown-linux-gnu/release/gwsr
           retention-days: 1
 
   build:
@@ -350,11 +350,11 @@ jobs:
       - name: Download binary
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
-          name: gws-linux-x86_64
+          name: gwsr-linux-x86_64
           path: ./bin
 
       - name: Make binary executable
-        run: chmod +x ./bin/gws
+        run: chmod +x ./bin/gwsr
 
       - name: Decode credentials
         env:
@@ -367,48 +367,48 @@ jobs:
           echo "$GOOGLE_CREDENTIALS_JSON" | base64 -d > /tmp/credentials.json
 
       - name: Smoketest — help
-        run: ./bin/gws --help
+        run: ./bin/gwsr --help
 
       - name: Smoketest — schema introspection
-        run: ./bin/gws schema drive.files.list | jq -e '.httpMethod'
+        run: ./bin/gwsr schema drive.files.list | jq -e '.httpMethod'
 
       - name: Smoketest — Drive files list
         env:
-          GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE: /tmp/credentials.json
+          GWSR_CREDENTIALS_FILE: /tmp/credentials.json
         run: |
-          ./bin/gws drive files list \
+          ./bin/gwsr drive files list \
             --params '{"pageSize": 1, "fields": "files(id,mimeType)"}' \
             | jq -e '.files'
 
       - name: Smoketest — Gmail messages
         env:
-          GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE: /tmp/credentials.json
+          GWSR_CREDENTIALS_FILE: /tmp/credentials.json
         run: |
-          ./bin/gws gmail users messages list \
+          ./bin/gwsr gmail users messages list \
             --params '{"userId": "me", "maxResults": 1, "fields": "messages(id)"}' \
             | jq -e '.messages'
 
       - name: Smoketest — Calendar events
         env:
-          GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE: /tmp/credentials.json
+          GWSR_CREDENTIALS_FILE: /tmp/credentials.json
         run: |
-          ./bin/gws calendar events list \
+          ./bin/gwsr calendar events list \
             --params '{"calendarId": "primary", "maxResults": 1, "fields": "kind,items(id,status)"}' \
             | jq -e '.kind'
 
       - name: Smoketest — Slides presentation
         env:
-          GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE: /tmp/credentials.json
+          GWSR_CREDENTIALS_FILE: /tmp/credentials.json
         run: |
-          ./bin/gws slides presentations get \
+          ./bin/gwsr slides presentations get \
             --params '{"presentationId": "1knOKD_87JWE4qsEbO4r5O91IxTER5ybBBhOJgZ1yLFI", "fields": "presentationId,slides(objectId)"}' \
             | jq -e '.presentationId'
 
       - name: Smoketest — pagination
         env:
-          GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE: /tmp/credentials.json
+          GWSR_CREDENTIALS_FILE: /tmp/credentials.json
         run: |
-          LINES=$(./bin/gws drive files list \
+          LINES=$(./bin/gwsr drive files list \
             --params '{"pageSize": 1, "fields": "nextPageToken,files(id)"}' \
             --page-all --page-limit 2 \
             | wc -l)
@@ -419,7 +419,7 @@ jobs:
 
       - name: Smoketest — error handling
         run: |
-          if ./bin/gws fakeservice list 2>&1; then
+          if ./bin/gwsr fakeservice list 2>&1; then
             echo "::error::Expected exit code 1 for unknown service"
             exit 1
           fi
