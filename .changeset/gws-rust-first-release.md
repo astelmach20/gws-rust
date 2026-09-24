@@ -10,7 +10,7 @@ First release of `gws-rust`, the maintained fork of googleworkspace/cli. It does
 - **Output:**
   - JSON is the default output everywhere, including helpers, `auth`, `setup`, `cache` and `commands`. Paginated output and streams are NDJSON. Human formats are opt-in with `--format table|yaml|csv`.
   - Errors are a single JSON envelope on stderr, and stdout is empty on failure.
-  - Exit codes: 6 is a retryable API error (429/5xx/rate limit), and 7 means confirmation required.
+  - Exit codes run 0–11: 6 is a retryable API error (429/5xx/rate limit), 7 confirmation required, 8 configuration error, 9 credential store error, 10 network error (no response; not marked retryable), 11 output blocked by Model Armor. Internal argument errors exit 5, and an unknown `--format` exits 3.
 - **Confirmations:** destructive actions (deletes, permanent deletes, destructive helpers) need `--yes`, or a prompt on a terminal. `GWSR_REQUIRE_CONFIRM=1` also gates outbound actions such as sending mail or sharing.
 - **Helper flags:** IDs are `--<noun>-id` (`--document-id`, `--spreadsheet-id`, `--script-id`, `--space-id`, `--calendar-id`, `--message-id`, `--subscription-id`, `--tasklist-id`). `drive +upload` takes `--file` and `--folder-id`. `gmail +read` uses `--body-format`. Helper-local `--format`/`--dry-run` copies are gone; the global flags apply.
 - **Requests:**
@@ -18,6 +18,9 @@ First release of `gws-rust`, the maintained fork of googleworkspace/cli. It does
   - Unknown `--params` and body fields are rejected; `--allow-unknown-params` / `--allow-unknown-fields` send them anyway.
   - Binary responses need `-o PATH` or `-o -`.
   - `GWSR_TIMEOUT_SECS` is replaced by `--timeout` / `GWSR_TIMEOUT`.
+  - Environment values that aren't valid UTF-8 are configuration errors instead of being read as unset.
+  - A quota-project source that exists but can't be used (unreadable OAuth client config or ADC file) is an error instead of a warning; set `GWSR_PROJECT_ID` or pass `--no-quota-project`.
+  - Output files (`-o`, exports, pulled sources) are written atomically and get the normal mode for the process umask. `gwsr` sets the umask to `077`, so they stay private to your user.
 - **Auth:**
   - Login is read-only by default; `--write` and `--full` widen it, and `--readonly` is removed.
   - Credentials live in encrypted per-profile directories (`profiles/<name>/`), with the key in the OS keyring or, with `GWSR_KEYRING_BACKEND=file`, in `encryption.key`. There is no fallback between backends.
@@ -25,13 +28,14 @@ First release of `gws-rust`, the maintained fork of googleworkspace/cli. It does
   - `auth export` masks secrets unless `--unmasked --output FILE` is given.
   - `auth logout` revokes the token.
   - Credential files readable by group or others are refused.
-- **Skills:** the generator is `gwsr dev generate-skills --output-dir DIR`, and skills are named `gwsr-*`.
+- **Skills:** the generator is `gwsr dev generate-skills --output-dir DIR`, and skills are named `gwsr-*`. Generated `SKILL.md` files carry a marker, and a full run deletes the marked skills it no longer produces (`pruned`), listing unmarked directories as `unmanaged`.
 
 **New**
 
 - Profiles (`--profile`, `auth list`, `auth use`), service-account impersonation (`--impersonate`), `GWSR_TOKEN_FILE`, `auth login --no-localhost`, incremental scope grants and per-method least-privilege scope selection.
 - `config.toml` (flag > env > config > default), `--jq`, `--columns`, `--compact`/`--pretty`, `-v`/`-q`, JSON stderr logs.
 - `--fields`, `@file` and `-` for `--params`/`--json`, `--page-items`, resumable uploads with retry, `-o -` and `--decode-field`, `--wait` for long-running operations, `--no-quota-project`, `GWSR_API_BASE_URL`, `GWSR_RESTRICT_PATHS`.
+- `--dry-run` also previews `gwsr cache clear`, `gwsr dev generate-skills` and `gwsr dev man` without deleting or writing anything.
 - `gwsr batch`, `gwsr commands`, `gwsr cache clear`, `gwsr completions <shell>` (dynamic), `gwsr dev man`, and `<api>:<version>` for any Discovery API.
 - Services: `admin` (Directory), `datatransfer`, `alertcenter`, `cloudidentity`, `groupssettings`, `licensing`, `reseller`, `vault`, `driveactivity`, `drivelabels`, `chromemanagement`, `chromepolicy`, `postmaster`, `cloudsearch`.
 - Helpers:

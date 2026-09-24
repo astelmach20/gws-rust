@@ -9,7 +9,8 @@ Before you write code, read [AGENTS.md](../AGENTS.md). It has the architecture, 
 ```bash
 git clone https://github.com/astelmach20/gws-rust && cd gws-rust
 nix develop      # optional: the pinned Rust toolchain and every tool below
-pnpm install     # changesets CLI; installs the lefthook git hooks
+pnpm install     # changesets CLI and lefthook (pnpm 11.27.1, pinned in package.json)
+pnpm run hooks   # optional: install the lefthook git hooks (primary checkout only)
 just             # list recipes
 ```
 
@@ -19,9 +20,9 @@ Without Nix, install [rustup](https://rustup.rs) (it picks up `rust-toolchain.to
 
 1. Branch from `main`.
 2. Make the change, with focused tests. Validation logic needs a test for both the accept path and the reject path.
-3. Run `just ci`: fmt, clippy, machete, shellcheck, actionlint/zizmor, the Rust and npm tests, and `cargo deny` + `cargo audit`. The lefthook hooks run the fast subset on commit and push.
+3. Run `just ci`: fmt, clippy, machete, shellcheck, actionlint/zizmor, the Rust and npm tests, and `cargo deny` + `cargo audit`. If you installed the hooks (`pnpm run hooks`), they run the fast subset on commit and push.
 4. Run `just coverage` if you touched a lot of code. CI fails when line coverage falls below the floor in `scripts/coverage.sh`.
-5. If you changed help text, helper flags, `registry/*.toml` or the skill generator, run `just skills` and commit the regenerated `skills/` and `docs/skills.md`.
+5. If you changed help text, helper flags, `registry/*.toml` or the skill generator, run `just skills` and commit the regenerated `skills/` and `docs/skills.md`, including new and deleted skill directories. Never edit a generated `SKILL.md` by hand. A full run deletes generated skills that are no longer produced; a directory reported as `unmanaged` has no generator marker, so delete it by hand if it is stale.
 6. If CLI output or help changed, update the snapshots: `cargo insta review` (or `INSTA_UPDATE=always cargo test`).
 7. Add a changeset (below) and open a pull request. All changes, including maintainers', go through review.
 

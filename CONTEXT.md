@@ -25,6 +25,10 @@
 | 5 | Internal error | Report it |
 | 6 | Retryable API error (429/5xx/rate limit) | Retry with backoff |
 | 7 | Confirmation required | Ask the user, then re-run with `--yes` |
+| 8 | Configuration error | Ask the user to fix the setting the message names |
+| 9 | Credential store error (keyring, stored credentials) | Ask the user; `gwsr auth status` shows the stored credential state |
+| 10 | Network error (no response) | For creates/sends, check whether it was applied before retrying |
+| 11 | Output blocked by Model Armor | Don't retry to get around it; the content was withheld on purpose |
 
 ## Syntax
 
