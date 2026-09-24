@@ -28,8 +28,8 @@ mod modelarmor;
 mod paths;
 
 pub use endpoint::{
-    API_BASE_URL_ENV, api_base_override, is_google_api_host, parse_api_base_override,
-    validate_api_base, validate_api_base_with,
+    API_BASE_URL_ENV, EndpointPolicy, api_base_override, is_google_api_host,
+    parse_api_base_override, validate_api_base, validate_api_base_with,
 };
 pub use modelarmor::ModelArmorTemplate;
 pub use paths::{

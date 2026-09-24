@@ -19,14 +19,6 @@ use serde_json::Value;
 use super::AuthMethod;
 use crate::error::GwsError;
 
-/// Build a [`GwsError::Other`] from anything convertible to `anyhow::Error`.
-///
-/// Every executor call site creates "other" errors through this one function
-/// so switching to core's `GwsError::other` constructor is a one-line change.
-pub(crate) fn other(err: impl Into<anyhow::Error>) -> GwsError {
-    GwsError::other(err.into())
-}
-
 /// Attempts to extract a GCP console enable URL from a Google API
 /// `accessNotConfigured` error message.
 ///

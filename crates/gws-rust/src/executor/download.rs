@@ -26,7 +26,6 @@ use base64::Engine;
 use serde_json::{Value, json};
 use tokio::io::AsyncWriteExt;
 
-use super::errors::other;
 use super::output::Emitter;
 use super::transport::next_chunk;
 use crate::discovery::{JsonSchemaProperty, RestDescription, RestMethod};
@@ -141,7 +140,7 @@ impl AtomicFile {
             .prefix(".gwsr-download-")
             .tempfile_in(&dir)
             .map_err(|e| {
-                other(anyhow::anyhow!(
+                GwsError::other(anyhow::anyhow!(
                     "failed to create a temporary file in '{}': {e}",
                     dir.display()
                 ))
@@ -156,7 +155,7 @@ impl AtomicFile {
 
     async fn write(&mut self, data: &[u8]) -> Result<(), GwsError> {
         self.file.write_all(data).await.map_err(|e| {
-            other(anyhow::anyhow!(
+            GwsError::other(anyhow::anyhow!(
                 "failed to write '{}': {e}",
                 self.target.display()
             ))
@@ -168,14 +167,14 @@ impl AtomicFile {
         self.file
             .flush()
             .await
-            .map_err(|e| other(anyhow::anyhow!("failed to flush '{target}': {e}")))?;
+            .map_err(|e| GwsError::other(anyhow::anyhow!("failed to flush '{target}': {e}")))?;
         self.file
             .sync_all()
             .await
-            .map_err(|e| other(anyhow::anyhow!("failed to sync '{target}': {e}")))?;
+            .map_err(|e| GwsError::other(anyhow::anyhow!("failed to sync '{target}': {e}")))?;
         drop(self.file);
         self.temp.persist(&self.target).map_err(|e| {
-            other(anyhow::anyhow!(
+            GwsError::other(anyhow::anyhow!(
                 "failed to move download into '{target}': {e}"
             ))
         })
@@ -235,7 +234,7 @@ pub(crate) async fn stream_binary(
 
 fn check_length(expected: Option<u64>, actual: u64) -> Result<(), GwsError> {
     match expected {
-        Some(e) if e != actual => Err(other(anyhow::anyhow!(
+        Some(e) if e != actual => Err(GwsError::other(anyhow::anyhow!(
             "download truncated: Content-Length was {e} bytes but {actual} were received"
         ))),
         _ => Ok(()),
@@ -332,8 +331,9 @@ pub(crate) async fn save_json_response(
     let (bytes, decoded_from) = match decoded_payload(doc, method, value, decode_field)? {
         Some((field, bytes)) => (bytes, Some(field)),
         None => {
-            let mut text = serde_json::to_vec_pretty(value)
-                .map_err(|e| other(anyhow::anyhow!("failed to serialize response: {e}")))?;
+            let mut text = serde_json::to_vec_pretty(value).map_err(|e| {
+                GwsError::other(anyhow::anyhow!("failed to serialize response: {e}"))
+            })?;
             text.push(b'\n');
             (text, None)
         }

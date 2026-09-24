@@ -15,14 +15,14 @@
 //! Request URL construction from Discovery path templates.
 //!
 //! This is the only place request URLs are assembled. Every URL built here
-//! is later checked by [`gws_rust_core::client::EndpointPolicy`] before a
+//! is later checked by [`EndpointPolicy`] before a
 //! credential is attached.
 
 use std::collections::HashSet;
 
 use serde_json::{Map, Value};
 
-use gws_rust_core::client::EndpointPolicy;
+use crate::validate::EndpointPolicy;
 
 use crate::discovery::{RestDescription, RestMethod};
 use crate::error::GwsError;
@@ -44,51 +44,6 @@ pub(crate) enum UrlTarget {
 pub(crate) struct RequestUrl {
     pub url: String,
     pub query: Vec<(String, String)>,
-}
-
-/// The API root: the operator override when set, otherwise Discovery `rootUrl`.
-///
-/// Switch-over point: core's `RestDescription::api_root()` plus
-/// `validate::api_base_override()` replace this function.
-pub(crate) fn api_root(doc: &RestDescription, endpoints: &EndpointPolicy) -> String {
-    let root = endpoints.root_url(&doc.root_url);
-    if root.ends_with('/') {
-        root
-    } else {
-        format!("{root}/")
-    }
-}
-
-/// The service base URL (`rootUrl + servicePath`, or `baseUrl`).
-pub(crate) fn service_base(doc: &RestDescription, endpoints: &EndpointPolicy) -> String {
-    match (&doc.base_url, endpoints.override_base()) {
-        (Some(base), None) => base.clone(),
-        _ => format!("{}{}", api_root(doc, endpoints), doc.service_path),
-    }
-}
-
-/// Path of the simple upload endpoint.
-///
-/// Switch-over point: core's `RestMethod::simple_upload_path()`.
-pub(crate) fn simple_upload_path(method: &RestMethod) -> Option<&str> {
-    method
-        .media_upload
-        .as_ref()
-        .and_then(|mu| mu.protocols.as_ref())
-        .and_then(|p| p.simple.as_ref())
-        .map(|s| s.path.as_str())
-}
-
-/// Path of the resumable upload endpoint.
-///
-/// Switch-over point: core's `RestMethod::resumable_upload_path()`.
-pub(crate) fn resumable_upload_path(method: &RestMethod) -> Option<&str> {
-    method
-        .media_upload
-        .as_ref()
-        .and_then(|mu| mu.protocols.as_ref())
-        .and_then(|p| p.resumable.as_ref())
-        .map(|s| s.path.as_str())
 }
 
 fn scalar_to_string(value: &Value) -> String {
@@ -157,12 +112,12 @@ pub(crate) fn build_url(
         match target {
             UrlTarget::Method => {
                 let path = render_path_template(template, params)?;
-                format!("{}{}", service_base(doc, endpoints), path)
+                format!("{}{}", doc.service_base(endpoints.override_base())?, path)
             }
             UrlTarget::SimpleUpload | UrlTarget::ResumableUpload => {
                 let upload_template = match target {
-                UrlTarget::ResumableUpload => resumable_upload_path(method),
-                _ => simple_upload_path(method),
+                UrlTarget::ResumableUpload => method.resumable_upload_path(),
+                _ => method.simple_upload_path(),
             }
             .ok_or_else(|| {
                 GwsError::Validation(format!(
@@ -174,7 +129,7 @@ pub(crate) fn build_url(
                 let upload_path = render_path_template(upload_template, params)?;
                 format!(
                     "{}{}",
-                    api_root(doc, endpoints),
+                    doc.api_root(endpoints.override_base())?,
                     upload_path.trim_start_matches('/')
                 )
             }
@@ -292,19 +247,19 @@ mod tests {
 
     #[test]
     fn basic_and_substitution() {
-        let doc = doc_with_base("https://api.example.com/");
+        let doc = doc_with_base("https://api.googleapis.com/");
         let m = method("files/{fileId}", path_params(&["fileId"]));
         let mut params = Map::new();
         params.insert("fileId".into(), json!("123"));
         params.insert("q".into(), json!("search term"));
         let u = build_url(&doc, &m, &params, UrlTarget::Method, &google()).unwrap();
-        assert_eq!(u.url, "https://api.example.com/files/123");
+        assert_eq!(u.url, "https://api.googleapis.com/files/123");
         assert_eq!(u.query, vec![("q".to_string(), "search term".to_string())]);
     }
 
     #[test]
     fn repeated_query_param_expands_array() {
-        let doc = doc_with_base("https://api.example.com/");
+        let doc = doc_with_base("https://api.googleapis.com/");
         let m = method("messages", HashMap::new());
         let mut params = Map::new();
         params.insert("metadataHeaders".into(), json!(["Subject", "Date"]));
@@ -320,7 +275,7 @@ mod tests {
 
     #[test]
     fn encodes_path_parameter_chars() {
-        let doc = doc_with_base("https://api.example.com/");
+        let doc = doc_with_base("https://api.googleapis.com/");
         let m = method(
             "spreadsheets/{spreadsheetId}/values/{range}",
             path_params(&["spreadsheetId", "range"]),
@@ -331,20 +286,20 @@ mod tests {
         let u = build_url(&doc, &m, &params, UrlTarget::Method, &google()).unwrap();
         assert_eq!(
             u.url,
-            "https://api.example.com/spreadsheets/abc123/values/hash%231%21A1%3AB2"
+            "https://api.googleapis.com/spreadsheets/abc123/values/hash%231%21A1%3AB2"
         );
     }
 
     #[test]
     fn plus_expansion() {
-        let doc = doc_with_base("https://api.example.com/");
+        let doc = doc_with_base("https://api.googleapis.com/");
         let m = method("v1/{+name}", path_params(&["name"]));
         let mut params = Map::new();
         params.insert("name".into(), json!("projects/p1/locations/us/topics/t1"));
         let u = build_url(&doc, &m, &params, UrlTarget::Method, &google()).unwrap();
         assert_eq!(
             u.url,
-            "https://api.example.com/v1/projects/p1/locations/us/topics/t1"
+            "https://api.googleapis.com/v1/projects/p1/locations/us/topics/t1"
         );
 
         params.insert("name".into(), json!("projects/p1#frag?x=y"));
@@ -407,7 +362,7 @@ mod tests {
 
     #[test]
     fn placeholder_like_values_are_not_substituted() {
-        let doc = doc_with_base("https://api.example.com/");
+        let doc = doc_with_base("https://api.googleapis.com/");
         let m = method("v1/{parent}/{child}", HashMap::new());
         let mut params = Map::new();
         params.insert("parent".into(), json!("literal-{child}-value"));
@@ -415,13 +370,13 @@ mod tests {
         let u = build_url(&doc, &m, &params, UrlTarget::Method, &google()).unwrap();
         assert_eq!(
             u.url,
-            "https://api.example.com/v1/literal%2D%7Bchild%7D%2Dvalue/ok"
+            "https://api.googleapis.com/v1/literal%2D%7Bchild%7D%2Dvalue/ok"
         );
     }
 
     #[test]
     fn errors_for_path_param_not_in_template() {
-        let doc = doc_with_base("https://api.example.com/");
+        let doc = doc_with_base("https://api.googleapis.com/");
         let mut m = method("files", path_params(&["fileId"]));
         m.flat_path = Some("files".into());
         let mut params = Map::new();
@@ -432,7 +387,7 @@ mod tests {
 
     #[test]
     fn missing_path_value_is_an_error_not_a_literal_placeholder() {
-        let doc = doc_with_base("https://api.example.com/");
+        let doc = doc_with_base("https://api.googleapis.com/");
         let m = method("files/{fileId}", path_params(&["fileId"]));
         let err = build_url(&doc, &m, &Map::new(), UrlTarget::Method, &google()).unwrap_err();
         assert!(

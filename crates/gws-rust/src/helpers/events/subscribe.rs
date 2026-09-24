@@ -590,7 +590,13 @@ mod tests {
                 .to_string()
                 .contains("--target")
         );
-        let m = events_matches(&["+subscribe", "--target", "//chat.googleapis.com/spaces/A", "--project", "p"]);
+        let m = events_matches(&[
+            "+subscribe",
+            "--target",
+            "//chat.googleapis.com/spaces/A",
+            "--project",
+            "p",
+        ]);
         assert!(
             parse_subscribe_args(&m)
                 .unwrap_err()

@@ -155,7 +155,7 @@ pub fn method_args(doc: &RestDescription, method: &RestMethod) -> Vec<Arg> {
                 .requires("upload")
                 .help_heading(HEADING_UPLOAD),
         );
-        if crate::executor::supports_resumable_upload(method) {
+        if method.supports_resumable_upload() {
             args.push(
                 Arg::new("upload-resumable")
                     .long("upload-resumable")
@@ -167,7 +167,7 @@ pub fn method_args(doc: &RestDescription, method: &RestMethod) -> Vec<Arg> {
         }
     }
 
-    if crate::executor::paginates(doc, method) {
+    if method.pagination(doc).is_some() {
         args.push(
             Arg::new("page-all")
                 .long("page-all")

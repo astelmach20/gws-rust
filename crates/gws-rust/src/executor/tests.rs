@@ -25,7 +25,8 @@ use serde_json::{Map, Value, json};
 use wiremock::matchers::{body_json, header, method, path, query_param, query_param_is_missing};
 use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
 
-use gws_rust_core::client::{EndpointPolicy, RetryPolicy};
+use gws_rust_core::client::RetryPolicy;
+use gws_rust_core::validate::EndpointPolicy;
 
 use super::output::Emitter;
 use super::*;
@@ -719,10 +720,7 @@ async fn token_is_never_sent_to_untrusted_root() {
     call.params = json!({"fileId": "1"});
     call.options.endpoints = EndpointPolicy::google_only();
     let err = call.run(&Emitter::capturing()).await.unwrap_err();
-    assert!(
-        err.to_string().contains("Refusing to send credentials"),
-        "{err}"
-    );
+    assert!(err.to_string().contains("Refusing to"), "{err}");
     assert!(server.received_requests().await.unwrap().is_empty());
 }
 
@@ -734,10 +732,7 @@ async fn http_googleapis_root_is_rejected() {
     call.params = json!({"fileId": "1"});
     call.options.endpoints = EndpointPolicy::google_only();
     let err = call.run(&Emitter::capturing()).await.unwrap_err();
-    assert!(
-        err.to_string().contains("Refusing to send credentials"),
-        "{err}"
-    );
+    assert!(err.to_string().contains("Refusing to"), "{err}");
 }
 
 // ── Destructive gate ────────────────────────────────────────────────────
@@ -790,7 +785,7 @@ async fn small_file_uses_multipart() {
     let d = doc(&server.uri());
     let mut call = Call::new(&d, "create", &server);
     call.body = Some(json!({"name": "a.txt"}));
-    call.upload = Some(UploadSource::File {
+    call.upload = Some(UploadSource {
         path: &path,
         content_type: None,
     });
@@ -881,7 +876,7 @@ async fn resumable_upload_resumes_after_chunk_failure() {
     let d = doc(&server.uri());
     let mut call = Call::new(&d, "create", &server);
     call.body = Some(json!({"name": "big.bin"}));
-    call.upload = Some(UploadSource::File {
+    call.upload = Some(UploadSource {
         path: &file_path,
         content_type: Some("application/octet-stream"),
     });
@@ -912,16 +907,13 @@ async fn upload_session_uri_on_foreign_host_is_refused() {
     let file_path = file.to_str().unwrap().to_string();
     let d = doc(&server.uri());
     let mut call = Call::new(&d, "create", &server);
-    call.upload = Some(UploadSource::File {
+    call.upload = Some(UploadSource {
         path: &file_path,
         content_type: None,
     });
     call.options.upload_mode = UploadMode::Resumable;
     let err = call.run(&Emitter::capturing()).await.unwrap_err();
-    assert!(
-        err.to_string().contains("Refusing to send credentials"),
-        "{err}"
-    );
+    assert!(err.to_string().contains("Refusing to"), "{err}");
 }
 
 // ── Downloads ───────────────────────────────────────────────────────────

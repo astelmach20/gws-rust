@@ -66,7 +66,7 @@ fn get<'a, T: std::any::Any + Clone + Send + Sync + 'static>(
     match m.try_get_one::<T>(id) {
         Ok(v) => Ok(v),
         Err(clap::parser::MatchesError::UnknownArgument { .. }) => Ok(None),
-        Err(e) => Err(super::errors::other(anyhow::anyhow!(
+        Err(e) => Err(GwsError::other(anyhow::anyhow!(
             "internal error reading flag --{id}: {e}"
         ))),
     }
@@ -217,7 +217,7 @@ pub async fn run_from_matches(
         })
         .transpose()?;
     let upload_content_type = get_string(m, "upload-content-type")?;
-    let upload = upload_path_str.map(|path| UploadSource::File {
+    let upload = upload_path_str.map(|path| UploadSource {
         path,
         content_type: upload_content_type,
     });

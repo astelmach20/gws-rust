@@ -235,6 +235,22 @@ impl RestDescription {
         }
     }
 
+    /// The service base URL requests are built from: `baseUrl` when the
+    /// document has one and no override is set, otherwise
+    /// [`api_root`](Self::api_root) + `servicePath`. Method paths are appended
+    /// to it verbatim.
+    pub fn service_base(&self, override_base: Option<&Url>) -> Result<String, GwsError> {
+        if override_base.is_none()
+            && let Some(base) = &self.base_url
+        {
+            validate_api_base_with(base, None)?;
+            return Ok(base.clone());
+        }
+        let root = self.api_root(override_base)?;
+        let service_path = self.service_path.trim_start_matches('/');
+        Ok(format!("{root}{service_path}"))
+    }
+
     /// Validate every endpoint-bearing field before the document is trusted
     /// (SEC-04): `rootUrl`, `mtlsRootUrl`, `baseUrl` must be trusted API bases,
     /// and `servicePath`, `batchPath`, and every method/upload path must be
@@ -361,7 +377,11 @@ impl RestMethod {
     /// response schema declares `nextPageToken`. When the response schema is
     /// not present in the document, `nextPageToken` is assumed.
     pub fn pagination(&self, doc: &RestDescription) -> Option<Pagination> {
-        let token_location = if self.parameters.contains_key(PAGE_TOKEN) {
+        let token_location = if self
+            .parameters
+            .get(PAGE_TOKEN)
+            .is_some_and(|p| p.location.as_deref() != Some("path"))
+        {
             PageTokenLocation::Query
         } else if self
             .request_schema(doc)
@@ -614,6 +634,28 @@ mod tests {
         );
         let base = Url::parse("https://proxy.example/").unwrap();
         assert_eq!(doc.api_root(Some(&base)).unwrap(), base);
+    }
+
+    #[test]
+    fn service_base_prefers_base_url_unless_overridden() {
+        let mut doc: RestDescription = serde_json::from_str(PAGED_DOC).unwrap();
+        doc.service_path = "v2/".to_string();
+        assert_eq!(
+            doc.service_base(None).unwrap(),
+            "https://driveactivity.googleapis.com/v2/"
+        );
+        doc.base_url = Some("https://driveactivity.googleapis.com/base/".to_string());
+        assert_eq!(
+            doc.service_base(None).unwrap(),
+            "https://driveactivity.googleapis.com/base/"
+        );
+        let proxy = Url::parse("http://127.0.0.1:9/").unwrap();
+        assert_eq!(
+            doc.service_base(Some(&proxy)).unwrap(),
+            "http://127.0.0.1:9/v2/"
+        );
+        doc.base_url = Some("https://evil.example/".to_string());
+        assert!(doc.service_base(None).is_err());
     }
 
     #[test]

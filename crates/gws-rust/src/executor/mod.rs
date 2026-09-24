@@ -19,7 +19,7 @@
 //! the credential-attaching transport with retries and token refresh
 //! ([`transport`]), uploads ([`upload`]), pagination ([`pagination`]),
 //! long-running operations ([`operation`]), downloads ([`download`]),
-//! Model Armor screening ([`sanitize`]) and the destructive-operation gate
+//! Model Armor screening and the destructive-operation gate
 //! ([`safety`]). [`batch`] implements `gwsr batch`, and [`options`] maps CLI
 //! flags onto [`Invocation`].
 
@@ -33,7 +33,6 @@ pub mod options;
 mod output;
 mod pagination;
 mod safety;
-mod sanitize;
 mod transport;
 mod upload;
 mod url;
@@ -41,13 +40,13 @@ mod url;
 #[cfg(test)]
 mod tests;
 
-use std::path::PathBuf;
 use std::time::Duration;
 
 use reqwest::Method;
 use serde_json::{Map, Value, json};
 
-use gws_rust_core::client::{EndpointPolicy, Idempotency, RetryPolicy, Sent};
+use gws_rust_core::client::{Idempotency, RetryPolicy, Sent};
+use gws_rust_core::validate::EndpointPolicy;
 
 pub use download::OutputTarget;
 pub use errors::extract_enable_url;
@@ -59,8 +58,8 @@ pub use upload::UploadMode;
 use crate::discovery::{RestDescription, RestMethod};
 use crate::error::GwsError;
 use crate::formatter::OutputFormat;
-use crate::helpers::modelarmor::{SanitizeConfig, SanitizeMode};
-use errors::{error_from_response, other};
+use crate::helpers::modelarmor::SanitizeConfig;
+use errors::error_from_response;
 use output::Emitter;
 use transport::{Transport, read_body};
 use upload::UploadData;
@@ -75,29 +74,11 @@ pub enum AuthMethod {
     None,
 }
 
-/// Source for media upload content: a file on disk or in-memory bytes.
-pub enum UploadSource<'a> {
-    /// Stream from a file on disk. The content type is explicit, inferred
-    /// from the extension, or taken from metadata `mimeType`.
-    File {
-        path: &'a str,
-        content_type: Option<&'a str>,
-    },
-    /// Upload from in-memory bytes with an explicit content type.
-    Bytes {
-        data: &'a [u8],
-        content_type: &'a str,
-    },
-}
-
-/// Whether `method` paginates (takes a `pageToken` in the query or body).
-pub fn paginates(doc: &RestDescription, method: &RestMethod) -> bool {
-    pagination::token_location(doc, method).is_some()
-}
-
-/// Whether `method` advertises the resumable upload protocol.
-pub fn supports_resumable_upload(method: &RestMethod) -> bool {
-    url::resumable_upload_path(method).is_some()
+/// Media upload content: a file on disk, streamed. The content type is
+/// explicit, inferred from the extension, or taken from metadata `mimeType`.
+pub struct UploadSource<'a> {
+    pub path: &'a str,
+    pub content_type: Option<&'a str>,
 }
 
 /// Whether `method` is destructive (see [`safety`]).
@@ -207,100 +188,39 @@ pub struct Invocation<'a> {
     pub options: ExecOptions,
 }
 
-/// Executes an API method call with the historical helper-facing signature.
-///
-/// Helpers call this; the CLI path uses [`execute`] through
-/// [`options::run_from_matches`].
-#[allow(clippy::too_many_arguments)]
-pub async fn execute_method(
-    doc: &RestDescription,
-    method: &RestMethod,
-    params_json: Option<&str>,
-    body_json: Option<&str>,
-    token: Option<&str>,
-    auth_method: AuthMethod,
-    output_path: Option<&str>,
-    upload: Option<UploadSource<'_>>,
-    dry_run: bool,
-    pagination: &PaginationConfig,
-    sanitize_template: Option<&str>,
-    sanitize_mode: &SanitizeMode,
-    output_format: &OutputFormat,
-    capture_output: bool,
-) -> Result<Option<Value>, GwsError> {
-    let credentials = match (token, auth_method) {
-        (Some(t), AuthMethod::OAuth) => Credentials::Static(t.to_string()),
-        _ => Credentials::None,
-    };
-    let mut options = ExecOptions::from_env()?;
-    options.dry_run = dry_run;
-    execute(Invocation {
-        doc,
-        method,
-        params: input::parse_params(params_json)?,
-        body: input::parse_body(body_json)?,
-        credentials,
-        upload,
-        output: output_path.map(|p| OutputTarget::File(PathBuf::from(p))),
-        pagination: pagination.clone(),
-        sanitize: SanitizeConfig {
-            template: sanitize_template.map(str::to_string),
-            mode: sanitize_mode.clone(),
-        },
-        format: output_format.clone(),
-        capture_output,
-        options,
-    })
-    .await
-}
-
 /// Executes an API method call, writing output to stdout.
 pub async fn execute(inv: Invocation<'_>) -> Result<Option<Value>, GwsError> {
     execute_to(inv, &Emitter::stdout()).await
 }
 
 /// The planned upload for a call.
-struct UploadPlan<'a> {
-    data: UploadData<'a>,
+struct UploadPlan {
+    data: UploadData,
     mime: String,
     resumable: bool,
 }
 
-async fn plan_upload<'a>(
-    source: &UploadSource<'a>,
+async fn plan_upload(
+    source: &UploadSource<'_>,
     method: &RestMethod,
     body: &Option<Value>,
     mode: UploadMode,
-) -> Result<UploadPlan<'a>, GwsError> {
-    let (data, mime) = match source {
-        UploadSource::Bytes { data, content_type } => {
-            if content_type.contains(['\r', '\n']) {
-                return Err(GwsError::Validation(
-                    "Upload content type must not contain CR or LF".to_string(),
-                ));
-            }
-            (UploadData::Bytes(data), (*content_type).to_string())
-        }
-        UploadSource::File { path, content_type } => {
-            let meta = tokio::fs::metadata(path).await.map_err(|e| {
-                GwsError::Validation(format!("Failed to read upload file '{path}': {e}"))
-            })?;
-            if !meta.is_file() {
-                return Err(GwsError::Validation(format!(
-                    "Upload path '{path}' is not a regular file"
-                )));
-            }
-            let mime = upload::resolve_upload_mime(*content_type, Some(path), body);
-            (
-                UploadData::File {
-                    path: (*path).to_string(),
-                    size: meta.len(),
-                },
-                mime,
-            )
-        }
+) -> Result<UploadPlan, GwsError> {
+    let UploadSource { path, content_type } = source;
+    let meta = tokio::fs::metadata(path)
+        .await
+        .map_err(|e| GwsError::Validation(format!("Failed to read upload file '{path}': {e}")))?;
+    if !meta.is_file() {
+        return Err(GwsError::Validation(format!(
+            "Upload path '{path}' is not a regular file"
+        )));
+    }
+    let mime = upload::resolve_upload_mime(*content_type, Some(path), body);
+    let data = UploadData {
+        path: (*path).to_string(),
+        size: meta.len(),
     };
-    let supports_resumable = url::resumable_upload_path(method).is_some();
+    let supports_resumable = method.resumable_upload_path().is_some();
     let resumable = match mode {
         UploadMode::Resumable if supports_resumable => true,
         UploadMode::Resumable => {
@@ -365,7 +285,7 @@ fn idempotency(params: &Map<String, Value>, body: &Option<Value>) -> Idempotency
 
 fn http_method(method: &RestMethod) -> Result<Method, GwsError> {
     Method::from_bytes(method.http_method.to_ascii_uppercase().as_bytes()).map_err(|_| {
-        other(anyhow::anyhow!(
+        GwsError::other(anyhow::anyhow!(
             "Unsupported HTTP method in Discovery document: {:?}",
             method.http_method
         ))
@@ -427,7 +347,7 @@ pub(crate) async fn execute_to(
         options,
     } = inv;
     let method_id = method.id.as_deref().unwrap_or("(unknown method)");
-    let token_location = pagination::token_location(doc, method);
+    let token_location = method.pagination(doc).map(|p| p.token_location);
     let page_all = pagination.page_all || options.page_items.is_some();
 
     if page_all && token_location.is_none() {
@@ -608,7 +528,7 @@ pub(crate) async fn execute_to(
         let mut value: Value = match serde_json::from_slice(&raw) {
             Ok(v) => v,
             Err(e) if is_json => {
-                return Err(other(anyhow::anyhow!(
+                return Err(GwsError::other(anyhow::anyhow!(
                     "{method_id} returned invalid JSON ({e}); first bytes: {}",
                     String::from_utf8_lossy(&raw[..raw.len().min(200)])
                 )));
@@ -632,8 +552,10 @@ pub(crate) async fn execute_to(
         };
         pages += 1;
 
-        if let Some(template) = &sanitize.template {
-            value = sanitize::screen_with_model_armor(template, &sanitize.mode, value).await?;
+        if sanitize.template.is_some() {
+            value = crate::helpers::modelarmor::require_pass(
+                crate::helpers::modelarmor::sanitize_value(&sanitize, value).await?,
+            )?;
         }
 
         // Long-running operations.
@@ -795,7 +717,7 @@ async fn send_upload(
     url: &str,
     query: &[(String, String)],
     body: &Option<Value>,
-    plan: &UploadPlan<'_>,
+    plan: &UploadPlan,
     idem: Idempotency,
     options: &ExecOptions,
 ) -> Result<Sent, GwsError> {
