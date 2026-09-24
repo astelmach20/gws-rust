@@ -233,9 +233,22 @@ jobs:
       - name: Check generated skills are current
         run: |
           cargo run --locked -- dev generate-skills --output-dir skills --index docs/skills.md
-          if ! git diff --quiet -- skills/; then
-            git diff --stat -- skills/
+          # `git status` also sees new (untracked) skills and pruned ones; `git diff` alone misses
+          # new files.
+          if [ -n "$(git status --porcelain -- skills/ docs/skills.md)" ]; then
+            git status --short -- skills/ docs/skills.md
             echo "::warning title=Skills drift::Generated skills differ from the committed ones. Run 'just skills' and commit the result if your change caused this."
+          fi
+          # Every skill directory must be generator-owned; anything else is a leftover the
+          # generator cannot prune (hand-written, or from before skills carried the marker).
+          leftovers=""
+          for dir in skills/*/; do
+            if ! grep -qxF '<!-- gwsr generated skill: do not edit by hand -->' "${dir}SKILL.md" 2>/dev/null; then
+              leftovers="$leftovers ${dir%/}"
+            fi
+          done
+          if [ -n "$leftovers" ]; then
+            echo "::warning title=Skills leftovers::Not produced by the generator:$leftovers. Delete them if they are stale."
           fi
 
   js:

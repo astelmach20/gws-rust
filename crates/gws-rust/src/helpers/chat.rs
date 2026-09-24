@@ -15,7 +15,8 @@
 //! Chat helpers: `+send`, `+spaces`, `+read`.
 
 use super::Helper;
-use super::http::{self, Api, ApiRequest, optional, required};
+use super::http::{self, Api, ApiRequest};
+use crate::args::{optional, required};
 use crate::confirm::{self, Impact, with_yes};
 use crate::error::GwsError;
 use clap::{Arg, ArgMatches, Command};
@@ -155,11 +156,11 @@ TIPS:
             let Some((name, m)) = matches.subcommand() else {
                 return Ok(false);
             };
-            let dry = http::dry_run(m);
+            let dry = crate::args::dry_run(m)?;
             let (api, value) = match name {
                 "+send" => {
                     let space = space_name(required(m, "space-id")?)?;
-                    let thread = optional(m, "thread")
+                    let thread = optional(m, "thread")?
                         .map(|t| thread_name(t, &space))
                         .transpose()?;
                     confirm::confirm(m, Impact::Outbound, &format!("post a message to {space}"))?;
@@ -169,7 +170,7 @@ TIPS:
                 }
                 "+spaces" => {
                     let api = Api::new(doc, &[SCOPE_SPACES_READONLY], dry, sanitize).await?;
-                    let v = spaces(&api, optional(m, "type")).await?;
+                    let v = spaces(&api, optional(m, "type")?).await?;
                     (api, v)
                 }
                 "+read" => {

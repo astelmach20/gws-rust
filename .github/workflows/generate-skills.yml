@@ -37,12 +37,13 @@ jobs:
 
       - id: diff
         run: |
-          if git diff --quiet -- skills/ docs/skills.md; then
+          # `git status` sees new (untracked) and pruned skills as well as edits.
+          if [ -z "$(git status --porcelain -- skills/ docs/skills.md)" ]; then
             echo "changed=false" >> "$GITHUB_OUTPUT"
             echo "Skills are up to date."
           else
             echo "changed=true" >> "$GITHUB_OUTPUT"
-            git diff --stat -- skills/ docs/skills.md
+            git status --short -- skills/ docs/skills.md
           fi
 
       - name: Add changeset

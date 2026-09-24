@@ -124,28 +124,37 @@ pub trait Helper: Send + Sync {
     }
 }
 
+/// Constructor for one helper.
+type MakeHelper = fn() -> Box<dyn Helper>;
+
+/// Helpers keyed by Discovery API name (`RestDescription::name`, i.e.
+/// `ServiceEntry::api_name`, not the CLI alias).
+const HELPERS: &[(&str, MakeHelper)] = &[
+    ("gmail", || Box::new(gmail::GmailHelper)),
+    ("sheets", || Box::new(sheets::SheetsHelper)),
+    ("docs", || Box::new(docs::DocsHelper)),
+    ("chat", || Box::new(chat::ChatHelper)),
+    ("drive", || Box::new(drive::DriveHelper)),
+    ("calendar", || Box::new(calendar::CalendarHelper)),
+    ("script", || Box::new(script::ScriptHelper)),
+    ("admin", || Box::new(admin::AdminHelper)),
+    ("tasks", || Box::new(tasks::TasksHelper)),
+    ("people", || Box::new(people::PeopleHelper)),
+    ("forms", || Box::new(forms::FormsHelper)),
+    ("meet", || Box::new(meet::MeetHelper)),
+    ("slides", || Box::new(slides::SlidesHelper)),
+    ("classroom", || Box::new(classroom::ClassroomHelper)),
+    ("keep", || Box::new(keep::KeepHelper)),
+    ("workspaceevents", || Box::new(events::EventsHelper)),
+    ("modelarmor", || Box::new(modelarmor::ModelArmorHelper)),
+    ("workflow", || Box::new(workflows::WorkflowHelper)),
+];
+
 pub fn get_helper(service: &str) -> Option<Box<dyn Helper>> {
-    match service {
-        "gmail" => Some(Box::new(gmail::GmailHelper)),
-        "sheets" => Some(Box::new(sheets::SheetsHelper)),
-        "docs" => Some(Box::new(docs::DocsHelper)),
-        "chat" => Some(Box::new(chat::ChatHelper)),
-        "drive" => Some(Box::new(drive::DriveHelper)),
-        "calendar" => Some(Box::new(calendar::CalendarHelper)),
-        "script" | "apps-script" => Some(Box::new(script::ScriptHelper)),
-        "admin" => Some(Box::new(admin::AdminHelper)),
-        "tasks" => Some(Box::new(tasks::TasksHelper)),
-        "people" => Some(Box::new(people::PeopleHelper)),
-        "forms" => Some(Box::new(forms::FormsHelper)),
-        "meet" => Some(Box::new(meet::MeetHelper)),
-        "slides" => Some(Box::new(slides::SlidesHelper)),
-        "classroom" => Some(Box::new(classroom::ClassroomHelper)),
-        "keep" => Some(Box::new(keep::KeepHelper)),
-        "workspaceevents" => Some(Box::new(events::EventsHelper)),
-        "modelarmor" => Some(Box::new(modelarmor::ModelArmorHelper)),
-        "workflow" => Some(Box::new(workflows::WorkflowHelper)),
-        _ => None,
-    }
+    HELPERS
+        .iter()
+        .find(|(name, _)| *name == service)
+        .map(|(_, make)| make())
 }
 
 #[cfg(test)]
@@ -180,6 +189,20 @@ mod tests {
         }
     }
 
+    /// Every helper key is the API name of a registered service, so no entry
+    /// is unreachable (as the removed `apps-script` alias was).
+    #[test]
+    fn every_helper_is_keyed_by_a_registered_api_name() {
+        for (name, _) in HELPERS {
+            assert!(
+                gws_rust_core::services::SERVICES
+                    .iter()
+                    .any(|s| s.api_name == *name),
+                "helper {name:?} is keyed by no registered API name"
+            );
+        }
+    }
+
     /// Helpers must decline (not error on) Discovery-generated subcommands so
     /// the generic executor can handle them.
     #[tokio::test]
@@ -188,7 +211,10 @@ mod tests {
             let helper = get_helper(name).expect("helper registered");
             let d = doc(name, version);
             let cmd = helper
-                .inject_commands(Command::new("gwsr"), &d)
+                .inject_commands(
+                    Command::new("gwsr").args(crate::cli_args::global_args()),
+                    &d,
+                )
                 .subcommand(Command::new("files").subcommand(Command::new("list")));
             let m = cmd.try_get_matches_from(["gwsr", "files", "list"]).unwrap();
             let handled = helper

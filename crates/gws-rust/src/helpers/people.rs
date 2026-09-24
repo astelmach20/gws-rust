@@ -15,7 +15,8 @@
 //! People helpers: `+find`.
 
 use super::Helper;
-use super::http::{self, Api, ApiRequest, flag, required};
+use super::http::{self, Api, ApiRequest};
+use crate::args::{flag, required};
 use crate::error::GwsError;
 use clap::{Arg, ArgAction, ArgMatches, Command};
 use serde_json::{Value, json};
@@ -75,14 +76,14 @@ TIPS:
             let Some(("+find", m)) = matches.subcommand() else {
                 return Ok(false);
             };
-            let directory = flag(m, "directory");
+            let directory = flag(m, "directory")?;
             let limit = http::limit(m, "limit")?;
             let scope = if directory {
                 SCOPE_DIRECTORY_READONLY
             } else {
                 SCOPE_CONTACTS_READONLY
             };
-            let api = Api::new(doc, &[scope], http::dry_run(m), sanitize).await?;
+            let api = Api::new(doc, &[scope], crate::args::dry_run(m)?, sanitize).await?;
             let v = find(&api, required(m, "query")?, directory, limit).await?;
             api.emit(m, &v).await?;
             Ok(true)

@@ -225,6 +225,7 @@ impl RetryPolicy {
             .base_delay
             .saturating_mul(2u32.saturating_pow(retry))
             .min(self.max_delay);
+        // Saturating: a delay beyond u64 milliseconds clamps (never reached).
         let ceiling_ms = u64::try_from(ceiling.as_millis()).unwrap_or(u64::MAX);
         if ceiling_ms == 0 {
             return Duration::ZERO;
@@ -313,7 +314,10 @@ impl From<SendError> for GwsError {
     fn from(err: SendError) -> Self {
         match err {
             SendError::Config(inner) => inner,
-            other => GwsError::other(other),
+            SendError::Build(_) => GwsError::other(err),
+            SendError::Transport { .. }
+            | SendError::Timeout { .. }
+            | SendError::ReadBody { .. } => GwsError::Network(Box::new(err)),
         }
     }
 }
@@ -353,7 +357,10 @@ pub fn is_retryable_status(status: StatusCode) -> bool {
     matches!(status.as_u16(), 408 | 429 | 500 | 502 | 503 | 504)
 }
 
-/// Parse a `Retry-After` header: delta-seconds or an HTTP-date.
+/// Parse a `Retry-After` header: delta-seconds or an HTTP-date. An invalid
+/// value is `None`, which callers treat as "no hint" and fall back to their
+/// own backoff (RFC 9110 lets recipients ignore an invalid Retry-After); a
+/// date in the past means "retry now".
 pub fn parse_retry_after(value: &str, now: SystemTime) -> Option<Duration> {
     let value = value.trim();
     if let Ok(secs) = value.parse::<u64>() {
@@ -366,6 +373,7 @@ pub fn parse_retry_after(value: &str, now: SystemTime) -> Option<Duration> {
 fn header_retry_after(headers: &HeaderMap) -> Option<Duration> {
     headers
         .get(RETRY_AFTER)
+        // Non-ASCII is as invalid as an unparseable value: no hint.
         .and_then(|v| v.to_str().ok())
         .and_then(|v| parse_retry_after(v, SystemTime::now()))
 }
@@ -523,6 +531,7 @@ pub async fn send(
                     });
                 }
                 let delay = retry_after.unwrap_or_else(|| policy.backoff(attempt - 1));
+                // Saturating conversion for the log field only.
                 tracing::debug!(
                     %method, %url, attempt, status = response.status().as_u16(),
                     delay_ms = u64::try_from(delay.as_millis()).unwrap_or(u64::MAX),

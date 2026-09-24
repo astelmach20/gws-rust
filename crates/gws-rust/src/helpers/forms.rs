@@ -15,7 +15,8 @@
 //! Forms helpers: `+responses` (JSON rows, or CSV via `--output`).
 
 use super::Helper;
-use super::http::{self, Api, ApiRequest, OutputTarget, flag, optional, required};
+use super::http::{self, Api, ApiRequest, OutputTarget};
+use crate::args::{flag, optional, required};
 use crate::error::GwsError;
 use crate::validate::encode_path_segment;
 use clap::{Arg, ArgAction, ArgMatches, Command};
@@ -85,13 +86,13 @@ TIPS:
             let Some(("+responses", m)) = matches.subcommand() else {
                 return Ok(false);
             };
-            let target = optional(m, "output")
-                .map(|o| OutputTarget::parse(o, flag(m, "overwrite")))
+            let target = optional(m, "output")?
+                .map(|o| OutputTarget::parse(o, flag(m, "overwrite")?))
                 .transpose()?;
             let api = Api::new(
                 doc,
                 &[SCOPE_BODY_READONLY, SCOPE_RESPONSES_READONLY],
-                http::dry_run(m),
+                crate::args::dry_run(m)?,
                 sanitize,
             )
             .await?;
@@ -109,7 +110,7 @@ TIPS:
                 Some(OutputTarget::File { path, overwrite }) => {
                     let csv = table.to_csv()?;
                     api.screen_text(&csv).await?;
-                    http::write_file_atomic(&path, csv.as_bytes(), overwrite)?;
+                    crate::output_file::write_atomic(&path, csv.as_bytes(), overwrite).await?;
                     api.emit(
                         m,
                         &json!({"output": path.display().to_string(), "rows": table.rows.len()}),

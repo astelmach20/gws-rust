@@ -49,11 +49,11 @@ pub const EXIT_CODE_DOCUMENTATION: &[(i32, &str)] = &[
     ),
     (
         GwsError::EXIT_CODE_AUTH,
-        "Auth error     — credentials missing, expired or invalid",
+        "Auth error     — no usable credentials, rejected/expired token, refused scopes or denied consent",
     ),
     (
         GwsError::EXIT_CODE_VALIDATION,
-        "Validation     — bad arguments, flags, config or input",
+        "Validation     — bad arguments, flags or input",
     ),
     (
         GwsError::EXIT_CODE_DISCOVERY,
@@ -70,6 +70,22 @@ pub const EXIT_CODE_DOCUMENTATION: &[(i32, &str)] = &[
     (
         GwsError::EXIT_CODE_CONFIRMATION_REQUIRED,
         "Not confirmed  — destructive or gated action needs --yes (or a terminal to confirm); nothing was sent",
+    ),
+    (
+        GwsError::EXIT_CODE_CONFIG,
+        "Config         — invalid or missing configuration (env vars, config.toml, profile, OAuth client file)",
+    ),
+    (
+        GwsError::EXIT_CODE_CREDENTIAL_STORE,
+        "Cred. store    — OS keyring / key file or stored credentials unreadable, unwritable or undecryptable",
+    ),
+    (
+        GwsError::EXIT_CODE_NETWORK,
+        "Network        — no response (connection, DNS, TLS, timeout); a non-idempotent call may have been applied",
+    ),
+    (
+        GwsError::EXIT_CODE_SANITIZATION_BLOCKED,
+        "Blocked        — --sanitize in block mode: Model Armor matched the output, which was withheld",
     ),
 ];
 
@@ -156,6 +172,33 @@ pub fn hint_for(err: &GwsError, ctx: &ErrorContext) -> Option<String> {
                 .to_string(),
         ),
         GwsError::Auth(_) => Some(auth_hint(ctx)),
+        GwsError::Config(_) => Some(
+            "Fix the setting named above (environment variable, config.toml, profile, OAuth \
+             client or credentials file). Exit code 8 marks configuration errors."
+                .to_string(),
+        ),
+        GwsError::CredentialStore(_) => Some(
+            "The local credential store failed. Check that the OS keyring is unlocked and \
+             reachable (or set GWSR_KEYRING_BACKEND=file), and that the config directory is \
+             readable and writable. Exit code 9 marks credential-store errors."
+                .to_string(),
+        ),
+        GwsError::Network(_) => Some(
+            "No response was received. Check the network connection and proxy settings, and \
+             raise --timeout for slow links. Before re-running a create or other \
+             non-idempotent call, check whether it was applied. Exit code 10 marks network \
+             failures."
+                .to_string(),
+        ),
+        GwsError::SanitizationBlocked(_) => Some(
+            "The request succeeded, but Model Armor matched its output, so nothing was printed \
+             (sanitize mode `block`). Do not retry to get around it. To see the output with a \
+             `_sanitization` annotation instead, use sanitize mode `warn` \
+             (GWSR_SANITIZE_MODE=warn or `sanitize_mode` in config.toml). Exit code 11 marks \
+             blocked output."
+                .to_string(),
+        ),
+        GwsError::Validation(_) | GwsError::Discovery(_) | GwsError::Other(_) => None,
         #[allow(unreachable_patterns)] // GwsError is #[non_exhaustive] in core
         _ => None,
     }
@@ -283,6 +326,11 @@ fn kind_label(err: &CliError) -> &'static str {
             GwsError::Validation(_) => "validation",
             GwsError::Discovery(_) => "discovery",
             GwsError::ConfirmationRequired(_) => "confirmation",
+            GwsError::Config(_) => "config",
+            GwsError::CredentialStore(_) => "credential-store",
+            GwsError::Network(_) => "network",
+            GwsError::SanitizationBlocked(_) => "blocked",
+            GwsError::Other(_) => "internal",
             #[allow(unreachable_patterns)] // GwsError is #[non_exhaustive] in core
             _ => "internal",
         },

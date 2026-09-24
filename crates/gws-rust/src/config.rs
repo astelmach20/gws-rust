@@ -100,7 +100,7 @@ pub struct Settings {
 }
 
 fn invalid(source: &str, key: &str, value: &str, expected: &str) -> GwsError {
-    GwsError::Validation(format!(
+    GwsError::Config(format!(
         "invalid {key} '{value}' in {source}: expected {expected}"
     ))
 }
@@ -142,7 +142,7 @@ fn parse_number<T: std::str::FromStr>(value: &str, key: &str, source: &str) -> R
 /// Parse the text of a config file. `origin` names it in error messages.
 pub fn parse_config(text: &str, origin: &Path) -> Result<ConfigFile, GwsError> {
     toml::from_str(text).map_err(|e| {
-        GwsError::Validation(format!(
+        GwsError::Config(format!(
             "invalid config file {}: {}",
             origin.display(),
             e.to_string().trim_end()
@@ -156,7 +156,7 @@ pub fn load_config_file(path: &Path) -> Result<Option<ConfigFile>, GwsError> {
     match std::fs::read_to_string(path) {
         Ok(text) => parse_config(&text, path).map(Some),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(GwsError::Validation(format!(
+        Err(e) => Err(GwsError::Config(format!(
             "cannot read config file {}: {e}",
             path.display()
         ))),
@@ -235,7 +235,7 @@ pub fn config_path_in(base: &Path) -> PathBuf {
 
 /// Path of the user config file.
 pub fn config_path() -> Result<PathBuf, GwsError> {
-    let base = crate::auth::try_config_dir().map_err(|e| GwsError::Validation(format!("{e:#}")))?;
+    let base = crate::auth::try_config_dir().map_err(crate::auth::to_gws_error)?;
     Ok(config_path_in(&base))
 }
 
@@ -253,7 +253,7 @@ pub fn set_profile_in(path: &Path, name: &str) -> Result<(), GwsError> {
         Ok(text) => text,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
         Err(e) => {
-            return Err(GwsError::Validation(format!(
+            return Err(GwsError::Config(format!(
                 "cannot read config file {}: {e}",
                 path.display()
             )));
@@ -261,9 +261,9 @@ pub fn set_profile_in(path: &Path, name: &str) -> Result<(), GwsError> {
     };
     // Refuse to rewrite a file that would not load afterwards.
     parse_config(&text, path)?;
-    let mut doc: toml_edit::DocumentMut = text.parse().map_err(|e| {
-        GwsError::Validation(format!("invalid config file {}: {e}", path.display()))
-    })?;
+    let mut doc: toml_edit::DocumentMut = text
+        .parse()
+        .map_err(|e| GwsError::Config(format!("invalid config file {}: {e}", path.display())))?;
     doc["profile"] = toml_edit::value(name);
     crate::fs_util::atomic_write(path, doc.to_string().as_bytes()).map_err(|e| {
         GwsError::other(
@@ -272,16 +272,64 @@ pub fn set_profile_in(path: &Path, name: &str) -> Result<(), GwsError> {
     })
 }
 
+/// Environment variables [`resolve`] reads.
+const SETTINGS_ENV_VARS: &[&str] = &[
+    "GWSR_FORMAT",
+    "GWSR_JSON_STYLE",
+    "GWSR_PAGE_LIMIT",
+    "GWSR_PAGE_DELAY_MS",
+    "GWSR_SANITIZE_MODE",
+    "GWSR_SANITIZE_TEMPLATE",
+    "GWSR_LOG_FILE",
+];
+
+/// Read an environment variable. Unset and blank are `None`; a value that is
+/// not valid UTF-8 is a configuration error rather than silently unset.
+pub(crate) fn env_var(name: &str) -> Result<Option<String>, GwsError> {
+    match std::env::var(name) {
+        Ok(v) if v.trim().is_empty() => Ok(None),
+        Ok(v) => Ok(Some(v)),
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(std::env::VarError::NotUnicode(_)) => Err(GwsError::Config(format!(
+            "environment variable {name} is not valid UTF-8"
+        ))),
+    }
+}
+
 /// Load and resolve settings from the real environment and config file.
 pub fn load() -> Result<Settings, GwsError> {
     let path = config_path()?;
     let file = load_config_file(&path)?;
-    resolve(file.as_ref(), &path, &|name| std::env::var(name).ok())
+    let mut vars = std::collections::HashMap::new();
+    for name in SETTINGS_ENV_VARS {
+        if let Some(value) = env_var(name)? {
+            vars.insert(*name, value);
+        }
+    }
+    resolve(file.as_ref(), &path, &|name| vars.get(name).cloned())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resolve_reads_only_the_env_vars_load_snapshots() {
+        let asked = std::cell::RefCell::new(Vec::new());
+        let file = ConfigFile::default();
+        resolve(Some(&file), &origin(), &|name| {
+            asked.borrow_mut().push(name.to_string());
+            None
+        })
+        .unwrap();
+        for name in asked.borrow().iter() {
+            assert!(
+                SETTINGS_ENV_VARS.contains(&name.as_str()),
+                "resolve reads {name}, which load() does not snapshot"
+            );
+        }
+        assert!(!asked.borrow().is_empty());
+    }
     use std::collections::HashMap;
 
     fn env_of(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {

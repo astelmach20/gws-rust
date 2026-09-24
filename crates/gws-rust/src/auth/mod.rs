@@ -37,6 +37,8 @@ pub mod token_cache;
 
 use secrecy::{ExposeSecret, SecretString};
 
+use crate::error::GwsError;
+
 use credentials::{AuthEnv, Credential, CredentialSource, Resolved};
 pub use profiles::try_config_dir;
 use token_cache::Freshness;
@@ -93,6 +95,103 @@ pub enum AuthError {
     /// Network failure talking to Google's OAuth endpoints.
     #[error("{0}")]
     Network(String),
+    /// The user or a Workspace policy denied the authorization request.
+    #[error("{0}")]
+    Denied(String),
+    /// Unusable interactive input (e.g. a pasted callback URL).
+    #[error("{0}")]
+    Input(String),
+    /// An unexpected internal failure (a background task panicked, stdout
+    /// could not be written).
+    #[error("{0}")]
+    Internal(String),
+}
+
+/// The CLI error category of an auth-layer failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Category {
+    Credential,
+    Config,
+    Store,
+    Network,
+    Input,
+    Internal,
+}
+
+impl Category {
+    fn of(e: &AuthError) -> Self {
+        match e {
+            AuthError::NoCredentials
+            | AuthError::ProfileNotLoggedIn { .. }
+            | AuthError::InvalidGrant { .. }
+            | AuthError::InvalidScope { .. }
+            | AuthError::TokenEndpoint(_)
+            | AuthError::Denied(_) => Category::Credential,
+            AuthError::Config(_) => Category::Config,
+            AuthError::Keystore(k) => Category::of_keystore(k),
+            AuthError::Storage(_) => Category::Store,
+            AuthError::Network(_) => Category::Network,
+            AuthError::Input(_) => Category::Input,
+            AuthError::Internal(_) => Category::Internal,
+        }
+    }
+
+    fn of_keystore(e: &keystore::KeystoreError) -> Self {
+        match e {
+            keystore::KeystoreError::InvalidBackend(_) => Category::Config,
+            _ => Category::Store,
+        }
+    }
+
+    fn error(self, message: String) -> GwsError {
+        match self {
+            Category::Credential => GwsError::Auth(message),
+            Category::Config => GwsError::Config(message),
+            Category::Store => GwsError::CredentialStore(message),
+            Category::Network => GwsError::Network(message.into()),
+            Category::Input => GwsError::Validation(message),
+            Category::Internal => GwsError::other(message),
+        }
+    }
+}
+
+impl From<AuthError> for GwsError {
+    fn from(e: AuthError) -> Self {
+        Category::of(&e).error(e.to_string())
+    }
+}
+
+impl From<keystore::KeystoreError> for GwsError {
+    fn from(e: keystore::KeystoreError) -> Self {
+        Category::of_keystore(&e).error(e.to_string())
+    }
+}
+
+/// Convert an `anyhow` error from the auth layer into the CLI error type,
+/// keeping the whole context chain in the message.
+///
+/// The category comes from the first typed cause in the chain:
+/// [`AuthError`] and [`keystore::KeystoreError`] map as in their `From`
+/// impls; a bare `std::io::Error` is a local storage failure
+/// ([`GwsError::CredentialStore`]). Everything else the auth layer reports
+/// untyped is a configuration problem (invalid environment variables,
+/// profile names, config or client files) and becomes [`GwsError::Config`].
+pub(crate) fn to_gws_error(err: anyhow::Error) -> GwsError {
+    let category = err
+        .chain()
+        .find_map(|cause| {
+            if let Some(e) = cause.downcast_ref::<AuthError>() {
+                Some(Category::of(e))
+            } else if let Some(e) = cause.downcast_ref::<keystore::KeystoreError>() {
+                Some(Category::of_keystore(e))
+            } else if cause.downcast_ref::<std::io::Error>().is_some() {
+                Some(Category::Store)
+            } else {
+                None
+            }
+        })
+        .unwrap_or(Category::Config);
+    category.error(format!("{err:#}"))
 }
 
 /// Mints replacement access tokens for a fixed set of scopes.
@@ -321,24 +420,16 @@ pub fn scopes_for_method(
 ///
 /// Priority: `GWSR_PROJECT_ID`, then the OAuth client configuration's project,
 /// then `quota_project_id` from Application Default Credentials.
-pub fn get_quota_project() -> Option<String> {
-    match profiles::env_string("GWSR_PROJECT_ID") {
-        Ok(Some(project_id)) => return Some(project_id),
-        Ok(None) => {}
-        Err(e) => tracing::warn!("ignoring GWSR_PROJECT_ID: {e:#}"),
-    }
-    match client_config::load_saved() {
-        Ok(Some(config)) => {
-            if let Some(project) = config.project_id.filter(|p| !p.is_empty()) {
-                return Some(project);
-            }
-        }
-        Ok(None) => {}
-        Err(e) => {
-            tracing::warn!("ignoring the OAuth client config for the quota project: {e:#}")
-        }
-    }
-    let path = std::env::var_os("GOOGLE_APPLICATION_CREDENTIALS")
+///
+/// # Errors
+///
+/// A source that exists but cannot be used is an error, not skipped: skipping
+/// it would silently bill a different project (or none). That covers a
+/// `GWSR_PROJECT_ID` that is not valid UTF-8 (exit 8), an unreadable or
+/// invalid OAuth client config, and an unreadable or invalid ADC file.
+/// `GWSR_NO_QUOTA_PROJECT` / `--no-quota-project` skip the lookup entirely.
+pub fn get_quota_project() -> Result<Option<String>, GwsError> {
+    let adc = std::env::var_os("GOOGLE_APPLICATION_CREDENTIALS")
         .filter(|v| !v.is_empty())
         .map(std::path::PathBuf::from)
         .or_else(|| {
@@ -347,31 +438,54 @@ pub fn get_quota_project() -> Option<String> {
                     .join("gcloud")
                     .join("application_default_credentials.json")
             })
-        })?;
-    let content = match std::fs::read_to_string(&path) {
+        });
+    resolve_quota_project(
+        profiles::env_string("GWSR_PROJECT_ID"),
+        client_config::load_saved,
+        adc.as_deref(),
+    )
+}
+
+fn resolve_quota_project(
+    env_project: anyhow::Result<Option<String>>,
+    load_client_config: impl FnOnce() -> anyhow::Result<Option<client_config::ClientConfig>>,
+    adc_path: Option<&std::path::Path>,
+) -> Result<Option<String>, GwsError> {
+    let skip = "set GWSR_PROJECT_ID, or pass --no-quota-project to send no quota project";
+    if let Some(project) = env_project.map_err(|e| GwsError::Config(format!("{e:#}")))? {
+        return Ok(Some(project));
+    }
+    let client = load_client_config().map_err(|e| {
+        to_gws_error(e.context(format!(
+            "cannot read the OAuth client config for the quota project ({skip})"
+        )))
+    })?;
+    if let Some(project) = client.and_then(|c| c.project_id).filter(|p| !p.is_empty()) {
+        return Ok(Some(project));
+    }
+    let Some(path) = adc_path else {
+        return Ok(None);
+    };
+    let content = match std::fs::read_to_string(path) {
         Ok(c) => c,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(e) => {
-            tracing::warn!(
-                "cannot read '{}' for the quota project: {e}",
+            return Err(GwsError::Config(format!(
+                "cannot read '{}' for the quota project ({skip}): {e}",
                 path.display()
-            );
-            return None;
+            )));
         }
     };
-    match serde_json::from_str::<serde_json::Value>(&content) {
-        Ok(json) => json
-            .get("quota_project_id")
-            .and_then(|v| v.as_str())
-            .map(str::to_string),
-        Err(e) => {
-            tracing::warn!(
-                "'{}' is not valid JSON; ignoring it for the quota project: {e}",
-                path.display()
-            );
-            None
-        }
-    }
+    let json: serde_json::Value = serde_json::from_str(&content).map_err(|e| {
+        GwsError::Config(format!(
+            "'{}' is not valid JSON, so its quota_project_id cannot be read ({skip}): {e}",
+            path.display()
+        ))
+    })?;
+    Ok(json
+        .get("quota_project_id")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string))
 }
 
 #[cfg(test)]
@@ -382,6 +496,175 @@ mod tests {
     use super::*;
     use wiremock::matchers::{body_string_contains, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn client_with_project(project: Option<&str>) -> client_config::ClientConfig {
+        client_config::ClientConfig {
+            client_id: "id".to_string(),
+            client_secret: secrecy::SecretString::from("secret".to_string()),
+            project_id: project.map(str::to_string),
+            source: client_config::ClientSource::BuiltIn,
+        }
+    }
+
+    #[test]
+    fn quota_project_priority_env_then_client_then_adc() {
+        let dir = tempfile::tempdir().unwrap();
+        let adc = dir.path().join("adc.json");
+        std::fs::write(&adc, r#"{"quota_project_id":"from-adc"}"#).unwrap();
+        let got = |env: Option<&str>, client: Option<&str>| {
+            resolve_quota_project(
+                Ok(env.map(str::to_string)),
+                || Ok(Some(client_with_project(client))),
+                Some(&adc),
+            )
+            .unwrap()
+        };
+        assert_eq!(
+            got(Some("from-env"), Some("c")).as_deref(),
+            Some("from-env")
+        );
+        assert_eq!(
+            got(None, Some("from-client")).as_deref(),
+            Some("from-client")
+        );
+        assert_eq!(got(None, None).as_deref(), Some("from-adc"));
+        let missing = dir.path().join("missing.json");
+        assert_eq!(
+            resolve_quota_project(Ok(None), || Ok(None), Some(&missing)).unwrap(),
+            None
+        );
+        assert_eq!(
+            resolve_quota_project(Ok(None), || Ok(None), None).unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn unusable_quota_project_sources_are_errors_not_skipped() {
+        let dir = tempfile::tempdir().unwrap();
+        // GWSR_PROJECT_ID not valid UTF-8.
+        let err = resolve_quota_project(
+            Err(anyhow::anyhow!(
+                "environment variable GWSR_PROJECT_ID is not valid UTF-8"
+            )),
+            || Ok(None),
+            None,
+        )
+        .unwrap_err();
+        assert!(matches!(err, GwsError::Config(_)), "{err:?}");
+        assert_eq!(err.exit_code(), 8);
+        // Unreadable OAuth client config.
+        let err = resolve_quota_project(
+            Ok(None),
+            || Err(anyhow::anyhow!("client_secret.json: expected value")),
+            None,
+        )
+        .unwrap_err();
+        assert!(matches!(err, GwsError::Config(_)), "{err:?}");
+        assert!(err.to_string().contains("OAuth client config"), "{err}");
+        let err = resolve_quota_project(
+            Ok(None),
+            || Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied).into()),
+            None,
+        )
+        .unwrap_err();
+        assert!(matches!(err, GwsError::CredentialStore(_)), "{err:?}");
+        // Invalid or unreadable ADC.
+        let adc = dir.path().join("adc.json");
+        std::fs::write(&adc, "not json").unwrap();
+        let err = resolve_quota_project(Ok(None), || Ok(None), Some(&adc)).unwrap_err();
+        assert!(err.to_string().contains("not valid JSON"), "{err}");
+        let err = resolve_quota_project(Ok(None), || Ok(None), Some(dir.path())).unwrap_err();
+        assert!(matches!(err, GwsError::Config(_)), "{err:?}");
+    }
+
+    #[test]
+    fn auth_errors_map_to_distinct_cli_errors_and_exit_codes() {
+        use keystore::KeystoreError;
+        let io = || std::io::Error::other("disk full");
+        let cases: Vec<(AuthError, i32, &str)> = vec![
+            (AuthError::NoCredentials, 2, "authError"),
+            (
+                AuthError::ProfileNotLoggedIn {
+                    profile: "work".into(),
+                },
+                2,
+                "authError",
+            ),
+            (
+                AuthError::InvalidGrant {
+                    description: "expired".into(),
+                    login_command: "gwsr auth login".into(),
+                },
+                2,
+                "authError",
+            ),
+            (
+                AuthError::InvalidScope {
+                    requested: vec!["https://www.googleapis.com/auth/drive".into()],
+                    description: "nope".into(),
+                },
+                2,
+                "authError",
+            ),
+            (AuthError::TokenEndpoint("HTTP 500".into()), 2, "authError"),
+            (AuthError::Denied("access_denied".into()), 2, "authError"),
+            (AuthError::Config("bad file".into()), 8, "configError"),
+            (
+                AuthError::Keystore(KeystoreError::InvalidBackend("x".into())),
+                8,
+                "configError",
+            ),
+            (
+                AuthError::Keystore(KeystoreError::KeyUnavailable("locked".into())),
+                9,
+                "credentialStoreError",
+            ),
+            (
+                AuthError::Keystore(KeystoreError::Io {
+                    context: "cannot read key".into(),
+                    source: io(),
+                }),
+                9,
+                "credentialStoreError",
+            ),
+            (
+                AuthError::Storage("unreadable".into()),
+                9,
+                "credentialStoreError",
+            ),
+            (AuthError::Network("dns".into()), 10, "networkError"),
+            (AuthError::Input("bad paste".into()), 3, "validationError"),
+            (
+                AuthError::Internal("task panicked".into()),
+                5,
+                "internalError",
+            ),
+        ];
+        for (auth, exit, reason) in cases {
+            let text = auth.to_string();
+            // Wrapped in anyhow context, as the auth layer returns it.
+            let wrapped = to_gws_error(anyhow::Error::new(auth).context("while loading"));
+            assert_eq!(wrapped.exit_code(), exit, "{text}");
+            assert_eq!(wrapped.to_json()["error"]["reason"], reason, "{text}");
+            assert!(wrapped.to_string().contains("while loading"), "{wrapped}");
+            assert!(wrapped.to_string().contains(&text), "{wrapped}");
+        }
+    }
+
+    #[test]
+    fn untyped_auth_layer_errors_are_config_and_io_errors_are_store_errors() {
+        let config = to_gws_error(anyhow::anyhow!("environment variable X is not valid UTF-8"));
+        assert!(matches!(config, GwsError::Config(_)), "{config:?}");
+        let store = to_gws_error(
+            anyhow::Error::new(std::io::Error::other("permission denied"))
+                .context("cannot read '/x/metadata.json'"),
+        );
+        assert!(matches!(store, GwsError::CredentialStore(_)), "{store:?}");
+        assert!(store.to_string().contains("permission denied"), "{store}");
+        let direct: GwsError = keystore::KeystoreError::Decrypt { what: "x".into() }.into();
+        assert!(matches!(direct, GwsError::CredentialStore(_)), "{direct:?}");
+    }
 
     const USER_JSON: &str =
         r#"{"type":"authorized_user","client_id":"cid","client_secret":"cs","refresh_token":"rt"}"#;

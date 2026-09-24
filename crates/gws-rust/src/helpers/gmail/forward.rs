@@ -246,13 +246,13 @@ fn parse_forward_args(matches: &ArgMatches) -> Result<ForwardConfig, GwsError> {
     Ok(ForwardConfig {
         message_id: required_str(matches, "message-id")?,
         to,
-        from: parse_optional_mailboxes(matches, "from"),
-        cc: parse_optional_mailboxes(matches, "cc"),
-        bcc: parse_optional_mailboxes(matches, "bcc"),
-        body: parse_optional_trimmed(matches, "body"),
-        html: matches.get_flag("html"),
+        from: parse_optional_mailboxes(matches, "from")?,
+        cc: parse_optional_mailboxes(matches, "cc")?,
+        bcc: parse_optional_mailboxes(matches, "bcc")?,
+        body: parse_optional_trimmed(matches, "body")?,
+        html: crate::args::flag(matches, "html")?,
         attachments: parse_attachments(matches)?,
-        no_original_attachments: matches.get_flag("no-original-attachments"),
+        no_original_attachments: crate::args::flag(matches, "no-original-attachments")?,
     })
 }
 

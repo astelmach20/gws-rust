@@ -239,6 +239,38 @@ fn service_method_help_shows_full_command_path_and_global_heading() {
 }
 
 #[test]
+fn versioned_service_help_shows_the_spec_as_typed() {
+    let env = Env::new();
+    env.seed_drive("Lists files.");
+    for args in [
+        vec!["drive:v3", "files", "list", "--help"],
+        vec!["--format", "json", "drive:v3", "files", "list", "--help"],
+    ] {
+        let out = env
+            .cmd()
+            .args(&args)
+            .assert()
+            .success()
+            .get_output()
+            .clone();
+        let help = stdout_of(&out);
+        assert!(
+            help.contains("Usage: gwsr drive:v3 files list [OPTIONS]"),
+            "{args:?}: {help}"
+        );
+    }
+    let out = env
+        .cmd()
+        .args(["drive:v3"])
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+    let help = stdout_of(&out);
+    assert!(help.contains("Usage: gwsr drive:v3 "), "{help}");
+}
+
+#[test]
 fn sanitize_help_names_the_real_env_var() {
     let env = Env::new();
     env.cmd()
@@ -468,14 +500,80 @@ fn config_file_sets_defaults_and_flags_override() {
 }
 
 #[test]
-fn invalid_config_is_a_loud_validation_error() {
+fn invalid_config_is_a_loud_config_error() {
     let env = Env::new();
     env.write_config("formt = \"table\"\n");
     env.cmd()
         .args(["cache", "clear"])
         .assert()
-        .code(3)
-        .stderr(predicate::str::contains("unknown field `formt`"));
+        .code(8)
+        .stdout("")
+        .stderr(predicate::str::contains("unknown field `formt`"))
+        .stderr(predicate::str::contains("\"configError\""));
+}
+
+#[test]
+fn auth_configuration_errors_exit_with_the_config_code() {
+    let env = Env::new();
+    // An invalid profile name selected through the environment is a
+    // configuration error (exit 8), not an authentication failure (exit 2).
+    env.cmd()
+        .args(["auth", "status"])
+        .env("GWSR_PROFILE", "../escape")
+        .assert()
+        .code(8)
+        .stdout("")
+        .stderr(predicate::str::contains("\"configError\""))
+        .stderr(predicate::str::contains("GWSR_PROFILE"));
+}
+
+#[test]
+fn cache_clear_dry_run_reports_and_keeps_the_cache() {
+    let env = Env::new();
+    env.seed_drive("Lists files.");
+    let out = env
+        .cmd()
+        .args(["cache", "clear", "--dry-run"])
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+    let v: Value = serde_json::from_str(&stdout_of(&out)).unwrap();
+    assert_eq!(v["dry_run"], true);
+    assert_eq!(v["wouldRemove"], 1);
+    let seeded = env.seeded_drive_path();
+    assert_eq!(v["documents"][0], seeded.display().to_string());
+    assert!(seeded.exists(), "--dry-run must not delete the cache");
+    let out = env
+        .cmd()
+        .args(["cache", "clear"])
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+    let v: Value = serde_json::from_str(&stdout_of(&out)).unwrap();
+    assert_eq!(v["removed"], 1);
+    assert!(!seeded.exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn non_utf8_environment_values_are_config_errors_not_ignored() {
+    use std::os::unix::ffi::OsStrExt;
+    let bad = std::ffi::OsStr::from_bytes(b"\xff");
+    for var in ["GWSR_FORMAT", "GWSR_LOG"] {
+        let env = Env::new();
+        env.cmd()
+            .args(["cache", "clear"])
+            .env(var, bad)
+            .assert()
+            .code(8)
+            .stdout("")
+            .stderr(predicate::str::contains("\"configError\""))
+            .stderr(predicate::str::contains(format!(
+                "{var} is not valid UTF-8"
+            )));
+    }
 }
 
 #[test]
@@ -694,6 +792,35 @@ fn generate_skills_requires_output_dir() {
         .success()
         .stdout(predicate::str::contains("--filter <NAME>"));
     assert!(std::fs::read_dir(env.work_dir()).unwrap().next().is_none());
+}
+
+#[test]
+fn filtered_generate_skills_run_prunes_nothing() {
+    let env = Env::new();
+    let run = || {
+        env.cmd()
+            .args([
+                "dev",
+                "generate-skills",
+                "--output-dir",
+                "out",
+                "--filter",
+                "shared",
+            ])
+            .assert()
+            .success()
+            .get_output()
+            .clone()
+    };
+    run();
+    // A generated (marked) skill this filtered run does not produce.
+    let shared = env.work_dir().join("out/gwsr-shared/SKILL.md");
+    let other = env.work_dir().join("out/gwsr-other");
+    std::fs::create_dir(&other).unwrap();
+    std::fs::copy(&shared, other.join("SKILL.md")).unwrap();
+    let summary: Value = serde_json::from_str(&stdout_of(&run())).unwrap();
+    assert_eq!(summary["pruned"], json!([]));
+    assert!(other.join("SKILL.md").exists());
 }
 
 #[test]

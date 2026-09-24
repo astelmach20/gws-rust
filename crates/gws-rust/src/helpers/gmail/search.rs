@@ -58,6 +58,7 @@ pub(super) async fn search(
     let mut next_page_token = None;
 
     loop {
+        // Saturating: more than u32::MAX collected IDs means none remain.
         let remaining = params
             .max
             .saturating_sub(u32::try_from(ids.len()).unwrap_or(u32::MAX));
@@ -91,6 +92,7 @@ pub(super) async fn search(
             .and_then(Value::as_str)
             .map(str::to_string);
         match token {
+            // Saturating, as above.
             Some(t) if u32::try_from(ids.len()).unwrap_or(u32::MAX) >= params.max => {
                 next_page_token = Some(t);
                 break;
@@ -120,7 +122,9 @@ pub(super) fn header<'a>(msg: &'a Value, name: &str) -> &'a str {
         .unwrap_or("")
 }
 
-/// Convert `internalDate` (epoch millis as a string) to RFC 3339.
+/// Convert `internalDate` (epoch millis as a string) to RFC 3339. The field
+/// is informational in the summary: when Gmail omits it or it is not a
+/// timestamp, the output shows `null` rather than failing the whole search.
 fn internal_date_rfc3339(msg: &Value) -> Option<String> {
     let millis: i64 = msg.get("internalDate")?.as_str()?.parse().ok()?;
     chrono::DateTime::from_timestamp_millis(millis).map(|d| d.to_rfc3339())
@@ -145,10 +149,10 @@ pub(super) fn summarize(msg: &Value) -> Value {
 
 fn parse_search_args(matches: &ArgMatches) -> Result<SearchParams, GwsError> {
     Ok(SearchParams {
-        query: parse_optional_trimmed(matches, "query"),
+        query: parse_optional_trimmed(matches, "query")?,
         max: value_or_default::<u32>(matches, "max")?,
-        page_token: parse_optional_trimmed(matches, "page-token"),
-        include_spam_trash: matches.get_flag("include-spam-trash"),
+        page_token: parse_optional_trimmed(matches, "page-token")?,
+        include_spam_trash: crate::args::flag(matches, "include-spam-trash")?,
     })
 }
 
@@ -190,8 +194,8 @@ pub(super) async fn handle_search(
     sanitize_config: &SanitizeConfig,
 ) -> Result<(), GwsError> {
     let params = parse_search_args(matches)?;
-    let format = crate::helpers::http::output_format(matches);
-    if crate::helpers::http::dry_run(matches) {
+    let format = crate::helpers::http::output_format(matches)?;
+    if crate::args::dry_run(matches)? {
         return dry_run_list(matches, &params);
     }
     let api = super::api::authenticated(&[GMAIL_READONLY_SCOPE]).await?;

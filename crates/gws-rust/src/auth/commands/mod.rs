@@ -248,25 +248,28 @@ pub async fn handle_auth_command(args: &[String], before: GlobalOverrides) -> Re
     };
     let leaf = leaf_matches(&matches);
     super::profiles::set_global_overrides(GlobalOverrides {
-        profile: merge_flag("profile", before.profile, leaf.get_one::<String>("profile"))?,
+        profile: merge_flag(
+            "profile",
+            before.profile,
+            crate::args::value::<String>(leaf, "profile")?,
+        )?,
         impersonate: merge_flag(
             "impersonate",
             before.impersonate,
-            leaf.get_one::<String>("impersonate"),
+            crate::args::value::<String>(leaf, "impersonate")?,
         )?,
     })?;
     match matches.subcommand() {
         Some(("login", m)) => login::handle(m).await,
         Some(("setup", m)) => {
-            let setup_args: Vec<String> = m
-                .get_many::<String>("args")
+            let setup_args: Vec<String> = crate::args::values(m, "args")?
                 .map(|vals| vals.cloned().collect())
                 .unwrap_or_default();
             super::setup::run_setup(&setup_args).await
         }
-        Some(("status", m)) => status::handle(m.get_flag("offline")).await,
+        Some(("status", m)) => status::handle(crate::args::flag(m, "offline")?).await,
         Some(("export", m)) => export::handle(m).await,
-        Some(("logout", m)) => logout::handle(m.get_flag("no-revoke")).await,
+        Some(("logout", m)) => logout::handle(crate::args::flag(m, "no-revoke")?).await,
         Some(("list", _)) => profile::handle_list(),
         Some(("use", m)) => profile::handle_use(m),
         Some((other, _)) => Err(GwsError::Validation(format!(
@@ -290,10 +293,6 @@ fn leaf_matches(m: &clap::ArgMatches) -> &clap::ArgMatches {
 }
 
 /// Convert an [`super::AuthError`] (or any error) into a CLI error.
-pub(crate) fn auth_err(e: impl std::fmt::Display) -> GwsError {
-    GwsError::Auth(e.to_string())
-}
-
 /// Print a command's JSON result to stdout in the configured format.
 pub(crate) fn print_json(value: &serde_json::Value) -> Result<(), GwsError> {
     crate::formatter::emit_default(value)

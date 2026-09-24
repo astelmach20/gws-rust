@@ -15,7 +15,8 @@
 //! Classroom helpers: `+courses`.
 
 use super::Helper;
-use super::http::{self, Api, ApiRequest, optional};
+use super::http::{self, Api, ApiRequest};
+use crate::args::optional;
 use crate::error::GwsError;
 use clap::{Arg, ArgMatches, Command};
 use serde_json::Value;
@@ -80,8 +81,14 @@ TIPS:
                 return Ok(false);
             };
             let limit = http::limit(m, "limit")?;
-            let api = Api::new(doc, &[SCOPE_COURSES_READONLY], http::dry_run(m), sanitize).await?;
-            let v = courses(&api, optional(m, "role"), optional(m, "state"), limit).await?;
+            let api = Api::new(
+                doc,
+                &[SCOPE_COURSES_READONLY],
+                crate::args::dry_run(m)?,
+                sanitize,
+            )
+            .await?;
+            let v = courses(&api, optional(m, "role")?, optional(m, "state")?, limit).await?;
             api.emit(m, &v).await?;
             Ok(true)
         })

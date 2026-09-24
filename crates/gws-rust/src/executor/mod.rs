@@ -24,13 +24,13 @@
 
 pub mod batch;
 mod body_schema;
-mod download;
+pub(crate) mod download;
 mod input;
 mod operation;
 pub mod options;
 mod output;
 mod pagination;
-mod upload;
+pub(crate) mod upload;
 mod url;
 
 #[cfg(test)]
@@ -419,7 +419,7 @@ pub(crate) async fn execute_to(
     }
 
     let quota_project = if options.quota_project {
-        crate::auth::get_quota_project()
+        crate::auth::get_quota_project()?
     } else {
         None
     };
@@ -461,6 +461,8 @@ pub(crate) async fn execute_to(
         };
         let status = sent.response.status();
         let note = sent.retry_note();
+        // A missing or non-ASCII Content-Type is "unknown" (treated as JSON
+        // and then reported if the body does not parse).
         let content_type = sent
             .response
             .headers()
@@ -528,7 +530,7 @@ pub(crate) async fn execute_to(
                 // otherwise wrap it as a JSON string (never raw on stdout).
                 match &output {
                     Some(OutputTarget::File(path)) => {
-                        download::write_file_atomic(path, &raw).await?;
+                        crate::output_file::write_atomic(path, &raw, true).await?;
                         out.single(json!({"status": "success", "saved_file": path.display().to_string(), "bytes": raw.len()}))?;
                     }
                     Some(OutputTarget::Stdout) => {
@@ -570,6 +572,7 @@ pub(crate) async fn execute_to(
                         note.as_deref(),
                     ));
                 }
+                // A missing or non-ASCII Content-Type is plain bytes.
                 let ct = dl
                     .response
                     .headers()

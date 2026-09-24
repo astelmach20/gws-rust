@@ -21,6 +21,7 @@
 
 #![cfg_attr(not(test), forbid(unsafe_code))]
 
+mod args;
 mod auth;
 mod cli_args;
 mod client;
@@ -40,6 +41,7 @@ mod inventory;
 mod jq;
 mod logging;
 mod output;
+mod output_file;
 mod schema;
 mod service;
 mod services;
@@ -91,7 +93,10 @@ fn main() -> ExitCode {
         return finish(Err(e.into()), human);
     }
 
-    let mut log_opts = logging::LogOptions::from_env(prescan.verbosity);
+    let mut log_opts = match logging::LogOptions::from_env(prescan.verbosity) {
+        Ok(opts) => opts,
+        Err(e) => return finish(Err(e.into()), human),
+    };
     log_opts.config_log = settings.log.clone();
     log_opts.human = human || prescan.verbosity > 0;
     if log_opts.file_dir.is_none() {
@@ -132,6 +137,11 @@ fn main() -> ExitCode {
 
 /// True when the effective output format is a human one (not JSON):
 /// `--format` flag > `GWSR_FORMAT` > config file > JSON.
+///
+/// This only picks the form of an error report, possibly before the flag and
+/// config are validated, so unparseable values are skipped here on purpose:
+/// clap rejects a bad `--format` and `config::load` a bad `GWSR_FORMAT`, and
+/// those errors are then reported (as JSON, the default).
 fn human_output(flag: Option<&str>, config: Option<OutputFormat>) -> bool {
     let from_flag = flag.and_then(|f| OutputFormat::parse(f).ok());
     let from_env = std::env::var("GWSR_FORMAT")
@@ -150,6 +160,7 @@ fn finish(result: Result<(), CliError>, human: bool) -> ExitCode {
         Err(e) => {
             tracing::debug!(error = ?e, "command failed");
             error::report(&e, human);
+            // Exit codes are 1..=10; the saturation is unreachable.
             ExitCode::from(u8::try_from(e.exit_code()).unwrap_or(u8::MAX))
         }
     }
@@ -261,7 +272,7 @@ fn install_output(global: &GlobalArgs, settings: &Settings) -> Result<(), CliErr
         .transpose()?;
     formatter::install_settings(OutputSettings {
         json_style,
-        default_format: effective_format(global, settings),
+        default_format: effective_format(global, settings)?,
         columns: global.columns.clone(),
         jq,
         terminal,
@@ -270,12 +281,11 @@ fn install_output(global: &GlobalArgs, settings: &Settings) -> Result<(), CliErr
 }
 
 /// The effective format for static commands (flag > env/config).
-fn effective_format(global: &GlobalArgs, settings: &Settings) -> OutputFormat {
-    global
-        .format
-        .as_deref()
-        .map(OutputFormat::from_str)
-        .unwrap_or(settings.format)
+fn effective_format(global: &GlobalArgs, settings: &Settings) -> Result<OutputFormat, GwsError> {
+    match global.format.as_deref() {
+        Some(f) => OutputFormat::from_str(f),
+        None => Ok(settings.format),
+    }
 }
 
 fn emit_value(value: &serde_json::Value, format: OutputFormat) -> Result<(), CliError> {
@@ -285,6 +295,29 @@ fn emit_value(value: &serde_json::Value, format: OutputFormat) -> Result<(), Cli
 }
 
 #[tracing::instrument(level = "debug", skip_all)]
+/// The `cache clear --dry-run` report: what a real clear would delete.
+fn cache_clear_dry_run(plan: Option<&discovery::ClearPlan>) -> serde_json::Value {
+    let paths = |v: &[std::path::PathBuf]| -> Vec<String> {
+        v.iter().map(|p| p.display().to_string()).collect()
+    };
+    match plan {
+        Some(plan) => serde_json::json!({
+            "dry_run": true,
+            "wouldRemove": plan.documents.len(),
+            "directory": plan.dir.as_ref().map(|d| d.display().to_string()),
+            "documents": paths(&plan.documents),
+            "tempFiles": paths(&plan.temp_files),
+        }),
+        None => serde_json::json!({
+            "dry_run": true,
+            "wouldRemove": 0,
+            "directory": null,
+            "documents": [],
+            "tempFiles": [],
+        }),
+    }
+}
+
 async fn dispatch(
     cli: Cli,
     args: &[OsString],
@@ -300,7 +333,7 @@ async fn dispatch(
     }
 
     install_output(&cli.global, settings)?;
-    let format = effective_format(&cli.global, settings);
+    let format = effective_format(&cli.global, settings)?;
     tracing::debug!(?command, ?format, "dispatching static command");
     // `auth` also accepts --profile/--impersonate after its own name and
     // records the overrides itself.
@@ -339,8 +372,14 @@ async fn dispatch(
         TopCommand::Cache {
             action: CacheCommand::Clear,
         } => {
-            let removed = discovery::loader()?.clear_cache().map_err(GwsError::from)?;
-            emit_value(&serde_json::json!({ "removed": removed }), format)?;
+            let loader = discovery::loader()?;
+            if cli.global.dry_run {
+                let plan = loader.clear_cache_plan().map_err(GwsError::from)?;
+                emit_value(&cache_clear_dry_run(plan.as_ref()), format)?;
+            } else {
+                let removed = loader.clear_cache().map_err(GwsError::from)?;
+                emit_value(&serde_json::json!({ "removed": removed }), format)?;
+            }
         }
         TopCommand::Dev {
             command: DevCommand::GenerateSkills(opts),
@@ -402,8 +441,9 @@ async fn run_service(
     tracing::debug!(service = %alias, api = %api_name, version = %version, "resolving service");
 
     let doc = service::load_document(&api_name, &version).await?;
-    let cmd = service::build_command(&alias, &doc);
-    let matches = match cmd.try_get_matches_from(service_argv(args, service_args, &alias)) {
+    // Usage lines show the service as typed, so `youtube:v3` stays runnable.
+    let cmd = service::build_command(service_token, &doc);
+    let matches = match cmd.try_get_matches_from(service_argv(args, service_args, service_token)) {
         Ok(m) => m,
         Err(e) if is_display_request(&e) => return print_display(&e),
         Err(e) => return Err(e.into()),
@@ -417,7 +457,7 @@ async fn run_service(
         ..Default::default()
     });
 
-    let output_format = OutputFormat::from_matches(&matches);
+    let output_format = OutputFormat::from_matches(&matches)?;
     let sanitize_template = global
         .sanitize
         .clone()

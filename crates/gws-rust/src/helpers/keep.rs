@@ -15,7 +15,8 @@
 //! Keep helpers: `+list`.
 
 use super::Helper;
-use super::http::{self, Api, ApiRequest, flag, optional};
+use super::http::{self, Api, ApiRequest};
+use crate::args::{flag, optional};
 use crate::error::GwsError;
 use clap::{Arg, ArgAction, ArgMatches, Command};
 use serde_json::Value;
@@ -73,8 +74,14 @@ TIPS:
                 return Ok(false);
             };
             let limit = http::limit(m, "limit")?;
-            let filter = build_filter(flag(m, "trashed"), optional(m, "changed-since"))?;
-            let api = Api::new(doc, &[SCOPE_KEEP_READONLY], http::dry_run(m), sanitize).await?;
+            let filter = build_filter(flag(m, "trashed")?, optional(m, "changed-since")?)?;
+            let api = Api::new(
+                doc,
+                &[SCOPE_KEEP_READONLY],
+                crate::args::dry_run(m)?,
+                sanitize,
+            )
+            .await?;
             let v = list(&api, &filter, limit).await?;
             api.emit(m, &v).await?;
             Ok(true)

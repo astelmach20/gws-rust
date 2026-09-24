@@ -37,11 +37,11 @@ fn parse_create_args(matches: &ArgMatches) -> Result<FilterSpec, GwsError> {
         ("query", "query"),
         ("exclude", "negatedQuery"),
     ] {
-        if let Some(v) = parse_optional_trimmed(matches, flag) {
+        if let Some(v) = parse_optional_trimmed(matches, flag)? {
             criteria.insert(field.to_string(), json!(v));
         }
     }
-    if matches.get_flag("has-attachment") {
+    if crate::args::flag(matches, "has-attachment")? {
         criteria.insert("hasAttachment".to_string(), json!(true));
     }
     if criteria.is_empty() {
@@ -50,8 +50,8 @@ fn parse_create_args(matches: &ArgMatches) -> Result<FilterSpec, GwsError> {
         ));
     }
 
-    let mut add_labels = list_values(matches, "add-label");
-    let mut remove_labels = list_values(matches, "remove-label");
+    let mut add_labels = list_values(matches, "add-label")?;
+    let mut remove_labels = list_values(matches, "remove-label")?;
     for (flag, system_label, add) in [
         ("archive", "INBOX", false),
         ("mark-read", "UNREAD", false),
@@ -61,7 +61,7 @@ fn parse_create_args(matches: &ArgMatches) -> Result<FilterSpec, GwsError> {
         ("trash", "TRASH", true),
         ("never-spam", "SPAM", false),
     ] {
-        if matches.get_flag(flag) {
+        if crate::args::flag(matches, flag)? {
             if add {
                 add_labels.push(system_label.to_string());
             } else {
@@ -69,7 +69,7 @@ fn parse_create_args(matches: &ArgMatches) -> Result<FilterSpec, GwsError> {
             }
         }
     }
-    let forward = parse_optional_trimmed(matches, "forward");
+    let forward = parse_optional_trimmed(matches, "forward")?;
     if add_labels.is_empty() && remove_labels.is_empty() && forward.is_none() {
         return Err(GwsError::Validation(
             "Provide at least one filter action".to_string(),
@@ -99,14 +99,14 @@ fn build_filter(spec: &FilterSpec, add: &[String], remove: &[String]) -> Value {
 }
 
 fn print(value: &Value, matches: &ArgMatches) -> Result<(), GwsError> {
-    let format = crate::helpers::http::output_format(matches);
+    let format = crate::helpers::http::output_format(matches)?;
     crate::output::emit(&crate::formatter::format_value(value, &format)?)?;
     Ok(())
 }
 
 /// Handle `+filter`.
 pub(super) async fn handle_filter(matches: &ArgMatches) -> Result<(), GwsError> {
-    let dry_run = crate::helpers::http::dry_run(matches);
+    let dry_run = crate::args::dry_run(matches)?;
     let base = format!("{}/users/me/settings/filters", super::api::GMAIL_API_BASE);
     match matches.subcommand() {
         Some(("list", sub)) => {

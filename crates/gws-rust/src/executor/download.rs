@@ -24,11 +24,11 @@ use std::time::Duration;
 
 use base64::Engine;
 use serde_json::{Value, json};
-use tokio::io::AsyncWriteExt;
 
 use super::output::Emitter;
 use crate::discovery::{JsonSchemaProperty, RestDescription, RestMethod};
 use crate::error::GwsError;
+use crate::output_file::AtomicFile;
 use crate::transport::next_chunk;
 
 /// Where `-o/--output` sends a response payload.
@@ -124,68 +124,27 @@ async fn read_limited(
     Ok(body)
 }
 
-struct AtomicFile {
-    file: tokio::fs::File,
-    temp: tempfile::TempPath,
-    target: PathBuf,
-}
-
-impl AtomicFile {
-    fn create(target: &Path) -> Result<Self, GwsError> {
-        let dir = match target.parent() {
-            Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
-            _ => PathBuf::from("."),
-        };
-        let named = tempfile::Builder::new()
-            .prefix(".gwsr-download-")
-            .tempfile_in(&dir)
-            .map_err(|e| {
-                GwsError::other(anyhow::anyhow!(
-                    "failed to create a temporary file in '{}': {e}",
-                    dir.display()
-                ))
-            })?;
-        let (file, temp) = named.into_parts();
-        Ok(Self {
-            file: tokio::fs::File::from_std(file),
-            temp,
-            target: target.to_path_buf(),
-        })
+/// Stream a response body into `path` atomically, verifying it against
+/// `Content-Length` before the file is moved into place. Returns the number of
+/// bytes written.
+pub(crate) async fn save_stream(
+    response: reqwest::Response,
+    path: &Path,
+    overwrite: bool,
+    idle: Option<Duration>,
+) -> Result<u64, GwsError> {
+    let expected = response.content_length();
+    let mut file = AtomicFile::create(path, overwrite)?;
+    let mut stream = response.bytes_stream();
+    let mut total: u64 = 0;
+    while let Some(chunk) = next_chunk(&mut stream, idle).await? {
+        file.write(&chunk).await?;
+        total += chunk.len() as u64;
     }
-
-    async fn write(&mut self, data: &[u8]) -> Result<(), GwsError> {
-        self.file.write_all(data).await.map_err(|e| {
-            GwsError::other(anyhow::anyhow!(
-                "failed to write '{}': {e}",
-                self.target.display()
-            ))
-        })
-    }
-
-    async fn commit(mut self) -> Result<(), GwsError> {
-        let target = self.target.display().to_string();
-        self.file
-            .flush()
-            .await
-            .map_err(|e| GwsError::other(anyhow::anyhow!("failed to flush '{target}': {e}")))?;
-        self.file
-            .sync_all()
-            .await
-            .map_err(|e| GwsError::other(anyhow::anyhow!("failed to sync '{target}': {e}")))?;
-        drop(self.file);
-        self.temp.persist(&self.target).map_err(|e| {
-            GwsError::other(anyhow::anyhow!(
-                "failed to move download into '{target}': {e}"
-            ))
-        })
-    }
-}
-
-/// Write `data` to `path` atomically.
-pub(crate) async fn write_file_atomic(path: &Path, data: &[u8]) -> Result<(), GwsError> {
-    let mut f = AtomicFile::create(path)?;
-    f.write(data).await?;
-    f.commit().await
+    // Verify before committing so a truncated body never replaces the target.
+    check_length(expected, total)?;
+    file.commit().await?;
+    Ok(total)
 }
 
 /// Stream a binary response to `target`.
@@ -199,12 +158,11 @@ pub(crate) async fn stream_binary(
     idle: Option<Duration>,
     emitter: &Emitter,
 ) -> Result<Option<Value>, GwsError> {
-    let expected = response.content_length();
-    let mut stream = response.bytes_stream();
-    let mut total: u64 = 0;
-
     match target {
         OutputTarget::Stdout => {
+            let expected = response.content_length();
+            let mut stream = response.bytes_stream();
+            let mut total: u64 = 0;
             while let Some(chunk) = next_chunk(&mut stream, idle).await? {
                 emitter.bytes(&chunk).await?;
                 total += chunk.len() as u64;
@@ -214,14 +172,8 @@ pub(crate) async fn stream_binary(
             Ok(None)
         }
         OutputTarget::File(path) => {
-            let mut file = AtomicFile::create(path)?;
-            while let Some(chunk) = next_chunk(&mut stream, idle).await? {
-                file.write(&chunk).await?;
-                total += chunk.len() as u64;
-            }
-            // Verify before committing so a truncated body never replaces the target.
-            check_length(expected, total)?;
-            file.commit().await?;
+            // `-o PATH` on a generated API method always replaces the target.
+            let total = save_stream(response, path, true, idle).await?;
             Ok(Some(json!({
                 "status": "success",
                 "saved_file": path.display().to_string(),
@@ -338,7 +290,7 @@ pub(crate) async fn save_json_response(
             (text, None)
         }
     };
-    write_file_atomic(path, &bytes).await?;
+    crate::output_file::write_atomic(path, &bytes, true).await?;
     let mut summary = json!({
         "status": "success",
         "saved_file": path.display().to_string(),
@@ -479,7 +431,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("out.txt");
         std::fs::write(&path, b"old").unwrap();
-        write_file_atomic(&path, b"new").await.unwrap();
+        crate::output_file::write_atomic(&path, b"new", true)
+            .await
+            .unwrap();
         assert_eq!(std::fs::read(&path).unwrap(), b"new");
         let entries: Vec<_> = std::fs::read_dir(dir.path()).unwrap().collect();
         assert_eq!(entries.len(), 1);

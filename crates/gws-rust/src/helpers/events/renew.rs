@@ -60,17 +60,16 @@ fn normalize_subscription(raw: &str) -> Result<String, GwsError> {
 }
 
 fn parse_renew_args(matches: &ArgMatches) -> Result<RenewConfig, GwsError> {
-    let subscription = matches
-        .get_one::<String>("subscription-id")
+    let subscription = crate::args::value::<String>(matches, "subscription-id")?
         .map(|s| normalize_subscription(s))
         .transpose()?;
-    let all = matches.get_flag("all");
+    let all = crate::args::flag(matches, "all")?;
     if subscription.is_none() && !all {
         return Err(GwsError::Validation(
             "Either --subscription-id or --all is required for +renew".to_string(),
         ));
     }
-    let event_types = parse_event_types(matches.get_one::<String>("event-types"));
+    let event_types = parse_event_types(crate::args::value::<String>(matches, "event-types")?);
     if all && event_types.is_empty() {
         return Err(GwsError::Validation(
             "--all requires --event-types".to_string(),
@@ -79,15 +78,14 @@ fn parse_renew_args(matches: &ArgMatches) -> Result<RenewConfig, GwsError> {
     if !event_types.is_empty() {
         scopes_for_event_types(&event_types)?;
     }
-    let within = matches
-        .get_one::<String>("within")
+    let within = crate::args::value::<String>(matches, "within")?
         .ok_or_else(|| GwsError::other("--within has no value"))?;
     Ok(RenewConfig {
         subscription,
         all,
         event_types,
         within_secs: parse_duration(within)?,
-        reactivate: matches.get_flag("reactivate"),
+        reactivate: crate::args::flag(matches, "reactivate")?,
     })
 }
 
@@ -138,6 +136,7 @@ fn filter_subscriptions_to_renew(
             .map_err(|e| GwsError::other(format!("{name}: invalid expireTime '{expire}': {e}")))?
             .timestamp();
         let remaining = expire.saturating_sub(now);
+        // Saturating: a window beyond i64 seconds covers every subscription.
         if remaining < i64::try_from(within_secs).unwrap_or(i64::MAX) {
             result.push(name.to_string());
         }
@@ -242,7 +241,7 @@ async fn run(api: &EventsApi, config: &RenewConfig, now: i64) -> Result<Value, G
 /// Handles the `+renew` command.
 pub(super) async fn handle_renew(matches: &ArgMatches) -> Result<(), GwsError> {
     let config = parse_renew_args(matches)?;
-    if crate::helpers::http::dry_run(matches) {
+    if crate::args::dry_run(matches)? {
         let plan = json!({
             "dry_run": true,
             "action": if config.reactivate { "reactivate" } else { "renew (ttl=0s: maximum lifetime)" },
