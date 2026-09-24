@@ -41,7 +41,7 @@ pub(super) async fn handle_triage(
     let results = search(&api, &params).await?;
     let query = params.query.as_deref().unwrap_or_default();
     if results.messages.is_empty() {
-        eprintln!("{}", no_messages_msg(query));
+        tracing::info!("{}", no_messages_msg(query));
     }
     let output = triage_output(
         query,

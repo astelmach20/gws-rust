@@ -93,8 +93,8 @@ pub(super) fn format_date_for_attribution(raw_date: &str) -> String {
     chrono::DateTime::parse_from_rfc2822(raw_date)
         .map(|dt| html_escape(&dt.format("%a, %b %-d, %Y at %-I:%M\u{202f}%p").to_string()))
         .unwrap_or_else(|e| {
-            eprintln!(
-                "Note: could not parse date as RFC 2822 ({}); using raw value.",
+            tracing::debug!(
+                "could not parse date as RFC 2822 ({}); using raw value.",
                 sanitize_for_terminal(&e.to_string())
             );
             html_escape(raw_date)

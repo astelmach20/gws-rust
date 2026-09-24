@@ -241,7 +241,7 @@ pub(crate) async fn handle(m: &clap::ArgMatches) -> Result<(), GwsError> {
     let account = match flow::fetch_email(&tokens.access_token, &endpoints).await {
         Ok(email) => Some(email),
         Err(e) => {
-            eprintln!("warning: signed in, but could not look up the account email: {e:#}");
+            tracing::warn!("signed in, but could not look up the account email: {e:#}");
             None
         }
     };
@@ -307,8 +307,8 @@ pub(crate) async fn handle(m: &clap::ArgMatches) -> Result<(), GwsError> {
         .filter(|s| !tokens.granted_scopes.contains(s))
         .collect();
     if !not_granted.is_empty() {
-        eprintln!(
-            "warning: these requested scopes were not granted (unchecked on the consent screen \
+        tracing::warn!(
+            "these requested scopes were not granted (unchecked on the consent screen \
              or not allowed for this client): {}",
             not_granted
                 .iter()

@@ -186,7 +186,7 @@ impl Page {
         let count = self.items.len();
         let mut out = json!({ key: self.items, "count": count });
         if self.truncated {
-            eprintln!("note: output limited to {count} {key} by --limit; more results exist");
+            tracing::warn!("output limited to {count} {key} by --limit; more results exist");
             out["truncated"] = json!(true);
             if let Some(token) = self.next_page_token {
                 out["nextPageToken"] = json!(token);

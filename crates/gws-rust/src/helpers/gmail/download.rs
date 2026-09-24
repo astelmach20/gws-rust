@@ -218,7 +218,7 @@ pub(super) async fn handle_attachments(
     let parts = select_parts(&original.parts, include_inline);
     let saved = download(&api, &message_id, &parts, &dir, overwrite).await?;
     if saved.is_empty() {
-        eprintln!(
+        tracing::info!(
             "Message {} has no attachments to download",
             sanitize_for_terminal(&message_id)
         );

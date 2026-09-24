@@ -42,8 +42,8 @@ pub(super) async fn pick(
             }
             Ok(_) => Vec::new(),
             Err(e) => {
-                eprintln!(
-                    "note: could not list enabled APIs for project '{pid}' ({e:#}); showing the \
+                tracing::warn!(
+                    "could not list enabled APIs for project '{pid}' ({e:#}); showing the \
                      basic scope list"
                 );
                 Vec::new()
@@ -170,7 +170,7 @@ fn run_picker(
     ) {
         Ok(r) => r,
         Err(e) => {
-            eprintln!("warning: the scope picker failed ({e}); using the read-only defaults");
+            tracing::warn!("the scope picker failed ({e}); using the read-only defaults");
             return Ok(None);
         }
     };
@@ -179,8 +179,8 @@ fn run_picker(
     };
     let chosen = selected_from_items(&items, &filtered);
     if chosen.len() > MANY_SCOPES_WARNING {
-        eprintln!(
-            "warning: {} scopes selected; unverified OAuth apps may be refused with this many",
+        tracing::warn!(
+            "{} scopes selected; unverified OAuth apps may be refused with this many",
             chosen.len()
         );
     }
@@ -261,11 +261,11 @@ pub(crate) async fn augment_with_discovery_scopes(
                     }
                 }
             }
-            Ok(_) => eprintln!(
-                "warning: service '{svc}' has no {}OAuth scopes usable for a user login",
+            Ok(_) => tracing::warn!(
+                "service '{svc}' has no {}OAuth scopes usable for a user login",
                 if readonly_only { "read-only " } else { "" }
             ),
-            Err(e) => eprintln!("warning: no scopes added for service '{svc}': {e:#}"),
+            Err(e) => tracing::warn!("no scopes added for service '{svc}': {e:#}"),
         }
     }
 }

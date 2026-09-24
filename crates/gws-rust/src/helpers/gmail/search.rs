@@ -197,7 +197,7 @@ pub(super) async fn handle_search(
     let api = super::api::authenticated(&[GMAIL_READONLY_SCOPE]).await?;
     let results = search(&api, &params).await?;
     if let Some(t) = &results.next_page_token {
-        eprintln!(
+        tracing::info!(
             "More results are available; continue with --page-token {}",
             sanitize_for_terminal(t)
         );

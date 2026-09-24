@@ -261,7 +261,7 @@ fn install_output(global: &GlobalArgs, settings: &Settings) -> Result<(), CliErr
         .transpose()?;
     formatter::install_settings(OutputSettings {
         json_style,
-        default_format: settings.format,
+        default_format: effective_format(global, settings),
         columns: global.columns.clone(),
         jq,
         terminal,

@@ -654,8 +654,8 @@ pub(crate) async fn execute_to(
 
         let Some(token) = next else { break };
         if pagination.page_limit != 0 && pages >= pagination.page_limit {
-            eprintln!(
-                "warning: stopped after {pages} page(s) because of --page-limit {}; more results are available \
+            tracing::warn!(
+                "stopped after {pages} page(s) because of --page-limit {}; more results are available \
                  (nextPageToken present). Use --page-limit 0 to fetch everything.",
                 pagination.page_limit
             );

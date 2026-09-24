@@ -339,7 +339,7 @@ pub(crate) async fn sanitize_value_with(
         Ok(result) if result.is_match() => match config.mode {
             SanitizeMode::Block => Ok(Sanitized::Blocked(result)),
             SanitizeMode::Warn => {
-                eprintln!("warning: Model Armor found a match (filterMatchState: MATCH_FOUND)");
+                tracing::warn!("Model Armor found a match (filterMatchState: MATCH_FOUND)");
                 let annotation = serde_json::to_value(&result).map_err(|e| {
                     GwsError::other(format!("Failed to serialize sanitization result: {e}"))
                 })?;
@@ -361,8 +361,8 @@ fn sanitization_failed(
         ))),
         SanitizeMode::Warn => {
             let msg = error.to_string();
-            eprintln!(
-                "warning: Model Armor sanitization failed; output is NOT sanitized: {}",
+            tracing::warn!(
+                "Model Armor sanitization failed; output is NOT sanitized: {}",
                 sanitize_for_terminal(&msg)
             );
             Ok(Sanitized::Pass(annotate(value, json!({ "error": msg }))))
@@ -570,10 +570,7 @@ async fn model_armor_post(matches: &ArgMatches, url: &str, body: &Value) -> Resu
             "Model Armor request failed",
         )
         .await?;
-    let text = serde_json::to_string_pretty(&resp)
-        .map_err(|e| GwsError::other(format!("Failed to serialize response: {e}")))?;
-    println!("{text}");
-    Ok(())
+    crate::helpers::http::print_value(matches, &resp)
 }
 
 #[derive(Debug, PartialEq)]
@@ -628,7 +625,7 @@ pub fn build_create_template_url(config: &CreateTemplateConfig) -> String {
 async fn handle_create_template(matches: &ArgMatches) -> Result<(), GwsError> {
     let config = parse_create_template_args(matches)?;
     let url = build_create_template_url(&config);
-    eprintln!("Creating Model Armor template '{}'", config.template_id);
+    tracing::info!("Creating Model Armor template '{}'", config.template_id);
     model_armor_post(matches, &url, &config.body).await
 }
 

@@ -75,7 +75,7 @@ pub(crate) fn emit_diagnostic(level: &str, event: &str, fields: Value) {
     if let (Some(obj), Value::Object(extra)) = (record.as_object_mut(), fields) {
         obj.extend(extra);
     }
-    eprintln!("{record}");
+    crate::output::eprint_line(&format!("{record}"));
 }
 
 /// Consecutive-failure budget with capped, jittered exponential backoff.

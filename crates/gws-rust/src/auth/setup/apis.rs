@@ -267,10 +267,7 @@ pub async fn fetch_scopes_for_apis(enabled_api_ids: &[String]) -> Vec<Discovered
                     }
                 }
             }
-            Err(e) => eprintln!(
-                "warning: cannot load scopes for {} ({}): {e:#}",
-                api.name, api.id
-            ),
+            Err(e) => tracing::warn!("cannot load scopes for {} ({}): {e:#}", api.name, api.id),
         }
     }
     all.sort_by(|a, b| {

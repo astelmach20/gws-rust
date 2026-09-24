@@ -135,6 +135,12 @@ pub fn format_value(value: &Value, format: &OutputFormat) -> Result<String, GwsE
     render(value, *format, settings(), None)
 }
 
+/// Print `value` to stdout in the process-wide default format (`--format` >
+/// `GWSR_FORMAT` > config), for commands without their own `--format`.
+pub fn emit_default(value: &Value) -> Result<(), GwsError> {
+    crate::output::emit(&format_value(value, &settings().default_format)?)
+}
+
 /// Format one page of a `--page-all` stream.
 ///
 /// JSON pages are always compact (one JSON document per line, NDJSON). CSV and
