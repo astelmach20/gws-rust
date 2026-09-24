@@ -20,10 +20,8 @@
 //! interactive prompts, and integration with Model Armor.
 
 mod auth;
-pub(crate) mod auth_commands;
 mod client;
 mod commands;
-pub(crate) mod credential_store;
 mod discovery;
 mod error;
 mod executor;
@@ -32,15 +30,11 @@ mod fs_util;
 mod generate_skills;
 mod helpers;
 mod logging;
-mod oauth_config;
 mod output;
 mod schema;
 mod services;
-mod setup;
-mod setup_tui;
 mod text;
 mod timezone;
-mod token_storage;
 pub(crate) mod validate;
 
 use error::{GwsError, print_error_json};
@@ -57,7 +51,14 @@ async fn main() {
 }
 
 async fn run() -> Result<(), GwsError> {
-    let args: Vec<String> = std::env::args().collect();
+    // Secrets live in this process's memory: keep them out of core dumps.
+    if let Err(e) = auth::hardening::disable_core_dumps() {
+        eprintln!("warning: could not disable core dumps: {e}");
+    }
+
+    let mut args: Vec<String> = std::env::args().collect();
+    // Global auth flags (--profile, --impersonate) may appear anywhere.
+    auth::apply_global_flags(&mut args)?;
 
     if args.len() < 2 {
         print_usage();
@@ -132,7 +133,7 @@ async fn run() -> Result<(), GwsError> {
     // Handle the `auth` command
     if first_arg == "auth" {
         let auth_args: Vec<String> = args.iter().skip(2).cloned().collect();
-        return auth_commands::handle_auth_command(&auth_args).await;
+        return auth::commands::handle_auth_command(&auth_args).await;
     }
 
     // Parse service name and optional version override
@@ -253,26 +254,25 @@ async fn run() -> Result<(), GwsError> {
     // Build pagination config from flags
     let pagination = parse_pagination_config(matched_args);
 
-    // Select the best scope for the method. Discovery Documents list scopes as
-    // alternatives (any one grants access). We pick the first (broadest) scope
-    // to avoid restrictive scopes like gmail.metadata that block query parameters.
-    let scopes: Vec<&str> = select_scope(&method.scopes).into_iter().collect();
+    // Pick the scope among the method's alternatives that the active profile
+    // was actually granted (see auth::scopes::select_for_method).
+    let scope_list = auth::scopes_for_method(&method.scopes, &method.http_method)
+        .map_err(|e| GwsError::Auth(format!("{e:#}")))?;
+    let scopes: Vec<&str> = scope_list.iter().map(String::as_str).collect();
 
-    // Authenticate: try OAuth, fail with error if credentials exist but are broken
+    // Authenticate. Only a complete absence of credentials falls back to an
+    // unauthenticated request; every other failure is reported.
     let (token, auth_method) = match auth::get_token(&scopes).await {
         Ok(t) => (Some(t), executor::AuthMethod::OAuth),
-        Err(e) => {
-            // If credentials were found but failed (e.g. decryption error, invalid token),
-            // propagate the error instead of silently falling back to unauthenticated.
-            // Only fall back to None if no credentials exist at all.
-            let err_msg = format!("{e:#}");
-            // NB: matches the bail!() message in auth::load_credentials_inner
-            if err_msg.starts_with("No credentials found") {
-                (None, executor::AuthMethod::None)
-            } else {
-                return Err(GwsError::Auth(format!("Authentication failed: {err_msg}")));
-            }
+        Err(e)
+            if matches!(
+                e.downcast_ref::<auth::AuthError>(),
+                Some(auth::AuthError::NoCredentials)
+            ) =>
+        {
+            (None, executor::AuthMethod::None)
         }
+        Err(e) => return Err(GwsError::Auth(format!("Authentication failed: {e:#}"))),
     };
 
     // Execute
@@ -294,17 +294,6 @@ async fn run() -> Result<(), GwsError> {
     )
     .await
     .map(|_| ())
-}
-
-/// Select the best scope from a method's scope list.
-///
-/// Discovery Documents list method scopes as alternatives — any single scope
-/// grants access. The first scope is typically the broadest. Using all scopes
-/// causes issues when restrictive scopes (e.g., `gmail.metadata`) are included,
-/// as the API enforces that scope's restrictions even when broader scopes are
-/// also present.
-pub(crate) fn select_scope(scopes: &[String]) -> Option<&str> {
-    scopes.first().map(|s| s.as_str())
 }
 
 fn parse_pagination_config(matches: &clap::ArgMatches) -> executor::PaginationConfig {
@@ -695,31 +684,5 @@ mod tests {
         ];
         let filtered = filter_args_for_subcommand(&args, "drive");
         assert_eq!(filtered, vec!["gwsr", "files", "list", "--format", "table"]);
-    }
-
-    #[test]
-    fn test_select_scope_picks_first() {
-        let scopes = vec![
-            "https://mail.google.com/".to_string(),
-            "https://www.googleapis.com/auth/gmail.metadata".to_string(),
-            "https://www.googleapis.com/auth/gmail.modify".to_string(),
-            "https://www.googleapis.com/auth/gmail.readonly".to_string(),
-        ];
-        assert_eq!(select_scope(&scopes), Some("https://mail.google.com/"));
-    }
-
-    #[test]
-    fn test_select_scope_single() {
-        let scopes = vec!["https://www.googleapis.com/auth/drive".to_string()];
-        assert_eq!(
-            select_scope(&scopes),
-            Some("https://www.googleapis.com/auth/drive")
-        );
-    }
-
-    #[test]
-    fn test_select_scope_empty() {
-        let scopes: Vec<String> = vec![];
-        assert_eq!(select_scope(&scopes), None);
     }
 }

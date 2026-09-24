@@ -28,6 +28,6 @@ pub async fn fetch_discovery_document(
     service: &str,
     version: &str,
 ) -> anyhow::Result<RestDescription> {
-    let cache_dir = crate::auth_commands::config_dir().join("cache");
+    let cache_dir = crate::auth::try_config_dir()?.join("cache");
     gws_rust_core::discovery::fetch_discovery_document(service, version, Some(&cache_dir)).await
 }
