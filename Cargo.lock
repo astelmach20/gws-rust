@@ -1412,7 +1412,6 @@ dependencies = [
  "dirs",
  "futures-util",
  "gws-rust-core",
- "httpdate",
  "iana-time-zone",
  "keyring",
  "mail-builder",
