@@ -43,7 +43,8 @@ pub(crate) fn other_err(e: impl Into<anyhow::Error>) -> GwsError {
 }
 
 /// Percent-encode a single path segment per RFC 3986, leaving the unreserved
-/// characters (`A-Z a-z 0-9 - . _ ~`) intact.
+/// characters (`A-Z a-z 0-9 - . _ ~`) and `@` (a legal `pchar`, common in
+/// calendar IDs and `@default`) intact.
 ///
 /// Google IDs routinely contain `-` and `_` (Apps Script IDs, Drive IDs);
 /// some endpoints (e.g. `scripts.run`, upstream #842) reject them when they
@@ -54,7 +55,8 @@ pub(crate) fn encode_segment(s: &str) -> String {
         .remove(b'-')
         .remove(b'.')
         .remove(b'_')
-        .remove(b'~');
+        .remove(b'~')
+        .remove(b'@');
     // "." and ".." are dot-segments and must never be sent verbatim.
     if s == "." || s == ".." {
         return s.replace('.', "%2E");
@@ -525,6 +527,17 @@ impl Api {
             }
         }
         print_value(matches, &value)
+    }
+
+    /// Screen text through Model Armor (when configured) before it is written
+    /// somewhere other than stdout.
+    pub async fn screen_text(&self, text: &str) -> Result<(), GwsError> {
+        if !self.dry_run
+            && let Some(template) = self.sanitize.template.as_deref()
+        {
+            screen(template, &self.sanitize.mode, text).await?;
+        }
+        Ok(())
     }
 
     /// Output plain text (e.g. a rendered document), screened like [`Api::emit`].
@@ -1027,6 +1040,7 @@ mod tests {
         assert_eq!(encode_segment("a/b?c#d e"), "a%2Fb%3Fc%23d%20e");
         assert_eq!(encode_segment(".."), "%2E%2E");
         assert_eq!(encode_segment("a:b"), "a%3Ab");
+        assert_eq!(encode_segment("ann@example.com"), "ann@example.com");
     }
 
     #[test]

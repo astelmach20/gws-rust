@@ -95,20 +95,36 @@ TIPS:
                 .arg(
                     Arg::new("body-format")
                         .long("body-format")
-                        .help("Output: text, markdown, or json (the raw Docs API document)")
-                        .value_parser(["text", "markdown", "json"])
+                        .help("How to render the body: markdown, text, or raw (the Docs API document JSON)")
+                        .value_parser(["markdown", "text", "raw"])
                         .default_value("markdown")
                         .value_name("FORMAT"),
+                )
+                .arg(
+                    Arg::new("output")
+                        .long("output")
+                        .short('o')
+                        .help("Write the rendered body to this file (under the current directory), or '-' for raw text on stdout")
+                        .value_name("PATH"),
+                )
+                .arg(
+                    Arg::new("overwrite")
+                        .long("overwrite")
+                        .help("Replace an existing --output file")
+                        .requires("output")
+                        .action(ArgAction::SetTrue),
                 )
                 .after_help(
                     "\
 EXAMPLES:
   gwsr docs +read --document-id DOC_ID
-  gwsr docs +read --document-id DOC_ID --body-format text > doc.txt
+  gwsr docs +read --document-id DOC_ID --body-format text --output doc.txt
+  gwsr docs +read --document-id DOC_ID --output - | less
 
 TIPS:
-  Read-only. Headings, lists, bold/italic/strikethrough, inline code, links
-  and tables are rendered; images appear as [image] placeholders.
+  Read-only. Prints JSON {documentId, title, bodyFormat, body} by default.
+  Headings, lists, bold/italic/strikethrough, inline code, links and tables
+  are rendered; images appear as [image] placeholders.
   Only the first tab of multi-tab documents is read.",
                 ),
         )
@@ -196,12 +212,41 @@ TIPS:
                 "+read" => {
                     let api = Api::new(doc, &[SCOPE_DOCS_READONLY], dry, sanitize).await?;
                     let format = required(m, "body-format")?;
-                    let document = get_document(&api, required(m, "document-id")?).await?;
-                    if api.is_dry_run() || format == "json" {
+                    let target = optional(m, "output")
+                        .map(|o| http::OutputTarget::parse(o, flag(m, "overwrite")))
+                        .transpose()?;
+                    if format == "raw" && target.is_some() {
+                        return Err(GwsError::Validation(
+                            "--output needs --body-format markdown or text".into(),
+                        ));
+                    }
+                    let id = required(m, "document-id")?;
+                    let document = get_document(&api, id).await?;
+                    if api.is_dry_run() || format == "raw" {
                         api.emit(m, &document).await?;
-                    } else {
-                        let text = reader::render(&document, format == "markdown");
-                        api.emit_text(m, text.trim_end_matches('\n')).await?;
+                        return Ok(true);
+                    }
+                    let body = reader::render(&document, format == "markdown");
+                    let body = body.trim_end_matches('\n');
+                    match target {
+                        None => {
+                            let v = json!({
+                                "documentId": id,
+                                "title": document.get("title"),
+                                "bodyFormat": format,
+                                "body": body,
+                            });
+                            api.emit(m, &v).await?;
+                        }
+                        Some(http::OutputTarget::Stdout) => api.emit_text(m, body).await?,
+                        Some(http::OutputTarget::File { path, overwrite }) => {
+                            let mut data = body.to_string();
+                            data.push('\n');
+                            api.screen_text(&data).await?;
+                            http::write_file_atomic(&path, data.as_bytes(), overwrite)?;
+                            let v = json!({"documentId": id, "output": path.display().to_string(), "bytes": data.len()});
+                            api.emit(m, &v).await?;
+                        }
                     }
                 }
                 "+write" => {

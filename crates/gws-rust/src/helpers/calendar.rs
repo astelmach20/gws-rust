@@ -1188,7 +1188,7 @@ mod tests {
     async fn insert_request_shape() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
-            .and(path("/calendars/team%40x.com/events"))
+            .and(path("/calendars/team@x.com/events"))
             .and(query_param("sendUpdates", "all"))
             .and(query_param("conferenceDataVersion", "1"))
             .and(body_partial_json(json!({"summary": "S"})))
@@ -1229,7 +1229,7 @@ mod tests {
             .mount(&server)
             .await;
         Mock::given(method("GET"))
-            .and(path("/calendars/a%40x/events"))
+            .and(path("/calendars/a@x/events"))
             .and(query_param("pageToken", "p2"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({"items": [
                 {"id": "2", "summary": "Second", "start": {"dateTime": "2030-01-01T12:00:00Z"}}
@@ -1237,7 +1237,7 @@ mod tests {
             .mount(&server)
             .await;
         Mock::given(method("GET"))
-            .and(path("/calendars/a%40x/events"))
+            .and(path("/calendars/a@x/events"))
             .and(query_param("timeZone", "UTC"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
                 "items": [{"id": "1", "summary": "First", "start": {"dateTime": "2030-01-01T09:00:00Z"}}],
@@ -1247,7 +1247,7 @@ mod tests {
             .mount(&server)
             .await;
         Mock::given(method("GET"))
-            .and(path("/calendars/b%40x/events"))
+            .and(path("/calendars/b@x/events"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({"items": [
                 {"id": "3", "summary": "All day", "start": {"date": "2030-01-01"}}
             ]})))
@@ -1292,7 +1292,7 @@ mod tests {
             .mount(&server)
             .await;
         Mock::given(method("GET"))
-            .and(path("/calendars/a%40x/events"))
+            .and(path("/calendars/a@x/events"))
             .respond_with(
                 ResponseTemplate::new(403)
                     .set_body_json(json!({"error": {"code": 403, "message": "denied"}})),

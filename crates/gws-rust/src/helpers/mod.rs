@@ -16,17 +16,25 @@ use crate::error::GwsError;
 use clap::{ArgMatches, Command};
 use std::future::Future;
 use std::pin::Pin;
+pub mod admin;
 pub mod calendar;
 pub mod chat;
+pub mod classroom;
 pub(crate) mod confirm;
 pub mod docs;
 pub mod drive;
 pub mod events;
+pub mod forms;
 pub mod gmail;
 pub(crate) mod http;
+pub mod keep;
+pub mod meet;
 pub mod modelarmor;
+pub mod people;
 pub mod script;
 pub mod sheets;
+pub mod slides;
+pub mod tasks;
 pub mod workflows;
 
 /// Base URL for the Google Cloud Pub/Sub v1 API.
@@ -124,9 +132,120 @@ pub fn get_helper(service: &str) -> Option<Box<dyn Helper>> {
         "drive" => Some(Box::new(drive::DriveHelper)),
         "calendar" => Some(Box::new(calendar::CalendarHelper)),
         "script" | "apps-script" => Some(Box::new(script::ScriptHelper)),
+        "admin" => Some(Box::new(admin::AdminHelper)),
+        "tasks" => Some(Box::new(tasks::TasksHelper)),
+        "people" => Some(Box::new(people::PeopleHelper)),
+        "forms" => Some(Box::new(forms::FormsHelper)),
+        "meet" => Some(Box::new(meet::MeetHelper)),
+        "slides" => Some(Box::new(slides::SlidesHelper)),
+        "classroom" => Some(Box::new(classroom::ClassroomHelper)),
+        "keep" => Some(Box::new(keep::KeepHelper)),
         "workspaceevents" => Some(Box::new(events::EventsHelper)),
         "modelarmor" => Some(Box::new(modelarmor::ModelArmorHelper)),
         "workflow" => Some(Box::new(workflows::WorkflowHelper)),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::*;
+
+    const APP_HELPERS: &[(&str, &str)] = &[
+        ("drive", "v3"),
+        ("docs", "v1"),
+        ("sheets", "v4"),
+        ("calendar", "v3"),
+        ("script", "v1"),
+        ("chat", "v1"),
+        ("admin", "directory_v1"),
+        ("admin", "reports_v1"),
+        ("tasks", "v1"),
+        ("people", "v1"),
+        ("forms", "v1"),
+        ("meet", "v2"),
+        ("slides", "v1"),
+        ("classroom", "v1"),
+        ("keep", "v1"),
+    ];
+
+    fn doc(name: &str, version: &str) -> crate::discovery::RestDescription {
+        crate::discovery::RestDescription {
+            name: name.into(),
+            version: version.into(),
+            root_url: "https://example.googleapis.com/".into(),
+            ..Default::default()
+        }
+    }
+
+    /// Helpers must decline (not error on) Discovery-generated subcommands so
+    /// the generic executor can handle them.
+    #[tokio::test]
+    async fn helpers_decline_non_helper_subcommands() {
+        for (name, version) in APP_HELPERS {
+            let helper = get_helper(name).expect("helper registered");
+            let d = doc(name, version);
+            let cmd = helper
+                .inject_commands(Command::new("gwsr"), &d)
+                .subcommand(Command::new("files").subcommand(Command::new("list")));
+            let m = cmd.try_get_matches_from(["gwsr", "files", "list"]).unwrap();
+            let handled = helper
+                .handle(&d, &m, &modelarmor::SanitizeConfig::default())
+                .await
+                .unwrap();
+            assert!(!handled, "{name} {version}");
+        }
+    }
+
+    /// Every helper command follows the flag conventions: IDs are `--<noun>-id`,
+    /// there are no positional arguments, and every flag has help text.
+    #[test]
+    fn helper_flags_follow_conventions() {
+        for (name, version) in APP_HELPERS {
+            let helper = get_helper(name).expect("helper registered");
+            let cmd = helper.inject_commands(Command::new("gwsr"), &doc(name, version));
+            let subs: Vec<_> = cmd.get_subcommands().collect();
+            assert!(!subs.is_empty(), "{name} {version} injects no helpers");
+            for sub in subs {
+                assert!(sub.get_name().starts_with('+'));
+                let about = sub.get_about().map(|a| a.to_string()).unwrap_or_default();
+                assert!(
+                    about.starts_with("[Helper] "),
+                    "{}: {about}",
+                    sub.get_name()
+                );
+                let first = about.trim_start_matches("[Helper] ").chars().next();
+                assert!(first.is_some_and(char::is_uppercase), "{}", sub.get_name());
+                for arg in sub.get_arguments() {
+                    assert!(
+                        arg.get_long().is_some(),
+                        "{} has a positional arg",
+                        sub.get_name()
+                    );
+                    assert!(
+                        arg.get_help().is_some(),
+                        "{} --{:?} lacks help",
+                        sub.get_name(),
+                        arg.get_long()
+                    );
+                    let long = arg.get_long().unwrap_or_default();
+                    assert!(
+                        !matches!(
+                            long,
+                            "document"
+                                | "spreadsheet"
+                                | "script"
+                                | "space"
+                                | "calendar"
+                                | "parent"
+                                | "id"
+                        ),
+                        "{} uses legacy flag --{long}",
+                        sub.get_name()
+                    );
+                }
+            }
+        }
     }
 }
