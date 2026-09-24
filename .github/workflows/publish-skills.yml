@@ -1,19 +1,16 @@
-name: Publish OpenClaw Skills
+name: Publish skills to ClawHub
 
+# Opt-in: set the repository variable CLAWHUB_PUBLISH=true and add the CLAWHUB_TOKEN secret to
+# the `clawhub` environment. Publishing never runs on pull requests.
 on:
   push:
     branches: [main]
     paths:
       - "skills/**"
-      - ".github/workflows/publish-skills.yml"
-  pull_request:
-    branches: [main]
-    paths:
-      - "skills/**"
-      - ".github/workflows/publish-skills.yml"
-  schedule:
-    - cron: "0 * * * *" # Hourly, to drip-publish past rate limits
+      - .github/workflows/publish-skills.yml
   workflow_dispatch:
+
+permissions: {}
 
 concurrency:
   group: ${{ github.workflow }}
@@ -21,35 +18,33 @@ concurrency:
 
 jobs:
   publish:
-    # Skip fork PRs — secrets (CLAWHUB_TOKEN) are not available
-    if: github.event.pull_request.head.repo.full_name == github.repository || github.event_name != 'pull_request'
-    runs-on: ubuntu-latest
+    name: Publish
+    if: vars.CLAWHUB_PUBLISH == 'true'
+    runs-on: ubuntu-24.04
+    environment: clawhub
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          node-version: "20"
-
-      - name: Install ClawHub CLI
-        run: npm i -g clawhub@0.7.0
-
-      - name: Authenticate ClawHub
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          package-manager-cache: false
+      # Exact version, no install scripts; a lockfile for one global CLI adds nothing here.
+      - run: npm install --global --ignore-scripts clawhub@0.23.3 # zizmor: ignore[adhoc-packages]
+      - name: Authenticate
         env:
           CLAWHUB_TOKEN: ${{ secrets.CLAWHUB_TOKEN }}
         run: |
-          if [ -z "$CLAWHUB_TOKEN" ]; then
-            echo "::error::CLAWHUB_TOKEN secret is not set"
+          if [[ -z "$CLAWHUB_TOKEN" ]]; then
+            echo "::error::CLAWHUB_PUBLISH=true but the CLAWHUB_TOKEN secret is not set in the clawhub environment."
             exit 1
           fi
-          clawhub login --token "$CLAWHUB_TOKEN"
-
-      - name: Publish skills
-        run: |
-          if [ "${{ github.event_name }}" = "pull_request" ]; then
-            clawhub sync --root skills --all --dry-run
-          else
-            clawhub sync --root skills --all
-          fi
+          clawhub login --token "$CLAWHUB_TOKEN" --no-browser
+      - run: >-
+          clawhub sync --root skills --all
+          --source-repo "${GITHUB_REPOSITORY}"
+          --source-commit "${GITHUB_SHA}"
+          --source-ref "${GITHUB_REF}"

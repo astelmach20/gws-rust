@@ -1,16 +1,16 @@
-## Description
+## What and why
 
-Please include a summary of the change and which issue is fixed. If adding a new feature or command, please include the output of running it with `--dry-run` to prove the JSON request body matches the Discovery Document schema.
+<!-- What does this change, and which issue or audit item does it address? -->
 
-**Dry Run Output:**
-```json
-// Paste --dry-run output here if applicable
-```
+## How it was tested
 
-## Checklist:
+<!-- Commands run, new tests added. For a new command or flag, paste `--dry-run` output showing
+the request matches the Discovery document. Never paste real tokens or personal data. -->
 
-- [ ] My code follows the `AGENTS.md` guidelines (no generated `google-*` crates).
-- [ ] I have run `cargo fmt --all` to format the code perfectly.
-- [ ] I have run `cargo clippy -- -D warnings` and resolved all warnings.
-- [ ] I have added tests that prove my fix is effective or that my feature works.
-- [ ] I have provided a Changeset file (e.g. via `pnpx changeset`) to document my changes.
+## Checklist
+
+- [ ] `just ci` passes locally (fmt, clippy `--all-targets --all-features`, tests, cargo-deny, cargo-audit).
+- [ ] New behavior has focused tests (unit, or integration with wiremock/assert_cmd).
+- [ ] Errors are surfaced with context; nothing fails silently.
+- [ ] No generated `google-*` API crates were added (the CLI builds commands from Discovery at runtime).
+- [ ] A changeset is included (`pnpm changeset`) if Rust code or Cargo manifests changed.

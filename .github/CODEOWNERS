@@ -1,10 +1,16 @@
-# Codeowners
+# Code owners for astelmach20/gws-rust. With the `main` ruleset requiring code-owner review,
+# every change needs the maintainer's approval; the explicit entries below document the
+# security-sensitive paths that must never be exempted if more owners are added later.
+*                    @astelmach20
 
-# Core engine code strictly requires your review
-# Isolates agents to `skills/` or `src/helpers/` unless absolutely necessary
-/src/main.rs @jpoehnelt
-/src/executor.rs @jpoehnelt
-/src/discovery.rs @jpoehnelt
-/src/commands.rs @jpoehnelt
-/src/auth.rs @jpoehnelt
-/src/schema.rs @jpoehnelt
+/.github/            @astelmach20
+/crates/             @astelmach20
+/npm/                @astelmach20
+/scripts/            @astelmach20
+/Cargo.toml          @astelmach20
+/Cargo.lock          @astelmach20
+/deny.toml           @astelmach20
+/rust-toolchain.toml @astelmach20
+/flake.nix           @astelmach20
+/flake.lock          @astelmach20
+/SECURITY.md         @astelmach20

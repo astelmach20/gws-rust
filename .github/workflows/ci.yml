@@ -1,429 +1,303 @@
-# Copyright 2026 Google LLC
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-
 name: CI
 
 on:
   push:
     branches: [main]
   pull_request:
-    branches: [main]
+  merge_group:
+  workflow_dispatch:
+
+permissions: {}
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   CARGO_TERM_COLOR: always
-  SCCACHE_GHA_ENABLED: "true"
-  SCCACHE_IGNORE_SERVER_IO_ERROR: "true"
+  CARGO_INCREMENTAL: "0"
+  RUST_BACKTRACE: short
 
 jobs:
-  changes:
-    name: Detect Changes
-    runs-on: ubuntu-latest
-    outputs:
-      rust: ${{ steps.filter.outputs.rust }}
-      nix: ${{ steps.filter.outputs.nix }}
-      skills: ${{ steps.filter.outputs.skills }}
+  fmt:
+    name: Format
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-      - uses: dorny/paths-filter@de90cc6fb38fc0963ad72b210f1f284cd68cea36 # v3
-        id: filter
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          filters: |
-            rust:
-              - '**/*.rs'
-              - 'Cargo.toml'
-              - 'crates/*/Cargo.toml'
-              - 'Cargo.lock'
-              - 'build.rs'
-              - '.cargo/**'
-            nix:
-              - 'flake.nix'
-              - 'flake.lock'
-            skills:
-              - 'skills/**'
+          persist-credentials: false
+      - uses: ./.github/actions/setup-rust
+        with:
+          components: rustfmt
+      - run: cargo fmt --all -- --check
+
+  clippy:
+    name: Clippy
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-rust
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 
   test:
-    name: Test
-    needs: changes
-    if: needs.changes.outputs.rust == 'true' || github.event_name == 'push'
+    name: Test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
     strategy:
+      fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [ubuntu-24.04, macos-15, windows-2025]
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-rust
+        with:
+          components: ""
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      # Includes unit, integration and doc tests. (--all-targets would skip doc tests.)
+      - run: cargo test --workspace --all-features --locked
 
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
-
-      - name: Setup sccache
-        id: sccache
-        uses: mozilla-actions/sccache-action@2df7dbab909c49ab7d3382d05da469f3f975c2d6 # v0.0.7
-        continue-on-error: true
-
-      - name: Enable sccache
-        if: steps.sccache.outcome == 'success'
-        shell: bash
+  msrv:
+    name: MSRV
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Read rust-version from Cargo.toml
+        id: msrv
         run: |
-          if sccache --start-server 2>/dev/null; then
-            echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
-          else
-            echo "::warning::sccache server failed to start, building without cache"
+          msrv="$(sed -nE 's/^rust-version[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/p' Cargo.toml)"
+          if [[ -z "$msrv" ]]; then
+            echo "::error file=Cargo.toml::[workspace.package] rust-version is missing"
+            exit 1
           fi
-
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@ad397744b0d591a723ab90405b7247fac0e6b8db # v2
+          echo "version=${msrv}" >> "$GITHUB_OUTPUT"
+      - uses: ./.github/actions/setup-rust
         with:
-          key: test-${{ matrix.os }}
+          toolchain: ${{ steps.msrv.outputs.version }}
+          components: ""
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - run: cargo check --workspace --all-targets --all-features --locked
 
-      - name: Run tests
-        run: cargo test --workspace --verbose
-
-  nix:
-    name: Nix
-    needs: changes
-    if: needs.changes.outputs.rust == 'true' || needs.changes.outputs.nix == 'true' || github.event_name == 'push'
-    runs-on: ubuntu-latest
+  beta:
+    name: Beta toolchain (allowed to fail)
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    # Early warning for upcoming compiler/clippy changes. Never blocks a merge, but a failure is
+    # reported as a warning annotation and in the job summary.
+    continue-on-error: true
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-      - name: Install Nix
-        uses: DeterminateSystems/nix-installer-action@d96bc962e61b3049ce8128d03d57a1144fa96539 # main
-      - name: Magic Nix Cache
-        uses: DeterminateSystems/magic-nix-cache-action@cec65ff6f104850203b152861d3f9e5f1747885d # main
-      - name: Check flake
-        run: nix flake check
-      - name: Build flake
-        run: nix build .
-
-  lint:
-    name: Lint
-    needs: changes
-    if: needs.changes.outputs.rust == 'true' || github.event_name == 'push'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          components: rustfmt, clippy
-
-      - name: Setup sccache
-        id: sccache
-        uses: mozilla-actions/sccache-action@2df7dbab909c49ab7d3382d05da469f3f975c2d6 # v0.0.7
-        continue-on-error: true
-
-      - name: Enable sccache
-        if: steps.sccache.outcome == 'success'
-        shell: bash
-        run: |
-          if sccache --start-server 2>/dev/null; then
-            echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
-          else
-            echo "::warning::sccache server failed to start, building without cache"
-          fi
-
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@ad397744b0d591a723ab90405b7247fac0e6b8db # v2
+          persist-credentials: false
+      - uses: ./.github/actions/setup-rust
         with:
-          key: lint
-
-      - name: Check formatting
+          toolchain: beta
+          components: clippy
+      - id: beta
         run: |
-          if ! cargo fmt --all -- --check; then
-            echo "::error::Cargo fmt failed. Please run 'cargo fmt --all' locally and commit the changes."
+          set +e
+          cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+          clippy=$?
+          cargo test --workspace --all-features --locked
+          test=$?
+          {
+            echo "## Beta toolchain"
+            echo "- clippy: exit ${clippy}"
+            echo "- test: exit ${test}"
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [[ $clippy -ne 0 || $test -ne 0 ]]; then
+            echo "::warning title=Beta toolchain::clippy exit ${clippy}, test exit ${test}. Fix before the next stable release."
             exit 1
           fi
 
-      - name: Clippy
-        run: cargo clippy --workspace -- -D warnings
-
-  deny:
-    name: Cargo Deny
-    needs: changes
-    if: needs.changes.outputs.rust == 'true' || github.event_name == 'push'
-    runs-on: ubuntu-latest
+  docs:
+    name: Rustdoc
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    env:
+      RUSTDOCFLAGS: -D warnings
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-
-      - name: Cargo deny
-        uses: EmbarkStudios/cargo-deny-action@3fd3802e88374d3fe9159b834c7714ec57d6c979 # v2.0.15
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          command: check
+          persist-credentials: false
+      - uses: ./.github/actions/setup-rust
+        with:
+          components: ""
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - run: cargo doc --workspace --all-features --no-deps --locked
 
+  machete:
+    name: Unused dependencies
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: taiki-e/install-action@9983c65e42da123ff25d1f78505eb6de315aa172 # v2.87.20
+        with:
+          tool: cargo-machete@0.9.2
+      - run: cargo machete
+
+  coverage:
+    name: Coverage
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-rust
+        with:
+          components: llvm-tools
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - uses: taiki-e/install-action@9983c65e42da123ff25d1f78505eb6de315aa172 # v2.87.20
+        with:
+          tool: cargo-llvm-cov@0.9.1
+      # Fails if line coverage drops below the floor in scripts/coverage.sh.
+      - run: scripts/coverage.sh --lcov
+      - name: Coverage summary
+        run: |
+          {
+            echo '## Coverage'
+            echo '```'
+            cargo llvm-cov report --summary-only | tail -n 1
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: lcov
+          path: lcov.info
+          retention-days: 14
+          if-no-files-found: error
 
   skills:
-    name: Verify Skills
-    needs: changes
-    if: needs.changes.outputs.rust == 'true' || github.event_name == 'push'
-    runs-on: ubuntu-latest
+    name: Skills
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
-
-      - name: Setup sccache
-        id: sccache
-        uses: mozilla-actions/sccache-action@2df7dbab909c49ab7d3382d05da469f3f975c2d6 # v0.0.7
-        continue-on-error: true
-
-      - name: Enable sccache
-        if: steps.sccache.outcome == 'success'
-        shell: bash
-        run: |
-          if sccache --start-server 2>/dev/null; then
-            echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
-          else
-            echo "::warning::sccache server failed to start, building without cache"
-          fi
-
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@ad397744b0d591a723ab90405b7247fac0e6b8db # v2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          key: skills
-
-      - name: Regenerate skills
-        run: cargo run -- generate-skills --output-dir skills
-
-      - name: Check for drift
-        run: |
-          if ! git diff --exit-code skills/; then
-            echo "::warning::Skills are out of date — the hourly auto-sync PR will fix this automatically."
-          fi
-
-  lint-skills:
-    name: Lint Skills
-    needs: changes
-    if: needs.changes.outputs.skills == 'true' || github.event_name == 'push'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-
-
-      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5
-
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          enable-cache: false
       - name: Validate skills
         run: |
           failed=0
           for skill_dir in skills/*/; do
-            if ! uvx --from skills-ref@0.1.1 agentskills validate "$skill_dir"; then
+            if ! uvx --from 'skills-ref==0.1.1' agentskills validate "$skill_dir"; then
+              echo "::error file=${skill_dir}SKILL.md::skill failed validation"
               failed=1
             fi
           done
-          if [ "$failed" -ne 0 ]; then
-            echo "::error::One or more skills failed validation."
-            exit 1
+          exit "$failed"
+      - uses: ./.github/actions/setup-rust
+        with:
+          components: ""
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      # Generated skills also change when Google updates a Discovery document, which a PR cannot
+      # control, so drift is a warning here; the scheduled Generate Skills workflow opens a PR.
+      - name: Check generated skills are current
+        run: |
+          cargo run --locked -- generate-skills --output-dir skills
+          if ! git diff --quiet -- skills/; then
+            git diff --stat -- skills/
+            echo "::warning title=Skills drift::Generated skills differ from the committed ones. Run 'just skills' and commit the result if your change caused this."
           fi
 
-  build-linux:
-    name: Build (Linux x86_64)
-    needs: changes
-    if: needs.changes.outputs.rust == 'true' || github.event_name == 'push'
-    runs-on: ubuntu-latest
+  js:
+    name: npm shim and release scripts
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          targets: x86_64-unknown-linux-gnu
-
-      - name: Setup sccache
-        id: sccache
-        uses: mozilla-actions/sccache-action@2df7dbab909c49ab7d3382d05da469f3f975c2d6 # v0.0.7
-        continue-on-error: true
-
-      - name: Enable sccache
-        if: steps.sccache.outcome == 'success'
-        shell: bash
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          package-manager-cache: false
+      - run: shellcheck --severity=style scripts/*.sh
+      - run: node --test "npm/test/*.test.mjs" "scripts/test/*.test.mjs"
+      - name: Check the npm package contents
+        working-directory: npm
         run: |
-          if sccache --start-server 2>/dev/null; then
-            echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
-          else
-            echo "::warning::sccache server failed to start, building without cache"
-          fi
+          npm pack --dry-run --json > "$RUNNER_TEMP/pack.json"
+          # shellcheck disable=SC2016 # the single-quoted program is JavaScript
+          node -e '
+            const [pack] = require(process.argv[1]);
+            const files = pack.files.map((f) => f.path).sort();
+            for (const required of ["bin/gwsr.js", "lib/platform.js", "platforms.json", "package.json"]) {
+              if (!files.includes(required)) throw new Error(`npm package is missing ${required}: ${files}`);
+            }
+            if (files.some((f) => f.startsWith("test/") || f.startsWith("scripts/"))) {
+              throw new Error(`npm package must not ship tests or scripts: ${files}`);
+            }
+            console.log(files.join("\n"));
+          ' "$RUNNER_TEMP/pack.json"
 
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@ad397744b0d591a723ab90405b7247fac0e6b8db # v2
-        with:
-          key: build-x86_64-unknown-linux-gnu
-          cache-targets: "false"
-
-      - name: Build
-        run: cargo build --release --target x86_64-unknown-linux-gnu
-
-      - name: Upload binary
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: gwsr-linux-x86_64
-          path: target/x86_64-unknown-linux-gnu/release/gwsr
-          retention-days: 1
-
-  build:
-    name: Build
-    needs: [smoketest, changes]
-    if: |
-      always() && !cancelled() && !failure()
-      && (needs.changes.outputs.rust == 'true' || github.event_name == 'push')
-    runs-on: ${{ matrix.os }}
-    strategy:
-      matrix:
-        include:
-          - os: ubuntu-latest
-            target: aarch64-unknown-linux-gnu
-          - os: macos-latest
-            target: x86_64-apple-darwin
-          - os: macos-latest
-            target: aarch64-apple-darwin
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
+  policy:
+    name: PR policy
+    if: github.event_name == 'pull_request' && github.event.pull_request.user.login != 'dependabot[bot]'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          targets: ${{ matrix.target }}
+          fetch-depth: 0
+          persist-credentials: false
+      - env:
+          BASE_REF: ${{ github.base_ref }}
+        run: scripts/check-changeset.sh "origin/${BASE_REF}"
 
-      - name: Setup sccache
-        id: sccache
-        uses: mozilla-actions/sccache-action@2df7dbab909c49ab7d3382d05da469f3f975c2d6 # v0.0.7
-        continue-on-error: true
-
-      - name: Enable sccache
-        if: steps.sccache.outcome == 'success'
-        shell: bash
-        run: |
-          if sccache --start-server 2>/dev/null; then
-            echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
-          else
-            echo "::warning::sccache server failed to start, building without cache"
-          fi
-
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@ad397744b0d591a723ab90405b7247fac0e6b8db # v2
-        with:
-          key: build-${{ matrix.target }}
-          cache-targets: "false"
-
-      - name: Install cross-compilation tools
-        if: matrix.target == 'aarch64-unknown-linux-gnu'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y gcc-aarch64-linux-gnu
-
-      - name: Disable Windows Defender scanning for cargo
-        if: runner.os == 'Windows'
-        run: |
-          Add-MpPreference -ExclusionPath "$env:USERPROFILE\.cargo"
-          Add-MpPreference -ExclusionPath "$env:USERPROFILE\.rustup"
-          Add-MpPreference -ExclusionPath "${{ github.workspace }}\target"
-
-      - name: Build
-        run: cargo build --release --target ${{ matrix.target }}
-        env:
-          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
-
-  smoketest:
-    name: API Smoketest
-    needs: build-linux
-    if: github.event.pull_request.head.repo.full_name == github.repository || github.event_name != 'pull_request'
-    runs-on: ubuntu-latest
+  # Single required check for branch protection: it passes only when every gating job passed.
+  ci-ok:
+    name: CI OK
+    if: always()
+    needs: [fmt, clippy, test, msrv, docs, machete, coverage, skills, js, policy]
+    runs-on: ubuntu-24.04
+    permissions: {}
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-
-      - name: Download binary
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
-        with:
-          name: gwsr-linux-x86_64
-          path: ./bin
-
-      - name: Make binary executable
-        run: chmod +x ./bin/gwsr
-
-      - name: Decode credentials
-        env:
-          GOOGLE_CREDENTIALS_JSON: ${{ secrets.GOOGLE_CREDENTIALS_JSON }}
+      - env:
+          RESULTS: ${{ toJSON(needs.*.result) }}
         run: |
-          if [ -z "$GOOGLE_CREDENTIALS_JSON" ]; then
-            echo "::error::GOOGLE_CREDENTIALS_JSON secret is not set"
+          echo "$RESULTS"
+          if jq -e 'any(.[]; . != "success" and . != "skipped")' <<<"$RESULTS" >/dev/null; then
+            echo "::error::One or more required CI jobs failed or were cancelled."
             exit 1
           fi
-          echo "$GOOGLE_CREDENTIALS_JSON" | base64 -d > /tmp/credentials.json
-
-      - name: Smoketest — help
-        run: ./bin/gwsr --help
-
-      - name: Smoketest — schema introspection
-        run: ./bin/gwsr schema drive.files.list | jq -e '.httpMethod'
-
-      - name: Smoketest — Drive files list
-        env:
-          GWSR_CREDENTIALS_FILE: /tmp/credentials.json
-        run: |
-          ./bin/gwsr drive files list \
-            --params '{"pageSize": 1, "fields": "files(id,mimeType)"}' \
-            | jq -e '.files'
-
-      - name: Smoketest — Gmail messages
-        env:
-          GWSR_CREDENTIALS_FILE: /tmp/credentials.json
-        run: |
-          ./bin/gwsr gmail users messages list \
-            --params '{"userId": "me", "maxResults": 1, "fields": "messages(id)"}' \
-            | jq -e '.messages'
-
-      - name: Smoketest — Calendar events
-        env:
-          GWSR_CREDENTIALS_FILE: /tmp/credentials.json
-        run: |
-          ./bin/gwsr calendar events list \
-            --params '{"calendarId": "primary", "maxResults": 1, "fields": "kind,items(id,status)"}' \
-            | jq -e '.kind'
-
-      - name: Smoketest — Slides presentation
-        env:
-          GWSR_CREDENTIALS_FILE: /tmp/credentials.json
-        run: |
-          ./bin/gwsr slides presentations get \
-            --params '{"presentationId": "1knOKD_87JWE4qsEbO4r5O91IxTER5ybBBhOJgZ1yLFI", "fields": "presentationId,slides(objectId)"}' \
-            | jq -e '.presentationId'
-
-      - name: Smoketest — pagination
-        env:
-          GWSR_CREDENTIALS_FILE: /tmp/credentials.json
-        run: |
-          LINES=$(./bin/gwsr drive files list \
-            --params '{"pageSize": 1, "fields": "nextPageToken,files(id)"}' \
-            --page-all --page-limit 2 \
-            | wc -l)
-          if [ "$LINES" -lt 2 ]; then
-            echo "::error::Expected at least 2 NDJSON lines from pagination, got $LINES"
-            exit 1
-          fi
-
-      - name: Smoketest — error handling
-        run: |
-          if ./bin/gwsr fakeservice list 2>&1; then
-            echo "::error::Expected exit code 1 for unknown service"
-            exit 1
-          fi
-
-      - name: Cleanup credentials
-        if: always()
-        run: rm -f /tmp/credentials.json
