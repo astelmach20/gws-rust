@@ -18,10 +18,12 @@ use std::future::Future;
 use std::pin::Pin;
 pub mod calendar;
 pub mod chat;
+pub(crate) mod confirm;
 pub mod docs;
 pub mod drive;
 pub mod events;
 pub mod gmail;
+pub(crate) mod http;
 pub mod modelarmor;
 pub mod script;
 pub mod sheets;
@@ -60,7 +62,9 @@ pub(crate) async fn shutdown_signal() {
                     Ok(mut sigterm) => {
                         tokio::select! {
                             res = tokio::signal::ctrl_c() => {
-                                res.expect("failed to listen for SIGINT");
+                                if let Err(e) = res {
+                                    eprintln!("error: could not listen for Ctrl+C: {e}; shutting down");
+                                }
                             }
                             Some(_) = sigterm.recv() => {}
                         }
@@ -70,17 +74,17 @@ pub(crate) async fn shutdown_signal() {
                             "warning: could not register SIGTERM handler: {e}. \
                              Listening for Ctrl+C only."
                         );
-                        tokio::signal::ctrl_c()
-                            .await
-                            .expect("failed to listen for SIGINT");
+                        if let Err(e) = tokio::signal::ctrl_c().await {
+                            eprintln!("error: could not listen for Ctrl+C: {e}; shutting down");
+                        }
                     }
                 }
             }
             #[cfg(not(unix))]
             {
-                tokio::signal::ctrl_c()
-                    .await
-                    .expect("failed to listen for SIGINT");
+                if let Err(e) = tokio::signal::ctrl_c().await {
+                    eprintln!("error: could not listen for Ctrl+C: {e}; shutting down");
+                }
             }
             n2.notify_waiters();
         });
