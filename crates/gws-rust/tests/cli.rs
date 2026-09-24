@@ -987,6 +987,8 @@ fn closed_stdout_is_a_clean_exit() {
     let mut child = std::process::Command::new(assert_cmd::cargo::cargo_bin("gwsr"))
         .args(["schema", "drive.files.list"])
         .env("GWSR_CONFIG_DIR", env.config_dir())
+        // Use the seeded cache; the test must never reach the network.
+        .env("GWSR_CACHE_DIR", env.cache_dir())
         .env("HOME", env.root.path().join("home"))
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
