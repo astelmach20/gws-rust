@@ -50,7 +50,7 @@ impl Env {
     }
 
     fn seeded_drive_path(&self) -> PathBuf {
-        self.cache_dir().join("discovery/drive+v3.json")
+        self.cache_dir().join("discovery").join("drive+v3.json")
     }
 
     fn work_dir(&self) -> PathBuf {

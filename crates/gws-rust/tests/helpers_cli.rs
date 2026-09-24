@@ -25,7 +25,7 @@ use serde_json::{Value, json};
 use std::path::Path;
 
 fn seed(dir: &Path, name: &str, version: &str, service_path: &str) {
-    let cache = dir.join("cache");
+    let cache = dir.join("cache").join("discovery");
     std::fs::create_dir_all(&cache).unwrap();
     let root = if service_path.is_empty() {
         format!("https://{name}.googleapis.com/")
@@ -40,7 +40,7 @@ fn seed(dir: &Path, name: &str, version: &str, service_path: &str) {
         "resources": {},
     });
     std::fs::write(
-        cache.join(format!("{name}_{version}.json")),
+        cache.join(format!("{name}+{version}.json")),
         serde_json::to_vec(&doc).unwrap(),
     )
     .unwrap();
@@ -50,6 +50,8 @@ fn gwsr(config: &Path) -> Command {
     let mut cmd = Command::cargo_bin("gwsr").unwrap();
     cmd.env_clear()
         .env("GWSR_CONFIG_DIR", config)
+        // The seeded Discovery cache; these tests must never reach the network.
+        .env("GWSR_CACHE_DIR", config.join("cache"))
         .env("HOME", config)
         .current_dir(config);
     cmd
