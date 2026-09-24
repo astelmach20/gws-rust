@@ -626,6 +626,20 @@ pub fn get() -> Result<&'static Env, GwsError> {
 
 #[cfg(test)]
 mod tests {
+    // Absolute paths differ by platform (`/etc` is not absolute on Windows).
+    #[cfg(not(windows))]
+    const ABS_CONFIG_DIR: &str = "/etc/gwsr";
+    #[cfg(windows)]
+    const ABS_CONFIG_DIR: &str = r"C:\ProgramData\gwsr";
+    #[cfg(not(windows))]
+    const ABS_CACHE_DIR: &str = "/var/cache/gwsr";
+    #[cfg(windows)]
+    const ABS_CACHE_DIR: &str = r"C:\ProgramData\gwsr\cache";
+    #[cfg(not(windows))]
+    const ABS_LOG_DIR: &str = "/var/log/gwsr";
+    #[cfg(windows)]
+    const ABS_LOG_DIR: &str = r"C:\ProgramData\gwsr\logs";
+
     use super::*;
     use secrecy::ExposeSecret;
 
@@ -655,8 +669,8 @@ mod tests {
             Some("a b"),
         ),
         ("GWSR_CLIENT_SECRET", "GOCSPX-secret", Some("sec ret")),
-        ("GWSR_CONFIG_DIR", "/etc/gwsr", Some("relative/dir")),
-        ("GWSR_CACHE_DIR", "/var/cache/gwsr", Some("bogus!!")),
+        ("GWSR_CONFIG_DIR", ABS_CONFIG_DIR, Some("relative/dir")),
+        ("GWSR_CACHE_DIR", ABS_CACHE_DIR, Some("bogus!!")),
         ("GWSR_KEYRING_BACKEND", "file", Some("bogus!!")),
         ("GWSR_PROJECT_ID", "my-project-1", Some("bogus!!")),
         ("GWSR_NO_QUOTA_PROJECT", "1", Some("bogus!!")),
@@ -680,7 +694,7 @@ mod tests {
         ("GWSR_SANITIZE_MODE", "block", Some("bogus!!")),
         ("GWSR_LOG", "gwsr=debug,warn", Some("bogus!!")),
         ("RUST_LOG", "info", Some("bogus!!")),
-        ("GWSR_LOG_FILE", "/var/log/gwsr", Some("bogus!!")),
+        ("GWSR_LOG_FILE", ABS_LOG_DIR, Some("bogus!!")),
         ("GWSR_COMPLETE", "bash", None),
     ];
 

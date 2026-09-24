@@ -1283,7 +1283,8 @@ mod tests {
         assert_eq!(v["unmanaged"][0], "notes");
         assert_eq!(v["output_dir"], "/out");
         assert_eq!(v["index"], "/idx.md");
-        assert_eq!(v["skills"][0]["path"], "/out/gwsr-shared/SKILL.md");
+        let expected = Path::new("/out").join("gwsr-shared").join("SKILL.md");
+        assert_eq!(v["skills"][0]["path"], expected.display().to_string());
         assert!(v.get("dry_run").is_none() && v.get("wouldPrune").is_none());
 
         let dry = skills_summary(Path::new("/out"), None, &index, &tidy, true);

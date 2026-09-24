@@ -63,6 +63,9 @@
               ./Cargo.toml
               ./Cargo.lock
               ./crates
+              # Read by drift tests (env table, CI skill-marker check).
+              ./README.md
+              ./.github/workflows/ci.yml
             ];
           };
           cargoLock.lockFile = ./Cargo.lock;
