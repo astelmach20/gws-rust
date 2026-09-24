@@ -12,153 +12,1021 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! HTTP client with retry logic for Google API requests.
+//! HTTP transport for Google API requests.
+//!
+//! This module owns the three transport-level policies every request in the
+//! project must follow:
+//!
+//! * **One client.** [`shared_client`] returns a clone of a single process-wide
+//!   [`reqwest::Client`], so every request shares one connection pool and TLS
+//!   session cache. Its redirect policy refuses HTTPS→HTTP downgrades and
+//!   caps redirect chains; `reqwest` already strips `Authorization` on any
+//!   cross-origin hop.
+//! * **One retry policy.** [`send`] (and the convenience wrapper
+//!   [`send_with_retry`]) retries transient failures with capped exponential
+//!   backoff and full jitter, honours `Retry-After` in both its delta-seconds
+//!   and HTTP-date forms, and never re-sends a non-idempotent request unless
+//!   the failure proves the request never left this process.
+//! * **One endpoint policy.** [`EndpointPolicy`] decides which hosts may
+//!   receive a bearer token: `https://*.googleapis.com` plus an explicit
+//!   operator override (`GWSR_API_BASE_URL`).
 
 use std::sync::OnceLock;
+use std::time::{Duration, SystemTime};
 
-use reqwest::header::{HeaderMap, HeaderValue};
+use reqwest::header::{HeaderMap, HeaderValue, RETRY_AFTER};
+use reqwest::{Method, StatusCode, Url};
 
-const MAX_RETRIES: u32 = 3;
-/// Maximum seconds to sleep on a 429 Retry-After header. Prevents a hostile
-/// or misconfigured server from hanging the process indefinitely.
-const MAX_RETRY_DELAY_SECS: u64 = 60;
-const CONNECT_TIMEOUT_SECS: u64 = 10;
+use crate::error::GwsError;
+
+/// Environment variable holding the per-request timeout in seconds
+/// (`0` disables it).
+pub const TIMEOUT_ENV: &str = "GWSR_TIMEOUT";
+/// Environment variable that points every API request at a different base URL
+/// (a private endpoint, a VPC-SC gateway, a recording proxy or a test server).
+pub const API_BASE_URL_ENV: &str = "GWSR_API_BASE_URL";
+
+/// Default time allowed for a server to start responding.
+pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(60);
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+const MAX_REDIRECTS: usize = 10;
+
+// ── Client ──────────────────────────────────────────────────────────────
 
 fn build_client_inner() -> Result<reqwest::Client, String> {
     let mut headers = HeaderMap::new();
-    let name = env!("CARGO_PKG_NAME");
-    let version = env!("CARGO_PKG_VERSION");
-
-    // Format: gl-rust/name-version (the gl-rust/ prefix is fixed)
-    let client_header = format!("gl-rust/{}-{}", name, version);
-    if let Ok(header_value) = HeaderValue::from_str(&client_header) {
-        headers.insert("x-goog-api-client", header_value);
-    }
+    let client_header = format!(
+        "gl-rust/{}-{}",
+        env!("CARGO_PKG_NAME"),
+        env!("CARGO_PKG_VERSION")
+    );
+    let header_value = HeaderValue::from_str(&client_header)
+        .map_err(|e| format!("invalid x-goog-api-client header {client_header:?}: {e}"))?;
+    headers.insert("x-goog-api-client", header_value);
 
     reqwest::Client::builder()
         .default_headers(headers)
-        .connect_timeout(std::time::Duration::from_secs(CONNECT_TIMEOUT_SECS))
+        .connect_timeout(CONNECT_TIMEOUT)
+        .redirect(reqwest::redirect::Policy::custom(redirect_policy))
         .build()
         .map_err(|e| format!("Failed to build HTTP client: {e}"))
 }
 
-pub fn build_client() -> Result<reqwest::Client, crate::error::GwsError> {
-    build_client_inner().map_err(|message| crate::error::GwsError::Other(anyhow::anyhow!(message)))
+/// Redirect policy: follow at most [`MAX_REDIRECTS`] hops and never downgrade
+/// from HTTPS to HTTP. `reqwest` removes `Authorization`, `Cookie` and
+/// `Proxy-Authorization` itself whenever scheme, host or port changes.
+fn redirect_policy(attempt: reqwest::redirect::Attempt<'_>) -> reqwest::redirect::Action {
+    if attempt.previous().len() >= MAX_REDIRECTS {
+        return attempt.error(format!("stopped after {MAX_REDIRECTS} redirects"));
+    }
+    let downgrade = attempt.url().scheme() == "http"
+        && attempt
+            .previous()
+            .last()
+            .is_some_and(|prev| prev.scheme() == "https");
+    if downgrade {
+        let target = attempt.url().to_string();
+        return attempt.error(format!("refusing HTTPS to HTTP redirect to {target}"));
+    }
+    attempt.follow()
 }
 
-/// Returns a shared reqwest client clone backed by a single global connection pool.
+/// Returns a clone of the single process-wide client.
 ///
-/// `reqwest::Client` is cheap to clone, so callers can take ownership of the
-/// returned value while still sharing pooled connections underneath.
-pub fn shared_client() -> Result<reqwest::Client, crate::error::GwsError> {
+/// `reqwest::Client` is reference counted, so clones share one connection
+/// pool. Building the client can only fail if the TLS backend cannot be
+/// initialised; that failure is cached and reported on every call.
+pub fn shared_client() -> Result<reqwest::Client, GwsError> {
     static CLIENT: OnceLock<Result<reqwest::Client, String>> = OnceLock::new();
-
     match CLIENT.get_or_init(build_client_inner) {
         Ok(client) => Ok(client.clone()),
-        Err(message) => Err(crate::error::GwsError::Other(anyhow::anyhow!(
-            message.clone()
+        Err(message) => Err(GwsError::Other(anyhow::anyhow!(message.clone()))),
+    }
+}
+
+/// Alias of [`shared_client`], kept because it is the name most call sites
+/// use. It does **not** build a new connection pool.
+pub fn build_client() -> Result<reqwest::Client, GwsError> {
+    shared_client()
+}
+
+// ── Timeouts ────────────────────────────────────────────────────────────
+
+/// Parse a timeout given in whole seconds. `0` means "no timeout".
+pub fn parse_timeout_secs(raw: &str, source: &str) -> Result<Option<Duration>, GwsError> {
+    let secs: u64 = raw.trim().parse().map_err(|_| {
+        GwsError::Validation(format!(
+            "{source} must be a whole number of seconds (0 disables the timeout), got {raw:?}"
+        ))
+    })?;
+    Ok((secs > 0).then(|| Duration::from_secs(secs)))
+}
+
+/// The timeout configured through `GWSR_TIMEOUT`, or [`DEFAULT_TIMEOUT`].
+/// An unparseable value is an error, never silently replaced by the default.
+pub fn timeout_from_env() -> Result<Option<Duration>, GwsError> {
+    match std::env::var(TIMEOUT_ENV) {
+        Ok(raw) => parse_timeout_secs(&raw, TIMEOUT_ENV),
+        Err(std::env::VarError::NotPresent) => Ok(Some(DEFAULT_TIMEOUT)),
+        Err(std::env::VarError::NotUnicode(_)) => Err(GwsError::Validation(format!(
+            "{TIMEOUT_ENV} is not valid UTF-8"
         ))),
     }
 }
 
-/// Send an HTTP request with automatic retry on 429 (rate limit) responses
-/// and transient connection/timeout errors.
-/// Respects the `Retry-After` header; falls back to exponential backoff (1s, 2s, 4s).
-pub async fn send_with_retry(
-    build_request: impl Fn() -> reqwest::RequestBuilder,
-) -> Result<reqwest::Response, reqwest::Error> {
-    let mut last_err: Option<reqwest::Error> = None;
+// ── Retry policy ────────────────────────────────────────────────────────
 
-    for attempt in 0..MAX_RETRIES {
-        match build_request().send().await {
-            Ok(resp) => {
-                if resp.status() != reqwest::StatusCode::TOO_MANY_REQUESTS {
-                    return Ok(resp);
-                }
+/// Whether a request may safely be sent more than once.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Idempotency {
+    /// Decide from the HTTP method: GET, HEAD, OPTIONS, PUT and DELETE are
+    /// idempotent (RFC 9110 §9.2.2); POST and PATCH are not.
+    FromMethod,
+    /// The caller guarantees the request is idempotent (for example it
+    /// carries a `requestId` the server de-duplicates on).
+    Idempotent,
+    /// Never re-send once the request may have reached the server.
+    NonIdempotent,
+}
 
-                let header_value = resp
-                    .headers()
-                    .get("retry-after")
-                    .and_then(|v| v.to_str().ok());
-                let retry_after = compute_retry_delay(header_value, attempt);
-                tokio::time::sleep(std::time::Duration::from_secs(retry_after)).await;
-            }
-            Err(e) if e.is_connect() || e.is_timeout() => {
-                // Transient network error — retry with exponential backoff
-                let delay = compute_retry_delay(None, attempt);
-                tokio::time::sleep(std::time::Duration::from_secs(delay)).await;
-                last_err = Some(e);
-            }
-            Err(e) => return Err(e),
+impl Idempotency {
+    fn resolve(self, method: &Method) -> bool {
+        match self {
+            Idempotency::Idempotent => true,
+            Idempotency::NonIdempotent => false,
+            Idempotency::FromMethod => matches!(
+                *method,
+                Method::GET | Method::HEAD | Method::OPTIONS | Method::PUT | Method::DELETE
+            ),
         }
-    }
-
-    // Final attempt — return whatever we get
-    match build_request().send().await {
-        Ok(resp) => Ok(resp),
-        Err(e) => Err(last_err.unwrap_or(e)),
     }
 }
 
-/// Compute the retry delay from a Retry-After header value and attempt number.
-/// Falls back to exponential backoff (1, 2, 4s) when the header is absent or
-/// unparseable. Always caps the result at MAX_RETRY_DELAY_SECS.
-fn compute_retry_delay(header_value: Option<&str>, attempt: u32) -> u64 {
-    header_value
-        .and_then(|s| s.parse::<u64>().ok())
-        .unwrap_or(2u64.saturating_pow(attempt))
-        .min(MAX_RETRY_DELAY_SECS)
+/// Retry and timeout settings for [`send`].
+#[derive(Debug, Clone)]
+pub struct RetryPolicy {
+    /// Total attempts including the first one. `1` disables retries.
+    pub max_attempts: u32,
+    /// Backoff ceiling for the first retry; doubles on every retry.
+    pub base_delay: Duration,
+    /// Upper bound of any computed backoff.
+    pub max_delay: Duration,
+    /// Largest server-requested `Retry-After` we are willing to sleep for.
+    /// A longer request stops retrying and returns the response as is.
+    pub max_retry_after: Duration,
+    /// Time allowed per attempt until response headers arrive. `None`
+    /// disables it (used for large uploads whose body takes long to send).
+    pub response_timeout: Option<Duration>,
+}
+
+impl Default for RetryPolicy {
+    fn default() -> Self {
+        Self {
+            max_attempts: 4,
+            base_delay: Duration::from_secs(1),
+            max_delay: Duration::from_secs(32),
+            max_retry_after: Duration::from_secs(60),
+            response_timeout: Some(DEFAULT_TIMEOUT),
+        }
+    }
+}
+
+impl RetryPolicy {
+    /// The default policy with the response timeout taken from `GWSR_TIMEOUT`.
+    pub fn from_env() -> Result<Self, GwsError> {
+        Ok(Self {
+            response_timeout: timeout_from_env()?,
+            ..Self::default()
+        })
+    }
+
+    /// Full-jitter backoff: a uniformly random delay in
+    /// `[0, min(max_delay, base_delay * 2^retry)]`.
+    pub fn backoff(&self, retry: u32) -> Duration {
+        let ceiling = self
+            .base_delay
+            .saturating_mul(2u32.saturating_pow(retry))
+            .min(self.max_delay);
+        let ceiling_ms = u64::try_from(ceiling.as_millis()).unwrap_or(u64::MAX);
+        if ceiling_ms == 0 {
+            return Duration::ZERO;
+        }
+        Duration::from_millis(rand::random_range(0..=ceiling_ms))
+    }
+}
+
+/// A response together with how it was obtained.
+#[derive(Debug)]
+pub struct Sent {
+    pub response: reqwest::Response,
+    /// Number of attempts made (1 when the first attempt succeeded).
+    pub attempts: u32,
+    /// The last `Retry-After` the server sent, if any.
+    pub retry_after: Option<Duration>,
+}
+
+impl Sent {
+    /// Human-readable note describing retries, for appending to error messages.
+    pub fn retry_note(&self) -> Option<String> {
+        retry_note(self.attempts, self.retry_after)
+    }
+}
+
+fn retry_note(attempts: u32, retry_after: Option<Duration>) -> Option<String> {
+    match (attempts > 1, retry_after) {
+        (false, None) => None,
+        (true, None) => Some(format!("gave up after {attempts} attempts")),
+        (false, Some(ra)) => Some(format!("server asked to retry after {}s", ra.as_secs())),
+        (true, Some(ra)) => Some(format!(
+            "gave up after {attempts} attempts; server asked to retry after {}s",
+            ra.as_secs()
+        )),
+    }
+}
+
+/// Why [`send`] could not produce a response.
+#[derive(Debug, thiserror::Error)]
+pub enum SendError {
+    #[error("failed to build HTTP request: {0}")]
+    Build(#[source] reqwest::Error),
+
+    #[error("{method} {url} failed after {attempts} attempt(s): {source}{}", not_retried_note(*.retried_allowed))]
+    Transport {
+        method: Method,
+        url: String,
+        attempts: u32,
+        /// False when the request was not retried because it is not idempotent.
+        retried_allowed: bool,
+        #[source]
+        source: reqwest::Error,
+    },
+
+    #[error("{method} {url}: no response within {}s after {attempts} attempt(s){}", timeout.as_secs(), not_retried_note(*.retried_allowed))]
+    Timeout {
+        method: Method,
+        url: String,
+        timeout: Duration,
+        attempts: u32,
+        retried_allowed: bool,
+    },
+
+    #[error("{method} {url}: failed to read HTTP {status} response body: {source}")]
+    ReadBody {
+        method: Method,
+        url: String,
+        status: StatusCode,
+        #[source]
+        source: reqwest::Error,
+    },
+
+    #[error(transparent)]
+    Config(#[from] GwsError),
+}
+
+fn not_retried_note(retried_allowed: bool) -> &'static str {
+    if retried_allowed {
+        ""
+    } else {
+        " (not retried: the method is not idempotent, so the server may or may not have applied it)"
+    }
+}
+
+impl From<SendError> for GwsError {
+    fn from(err: SendError) -> Self {
+        match err {
+            SendError::Config(inner) => inner,
+            other => GwsError::Other(anyhow::Error::new(other)),
+        }
+    }
+}
+
+/// Outcome of inspecting one attempt.
+enum Verdict {
+    Done(reqwest::Response),
+    Retry {
+        response: reqwest::Response,
+        retry_after: Option<Duration>,
+    },
+}
+
+/// Google signals per-user and per-project rate limits with HTTP 403 and one
+/// of these reasons in `error.errors[].reason` (or `error.details[].reason`).
+const RATE_LIMIT_REASONS: &[&str] = &[
+    "rateLimitExceeded",
+    "userRateLimitExceeded",
+    "RATE_LIMIT_EXCEEDED",
+];
+
+/// Returns true when a Google error body names a retryable rate-limit reason.
+pub fn is_rate_limit_body(body: &[u8]) -> bool {
+    let Ok(json) = serde_json::from_slice::<serde_json::Value>(body) else {
+        return false;
+    };
+    let err = &json["error"];
+    let reasons = err["errors"]
+        .as_array()
+        .into_iter()
+        .chain(err["details"].as_array())
+        .flatten()
+        .filter_map(|e| e["reason"].as_str());
+    reasons
+        .chain(err["reason"].as_str())
+        .any(|r| RATE_LIMIT_REASONS.contains(&r))
+}
+
+/// HTTP statuses retried for idempotent requests.
+pub fn is_retryable_status(status: StatusCode) -> bool {
+    matches!(status.as_u16(), 408 | 429 | 500 | 502 | 503 | 504)
+}
+
+/// Parse a `Retry-After` header: delta-seconds or an HTTP-date.
+pub fn parse_retry_after(value: &str, now: SystemTime) -> Option<Duration> {
+    let value = value.trim();
+    if let Ok(secs) = value.parse::<u64>() {
+        return Some(Duration::from_secs(secs));
+    }
+    let when = httpdate::parse_http_date(value).ok()?;
+    Some(when.duration_since(now).unwrap_or(Duration::ZERO))
+}
+
+fn header_retry_after(headers: &HeaderMap) -> Option<Duration> {
+    headers
+        .get(RETRY_AFTER)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| parse_retry_after(v, SystemTime::now()))
+}
+
+/// Rebuild a response whose body has already been read so it can be handed
+/// back to the caller unchanged.
+fn rebuild_response(
+    status: StatusCode,
+    version: reqwest::Version,
+    headers: HeaderMap,
+    body: bytes::Bytes,
+) -> reqwest::Response {
+    let mut rebuilt = http::Response::new(body);
+    *rebuilt.status_mut() = status;
+    *rebuilt.version_mut() = version;
+    *rebuilt.headers_mut() = headers;
+    reqwest::Response::from(rebuilt)
+}
+
+async fn classify(
+    response: reqwest::Response,
+    method: &Method,
+    url: &str,
+) -> Result<Verdict, SendError> {
+    let status = response.status();
+    let retry_after = header_retry_after(response.headers());
+    if is_retryable_status(status) {
+        return Ok(Verdict::Retry {
+            response,
+            retry_after,
+        });
+    }
+    if status != StatusCode::FORBIDDEN {
+        return Ok(Verdict::Done(response));
+    }
+    // A 403 is only retryable when the body names a rate-limit reason, so the
+    // body must be read and the response rebuilt around it.
+    let version = response.version();
+    let headers = response.headers().clone();
+    let body = response
+        .bytes()
+        .await
+        .map_err(|source| SendError::ReadBody {
+            method: method.clone(),
+            url: url.to_string(),
+            status,
+            source,
+        })?;
+    let rate_limited = is_rate_limit_body(&body);
+    let response = rebuild_response(status, version, headers, body);
+    Ok(if rate_limited {
+        Verdict::Retry {
+            response,
+            retry_after,
+        }
+    } else {
+        Verdict::Done(response)
+    })
+}
+
+/// Send a request built by `build`, retrying transient failures.
+///
+/// `build` is called once per attempt so streamed bodies can be recreated.
+///
+/// * Idempotent requests are retried on 408/429/500/502/503/504, on a Google
+///   403 `rateLimitExceeded`/`userRateLimitExceeded`, on connection errors and
+///   on timeouts.
+/// * Non-idempotent requests (POST/PATCH unless the caller says otherwise) are
+///   retried **only** when the connection could not be established, which
+///   proves the request never reached the server. They are never retried on a
+///   timeout or an error status, so a slow `messages.send` cannot be sent twice.
+/// * When retries are exhausted, the real final response (or error) is
+///   returned, never a stale earlier one.
+pub async fn send(
+    policy: &RetryPolicy,
+    idempotency: Idempotency,
+    build: impl Fn() -> reqwest::RequestBuilder,
+) -> Result<Sent, SendError> {
+    let max_attempts = policy.max_attempts.max(1);
+    let mut last_retry_after = None;
+    let mut attempt: u32 = 0;
+    loop {
+        attempt += 1;
+        let (client, request) = build().build_split();
+        let request = request.map_err(SendError::Build)?;
+        let method = request.method().clone();
+        let url = redact_url(request.url());
+        let idempotent = idempotency.resolve(&method);
+        let can_retry = attempt < max_attempts;
+
+        let outcome = match policy.response_timeout {
+            Some(limit) => match tokio::time::timeout(limit, client.execute(request)).await {
+                Ok(result) => result.map_err(Some),
+                Err(_elapsed) => Err(None),
+            },
+            None => client.execute(request).await.map_err(Some),
+        };
+
+        let response = match outcome {
+            Ok(response) => response,
+            Err(Some(err)) => {
+                // Connect errors mean nothing was sent; any method may retry.
+                let retryable = err.is_connect() || (idempotent && err.is_timeout());
+                if retryable && can_retry {
+                    tracing::debug!(%method, %url, attempt, error = %err, "retrying after transport error");
+                    tokio::time::sleep(policy.backoff(attempt - 1)).await;
+                    continue;
+                }
+                return Err(SendError::Transport {
+                    method,
+                    url,
+                    attempts: attempt,
+                    retried_allowed: idempotent || err.is_connect(),
+                    source: err,
+                });
+            }
+            Err(None) => {
+                let timeout = policy.response_timeout.unwrap_or_default();
+                if idempotent && can_retry {
+                    tracing::debug!(%method, %url, attempt, "retrying after timeout");
+                    tokio::time::sleep(policy.backoff(attempt - 1)).await;
+                    continue;
+                }
+                return Err(SendError::Timeout {
+                    method,
+                    url,
+                    timeout,
+                    attempts: attempt,
+                    retried_allowed: idempotent,
+                });
+            }
+        };
+
+        match classify(response, &method, &url).await? {
+            Verdict::Done(response) => {
+                return Ok(Sent {
+                    response,
+                    attempts: attempt,
+                    retry_after: last_retry_after,
+                });
+            }
+            Verdict::Retry {
+                response,
+                retry_after,
+            } => {
+                if retry_after.is_some() {
+                    last_retry_after = retry_after;
+                }
+                let too_long = retry_after.is_some_and(|ra| ra > policy.max_retry_after);
+                if !idempotent || !can_retry || too_long {
+                    return Ok(Sent {
+                        response,
+                        attempts: attempt,
+                        retry_after: last_retry_after,
+                    });
+                }
+                let delay = retry_after.unwrap_or_else(|| policy.backoff(attempt - 1));
+                tracing::debug!(
+                    %method, %url, attempt, status = response.status().as_u16(),
+                    delay_ms = u64::try_from(delay.as_millis()).unwrap_or(u64::MAX),
+                    "retrying after retryable status"
+                );
+                drop(response);
+                tokio::time::sleep(delay).await;
+            }
+        }
+    }
+}
+
+/// [`send`] with [`RetryPolicy::from_env`] and idempotency inferred from the
+/// HTTP method. Returns only the response.
+pub async fn send_with_retry(
+    build: impl Fn() -> reqwest::RequestBuilder,
+) -> Result<reqwest::Response, SendError> {
+    let policy = RetryPolicy::from_env()?;
+    send(&policy, Idempotency::FromMethod, build)
+        .await
+        .map(|sent| sent.response)
+}
+
+/// Drop the query string from a URL before it goes into an error message or
+/// log line; query strings can carry user data such as search terms.
+fn redact_url(url: &Url) -> String {
+    let mut clean = url.clone();
+    clean.set_query(None);
+    clean.set_fragment(None);
+    clean.to_string()
+}
+
+// ── Endpoint policy ─────────────────────────────────────────────────────
+
+/// Decides which URLs may receive credentials.
+///
+/// By default only `https://googleapis.com` and `https://*.googleapis.com`
+/// are trusted. An operator can add exactly one extra origin with
+/// `GWSR_API_BASE_URL`; that value also replaces the Discovery `rootUrl` so
+/// every request is routed there.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct EndpointPolicy {
+    override_base: Option<Url>,
+}
+
+impl EndpointPolicy {
+    /// Trust Google API hosts only.
+    pub fn google_only() -> Self {
+        Self::default()
+    }
+
+    /// Trust Google API hosts plus the origin of `base`.
+    ///
+    /// `base` must be `https://`, or `http://` on a loopback address (for local
+    /// proxies and tests), and must not carry credentials, a query or a fragment.
+    pub fn with_override(base: &str) -> Result<Self, GwsError> {
+        let mut url = Url::parse(base.trim()).map_err(|e| {
+            GwsError::Validation(format!("{API_BASE_URL_ENV} is not a valid URL ({base:?}): {e}"))
+        })?;
+        let loopback = is_loopback(&url);
+        match url.scheme() {
+            "https" => {}
+            "http" if loopback => {}
+            other => {
+                return Err(GwsError::Validation(format!(
+                    "{API_BASE_URL_ENV} must use https:// (http:// is allowed only for loopback hosts), got scheme {other:?}"
+                )));
+            }
+        }
+        if url.host_str().is_none() {
+            return Err(GwsError::Validation(format!(
+                "{API_BASE_URL_ENV} must include a host: {base:?}"
+            )));
+        }
+        if !url.username().is_empty() || url.password().is_some() {
+            return Err(GwsError::Validation(format!(
+                "{API_BASE_URL_ENV} must not embed credentials"
+            )));
+        }
+        if url.query().is_some() || url.fragment().is_some() {
+            return Err(GwsError::Validation(format!(
+                "{API_BASE_URL_ENV} must not include a query string or fragment"
+            )));
+        }
+        if !url.path().ends_with('/') {
+            let path = format!("{}/", url.path());
+            url.set_path(&path);
+        }
+        Ok(Self {
+            override_base: Some(url),
+        })
+    }
+
+    /// Read `GWSR_API_BASE_URL`; unset or empty means [`Self::google_only`].
+    pub fn from_env() -> Result<Self, GwsError> {
+        match std::env::var(API_BASE_URL_ENV) {
+            Ok(v) if v.trim().is_empty() => Ok(Self::google_only()),
+            Ok(v) => Self::with_override(&v),
+            Err(std::env::VarError::NotPresent) => Ok(Self::google_only()),
+            Err(std::env::VarError::NotUnicode(_)) => Err(GwsError::Validation(format!(
+                "{API_BASE_URL_ENV} is not valid UTF-8"
+            ))),
+        }
+    }
+
+    /// The operator-supplied base URL (always ends in `/`).
+    pub fn override_base(&self) -> Option<&Url> {
+        self.override_base.as_ref()
+    }
+
+    /// The root URL requests should be built from: the override when set,
+    /// otherwise the Discovery document's `rootUrl`.
+    pub fn root_url(&self, discovery_root: &str) -> String {
+        match &self.override_base {
+            Some(base) => base.to_string(),
+            None => discovery_root.to_string(),
+        }
+    }
+
+    /// Validate that `url` may receive a bearer token. Returns the parsed URL.
+    pub fn check(&self, url: &str) -> Result<Url, GwsError> {
+        let parsed = Url::parse(url).map_err(|e| {
+            GwsError::Validation(format!("Refusing to send credentials to invalid URL {url:?}: {e}"))
+        })?;
+        if let Some(base) = &self.override_base
+            && same_origin(base, &parsed)
+        {
+            return Ok(parsed);
+        }
+        let host = parsed.host_str().unwrap_or_default();
+        let google = host == "googleapis.com" || host.ends_with(".googleapis.com");
+        if parsed.scheme() == "https" && google {
+            return Ok(parsed);
+        }
+        Err(GwsError::Validation(format!(
+            "Refusing to send credentials to {}: only https://*.googleapis.com is trusted \
+             (set {API_BASE_URL_ENV} to route requests to another endpoint)",
+            redact_url(&parsed)
+        )))
+    }
+}
+
+fn same_origin(a: &Url, b: &Url) -> bool {
+    a.scheme() == b.scheme()
+        && a.host_str() == b.host_str()
+        && a.port_or_known_default() == b.port_or_known_default()
+}
+
+fn is_loopback(url: &Url) -> bool {
+    match url.host() {
+        Some(url::Host::Domain(d)) => d.eq_ignore_ascii_case("localhost"),
+        Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+        Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+        None => false,
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU32, Ordering};
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
 
-    #[test]
-    fn build_client_succeeds() {
-        assert!(build_client().is_ok());
+    fn fast_policy() -> RetryPolicy {
+        RetryPolicy {
+            max_attempts: 4,
+            base_delay: Duration::from_millis(1),
+            max_delay: Duration::from_millis(5),
+            max_retry_after: Duration::from_secs(2),
+            response_timeout: Some(Duration::from_secs(5)),
+        }
+    }
+
+    /// Responds with each template in turn, repeating the last one.
+    struct Sequence {
+        responses: Vec<ResponseTemplate>,
+        calls: Arc<AtomicU32>,
+    }
+
+    impl Respond for Sequence {
+        fn respond(&self, _: &Request) -> ResponseTemplate {
+            let n = self.calls.fetch_add(1, Ordering::SeqCst) as usize;
+            self.responses[n.min(self.responses.len() - 1)].clone()
+        }
+    }
+
+    async fn mount_sequence(
+        server: &MockServer,
+        http_method: &str,
+        responses: Vec<ResponseTemplate>,
+    ) -> Arc<AtomicU32> {
+        let calls = Arc::new(AtomicU32::new(0));
+        Mock::given(method(http_method))
+            .and(path("/r"))
+            .respond_with(Sequence {
+                responses,
+                calls: calls.clone(),
+            })
+            .mount(server)
+            .await;
+        calls
+    }
+
+    fn rate_limit_403() -> ResponseTemplate {
+        ResponseTemplate::new(403).set_body_json(serde_json::json!({
+            "error": {"code": 403, "message": "slow down",
+                      "errors": [{"reason": "userRateLimitExceeded"}]}
+        }))
     }
 
     #[test]
-    fn shared_client_succeeds() {
-        assert!(shared_client().is_ok());
+    fn shared_client_is_reused() {
+        let a = shared_client().unwrap();
+        let b = build_client().unwrap();
+        let ra = a.get("https://example.com").build().unwrap();
+        let rb = b.get("https://example.com").build().unwrap();
+        assert_eq!(ra.url(), rb.url());
     }
 
     #[test]
-    fn shared_client_can_be_reused() {
-        let client_a = shared_client().unwrap();
-        let client_b = shared_client().unwrap();
-        let request_a = client_a.get("https://example.com").build().unwrap();
-        let request_b = client_b.get("https://example.com").build().unwrap();
-        assert_eq!(request_a.url(), request_b.url());
+    fn backoff_is_bounded_by_cap() {
+        let policy = RetryPolicy {
+            base_delay: Duration::from_millis(100),
+            max_delay: Duration::from_millis(250),
+            ..RetryPolicy::default()
+        };
+        for retry in 0..10 {
+            let ceiling = Duration::from_millis(100 * 2u64.pow(retry)).min(policy.max_delay);
+            assert!(policy.backoff(retry) <= ceiling);
+        }
     }
 
     #[test]
-    fn retry_delay_caps_large_header_value() {
-        assert_eq!(compute_retry_delay(Some("999999"), 0), MAX_RETRY_DELAY_SECS);
+    fn retry_after_parses_seconds_and_http_date() {
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        assert_eq!(parse_retry_after("7", now), Some(Duration::from_secs(7)));
+        let later = httpdate::fmt_http_date(now + Duration::from_secs(30));
+        assert_eq!(parse_retry_after(&later, now), Some(Duration::from_secs(30)));
+        let earlier = httpdate::fmt_http_date(now - Duration::from_secs(30));
+        assert_eq!(parse_retry_after(&earlier, now), Some(Duration::ZERO));
+        assert_eq!(parse_retry_after("soon", now), None);
     }
 
     #[test]
-    fn retry_delay_passes_through_small_header_value() {
-        assert_eq!(compute_retry_delay(Some("5"), 0), 5);
+    fn rate_limit_reasons_detected() {
+        assert!(is_rate_limit_body(
+            br#"{"error":{"errors":[{"reason":"rateLimitExceeded"}]}}"#
+        ));
+        assert!(is_rate_limit_body(
+            br#"{"error":{"details":[{"reason":"RATE_LIMIT_EXCEEDED"}]}}"#
+        ));
+        assert!(!is_rate_limit_body(
+            br#"{"error":{"errors":[{"reason":"insufficientPermissions"}]}}"#
+        ));
+        assert!(!is_rate_limit_body(b"not json"));
     }
 
     #[test]
-    fn retry_delay_falls_back_to_exponential_on_missing_header() {
-        assert_eq!(compute_retry_delay(None, 0), 1); // 2^0
-        assert_eq!(compute_retry_delay(None, 1), 2); // 2^1
-        assert_eq!(compute_retry_delay(None, 2), 4); // 2^2
+    fn timeout_parsing() {
+        assert_eq!(
+            parse_timeout_secs("30", "--timeout").unwrap(),
+            Some(Duration::from_secs(30))
+        );
+        assert_eq!(parse_timeout_secs("0", "--timeout").unwrap(), None);
+        assert!(parse_timeout_secs("abc", "--timeout").is_err());
+        assert!(parse_timeout_secs("-1", "--timeout").is_err());
+    }
+
+    #[tokio::test]
+    async fn retries_idempotent_get_on_5xx_then_succeeds() {
+        let server = MockServer::start().await;
+        let calls = mount_sequence(
+            &server,
+            "GET",
+            vec![
+                ResponseTemplate::new(503),
+                ResponseTemplate::new(500),
+                ResponseTemplate::new(200).set_body_string("ok"),
+            ],
+        )
+        .await;
+        let client = shared_client().unwrap();
+        let url = format!("{}/r", server.uri());
+        let sent = send(&fast_policy(), Idempotency::FromMethod, || client.get(&url))
+            .await
+            .unwrap();
+        assert_eq!(sent.response.status(), 200);
+        assert_eq!(sent.attempts, 3);
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn returns_real_final_response_when_exhausted() {
+        let server = MockServer::start().await;
+        let calls = mount_sequence(
+            &server,
+            "GET",
+            vec![
+                ResponseTemplate::new(503),
+                ResponseTemplate::new(502).set_body_string("final"),
+            ],
+        )
+        .await;
+        let client = shared_client().unwrap();
+        let url = format!("{}/r", server.uri());
+        let sent = send(&fast_policy(), Idempotency::FromMethod, || client.get(&url))
+            .await
+            .unwrap();
+        assert_eq!(sent.attempts, 4);
+        assert_eq!(calls.load(Ordering::SeqCst), 4);
+        assert_eq!(sent.response.status(), 502);
+        assert_eq!(sent.retry_note().as_deref(), Some("gave up after 4 attempts"));
+        assert_eq!(sent.response.text().await.unwrap(), "final");
+    }
+
+    #[tokio::test]
+    async fn retries_google_rate_limit_403_and_preserves_other_403_body() {
+        let server = MockServer::start().await;
+        let calls = mount_sequence(
+            &server,
+            "GET",
+            vec![
+                rate_limit_403(),
+                ResponseTemplate::new(403).set_body_json(serde_json::json!({
+                    "error": {"code": 403, "message": "nope",
+                              "errors": [{"reason": "insufficientPermissions"}]}
+                })),
+            ],
+        )
+        .await;
+        let client = shared_client().unwrap();
+        let url = format!("{}/r", server.uri());
+        let sent = send(&fast_policy(), Idempotency::FromMethod, || client.get(&url))
+            .await
+            .unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert_eq!(sent.response.status(), 403);
+        let body: serde_json::Value = sent.response.json().await.unwrap();
+        assert_eq!(body["error"]["errors"][0]["reason"], "insufficientPermissions");
+    }
+
+    #[tokio::test]
+    async fn never_retries_post_on_error_status() {
+        let server = MockServer::start().await;
+        let calls = mount_sequence(&server, "POST", vec![ResponseTemplate::new(503)]).await;
+        let client = shared_client().unwrap();
+        let url = format!("{}/r", server.uri());
+        let sent = send(&fast_policy(), Idempotency::FromMethod, || client.post(&url))
+            .await
+            .unwrap();
+        assert_eq!(sent.response.status(), 503);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn never_retries_post_on_timeout() {
+        let server = MockServer::start().await;
+        let calls = mount_sequence(
+            &server,
+            "POST",
+            vec![ResponseTemplate::new(200).set_delay(Duration::from_millis(500))],
+        )
+        .await;
+        let client = shared_client().unwrap();
+        let url = format!("{}/r", server.uri());
+        let policy = RetryPolicy {
+            response_timeout: Some(Duration::from_millis(50)),
+            ..fast_policy()
+        };
+        let err = send(&policy, Idempotency::FromMethod, || client.post(&url))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, SendError::Timeout { attempts: 1, .. }), "{err}");
+        assert!(err.to_string().contains("not idempotent"));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn retries_post_when_caller_guarantees_idempotency() {
+        let server = MockServer::start().await;
+        let calls = mount_sequence(
+            &server,
+            "POST",
+            vec![ResponseTemplate::new(503), ResponseTemplate::new(200)],
+        )
+        .await;
+        let client = shared_client().unwrap();
+        let url = format!("{}/r", server.uri());
+        let sent = send(&fast_policy(), Idempotency::Idempotent, || client.post(&url))
+            .await
+            .unwrap();
+        assert_eq!(sent.response.status(), 200);
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn get_timeout_is_retried() {
+        let server = MockServer::start().await;
+        let calls = mount_sequence(
+            &server,
+            "GET",
+            vec![
+                ResponseTemplate::new(200).set_delay(Duration::from_millis(500)),
+                ResponseTemplate::new(200),
+            ],
+        )
+        .await;
+        let client = shared_client().unwrap();
+        let url = format!("{}/r", server.uri());
+        let policy = RetryPolicy {
+            response_timeout: Some(Duration::from_millis(100)),
+            ..fast_policy()
+        };
+        let sent = send(&policy, Idempotency::FromMethod, || client.get(&url))
+            .await
+            .unwrap();
+        assert_eq!(sent.response.status(), 200);
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn honours_retry_after_and_gives_up_when_too_long() {
+        let server = MockServer::start().await;
+        let calls = mount_sequence(
+            &server,
+            "GET",
+            vec![ResponseTemplate::new(429).insert_header("retry-after", "3600")],
+        )
+        .await;
+        let client = shared_client().unwrap();
+        let url = format!("{}/r", server.uri());
+        let sent = send(&fast_policy(), Idempotency::FromMethod, || client.get(&url))
+            .await
+            .unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(sent.response.status(), 429);
+        assert_eq!(sent.retry_after, Some(Duration::from_secs(3600)));
+        assert!(sent.retry_note().unwrap().contains("3600s"));
+    }
+
+    #[tokio::test]
+    async fn connection_refused_is_reported_with_attempts() {
+        // Bind then drop a listener to get a port nothing listens on.
+        let port = {
+            let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            l.local_addr().unwrap().port()
+        };
+        let client = shared_client().unwrap();
+        let url = format!("http://127.0.0.1:{port}/r");
+        let err = send(&fast_policy(), Idempotency::FromMethod, || client.post(&url))
+            .await
+            .unwrap_err();
+        match err {
+            SendError::Transport { attempts, .. } => assert_eq!(attempts, 4),
+            other => panic!("unexpected error: {other}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn authorization_is_not_forwarded_across_hosts() {
+        let target = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/landing"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&target)
+            .await;
+        let origin = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/r"))
+            .respond_with(
+                ResponseTemplate::new(302)
+                    .insert_header("location", format!("{}/landing", target.uri()).as_str()),
+            )
+            .mount(&origin)
+            .await;
+        let client = shared_client().unwrap();
+        let url = format!("{}/r", origin.uri());
+        let sent = send(&fast_policy(), Idempotency::FromMethod, || {
+            client.get(&url).bearer_auth("secret-token")
+        })
+        .await
+        .unwrap();
+        assert_eq!(sent.response.status(), 200);
+        let received = target.received_requests().await.unwrap();
+        assert_eq!(received.len(), 1);
+        assert!(!received[0].headers.contains_key("authorization"));
+        let first = origin.received_requests().await.unwrap();
+        assert!(first[0].headers.contains_key("authorization"));
     }
 
     #[test]
-    fn retry_delay_falls_back_on_unparseable_header() {
-        assert_eq!(compute_retry_delay(Some("not-a-number"), 1), 2);
-        assert_eq!(compute_retry_delay(Some(""), 0), 1);
+    fn endpoint_policy_default_trusts_googleapis_https_only() {
+        let p = EndpointPolicy::google_only();
+        assert!(p.check("https://www.googleapis.com/drive/v3/files").is_ok());
+        assert!(p.check("https://gmail.googleapis.com/gmail/v1/x").is_ok());
+        assert!(p.check("http://www.googleapis.com/drive/v3/files").is_err());
+        assert!(p.check("https://evil.com/drive").is_err());
+        assert!(p.check("https://googleapis.com.evil.com/").is_err());
+        assert!(p.check("https://evilgoogleapis.com/").is_err());
     }
 
     #[test]
-    fn retry_delay_caps_at_boundary() {
-        assert_eq!(compute_retry_delay(Some("60"), 0), 60);
-        assert_eq!(compute_retry_delay(Some("61"), 0), MAX_RETRY_DELAY_SECS);
+    fn endpoint_policy_override() {
+        let p = EndpointPolicy::with_override("https://proxy.corp.example/api").unwrap();
+        assert_eq!(p.override_base().unwrap().as_str(), "https://proxy.corp.example/api/");
+        assert_eq!(p.root_url("https://www.googleapis.com/"), "https://proxy.corp.example/api/");
+        assert!(p.check("https://proxy.corp.example/api/drive/v3/files").is_ok());
+        assert!(p.check("https://other.example/").is_err());
+        assert!(p.check("https://www.googleapis.com/x").is_ok());
+
+        assert!(EndpointPolicy::with_override("http://127.0.0.1:8080").is_ok());
+        assert!(EndpointPolicy::with_override("http://localhost:8080/").is_ok());
+        assert!(EndpointPolicy::with_override("http://proxy.corp.example/").is_err());
+        assert!(EndpointPolicy::with_override("https://user:pw@proxy.example/").is_err());
+        assert!(EndpointPolicy::with_override("https://proxy.example/?a=b").is_err());
+        assert!(EndpointPolicy::with_override("ftp://proxy.example/").is_err());
+        assert!(EndpointPolicy::with_override("not a url").is_err());
     }
 }
