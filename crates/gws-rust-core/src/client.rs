@@ -122,15 +122,43 @@ pub fn parse_timeout_secs(raw: &str, source: &str) -> Result<Option<Duration>, G
     Ok((secs > 0).then(|| Duration::from_secs(secs)))
 }
 
-/// The timeout configured through `GWSR_TIMEOUT`, or [`DEFAULT_TIMEOUT`].
-/// An unparseable value is an error, never silently replaced by the default.
+/// Timeout from the configuration file, installed once at startup by the
+/// binary. `Some(None)` means the config disables the timeout.
+static CONFIGURED_TIMEOUT: OnceLock<Option<Duration>> = OnceLock::new();
+
+/// Install the timeout from the configuration file (`timeout_secs`; `0`
+/// disables it). It ranks below `--timeout` and `GWSR_TIMEOUT` and above
+/// [`DEFAULT_TIMEOUT`]. Call at most once per process.
+pub fn set_configured_timeout(secs: u64) -> Result<(), GwsError> {
+    CONFIGURED_TIMEOUT
+        .set((secs > 0).then(|| Duration::from_secs(secs)))
+        .map_err(|_| GwsError::other("the configured timeout was already installed"))
+}
+
+/// The request timeout: `GWSR_TIMEOUT` > the configured timeout (see
+/// [`set_configured_timeout`]) > [`DEFAULT_TIMEOUT`]. An unparseable value is
+/// an error, never silently replaced by the default.
 pub fn timeout_from_env() -> Result<Option<Duration>, GwsError> {
-    match std::env::var(TIMEOUT_ENV) {
-        Ok(raw) => parse_timeout_secs(&raw, TIMEOUT_ENV),
-        Err(std::env::VarError::NotPresent) => Ok(Some(DEFAULT_TIMEOUT)),
-        Err(std::env::VarError::NotUnicode(_)) => Err(GwsError::Validation(format!(
-            "{TIMEOUT_ENV} is not valid UTF-8"
-        ))),
+    let env = match std::env::var(TIMEOUT_ENV) {
+        Ok(raw) => Some(raw),
+        Err(std::env::VarError::NotPresent) => None,
+        Err(std::env::VarError::NotUnicode(_)) => {
+            return Err(GwsError::Validation(format!(
+                "{TIMEOUT_ENV} is not valid UTF-8"
+            )));
+        }
+    };
+    resolve_timeout(env.as_deref(), CONFIGURED_TIMEOUT.get().copied())
+}
+
+fn resolve_timeout(
+    env: Option<&str>,
+    configured: Option<Option<Duration>>,
+) -> Result<Option<Duration>, GwsError> {
+    match (env, configured) {
+        (Some(raw), _) => parse_timeout_secs(raw, TIMEOUT_ENV),
+        (None, Some(configured)) => Ok(configured),
+        (None, None) => Ok(Some(DEFAULT_TIMEOUT)),
     }
 }
 
@@ -673,6 +701,23 @@ fn is_loopback(url: &Url) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn timeout_precedence_env_then_config_then_default() {
+        let config = Some(Some(Duration::from_secs(5)));
+        assert_eq!(
+            resolve_timeout(Some("7"), config).unwrap(),
+            Some(Duration::from_secs(7))
+        );
+        assert_eq!(resolve_timeout(Some("0"), config).unwrap(), None);
+        assert_eq!(
+            resolve_timeout(None, config).unwrap(),
+            Some(Duration::from_secs(5))
+        );
+        assert_eq!(resolve_timeout(None, Some(None)).unwrap(), None);
+        assert_eq!(resolve_timeout(None, None).unwrap(), Some(DEFAULT_TIMEOUT));
+        assert!(resolve_timeout(Some("soon"), config).is_err());
+    }
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU32, Ordering};
     use wiremock::matchers::{method, path};

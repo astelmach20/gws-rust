@@ -287,7 +287,9 @@ pub(crate) async fn handle(m: &clap::ArgMatches) -> Result<(), GwsError> {
                 )));
             }
         }
-        if profiles::has_active_profile_file(&save_base) {
+        let configured = crate::config::profile_in(&crate::config::config_path_in(&save_base))
+            .map_err(|e| auth_err(format!("{e}")))?;
+        if configured.is_some() {
             Ok(false)
         } else {
             profiles::set_active_profile(&save_base, &profile_name)
@@ -298,7 +300,7 @@ pub(crate) async fn handle(m: &clap::ArgMatches) -> Result<(), GwsError> {
     .await
     .map_err(|e| auth_err(format!("save task failed: {e}")))??;
 
-    crate::timezone::invalidate_cache();
+    crate::timezone::invalidate_cache()?;
 
     let not_granted: Vec<&String> = requested
         .iter()

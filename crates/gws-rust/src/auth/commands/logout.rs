@@ -30,7 +30,7 @@ use crate::error::GwsError;
 pub(super) async fn handle(no_revoke: bool) -> Result<(), GwsError> {
     let env = AuthEnv::from_process().map_err(|e| auth_err(format!("{e:#}")))?;
     let outcome = logout(&env, no_revoke).await?;
-    crate::timezone::invalidate_cache();
+    crate::timezone::invalidate_cache()?;
     print_json(&outcome.report)?;
     match outcome.revoke_error {
         Some(e) => Err(GwsError::Auth(format!(

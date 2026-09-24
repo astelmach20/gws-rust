@@ -14,102 +14,257 @@
 
 //! Structured Logging
 //!
-//! Provides opt-in, PII-free logging for HTTP requests and CLI operations.
-//! All output goes to stderr or a log file — stdout remains clean for
-//! machine-consumable JSON output.
+//! Diagnostics go to stderr (human-readable) and optionally to a JSON-lines
+//! file with daily rotation. stdout stays reserved for command output.
 //!
-//! ## Environment Variables
+//! ## stderr filter, highest precedence first
 //!
-//! - `GWSR_LOG`: Filter directive for stderr logging
-//!   (e.g., `gwsr=debug`, `gwsr=trace`). If unset, no stderr logging.
+//! 1. `-v` / `-vv` / `-vvv` (info / debug / trace for gwsr) or `-q` (errors only)
+//! 2. `GWSR_LOG` (a `tracing` filter directive such as `gwsr=debug`)
+//! 3. `RUST_LOG`
+//! 4. `log` in `config.toml`
+//! 5. default: warnings and errors
 //!
-//! - `GWSR_LOG_FILE`: Directory path for JSON-line log
-//!   files with daily rotation. If unset, no file logging.
+//! stderr lines are JSON objects unless `-v` is given or the output format is
+//! a human one (table/yaml/csv).
+//!
+//! ## File logging
+//!
+//! `GWSR_LOG_FILE` (or `log_file` in `config.toml`) names a directory that
+//! receives `gwsr.log.YYYY-MM-DD` JSON-line files at debug level. The
+//! directory is created `0700` and files are created `0600` (the process
+//! umask is `0077`). The returned [`LogGuard`] must be kept alive until the
+//! process exits so buffered records are flushed.
 
+use std::path::{Path, PathBuf};
+
+use tracing_subscriber::EnvFilter;
 use tracing_subscriber::prelude::*;
 
-/// Environment variable controlling stderr log output.
-const ENV_LOG: &str = "GWSR_LOG";
+use crate::error::GwsError;
 
-/// Environment variable controlling file log output.
-const ENV_LOG_FILE: &str = "GWSR_LOG_FILE";
+/// Environment variable with a filter directive for stderr logging.
+pub const ENV_LOG: &str = "GWSR_LOG";
 
-/// Initialize the tracing subscriber based on environment variables.
-///
-/// If neither `GWSR_LOG` nor `GWSR_LOG_FILE`
-/// is set, this is a no-op and logging adds zero overhead.
-///
-/// This function must be called at most once (typically in `main()`).
-/// Subsequent calls will silently fail (tracing only allows one global
-/// subscriber).
-pub fn init_logging() {
-    let stderr_filter = std::env::var(ENV_LOG).ok();
-    let log_file_dir = std::env::var(ENV_LOG_FILE).ok();
+/// Environment variable naming the JSON log file directory.
+pub const ENV_LOG_FILE: &str = "GWSR_LOG_FILE";
 
-    // If neither env var is set, skip initialization entirely for zero overhead.
-    if stderr_filter.is_none() && log_file_dir.is_none() {
-        return;
-    }
+/// Crates whose verbosity `-v` raises.
+const OWN_TARGETS: &[&str] = &["gwsr", "gws_rust_core"];
 
-    let registry = tracing_subscriber::registry();
+/// Keeps the non-blocking file writer alive; dropping it flushes pending
+/// records. Hold it for the lifetime of `main`.
+#[must_use = "dropping the guard stops file logging and flushes it"]
+pub struct LogGuard {
+    _file: Option<tracing_appender::non_blocking::WorkerGuard>,
+}
 
-    // Stderr layer: human-readable, filtered by GWSR_LOG
-    let stderr_layer = stderr_filter.map(|filter| {
-        let env_filter = tracing_subscriber::EnvFilter::new(filter);
-        tracing_subscriber::fmt::layer()
-            .with_writer(std::io::stderr)
-            .with_target(false)
-            .compact()
-            .with_filter(env_filter)
-    });
+/// Inputs to logging initialization (already resolved by `main`).
+#[derive(Debug, Default, Clone)]
+pub struct LogOptions {
+    /// Net `-v` count minus `-q` (negative = quiet).
+    pub verbosity: i8,
+    /// `GWSR_LOG`.
+    pub gwsr_log: Option<String>,
+    /// `RUST_LOG`.
+    pub rust_log: Option<String>,
+    /// `log` from the config file.
+    pub config_log: Option<String>,
+    /// Log file directory (`GWSR_LOG_FILE` or config `log_file`).
+    pub file_dir: Option<PathBuf>,
+    /// Human-readable stderr lines instead of JSON lines (set for `-v` or a
+    /// human output format).
+    pub human: bool,
+}
 
-    // File layer: JSON-line output with daily rotation
-    let (file_layer, _guard) = if let Some(ref dir) = log_file_dir {
-        let file_appender = tracing_appender::rolling::daily(dir, "gwsr.log");
-        let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
-        let layer = tracing_subscriber::fmt::layer()
-            .json()
-            .with_writer(non_blocking)
-            .with_target(true)
-            .with_filter(tracing_subscriber::EnvFilter::new("gwsr=debug"));
-        (Some(layer), Some(guard))
-    } else {
-        (None, None)
-    };
-
-    // Compose layers and set as global subscriber.
-    // The guard is leaked intentionally so the non-blocking writer stays
-    // alive for the lifetime of the process.
-    let subscriber = registry.with(stderr_layer).with(file_layer);
-    if tracing::subscriber::set_global_default(subscriber).is_ok()
-        && let Some(guard) = _guard
-    {
-        // Leak the guard so the non-blocking writer lives for the process lifetime.
-        // This is the recommended pattern from tracing-appender docs.
-        std::mem::forget(guard);
+impl LogOptions {
+    /// Read the environment-provided parts.
+    pub fn from_env(verbosity: i8) -> Self {
+        Self {
+            verbosity,
+            gwsr_log: non_empty_env(ENV_LOG),
+            rust_log: non_empty_env("RUST_LOG"),
+            config_log: None,
+            file_dir: non_empty_env(ENV_LOG_FILE).map(PathBuf::from),
+            human: false,
+        }
     }
 }
 
+fn non_empty_env(name: &str) -> Option<String> {
+    std::env::var(name).ok().filter(|v| !v.trim().is_empty())
+}
+
+fn own_directive(level: &str) -> String {
+    let mut parts = vec!["warn".to_string()];
+    parts.extend(OWN_TARGETS.iter().map(|t| format!("{t}={level}")));
+    parts.join(",")
+}
+
+/// The stderr filter directive selected by the precedence rules.
+pub fn stderr_directive(opts: &LogOptions) -> String {
+    match opts.verbosity {
+        v if v < 0 => "error".to_string(),
+        1 => own_directive("info"),
+        2 => own_directive("debug"),
+        v if v >= 3 => own_directive("trace"),
+        _ => opts
+            .gwsr_log
+            .clone()
+            .or_else(|| opts.rust_log.clone())
+            .or_else(|| opts.config_log.clone())
+            .unwrap_or_else(|| "warn".to_string()),
+    }
+}
+
+fn parse_filter(directive: &str) -> Result<EnvFilter, GwsError> {
+    EnvFilter::try_new(directive)
+        .map_err(|e| GwsError::Validation(format!("invalid log filter '{directive}': {e}")))
+}
+
+/// Create the log directory with owner-only permissions.
+fn create_private_dir(dir: &Path) -> Result<(), GwsError> {
+    let mut builder = std::fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    builder.create(dir).map_err(|e| {
+        GwsError::from(
+            anyhow::Error::new(e)
+                .context(format!("failed to create log directory {}", dir.display())),
+        )
+    })
+}
+
+/// Install the global tracing subscriber.
+pub fn init(opts: &LogOptions) -> Result<LogGuard, GwsError> {
+    let stderr_filter = parse_filter(&stderr_directive(opts))?;
+    // Machine-readable by default: one JSON object per stderr line. `-v` or a
+    // human output format switches to compact human lines.
+    let (stderr_human, stderr_json) = if opts.human {
+        let layer = tracing_subscriber::fmt::layer()
+            .with_writer(std::io::stderr)
+            .with_target(opts.verbosity >= 2)
+            .with_ansi(crate::output::stderr_supports_color())
+            .compact()
+            .with_filter(stderr_filter);
+        (Some(layer), None)
+    } else {
+        let layer = tracing_subscriber::fmt::layer()
+            .json()
+            .with_writer(std::io::stderr)
+            .with_target(true)
+            .with_ansi(false)
+            .with_filter(stderr_filter);
+        (None, Some(layer))
+    };
+
+    let (file_layer, guard) = match &opts.file_dir {
+        Some(dir) => {
+            create_private_dir(dir)?;
+            let appender = tracing_appender::rolling::Builder::new()
+                .rotation(tracing_appender::rolling::Rotation::DAILY)
+                .filename_prefix("gwsr.log")
+                .build(dir)
+                .map_err(|e| {
+                    GwsError::from(
+                        anyhow::Error::new(e)
+                            .context(format!("failed to open log file in {}", dir.display())),
+                    )
+                })?;
+            let (writer, guard) = tracing_appender::non_blocking(appender);
+            let layer = tracing_subscriber::fmt::layer()
+                .json()
+                .with_writer(writer)
+                .with_target(true)
+                .with_filter(parse_filter(&own_directive("debug"))?);
+            (Some(layer), Some(guard))
+        }
+        None => (None, None),
+    };
+
+    tracing_subscriber::registry()
+        .with(stderr_human)
+        .with(stderr_json)
+        .with(file_layer)
+        .try_init()
+        .map_err(|e| {
+            GwsError::from(anyhow::anyhow!("failed to install the log subscriber: {e}"))
+        })?;
+
+    Ok(LogGuard { _file: guard })
+}
+
 #[cfg(test)]
-#[allow(unsafe_code)] // tests mutate process env; they are serialized with #[serial]
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_init_logging_default_no_panic() {
-        // With no env vars set, init_logging should be a no-op and not panic.
-        // We can't truly test the global subscriber in unit tests (it's global state),
-        // but we can verify the early-return path doesn't panic.
-        // FIXME: Audit that the environment access only happens in single-threaded code.
-        unsafe { std::env::remove_var(ENV_LOG) };
-        // FIXME: Audit that the environment access only happens in single-threaded code.
-        unsafe { std::env::remove_var(ENV_LOG_FILE) };
-        init_logging();
+    fn opts(verbosity: i8) -> LogOptions {
+        LogOptions {
+            verbosity,
+            ..Default::default()
+        }
     }
 
     #[test]
-    fn test_env_var_names() {
-        assert_eq!(ENV_LOG, "GWSR_LOG");
-        assert_eq!(ENV_LOG_FILE, "GWSR_LOG_FILE");
+    fn default_is_warn() {
+        assert_eq!(stderr_directive(&opts(0)), "warn");
+    }
+
+    #[test]
+    fn verbosity_flags_win_over_env_and_config() {
+        let o = LogOptions {
+            verbosity: 2,
+            gwsr_log: Some("gwsr=trace".into()),
+            rust_log: Some("info".into()),
+            config_log: Some("error".into()),
+            file_dir: None,
+            human: false,
+        };
+        assert_eq!(stderr_directive(&o), "warn,gwsr=debug,gws_rust_core=debug");
+        assert_eq!(
+            stderr_directive(&opts(1)),
+            "warn,gwsr=info,gws_rust_core=info"
+        );
+        assert_eq!(
+            stderr_directive(&opts(5)),
+            "warn,gwsr=trace,gws_rust_core=trace"
+        );
+        assert_eq!(stderr_directive(&opts(-1)), "error");
+    }
+
+    #[test]
+    fn env_precedence_gwsr_log_then_rust_log_then_config() {
+        let mut o = LogOptions {
+            gwsr_log: Some("gwsr=debug".into()),
+            rust_log: Some("info".into()),
+            config_log: Some("error".into()),
+            ..Default::default()
+        };
+        assert_eq!(stderr_directive(&o), "gwsr=debug");
+        o.gwsr_log = None;
+        assert_eq!(stderr_directive(&o), "info");
+        o.rust_log = None;
+        assert_eq!(stderr_directive(&o), "error");
+    }
+
+    #[test]
+    fn invalid_filter_is_a_validation_error() {
+        let err = parse_filter("gwsr=notalevel").unwrap_err();
+        assert!(matches!(err, GwsError::Validation(_)), "{err:?}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn log_dir_is_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("logs/nested");
+        create_private_dir(&dir).unwrap();
+        let mode = std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o700);
     }
 }

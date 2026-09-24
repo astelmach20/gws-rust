@@ -18,7 +18,7 @@
 //! $GWSR_CONFIG_DIR (default ~/.config/gwsr)      0700
 //! ├── client_secret.json                          OAuth client (shared by all profiles)
 //! ├── encryption.key                              only with GWSR_KEYRING_BACKEND=file
-//! ├── active_profile                              name of the profile used by default
+//! ├── config.toml                                 `profile = "<name>"` (set by `gwsr auth use`)
 //! └── profiles/<name>/                            0700
 //!     ├── credentials.enc                         encrypted refresh token
 //!     ├── token_cache.enc                         encrypted access-token cache
@@ -27,7 +27,7 @@
 //! ```
 //!
 //! The active profile is chosen by `--profile`, then `GWSR_PROFILE`, then the
-//! `active_profile` file, then `default`.
+//! `profile` key of `config.toml` (written by `gwsr auth use`), then `default`.
 
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
@@ -41,7 +41,6 @@ use crate::error::GwsError;
 pub const DEFAULT_PROFILE: &str = "default";
 
 const PROFILES_DIR: &str = "profiles";
-const ACTIVE_PROFILE_FILE: &str = "active_profile";
 const MAX_PROFILE_NAME_LEN: usize = 64;
 
 /// Process-wide auth settings taken from global command-line flags.
@@ -71,67 +70,6 @@ pub fn set_global_overrides(overrides: GlobalOverrides) -> Result<(), GwsError> 
 
 fn overrides() -> Option<&'static GlobalOverrides> {
     OVERRIDES.get()
-}
-
-/// Extract `--profile` and `--impersonate` (both `--flag value` and
-/// `--flag=value` forms) from `args`, removing them so the rest of the CLI
-/// never sees them, and record them for this process.
-///
-/// Scanning stops at a literal `--`. `args[0]` (the program name) is skipped.
-///
-/// # Errors
-///
-/// Fails on a flag without a value, a repeated flag, or an invalid profile name.
-pub fn apply_global_flags(args: &mut Vec<String>) -> Result<(), GwsError> {
-    let overrides = extract_global_flags(args)?;
-    set_global_overrides(overrides)
-}
-
-pub(crate) fn extract_global_flags(args: &mut Vec<String>) -> Result<GlobalOverrides, GwsError> {
-    let mut out = GlobalOverrides::default();
-    let mut kept = Vec::with_capacity(args.len());
-    let mut iter = std::mem::take(args).into_iter();
-    if let Some(program) = iter.next() {
-        kept.push(program);
-    }
-    while let Some(arg) = iter.next() {
-        if arg == "--" {
-            kept.push(arg);
-            kept.extend(iter.by_ref());
-            break;
-        }
-        let (flag, inline_value) = match arg.split_once('=') {
-            Some((f, v)) if f.starts_with("--") => (f.to_string(), Some(v.to_string())),
-            _ => (arg.clone(), None),
-        };
-        let slot = match flag.as_str() {
-            "--profile" => &mut out.profile,
-            "--impersonate" => &mut out.impersonate,
-            _ => {
-                kept.push(arg);
-                continue;
-            }
-        };
-        let value = match inline_value {
-            Some(v) => v,
-            None => iter
-                .next()
-                .ok_or_else(|| GwsError::Validation(format!("{flag} requires a value")))?,
-        };
-        if value.is_empty() || value.starts_with("--") {
-            return Err(GwsError::Validation(format!(
-                "{flag} requires a non-empty value"
-            )));
-        }
-        if slot.is_some() {
-            return Err(GwsError::Validation(format!(
-                "{flag} was given more than once"
-            )));
-        }
-        *slot = Some(value);
-    }
-    *args = kept;
-    Ok(out)
 }
 
 /// Read a string environment variable; unset or empty is `None`.
@@ -167,19 +105,6 @@ pub fn try_config_dir() -> anyhow::Result<PathBuf> {
     Ok(home.join(".config").join("gwsr"))
 }
 
-/// Infallible form of [`try_config_dir`] for callers that only use the
-/// directory for caches. If the home directory is unknown it warns loudly and
-/// uses `./.gwsr`.
-pub fn config_dir() -> PathBuf {
-    match try_config_dir() {
-        Ok(dir) => dir,
-        Err(e) => {
-            eprintln!("warning: {e:#}; using ./.gwsr for cache files");
-            PathBuf::from(".gwsr")
-        }
-    }
-}
-
 /// Validate a profile name: 1-64 characters of `[A-Za-z0-9_.-]`, not starting
 /// with `.` (so it can never be `.`/`..` or a hidden file).
 ///
@@ -206,7 +131,7 @@ pub fn validate_profile_name(name: &str) -> anyhow::Result<()> {
 pub enum ProfileSource {
     Flag,
     EnvVar,
-    ActiveProfileFile,
+    ConfigFile,
     Default,
 }
 
@@ -217,11 +142,11 @@ pub struct ActiveProfile {
     pub source: ProfileSource,
 }
 
-/// Resolve the active profile for `base` (flag > env > file > default).
+/// Resolve the active profile for `base` (flag > env > config.toml > default).
 ///
 /// # Errors
 ///
-/// Fails on an invalid name or an unreadable `active_profile` file.
+/// Fails on an invalid name or an unreadable/invalid `config.toml`.
 pub fn active_profile(base: &Path) -> anyhow::Result<ActiveProfile> {
     let flag = overrides().and_then(|o| o.profile.clone());
     let env = env_string("GWSR_PROFILE")?;
@@ -237,8 +162,10 @@ fn resolve_active_profile(
         (name, ProfileSource::Flag)
     } else if let Some(name) = env {
         (name, ProfileSource::EnvVar)
-    } else if let Some(name) = read_active_profile_file(base)? {
-        (name, ProfileSource::ActiveProfileFile)
+    } else if let Some(name) = crate::config::profile_in(&crate::config::config_path_in(base))
+        .map_err(|e| anyhow::anyhow!("{e}"))?
+    {
+        (name, ProfileSource::ConfigFile)
     } else {
         (DEFAULT_PROFILE.to_string(), ProfileSource::Default)
     };
@@ -246,41 +173,18 @@ fn resolve_active_profile(
     Ok(ActiveProfile { name, source })
 }
 
-fn read_active_profile_file(base: &Path) -> anyhow::Result<Option<String>> {
-    let path = base.join(ACTIVE_PROFILE_FILE);
-    match std::fs::read_to_string(&path) {
-        Ok(s) => {
-            let name = s.trim().to_string();
-            if name.is_empty() {
-                anyhow::bail!(
-                    "'{}' is empty; run `gwsr auth use <profile>` to select a profile",
-                    path.display()
-                );
-            }
-            Ok(Some(name))
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(e).with_context(|| format!("cannot read '{}'", path.display())),
-    }
-}
-
-/// Persist `name` as the default profile for future invocations.
+/// Persist `name` as the default profile (`profile` in `config.toml`) for
+/// future invocations; the rest of the file is preserved.
 ///
 /// # Errors
 ///
-/// Fails on an invalid name or a write error.
+/// Fails on an invalid name, an invalid existing config file or a write error.
 pub fn set_active_profile(base: &Path, name: &str) -> anyhow::Result<()> {
     validate_profile_name(name)?;
     crate::fs_util::ensure_private_dir(base)
         .with_context(|| format!("cannot create config directory '{}'", base.display()))?;
-    let path = base.join(ACTIVE_PROFILE_FILE);
-    crate::fs_util::atomic_write(&path, format!("{name}\n").as_bytes())
-        .with_context(|| format!("cannot write '{}'", path.display()))
-}
-
-/// Whether an `active_profile` file exists.
-pub fn has_active_profile_file(base: &Path) -> bool {
-    base.join(ACTIVE_PROFILE_FILE).is_file()
+    crate::config::set_profile_in(&crate::config::config_path_in(base), name)
+        .map_err(|e| anyhow::anyhow!("{e}"))
 }
 
 /// All files belonging to one profile.
@@ -426,45 +330,6 @@ pub fn impersonation_subject() -> anyhow::Result<Option<String>> {
 mod tests {
     use super::*;
 
-    fn args(v: &[&str]) -> Vec<String> {
-        v.iter().map(|s| s.to_string()).collect()
-    }
-
-    #[test]
-    fn extract_global_flags_both_forms() {
-        let mut a = args(&[
-            "gwsr",
-            "--profile",
-            "work",
-            "drive",
-            "files",
-            "list",
-            "--impersonate=alice@example.com",
-        ]);
-        let o = extract_global_flags(&mut a).unwrap();
-        assert_eq!(o.profile.as_deref(), Some("work"));
-        assert_eq!(o.impersonate.as_deref(), Some("alice@example.com"));
-        assert_eq!(a, args(&["gwsr", "drive", "files", "list"]));
-    }
-
-    #[test]
-    fn extract_global_flags_stops_at_double_dash() {
-        let mut a = args(&["gwsr", "x", "--", "--profile", "p"]);
-        let o = extract_global_flags(&mut a).unwrap();
-        assert_eq!(o, GlobalOverrides::default());
-        assert_eq!(a, args(&["gwsr", "x", "--", "--profile", "p"]));
-    }
-
-    #[test]
-    fn extract_global_flags_errors() {
-        assert!(extract_global_flags(&mut args(&["gwsr", "--profile"])).is_err());
-        assert!(extract_global_flags(&mut args(&["gwsr", "--profile="])).is_err());
-        assert!(extract_global_flags(&mut args(&["gwsr", "--profile", "--x"])).is_err());
-        assert!(
-            extract_global_flags(&mut args(&["gwsr", "--profile", "a", "--profile", "b"])).is_err()
-        );
-    }
-
     #[test]
     fn profile_name_validation() {
         for ok in ["default", "work", "a.b-c_d", "X9"] {
@@ -483,12 +348,20 @@ mod tests {
         assert_eq!(p.name, DEFAULT_PROFILE);
         assert_eq!(p.source, ProfileSource::Default);
 
+        // `auth use` writes config.toml and keeps its other keys.
+        std::fs::write(base.join("config.toml"), "# mine\nformat = \"table\"\n").unwrap();
         set_active_profile(base, "filed").unwrap();
         let p = resolve_active_profile(base, None, None).unwrap();
         assert_eq!(
             (p.name.as_str(), p.source),
-            ("filed", ProfileSource::ActiveProfileFile)
+            ("filed", ProfileSource::ConfigFile)
         );
+        let text = std::fs::read_to_string(base.join("config.toml")).unwrap();
+        assert!(
+            text.contains("# mine") && text.contains("format = \"table\""),
+            "{text}"
+        );
+        assert!(!base.join("active_profile").exists());
 
         let p = resolve_active_profile(base, None, Some("env".into())).unwrap();
         assert_eq!((p.name.as_str(), p.source), ("env", ProfileSource::EnvVar));
@@ -500,9 +373,11 @@ mod tests {
     }
 
     #[test]
-    fn empty_active_profile_file_is_an_error() {
+    fn invalid_config_profile_is_an_error() {
         let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join(ACTIVE_PROFILE_FILE), "\n").unwrap();
+        std::fs::write(dir.path().join("config.toml"), "profile = \"../x\"\n").unwrap();
+        assert!(resolve_active_profile(dir.path(), None, None).is_err());
+        std::fs::write(dir.path().join("config.toml"), "profile = [\n").unwrap();
         assert!(resolve_active_profile(dir.path(), None, None).is_err());
     }
 

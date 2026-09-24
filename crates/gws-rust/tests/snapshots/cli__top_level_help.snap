@@ -1,0 +1,105 @@
+---
+source: crates/gws-rust/tests/cli.rs
+expression: help
+---
+Google Workspace CLI: every Workspace API, built at runtime from Google's Discovery documents
+
+Usage: gwsr [OPTIONS] [COMMAND|SERVICE]
+
+Commands:
+  auth         Sign in, inspect and manage credentials (run `gwsr auth --help`)
+  schema       Show the request/response schema of a method or type
+  commands     Inventory of services, resources, methods and helpers with their flags (JSON; `--format table|csv` gives one row per command)
+  completions  Print a shell completion script (dynamic: completes services, resources and methods from cached Discovery documents)
+  batch        Send many API calls in multipart/mixed batch requests (NDJSON in, NDJSON out)
+  cache        Manage the local Discovery document cache
+  help         Show help for a command or service (`gwsr help drive files list`)
+  dev          Maintainer tools
+
+Options:
+  -h, --help     Print help
+  -V, --version  Print version
+
+Global options:
+      --format <FORMAT>        Output format [default: json, or `format` in config.toml] [possible values: json, table, yaml, yml, csv]
+      --jq <EXPR>              Filter output with a jq expression (string results print raw)
+      --columns <COLS>         Columns for table/csv output, comma-separated (dot paths for nested fields)
+      --compact                Single-line JSON (default when stdout is not a terminal)
+      --pretty                 Indented JSON (default on a terminal)
+      --dry-run                Validate the request locally and print it without sending it
+      --sanitize <TEMPLATE>    Screen API responses through a Model Armor template (projects/P/locations/L/templates/T; env: GWSR_SANITIZE_TEMPLATE)
+      --api-version <VERSION>  Override the service's API version (e.g. v2); also `<service>:<version>`
+  -v, --verbose...             More diagnostics on stderr (-v info, -vv debug, -vvv trace)
+  -q, --quiet                  Only print errors on stderr
+      --profile <NAME>         Credential profile (env: GWSR_PROFILE; default: `profile` in config.toml, set by `gwsr auth use`, then "default")
+      --impersonate <EMAIL>    Service accounts only: act as this user via domain-wide delegation (env: GWSR_IMPERSONATE)
+
+Services:
+  drive              Manage files, folders, and shared drives
+  sheets             Read and write spreadsheets
+  gmail              Send, read, and manage email
+  calendar           Manage calendars and events
+  admin-reports      Audit logs and usage reports (also: reports)
+  admin              Manage users, groups, org units, devices, and roles (Admin SDK Directory) (also: directory, admin-directory)
+  datatransfer       Transfer user data between accounts (Admin SDK Data Transfer) (also: admin-datatransfer)
+  alertcenter        Manage Workspace security alerts
+  cloudidentity      Manage identity groups, memberships, and devices
+  groupssettings     Manage Google Groups settings
+  licensing          Assign and manage product licenses
+  reseller           Manage reseller customers and subscriptions
+  vault              Manage eDiscovery matters, holds, and exports
+  driveactivity      Query activity on Drive files and folders
+  drivelabels        Manage Drive labels and classification
+  chromemanagement   Chrome browser and ChromeOS device reports and telemetry
+  chromepolicy       Manage Chrome policies for users and devices
+  postmaster         Gmail sender reputation and delivery metrics (Postmaster Tools) (also: gmailpostmastertools)
+  cloudsearch        Manage Cloud Search data sources and queries
+  docs               Read and write Google Docs
+  slides             Read and write presentations
+  tasks              Manage task lists and tasks
+  people             Manage contacts and profiles
+  chat               Manage Chat spaces and messages
+  classroom          Manage classes, rosters, and coursework
+  forms              Read and write Google Forms
+  keep               Manage Google Keep notes
+  meet               Manage Google Meet conferences
+  events             Subscribe to Google Workspace events
+  modelarmor         Filter user-generated content for safety
+  workflow           Cross-service productivity workflows (also: wf)
+  script             Manage Google Apps Script projects
+
+Usage: gwsr <SERVICE> <RESOURCE> [SUB-RESOURCE] <METHOD> [--params JSON] [--json JSON]
+Example: gwsr drive files list --params '{"pageSize": 5}' --format table
+
+Environment:
+  GWSR_TOKEN               Pre-obtained OAuth2 access token (highest priority)
+  GWSR_CREDENTIALS_FILE    Path to an OAuth or service-account credentials JSON file
+  GWSR_CLIENT_ID           OAuth client ID (for gwsr auth login)
+  GWSR_CLIENT_SECRET       OAuth client secret (for gwsr auth login)
+  GWSR_CONFIG_DIR          Config directory (default: ~/.config/gwsr)
+  GWSR_KEYRING_BACKEND     Keyring backend: keyring (default) or file
+  GWSR_PROJECT_ID          GCP project for quota and billing
+  GWSR_FORMAT              Default output format (json, table, yaml, csv)
+  GWSR_JSON_STYLE          JSON layout: auto (default), compact, pretty
+  GWSR_PAGE_LIMIT          Default --page-limit
+  GWSR_PAGE_DELAY_MS       Default --page-delay
+  GWSR_SANITIZE_TEMPLATE   Default Model Armor template (--sanitize)
+  GWSR_SANITIZE_MODE       Sanitization mode: warn (default) or block
+  GWSR_LOG                 stderr log filter, e.g. gwsr=debug (RUST_LOG is also honored)
+  GWSR_LOG_FILE            Directory for JSON log files (daily rotation, mode 0600)
+  GWSR_COMPLETE            Set by the shell completion script; do not set manually
+
+Exit codes:
+  0    Success
+  1    API error      — Google rejected the request (permanent; do not retry unchanged)
+  2    Auth error     — credentials missing, expired or invalid
+  3    Validation     — bad arguments, flags, config or input
+  4    Discovery      — could not fetch or parse the API schema
+  5    Internal       — unexpected failure (I/O, serialization, ...)
+  6    API retryable  — rate limit (429/403 rateLimitExceeded) or server error (5xx); retry with backoff
+
+Output is JSON by default (compact when piped); --format table|yaml|csv is opt-in.
+Errors: one JSON object {"error":{...}} on stderr (human text with a human --format);
+stdout stays empty on failure.
+Config: ~/.config/gwsr/config.toml (flag > env > config > default).
+This is not an officially supported Google product.
