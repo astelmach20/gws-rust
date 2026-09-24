@@ -62,7 +62,7 @@ workflows:
 
 # Regenerate agent skills from the live Discovery documents (network access required)
 skills:
-    cargo run --locked -- generate-skills --output-dir skills
+    cargo run --locked -- dev generate-skills --output-dir skills --index docs/skills.md
 
 # Everything CI checks, in roughly the same order
 ci: lint test test-js deny

@@ -37,6 +37,8 @@ pub mod token_cache;
 
 use secrecy::{ExposeSecret, SecretString};
 
+use crate::error::GwsError;
+
 use credentials::{AuthEnv, Credential, CredentialSource, Resolved};
 pub use profiles::try_config_dir;
 use token_cache::Freshness;
@@ -93,6 +95,103 @@ pub enum AuthError {
     /// Network failure talking to Google's OAuth endpoints.
     #[error("{0}")]
     Network(String),
+    /// The user or a Workspace policy denied the authorization request.
+    #[error("{0}")]
+    Denied(String),
+    /// Unusable interactive input (e.g. a pasted callback URL).
+    #[error("{0}")]
+    Input(String),
+    /// An unexpected internal failure (a background task panicked, stdout
+    /// could not be written).
+    #[error("{0}")]
+    Internal(String),
+}
+
+/// The CLI error category of an auth-layer failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Category {
+    Credential,
+    Config,
+    Store,
+    Network,
+    Input,
+    Internal,
+}
+
+impl Category {
+    fn of(e: &AuthError) -> Self {
+        match e {
+            AuthError::NoCredentials
+            | AuthError::ProfileNotLoggedIn { .. }
+            | AuthError::InvalidGrant { .. }
+            | AuthError::InvalidScope { .. }
+            | AuthError::TokenEndpoint(_)
+            | AuthError::Denied(_) => Category::Credential,
+            AuthError::Config(_) => Category::Config,
+            AuthError::Keystore(k) => Category::of_keystore(k),
+            AuthError::Storage(_) => Category::Store,
+            AuthError::Network(_) => Category::Network,
+            AuthError::Input(_) => Category::Input,
+            AuthError::Internal(_) => Category::Internal,
+        }
+    }
+
+    fn of_keystore(e: &keystore::KeystoreError) -> Self {
+        match e {
+            keystore::KeystoreError::InvalidBackend(_) => Category::Config,
+            _ => Category::Store,
+        }
+    }
+
+    fn error(self, message: String) -> GwsError {
+        match self {
+            Category::Credential => GwsError::Auth(message),
+            Category::Config => GwsError::Config(message),
+            Category::Store => GwsError::CredentialStore(message),
+            Category::Network => GwsError::Network(message.into()),
+            Category::Input => GwsError::Validation(message),
+            Category::Internal => GwsError::other(message),
+        }
+    }
+}
+
+impl From<AuthError> for GwsError {
+    fn from(e: AuthError) -> Self {
+        Category::of(&e).error(e.to_string())
+    }
+}
+
+impl From<keystore::KeystoreError> for GwsError {
+    fn from(e: keystore::KeystoreError) -> Self {
+        Category::of_keystore(&e).error(e.to_string())
+    }
+}
+
+/// Convert an `anyhow` error from the auth layer into the CLI error type,
+/// keeping the whole context chain in the message.
+///
+/// The category comes from the first typed cause in the chain:
+/// [`AuthError`] and [`keystore::KeystoreError`] map as in their `From`
+/// impls; a bare `std::io::Error` is a local storage failure
+/// ([`GwsError::CredentialStore`]). Everything else the auth layer reports
+/// untyped is a configuration problem (invalid environment variables,
+/// profile names, config or client files) and becomes [`GwsError::Config`].
+pub(crate) fn to_gws_error(err: anyhow::Error) -> GwsError {
+    let category = err
+        .chain()
+        .find_map(|cause| {
+            if let Some(e) = cause.downcast_ref::<AuthError>() {
+                Some(Category::of(e))
+            } else if let Some(e) = cause.downcast_ref::<keystore::KeystoreError>() {
+                Some(Category::of_keystore(e))
+            } else if cause.downcast_ref::<std::io::Error>().is_some() {
+                Some(Category::Store)
+            } else {
+                None
+            }
+        })
+        .unwrap_or(Category::Config);
+    category.error(format!("{err:#}"))
 }
 
 /// Mints replacement access tokens for a fixed set of scopes.
@@ -382,6 +481,94 @@ mod tests {
     use super::*;
     use wiremock::matchers::{body_string_contains, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    #[test]
+    fn auth_errors_map_to_distinct_cli_errors_and_exit_codes() {
+        use keystore::KeystoreError;
+        let io = || std::io::Error::other("disk full");
+        let cases: Vec<(AuthError, i32, &str)> = vec![
+            (AuthError::NoCredentials, 2, "authError"),
+            (
+                AuthError::ProfileNotLoggedIn {
+                    profile: "work".into(),
+                },
+                2,
+                "authError",
+            ),
+            (
+                AuthError::InvalidGrant {
+                    description: "expired".into(),
+                    login_command: "gwsr auth login".into(),
+                },
+                2,
+                "authError",
+            ),
+            (
+                AuthError::InvalidScope {
+                    requested: vec!["https://www.googleapis.com/auth/drive".into()],
+                    description: "nope".into(),
+                },
+                2,
+                "authError",
+            ),
+            (AuthError::TokenEndpoint("HTTP 500".into()), 2, "authError"),
+            (AuthError::Denied("access_denied".into()), 2, "authError"),
+            (AuthError::Config("bad file".into()), 8, "configError"),
+            (
+                AuthError::Keystore(KeystoreError::InvalidBackend("x".into())),
+                8,
+                "configError",
+            ),
+            (
+                AuthError::Keystore(KeystoreError::KeyUnavailable("locked".into())),
+                9,
+                "credentialStoreError",
+            ),
+            (
+                AuthError::Keystore(KeystoreError::Io {
+                    context: "cannot read key".into(),
+                    source: io(),
+                }),
+                9,
+                "credentialStoreError",
+            ),
+            (
+                AuthError::Storage("unreadable".into()),
+                9,
+                "credentialStoreError",
+            ),
+            (AuthError::Network("dns".into()), 10, "networkError"),
+            (AuthError::Input("bad paste".into()), 3, "validationError"),
+            (
+                AuthError::Internal("task panicked".into()),
+                5,
+                "internalError",
+            ),
+        ];
+        for (auth, exit, reason) in cases {
+            let text = auth.to_string();
+            // Wrapped in anyhow context, as the auth layer returns it.
+            let wrapped = to_gws_error(anyhow::Error::new(auth).context("while loading"));
+            assert_eq!(wrapped.exit_code(), exit, "{text}");
+            assert_eq!(wrapped.to_json()["error"]["reason"], reason, "{text}");
+            assert!(wrapped.to_string().contains("while loading"), "{wrapped}");
+            assert!(wrapped.to_string().contains(&text), "{wrapped}");
+        }
+    }
+
+    #[test]
+    fn untyped_auth_layer_errors_are_config_and_io_errors_are_store_errors() {
+        let config = to_gws_error(anyhow::anyhow!("environment variable X is not valid UTF-8"));
+        assert!(matches!(config, GwsError::Config(_)), "{config:?}");
+        let store = to_gws_error(
+            anyhow::Error::new(std::io::Error::other("permission denied"))
+                .context("cannot read '/x/metadata.json'"),
+        );
+        assert!(matches!(store, GwsError::CredentialStore(_)), "{store:?}");
+        assert!(store.to_string().contains("permission denied"), "{store}");
+        let direct: GwsError = keystore::KeystoreError::Decrypt { what: "x".into() }.into();
+        assert!(matches!(direct, GwsError::CredentialStore(_)), "{direct:?}");
+    }
 
     const USER_JSON: &str =
         r#"{"type":"authorized_user","client_id":"cid","client_secret":"cs","refresh_token":"rt"}"#;

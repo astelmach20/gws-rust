@@ -468,14 +468,31 @@ fn config_file_sets_defaults_and_flags_override() {
 }
 
 #[test]
-fn invalid_config_is_a_loud_validation_error() {
+fn invalid_config_is_a_loud_config_error() {
     let env = Env::new();
     env.write_config("formt = \"table\"\n");
     env.cmd()
         .args(["cache", "clear"])
         .assert()
-        .code(3)
-        .stderr(predicate::str::contains("unknown field `formt`"));
+        .code(8)
+        .stdout("")
+        .stderr(predicate::str::contains("unknown field `formt`"))
+        .stderr(predicate::str::contains("\"configError\""));
+}
+
+#[test]
+fn auth_configuration_errors_exit_with_the_config_code() {
+    let env = Env::new();
+    // An invalid profile name selected through the environment is a
+    // configuration error (exit 8), not an authentication failure (exit 2).
+    env.cmd()
+        .args(["auth", "status"])
+        .env("GWSR_PROFILE", "../escape")
+        .assert()
+        .code(8)
+        .stdout("")
+        .stderr(predicate::str::contains("\"configError\""))
+        .stderr(predicate::str::contains("GWSR_PROFILE"));
 }
 
 #[test]

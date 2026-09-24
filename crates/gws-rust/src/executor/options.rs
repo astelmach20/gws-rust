@@ -132,7 +132,7 @@ pub fn parse_exec_options(m: &clap::ArgMatches) -> Result<ExecOptions, GwsError>
 /// it on 401. No stored credentials means an unauthenticated request.
 async fn resolve_credentials(method: &RestMethod) -> Result<Credentials, GwsError> {
     let scopes = crate::auth::scopes_for_method(&method.scopes, &method.http_method)
-        .map_err(|e| GwsError::Auth(format!("{e:#}")))?;
+        .map_err(crate::auth::to_gws_error)?;
     Credentials::for_scopes(&scopes).await
 }
 

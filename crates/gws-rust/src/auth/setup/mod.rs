@@ -169,6 +169,9 @@ fn tui_err(e: std::io::Error) -> GwsError {
     GwsError::Validation(format!("terminal UI error: {e}"))
 }
 
+/// `auth setup` delegates sign-in, account and project selection to the
+/// gcloud CLI; a failed gcloud step means setting up authentication failed,
+/// so it is reported as an auth error (exit code 2) with gcloud's output.
 fn gcloud_err(e: anyhow::Error) -> GwsError {
     GwsError::Auth(format!("{e:#}"))
 }
@@ -558,19 +561,22 @@ async fn configure_consent_screen(
     token: &SecretString,
     support_email: &str,
 ) -> Result<Consent, GwsError> {
-    let client = crate::auth::http::client().map_err(gcloud_err)?;
+    let client = crate::auth::http::client()
+        .map_err(|e| GwsError::other(format!("cannot build the HTTP client: {e:#}")))?;
     let url = format!("https://oauth2.googleapis.com/v1/projects/{project_id}/brands");
     let check = client
         .get(&url)
         .bearer_auth(token.expose_secret())
         .send()
         .await
-        .map_err(|e| GwsError::Auth(format!("cannot check the OAuth consent screen: {e}")))?;
+        .map_err(|e| {
+            GwsError::Network(format!("cannot check the OAuth consent screen: {e}").into())
+        })?;
     if check.status().is_success() {
         let body: serde_json::Value = check
             .json()
             .await
-            .map_err(|e| GwsError::Auth(format!("invalid consent-screen response: {e}")))?;
+            .map_err(|e| GwsError::other(format!("invalid consent-screen response: {e}")))?;
         if body
             .get("brands")
             .and_then(|b| b.as_array())
@@ -585,15 +591,16 @@ async fn configure_consent_screen(
         .json(&json!({"applicationTitle": "gwsr CLI", "supportEmail": support_email}))
         .send()
         .await
-        .map_err(|e| GwsError::Auth(format!("cannot create the OAuth consent screen: {e}")))?;
+        .map_err(|e| {
+            GwsError::Network(format!("cannot create the OAuth consent screen: {e}").into())
+        })?;
     let status = create.status();
     if status.is_success() {
         return Ok(Consent::Created);
     }
-    let body = create
-        .text()
-        .await
-        .map_err(|e| GwsError::Auth(format!("cannot read the consent-screen response: {e}")))?;
+    let body = create.text().await.map_err(|e| {
+        GwsError::Network(format!("cannot read the consent-screen response: {e}").into())
+    })?;
     if body.contains("ALREADY_EXISTS") || body.contains("already exists") {
         return Ok(Consent::Exists);
     }
@@ -617,7 +624,7 @@ async fn stage_configure_oauth(ctx: &mut Ctx) -> Result<Stage, GwsError> {
     }
     if !ctx.interactive {
         let configured = crate::auth::client_config::load_from(&ctx.client_path)
-            .map_err(|e| GwsError::Validation(format!("{e:#}")))?
+            .map_err(crate::auth::to_gws_error)?
             .is_some();
         if !configured {
             ctx.manual_steps = Some(messages::manual_oauth_instructions(
@@ -629,7 +636,7 @@ async fn stage_configure_oauth(ctx: &mut Ctx) -> Result<Stage, GwsError> {
     }
 
     let existing_id = crate::auth::client_config::load_from(&ctx.client_path)
-        .map_err(|e| GwsError::Validation(format!("{e:#}")))?
+        .map_err(crate::auth::to_gws_error)?
         .map(|c| c.client_id);
     let project = ctx.project_id.clone();
     let note = ctx
@@ -686,7 +693,7 @@ async fn stage_configure_oauth(ctx: &mut Ctx) -> Result<Stage, GwsError> {
         &secret,
         Some(&ctx.project_id),
     )
-    .map_err(|e| GwsError::Validation(format!("{e:#}")))?;
+    .map_err(crate::auth::to_gws_error)?;
     ctx.step(4, StepStatus::Done("configured".into()))?;
     Ok(Stage::Finish)
 }
@@ -752,8 +759,8 @@ pub async fn run_setup(args: &[String]) -> Result<(), GwsError> {
     if opts.dry_run {
         crate::output::eprint_line("DRY RUN: no changes will be made\n");
     }
-    let client_path = crate::auth::client_config::client_config_path()
-        .map_err(|e| GwsError::Validation(format!("{e:#}")))?;
+    let client_path =
+        crate::auth::client_config::client_config_path().map_err(crate::auth::to_gws_error)?;
     let wizard = if interactive {
         Some(SetupWizard::start(&STEP_LABELS).map_err(tui_err)?)
     } else {

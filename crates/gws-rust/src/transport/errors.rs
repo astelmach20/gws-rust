@@ -39,9 +39,9 @@ pub fn extract_enable_url(message: &str) -> Option<String> {
     Some(url.to_string())
 }
 
-/// Prefix `context` (e.g. "Failed to send message") to an API or internal
-/// error. Validation, auth and discovery errors already say what failed and
-/// are returned unchanged.
+/// Prefix `context` (e.g. "Failed to send message") to an API, network or
+/// internal error. Validation, auth, configuration and discovery errors
+/// already say what failed and are returned unchanged.
 pub(crate) fn with_context(err: GwsError, context: &str) -> GwsError {
     match err {
         GwsError::Api {
@@ -56,6 +56,10 @@ pub(crate) fn with_context(err: GwsError, context: &str) -> GwsError {
             enable_url,
         },
         GwsError::Other(source) => GwsError::Other(Box::new(Context {
+            context: context.to_string(),
+            source,
+        })),
+        GwsError::Network(source) => GwsError::Network(Box::new(Context {
             context: context.to_string(),
             source,
         })),

@@ -135,6 +135,18 @@ pub enum ProfileSource {
     Default,
 }
 
+impl ProfileSource {
+    /// Where the user set the name, as they would write it.
+    pub fn origin(self) -> &'static str {
+        match self {
+            ProfileSource::Flag => "--profile",
+            ProfileSource::EnvVar => "GWSR_PROFILE",
+            ProfileSource::ConfigFile => "the `profile` key of config.toml",
+            ProfileSource::Default => "the built-in default",
+        }
+    }
+}
+
 /// The profile selected for this invocation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ActiveProfile {
@@ -169,7 +181,7 @@ fn resolve_active_profile(
     } else {
         (DEFAULT_PROFILE.to_string(), ProfileSource::Default)
     };
-    validate_profile_name(&name).with_context(|| format!("profile selected via {source:?}"))?;
+    validate_profile_name(&name).with_context(|| format!("profile set by {}", source.origin()))?;
     Ok(ActiveProfile { name, source })
 }
 

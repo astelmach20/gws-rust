@@ -140,7 +140,7 @@ async fn batch_credentials(calls: &[BatchCall<'_>]) -> Result<Credentials, GwsEr
     let mut scopes: Vec<String> = Vec::new();
     for call in calls {
         let chosen = crate::auth::scopes_for_method(&call.method.scopes, &call.method.http_method)
-            .map_err(|e| GwsError::Auth(format!("{e:#}")))?;
+            .map_err(crate::auth::to_gws_error)?;
         scopes.extend(chosen);
     }
     scopes.sort_unstable();

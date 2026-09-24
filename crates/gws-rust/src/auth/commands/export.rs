@@ -28,7 +28,7 @@ use std::path::{Path, PathBuf};
 use serde_json::{Value, json};
 use zeroize::Zeroizing;
 
-use super::{auth_err, print_json};
+use super::print_json;
 use crate::auth::credentials::AuthEnv;
 use crate::auth::keystore::Purpose;
 use crate::error::GwsError;
@@ -36,10 +36,10 @@ use crate::error::GwsError;
 const SECRET_FIELDS: &[&str] = &["client_secret", "refresh_token", "private_key"];
 
 pub(super) async fn handle(m: &clap::ArgMatches) -> Result<(), GwsError> {
-    let env = AuthEnv::from_process().map_err(|e| auth_err(format!("{e:#}")))?;
+    let env = AuthEnv::from_process().map_err(crate::auth::to_gws_error)?;
     let plaintext = tokio::task::spawn_blocking(move || read_profile_plaintext(&env))
         .await
-        .map_err(|e| auth_err(format!("export task failed: {e}")))??;
+        .map_err(|e| GwsError::other(format!("export task failed: {e}")))??;
 
     if crate::args::flag(m, "unmasked")? {
         let output = crate::args::value::<String>(m, "output")?
@@ -69,28 +69,26 @@ fn read_profile_plaintext(env: &AuthEnv) -> Result<Zeroizing<String>, GwsError> 
         )));
     }
     let data = std::fs::read(path)
-        .map_err(|e| auth_err(format!("cannot read '{}': {e}", path.display())))?;
+        .map_err(|e| GwsError::CredentialStore(format!("cannot read '{}': {e}", path.display())))?;
     let what = format!("the credentials of profile '{}'", env.profile.name);
-    let keystore = env.keystore().map_err(auth_err)?;
-    let pt = keystore
-        .decrypt(Purpose::Credentials, &data, &what)
-        .map_err(auth_err)?;
+    let keystore = env.keystore()?;
+    let pt = keystore.decrypt(Purpose::Credentials, &data, &what)?;
     let text = std::str::from_utf8(&pt)
-        .map_err(|_| auth_err(format!("{what} decrypted to invalid UTF-8")))?;
+        .map_err(|_| GwsError::CredentialStore(format!("{what} decrypted to invalid UTF-8")))?;
     Ok(Zeroizing::new(text.to_string()))
 }
 
 /// Mask secrets; fail (without printing) if the data is not a JSON object.
 pub(super) fn masked(plaintext: &str) -> Result<Value, GwsError> {
     let mut value: Value = serde_json::from_str(plaintext).map_err(|_| {
-        GwsError::Auth(
+        GwsError::CredentialStore(
             "the stored credentials are not valid JSON; refusing to print them. Run `gwsr auth \
              logout` and `gwsr auth login` to replace them"
                 .into(),
         )
     })?;
     let obj = value.as_object_mut().ok_or_else(|| {
-        GwsError::Auth(
+        GwsError::CredentialStore(
             "the stored credentials are not a JSON object; refusing to print them".into(),
         )
     })?;
