@@ -495,6 +495,35 @@ fn auth_configuration_errors_exit_with_the_config_code() {
         .stderr(predicate::str::contains("GWSR_PROFILE"));
 }
 
+#[test]
+fn cache_clear_dry_run_reports_and_keeps_the_cache() {
+    let env = Env::new();
+    env.seed_drive("Lists files.");
+    let out = env
+        .cmd()
+        .args(["cache", "clear", "--dry-run"])
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+    let v: Value = serde_json::from_str(&stdout_of(&out)).unwrap();
+    assert_eq!(v["dry_run"], true);
+    assert_eq!(v["wouldRemove"], 1);
+    let seeded = env.seeded_drive_path();
+    assert_eq!(v["documents"][0], seeded.display().to_string());
+    assert!(seeded.exists(), "--dry-run must not delete the cache");
+    let out = env
+        .cmd()
+        .args(["cache", "clear"])
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+    let v: Value = serde_json::from_str(&stdout_of(&out)).unwrap();
+    assert_eq!(v["removed"], 1);
+    assert!(!seeded.exists());
+}
+
 #[cfg(unix)]
 #[test]
 fn non_utf8_environment_values_are_config_errors_not_ignored() {
