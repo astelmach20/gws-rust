@@ -1,0 +1,59 @@
+name: Set up Rust
+description: >-
+  Installs the Rust toolchain pinned in rust-toolchain.toml (or an explicit override such as the
+  MSRV or beta) with rustup, which is preinstalled on GitHub-hosted runners. No third-party action
+  is involved, so the toolchain version lives in exactly one place.
+
+inputs:
+  toolchain:
+    description: Toolchain override (e.g. "1.89", "beta"), applied as a rustup directory override. Empty means the rust-toolchain.toml channel.
+    required: false
+    default: ""
+  components:
+    description: Comma-separated rustup components to install.
+    required: false
+    default: "clippy,rustfmt"
+  targets:
+    description: Comma-separated extra compilation targets.
+    required: false
+    default: ""
+  working-directory:
+    description: Directory containing rust-toolchain.toml.
+    required: false
+    default: "."
+
+outputs:
+  toolchain:
+    description: The installed toolchain name.
+    value: ${{ steps.install.outputs.toolchain }}
+
+runs:
+  using: composite
+  steps:
+    - id: install
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        TOOLCHAIN: ${{ inputs.toolchain }}
+        COMPONENTS: ${{ inputs.components }}
+        TARGETS: ${{ inputs.targets }}
+      run: |
+        set -euo pipefail
+        toolchain="$TOOLCHAIN"
+        if [[ -z "$toolchain" ]]; then
+          toolchain="$(sed -nE 's/^channel[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/p' rust-toolchain.toml)"
+          if [[ -z "$toolchain" ]]; then
+            echo "::error file=rust-toolchain.toml::could not read the toolchain channel"
+            exit 1
+          fi
+        fi
+        args=(toolchain install "$toolchain" --profile minimal --no-self-update)
+        if [[ -n "$COMPONENTS" ]]; then args+=(--component "$COMPONENTS"); fi
+        if [[ -n "$TARGETS" ]]; then args+=(--target "$TARGETS"); fi
+        rustup "${args[@]}"
+        # A directory override outranks rust-toolchain.toml, so later steps in this checkout use
+        # the requested MSRV/beta toolchain without exporting anything through GITHUB_ENV.
+        if [[ -n "$TOOLCHAIN" ]]; then rustup override set "$toolchain"; fi
+        echo "toolchain=${toolchain}" >> "$GITHUB_OUTPUT"
+        rustup run "$toolchain" rustc --version --verbose
+        rustup run "$toolchain" cargo --version
