@@ -574,7 +574,7 @@ Report vulnerabilities privately; see [SECURITY.md](SECURITY.md).
 ```bash
 nix develop        # optional: the pinned toolchain plus just, cargo-deny, cargo-llvm-cov, ...
 just               # list recipes
-just ci            # everything CI checks: fmt, clippy, machete, shellcheck, workflows, tests, deny/audit
+just ci            # the local CI gate: fmt, clippy, machete, shellcheck, actionlint, Rust and npm tests, cargo deny + audit
 just coverage      # tests under cargo-llvm-cov with the 65% line-coverage floor
 pnpm changeset     # every PR that changes Rust code needs a changeset
 ```
