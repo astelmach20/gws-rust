@@ -1,6 +1,6 @@
 ---
 name: gwsr-workflow-meeting-prep
-description: "Google Workflow: Prepare for your next meeting: agenda, attendees, and linked docs."
+description: "Google Workflow: Prepare for your next meeting: agenda, attendees, and links."
 metadata:
   version: 0.22.5
   openclaw:
@@ -13,9 +13,9 @@ metadata:
 
 # workflow +meeting-prep
 
-> **PREREQUISITE:** Read `../gwsr-shared/SKILL.md` for auth, global flags, and security rules. If missing, run `gwsr generate-skills` to create it.
+> **PREREQUISITE:** Read `../gwsr-shared/SKILL.md` for auth, global flags, and security rules.
 
-Prepare for your next meeting: agenda, attendees, and linked docs
+Prepare for your next meeting: agenda, attendees, and links
 
 ## Usage
 
@@ -27,20 +27,18 @@ gwsr workflow +meeting-prep
 
 | Flag | Required | Default | Description |
 |------|----------|---------|-------------|
-| `--calendar` | — | primary | Calendar ID (default: primary) |
-| `--format` | — | — | Output format: json (default), table, yaml, csv |
+| `--calendar-id` | — | primary | Calendar ID |
 
 ## Examples
 
 ```bash
 gwsr workflow +meeting-prep
-gwsr workflow +meeting-prep --calendar Work
+gwsr workflow +meeting-prep --calendar-id team@example.com
 ```
 
 ## Tips
 
-- Read-only — never modifies data.
-- Shows the next upcoming event with attendees and description.
+- Read-only. Shows the next upcoming event with attendees and description.
 
 ## See Also
 

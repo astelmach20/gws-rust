@@ -13,7 +13,7 @@ metadata:
 
 # docs (v1)
 
-> **PREREQUISITE:** Read `../gwsr-shared/SKILL.md` for auth, global flags, and security rules. If missing, run `gwsr generate-skills` to create it.
+> **PREREQUISITE:** Read `../gwsr-shared/SKILL.md` for auth, global flags, and security rules.
 
 ```bash
 gwsr docs <resource> <method> [flags]
@@ -23,7 +23,10 @@ gwsr docs <resource> <method> [flags]
 
 | Command | Description |
 |---------|-------------|
-| [`+write`](../gwsr-docs-write/SKILL.md) | Append text to a document |
+| [`+create`](../gwsr-docs-create/SKILL.md) | Create a new document, optionally with content |
+| [`+read`](../gwsr-docs-read/SKILL.md) | Read a document as plain text or Markdown |
+| [`+write`](../gwsr-docs-write/SKILL.md) | Append text or Markdown to the end of a document |
+| [`+replace`](../gwsr-docs-replace/SKILL.md) | Find and replace text throughout a document |
 
 ## API Resources
 

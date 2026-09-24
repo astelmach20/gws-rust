@@ -13,11 +13,17 @@ metadata:
 
 # admin-reports (reports_v1)
 
-> **PREREQUISITE:** Read `../gwsr-shared/SKILL.md` for auth, global flags, and security rules. If missing, run `gwsr generate-skills` to create it.
+> **PREREQUISITE:** Read `../gwsr-shared/SKILL.md` for auth, global flags, and security rules.
 
 ```bash
 gwsr admin-reports <resource> <method> [flags]
 ```
+
+## Helper Commands
+
+| Command | Description |
+|---------|-------------|
+| [`+audit`](../gwsr-admin-reports-audit/SKILL.md) | Query audit activity (Reports API) |
 
 ## API Resources
 

@@ -13,11 +13,17 @@ metadata:
 
 # meet (v2)
 
-> **PREREQUISITE:** Read `../gwsr-shared/SKILL.md` for auth, global flags, and security rules. If missing, run `gwsr generate-skills` to create it.
+> **PREREQUISITE:** Read `../gwsr-shared/SKILL.md` for auth, global flags, and security rules.
 
 ```bash
 gwsr meet <resource> <method> [flags]
 ```
+
+## Helper Commands
+
+| Command | Description |
+|---------|-------------|
+| [`+create`](../gwsr-meet-create/SKILL.md) | Create a Meet meeting space and print its link |
 
 ## API Resources
 

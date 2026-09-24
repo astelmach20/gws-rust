@@ -1,6 +1,6 @@
 ---
 name: gwsr-workflow-weekly-digest
-description: "Google Workflow: Weekly summary: this week's meetings + unread email count."
+description: "Google Workflow: Weekly summary: the next 7 days of meetings and your unread email count."
 metadata:
   version: 0.22.5
   openclaw:
@@ -13,21 +13,15 @@ metadata:
 
 # workflow +weekly-digest
 
-> **PREREQUISITE:** Read `../gwsr-shared/SKILL.md` for auth, global flags, and security rules. If missing, run `gwsr generate-skills` to create it.
+> **PREREQUISITE:** Read `../gwsr-shared/SKILL.md` for auth, global flags, and security rules.
 
-Weekly summary: this week's meetings + unread email count
+Weekly summary: the next 7 days of meetings and your unread email count
 
 ## Usage
 
 ```bash
 gwsr workflow +weekly-digest
 ```
-
-## Flags
-
-| Flag | Required | Default | Description |
-|------|----------|---------|-------------|
-| `--format` | — | — | Output format: json (default), table, yaml, csv |
 
 ## Examples
 
@@ -38,8 +32,7 @@ gwsr workflow +weekly-digest --format table
 
 ## Tips
 
-- Read-only — never modifies data.
-- Combines calendar agenda (week) with gmail triage summary.
+- Read-only. The unread count is Gmail's estimate for is:unread.
 
 ## See Also
 

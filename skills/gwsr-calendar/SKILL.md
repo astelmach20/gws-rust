@@ -13,7 +13,7 @@ metadata:
 
 # calendar (v3)
 
-> **PREREQUISITE:** Read `../gwsr-shared/SKILL.md` for auth, global flags, and security rules. If missing, run `gwsr generate-skills` to create it.
+> **PREREQUISITE:** Read `../gwsr-shared/SKILL.md` for auth, global flags, and security rules.
 
 ```bash
 gwsr calendar <resource> <method> [flags]
@@ -23,8 +23,12 @@ gwsr calendar <resource> <method> [flags]
 
 | Command | Description |
 |---------|-------------|
-| [`+insert`](../gwsr-calendar-insert/SKILL.md) | create a new event |
-| [`+agenda`](../gwsr-calendar-agenda/SKILL.md) | Show upcoming events across all calendars |
+| [`+insert`](../gwsr-calendar-insert/SKILL.md) | Create a new event |
+| [`+agenda`](../gwsr-calendar-agenda/SKILL.md) | Show upcoming events across calendars |
+| [`+freebusy`](../gwsr-calendar-freebusy/SKILL.md) | Show busy times and find free slots |
+| [`+update`](../gwsr-calendar-update/SKILL.md) | Change fields of an existing event |
+| [`+delete`](../gwsr-calendar-delete/SKILL.md) | Delete an event |
+| [`+rsvp`](../gwsr-calendar-rsvp/SKILL.md) | Respond to an event invitation |
 
 ## API Resources
 

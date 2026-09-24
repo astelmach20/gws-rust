@@ -13,7 +13,7 @@ metadata:
 
 # events (v1)
 
-> **PREREQUISITE:** Read `../gwsr-shared/SKILL.md` for auth, global flags, and security rules. If missing, run `gwsr generate-skills` to create it.
+> **PREREQUISITE:** Read `../gwsr-shared/SKILL.md` for auth, global flags, and security rules.
 
 ```bash
 gwsr events <resource> <method> [flags]
@@ -24,7 +24,7 @@ gwsr events <resource> <method> [flags]
 | Command | Description |
 |---------|-------------|
 | [`+subscribe`](../gwsr-events-subscribe/SKILL.md) | Subscribe to Workspace events and stream them as NDJSON |
-| [`+renew`](../gwsr-events-renew/SKILL.md) | Renew/reactivate Workspace Events subscriptions |
+| [`+renew`](../gwsr-events-renew/SKILL.md) | Renew or reactivate Workspace Events subscriptions |
 
 ## API Resources
 

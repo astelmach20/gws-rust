@@ -1,6 +1,6 @@
 ---
 name: gwsr-gmail-triage
-description: "Gmail: Show unread inbox summary (sender, subject, date)."
+description: "Gmail: Show an unread inbox summary (sender, subject, date)."
 metadata:
   version: 0.22.5
   openclaw:
@@ -13,9 +13,9 @@ metadata:
 
 # gmail +triage
 
-> **PREREQUISITE:** Read `../gwsr-shared/SKILL.md` for auth, global flags, and security rules. If missing, run `gwsr generate-skills` to create it.
+> **PREREQUISITE:** Read `../gwsr-shared/SKILL.md` for auth, global flags, and security rules.
 
-Show unread inbox summary (sender, subject, date)
+Show an unread inbox summary (sender, subject, date)
 
 ## Usage
 
@@ -27,23 +27,22 @@ gwsr gmail +triage
 
 | Flag | Required | Default | Description |
 |------|----------|---------|-------------|
-| `--max` | — | 20 | Maximum messages to show (default: 20) |
-| `--query` | — | — | Gmail search query (default: is:unread) |
-| `--labels` | — | — | Include label names in output |
+| `--max` | — | 20 | Maximum number of messages to show |
+| `--query` | — | is:unread | Gmail search query |
+| `--labels` | — | — | Include label IDs in the output |
 
 ## Examples
 
 ```bash
 gwsr gmail +triage
 gwsr gmail +triage --max 5 --query 'from:boss'
-gwsr gmail +triage --format json | jq '.[].subject'
-gwsr gmail +triage --labels
+gwsr gmail +triage --format table
+gwsr gmail +triage | jq -r '.messages[].subject'
 ```
 
 ## Tips
 
-- Read-only — never modifies your mailbox.
-- Defaults to table output format.
+- Read-only. Use +search for full metadata and paging.
 
 ## See Also
 

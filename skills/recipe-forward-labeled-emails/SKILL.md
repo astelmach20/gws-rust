@@ -21,9 +21,6 @@ Find Gmail messages with a specific label and forward them to another address.
 
 ## Steps
 
-1. Find labeled messages: `gwsr gmail users messages list --params '{"userId": "me", "q": "label:needs-review"}' --format table`
-2. Get message content: `gwsr gmail users messages get --params '{"userId": "me", "id": "MSG_ID"}'`
-3. Forward via new email: `gwsr gmail +send --to manager@company.com --subject 'FW: [Original Subject]' --body 'Forwarding for your review:
-
-[Original Message Body]'`
+1. Find labeled messages: `gwsr gmail +search --query 'label:needs-review' --format table`
+2. Forward a message: `gwsr gmail +forward --message-id MSG_ID --to manager@company.com --body 'Forwarding for your review.'`
 

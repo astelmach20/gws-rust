@@ -13,11 +13,19 @@ metadata:
 
 # tasks (v1)
 
-> **PREREQUISITE:** Read `../gwsr-shared/SKILL.md` for auth, global flags, and security rules. If missing, run `gwsr generate-skills` to create it.
+> **PREREQUISITE:** Read `../gwsr-shared/SKILL.md` for auth, global flags, and security rules.
 
 ```bash
 gwsr tasks <resource> <method> [flags]
 ```
+
+## Helper Commands
+
+| Command | Description |
+|---------|-------------|
+| [`+add`](../gwsr-tasks-add/SKILL.md) | Add a task |
+| [`+list`](../gwsr-tasks-list/SKILL.md) | List tasks in a task list |
+| [`+lists`](../gwsr-tasks-lists/SKILL.md) | List your task lists |
 
 ## API Resources
 

@@ -13,14 +13,14 @@ metadata:
 
 # workflow +file-announce
 
-> **PREREQUISITE:** Read `../gwsr-shared/SKILL.md` for auth, global flags, and security rules. If missing, run `gwsr generate-skills` to create it.
+> **PREREQUISITE:** Read `../gwsr-shared/SKILL.md` for auth, global flags, and security rules.
 
 Announce a Drive file in a Chat space
 
 ## Usage
 
 ```bash
-gwsr workflow +file-announce --file-id <ID> --space <SPACE>
+gwsr workflow +file-announce --file-id <ID> --space-id <ID>
 ```
 
 ## Flags
@@ -28,22 +28,21 @@ gwsr workflow +file-announce --file-id <ID> --space <SPACE>
 | Flag | Required | Default | Description |
 |------|----------|---------|-------------|
 | `--file-id` | ✓ | — | Drive file ID to announce |
-| `--space` | ✓ | — | Chat space name (e.g. spaces/SPACE_ID) |
-| `--message` | — | — | Custom announcement message |
-| `--format` | — | — | Output format: json (default), table, yaml, csv |
+| `--space-id` | ✓ | — | Chat space (SPACE_ID or spaces/SPACE_ID) |
+| `--message` | — | — | Custom announcement text (the file link is appended) |
+| `--yes` | — | — | Confirm this action without prompting (required when not on a terminal) |
 
 ## Examples
 
 ```bash
-gwsr workflow +file-announce --file-id FILE_ID --space spaces/ABC123
-gwsr workflow +file-announce --file-id FILE_ID --space spaces/ABC123 --message 'Check this out!'
+gwsr workflow +file-announce --file-id FILE_ID --space-id ABC123
+gwsr workflow +file-announce --file-id FILE_ID --space-id spaces/ABC123 --message 'Check this out!'
 ```
 
 ## Tips
 
-- This is a write command — sends a Chat message.
-- Use `gwsr drive +upload` first to upload the file, then announce it here.
-- Fetches the file name from Drive to build the announcement.
+- Sends a Chat message. With GWSR_REQUIRE_CONFIRM=1 it requires --yes.
+- Upload the file first with gwsr drive +upload, then announce it here.
 
 ## See Also
 

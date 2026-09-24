@@ -1,6 +1,6 @@
 ---
 name: gwsr-calendar-agenda
-description: "Google Calendar: Show upcoming events across all calendars."
+description: "Google Calendar: Show upcoming events across calendars."
 metadata:
   version: 0.22.5
   openclaw:
@@ -13,9 +13,9 @@ metadata:
 
 # calendar +agenda
 
-> **PREREQUISITE:** Read `../gwsr-shared/SKILL.md` for auth, global flags, and security rules. If missing, run `gwsr generate-skills` to create it.
+> **PREREQUISITE:** Read `../gwsr-shared/SKILL.md` for auth, global flags, and security rules.
 
-Show upcoming events across all calendars
+Show upcoming events across calendars
 
 ## Usage
 
@@ -27,12 +27,13 @@ gwsr calendar +agenda
 
 | Flag | Required | Default | Description |
 |------|----------|---------|-------------|
-| `--today` | — | — | Show today's events |
-| `--tomorrow` | — | — | Show tomorrow's events |
-| `--week` | — | — | Show this week's events |
-| `--days` | — | — | Number of days ahead to show |
-| `--calendar` | — | — | Filter to specific calendar name or ID |
-| `--timezone` | — | — | IANA timezone override (e.g. America/Denver). Defaults to Google account timezone. |
+| `--today` | — | — | Today's events |
+| `--tomorrow` | — | — | Tomorrow's events |
+| `--week` | — | — | The next 7 days |
+| `--days` | — | — | The next N days (default: 1) |
+| `--calendar-id` | — | — | Only this calendar (repeatable) |
+| `--calendar-name` | — | — | Only calendars whose name contains TEXT |
+| `--timezone` | — | — | IANA time zone for times without a UTC offset (default: your Google account time zone) |
 
 ## Examples
 
@@ -40,15 +41,14 @@ gwsr calendar +agenda
 gwsr calendar +agenda
 gwsr calendar +agenda --today
 gwsr calendar +agenda --week --format table
-gwsr calendar +agenda --days 3 --calendar 'Work'
+gwsr calendar +agenda --days 3 --calendar-name Work
 gwsr calendar +agenda --today --timezone America/New_York
 ```
 
 ## Tips
 
-- Read-only — never modifies events.
-- Queries all calendars by default; use --calendar to filter.
-- Uses your Google account timezone by default; override with --timezone.
+- Read-only. Every page of every selected calendar is fetched (no truncation);
+- a calendar that cannot be read fails the command with its name.
 
 ## See Also
 

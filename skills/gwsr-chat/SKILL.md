@@ -13,7 +13,7 @@ metadata:
 
 # chat (v1)
 
-> **PREREQUISITE:** Read `../gwsr-shared/SKILL.md` for auth, global flags, and security rules. If missing, run `gwsr generate-skills` to create it.
+> **PREREQUISITE:** Read `../gwsr-shared/SKILL.md` for auth, global flags, and security rules.
 
 ```bash
 gwsr chat <resource> <method> [flags]
@@ -24,6 +24,8 @@ gwsr chat <resource> <method> [flags]
 | Command | Description |
 |---------|-------------|
 | [`+send`](../gwsr-chat-send/SKILL.md) | Send a message to a space |
+| [`+spaces`](../gwsr-chat-spaces/SKILL.md) | List the spaces you are a member of |
+| [`+read`](../gwsr-chat-read/SKILL.md) | Read the most recent messages in a space |
 
 ## API Resources
 

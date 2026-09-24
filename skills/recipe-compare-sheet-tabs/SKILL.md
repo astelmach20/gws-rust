@@ -21,7 +21,7 @@ Read data from two tabs in a Google Sheet to compare and identify differences.
 
 ## Steps
 
-1. Read the first tab: `gwsr sheets +read --spreadsheet SHEET_ID --range "January!A1:D"`
-2. Read the second tab: `gwsr sheets +read --spreadsheet SHEET_ID --range "February!A1:D"`
+1. Read the first tab: `gwsr sheets +read --spreadsheet-id SHEET_ID --range "January!A1:D"`
+2. Read the second tab: `gwsr sheets +read --spreadsheet-id SHEET_ID --range "February!A1:D"`
 3. Compare the data and identify changes
 

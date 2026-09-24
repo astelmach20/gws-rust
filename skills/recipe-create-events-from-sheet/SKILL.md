@@ -22,6 +22,6 @@ Read event data from a Google Sheets spreadsheet and create Google Calendar entr
 
 ## Steps
 
-1. Read event data: `gwsr sheets +read --spreadsheet SHEET_ID --range "Events!A2:D"`
+1. Read event data: `gwsr sheets +read --spreadsheet-id SHEET_ID --range "Events!A2:D"`
 2. For each row, create a calendar event: `gwsr calendar +insert --summary 'Team Standup' --start '2026-01-20T09:00:00' --end '2026-01-20T09:30:00' --attendee alice@company.com --attendee bob@company.com`
 

@@ -13,7 +13,7 @@ metadata:
 
 # workflow +email-to-task
 
-> **PREREQUISITE:** Read `../gwsr-shared/SKILL.md` for auth, global flags, and security rules. If missing, run `gwsr generate-skills` to create it.
+> **PREREQUISITE:** Read `../gwsr-shared/SKILL.md` for auth, global flags, and security rules.
 
 Convert a Gmail message into a Google Tasks entry
 
@@ -28,19 +28,19 @@ gwsr workflow +email-to-task --message-id <ID>
 | Flag | Required | Default | Description |
 |------|----------|---------|-------------|
 | `--message-id` | ✓ | — | Gmail message ID to convert |
-| `--tasklist` | — | @default | Task list ID (default: @default) |
+| `--tasklist-id` | — | @default | Task list ID |
 
 ## Examples
 
 ```bash
 gwsr workflow +email-to-task --message-id MSG_ID
-gwsr workflow +email-to-task --message-id MSG_ID --tasklist LIST_ID
+gwsr workflow +email-to-task --message-id MSG_ID --tasklist-id LIST_ID
 ```
 
 ## Tips
 
-- Reads the email subject as the task title and snippet as notes.
-- Creates a new task — confirm with the user before executing.
+- Uses the email subject as the task title and the snippet as notes.
+- Creates a task; preview with --dry-run.
 
 ## See Also
 

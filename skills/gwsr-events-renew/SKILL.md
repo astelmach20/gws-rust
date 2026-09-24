@@ -1,6 +1,6 @@
 ---
 name: gwsr-events-renew
-description: "Google Workspace Events: Renew/reactivate Workspace Events subscriptions."
+description: "Google Workspace Events: Renew or reactivate Workspace Events subscriptions."
 metadata:
   version: 0.22.5
   openclaw:
@@ -13,9 +13,9 @@ metadata:
 
 # events +renew
 
-> **PREREQUISITE:** Read `../gwsr-shared/SKILL.md` for auth, global flags, and security rules. If missing, run `gwsr generate-skills` to create it.
+> **PREREQUISITE:** Read `../gwsr-shared/SKILL.md` for auth, global flags, and security rules.
 
-Renew/reactivate Workspace Events subscriptions
+Renew or reactivate Workspace Events subscriptions
 
 ## Usage
 
@@ -27,21 +27,24 @@ gwsr events +renew
 
 | Flag | Required | Default | Description |
 |------|----------|---------|-------------|
-| `--name` | — | — | Subscription name to reactivate (e.g., subscriptions/SUB_ID) |
-| `--all` | — | — | Renew all subscriptions expiring within --within window |
-| `--within` | — | 1h | Time window for --all (e.g., 1h, 30m, 2d) |
+| `--subscription-id` | — | — | Subscription to renew (subscriptions/SUB_ID or SUB_ID) |
+| `--all` | — | — | Renew every subscription for --event-types that expires within --within |
+| `--event-types` | — | — | Comma-separated event types (required with --all; selects the OAuth scope) |
+| `--within` | — | 1h | Time window for --all (e.g., 30m, 1h, 2d) |
+| `--reactivate` | — | — | Reactivate a SUSPENDED subscription instead of extending its expiry |
 
 ## Examples
 
 ```bash
-gwsr events +renew --name subscriptions/SUB_ID
-gwsr events +renew --all --within 2d
+gwsr events +renew --subscription-id subscriptions/SUB_ID
+gwsr events +renew --subscription-id SUB_ID --reactivate
+gwsr events +renew --all --event-types google.workspace.chat.message.v1.created --within 2d
 ```
 
 ## Tips
 
-- Subscriptions expire if not renewed periodically.
-- Use --all with a cron job to keep subscriptions alive.
+- Renewing sets the subscription TTL to the maximum allowed.
+- Use --all from a cron job to keep subscriptions alive.
 
 ## See Also
 

@@ -13,11 +13,18 @@ metadata:
 
 # slides (v1)
 
-> **PREREQUISITE:** Read `../gwsr-shared/SKILL.md` for auth, global flags, and security rules. If missing, run `gwsr generate-skills` to create it.
+> **PREREQUISITE:** Read `../gwsr-shared/SKILL.md` for auth, global flags, and security rules.
 
 ```bash
 gwsr slides <resource> <method> [flags]
 ```
+
+## Helper Commands
+
+| Command | Description |
+|---------|-------------|
+| [`+create`](../gwsr-slides-create/SKILL.md) | Create a new presentation |
+| [`+read`](../gwsr-slides-read/SKILL.md) | Extract the text and speaker notes of every slide |
 
 ## API Resources
 

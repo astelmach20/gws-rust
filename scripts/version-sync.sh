@@ -65,7 +65,7 @@ VERSION="$version" node --input-type=module -e '
 cargo update --workspace
 
 # Skills embed the CLI version in their metadata.
-cargo run --locked -- generate-skills --output-dir skills
+cargo run --locked -- dev generate-skills --output-dir skills --index docs/skills.md
 
 git add Cargo.toml Cargo.lock crates/gws-rust/Cargo.toml npm/package.json gemini-extension.json skills/ docs/skills.md
 echo "Version ${version} synced."

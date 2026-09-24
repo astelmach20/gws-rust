@@ -22,6 +22,6 @@ Subscribe to change notifications on a Google Drive file or folder.
 ## Steps
 
 1. Create subscription: `gwsr events subscriptions create --json '{"targetResource": "//drive.googleapis.com/drives/DRIVE_ID", "eventTypes": ["google.workspace.drive.file.v1.updated"], "notificationEndpoint": {"pubsubTopic": "projects/PROJECT/topics/TOPIC"}, "payloadOptions": {"includeResource": true}}'`
-2. List active subscriptions: `gwsr events subscriptions list`
-3. Renew before expiry: `gwsr events +renew --subscription SUBSCRIPTION_ID`
+2. List active subscriptions: `gwsr events subscriptions list --params '{"filter": "event_types:\"google.workspace.drive.file.v1.updated\""}'`
+3. Renew before expiry: `gwsr events +renew --subscription-id SUBSCRIPTION_ID --event-types google.workspace.drive.file.v1.updated`
 

@@ -13,7 +13,7 @@ metadata:
 
 # sheets (v4)
 
-> **PREREQUISITE:** Read `../gwsr-shared/SKILL.md` for auth, global flags, and security rules. If missing, run `gwsr generate-skills` to create it.
+> **PREREQUISITE:** Read `../gwsr-shared/SKILL.md` for auth, global flags, and security rules.
 
 ```bash
 gwsr sheets <resource> <method> [flags]
@@ -23,8 +23,11 @@ gwsr sheets <resource> <method> [flags]
 
 | Command | Description |
 |---------|-------------|
-| [`+append`](../gwsr-sheets-append/SKILL.md) | Append a row to a spreadsheet |
-| [`+read`](../gwsr-sheets-read/SKILL.md) | Read values from a spreadsheet |
+| [`+append`](../gwsr-sheets-append/SKILL.md) | Append rows after the last row of a table |
+| [`+read`](../gwsr-sheets-read/SKILL.md) | Read values from a range, optionally exporting CSV |
+| [`+write`](../gwsr-sheets-write/SKILL.md) | Overwrite values in a range (values.update) |
+| [`+clear`](../gwsr-sheets-clear/SKILL.md) | Clear all values in a range (formatting is kept) |
+| [`+create`](../gwsr-sheets-create/SKILL.md) | Create a new spreadsheet |
 
 ## API Resources
 
