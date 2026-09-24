@@ -795,6 +795,35 @@ fn generate_skills_requires_output_dir() {
 }
 
 #[test]
+fn filtered_generate_skills_run_prunes_nothing() {
+    let env = Env::new();
+    let run = || {
+        env.cmd()
+            .args([
+                "dev",
+                "generate-skills",
+                "--output-dir",
+                "out",
+                "--filter",
+                "shared",
+            ])
+            .assert()
+            .success()
+            .get_output()
+            .clone()
+    };
+    run();
+    // A generated (marked) skill this filtered run does not produce.
+    let shared = env.work_dir().join("out/gwsr-shared/SKILL.md");
+    let other = env.work_dir().join("out/gwsr-other");
+    std::fs::create_dir(&other).unwrap();
+    std::fs::copy(&shared, other.join("SKILL.md")).unwrap();
+    let summary: Value = serde_json::from_str(&stdout_of(&run())).unwrap();
+    assert_eq!(summary["pruned"], json!([]));
+    assert!(other.join("SKILL.md").exists());
+}
+
+#[test]
 fn generate_skills_filters_are_exact_and_output_is_agent_safe() {
     let env = Env::new();
     let out = env

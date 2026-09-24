@@ -294,14 +294,127 @@ pub async fn handle_generate_skills(
         write_skills_index(&index, path)?;
     }
 
-    tracing::info!(count = index.len(), dir = %output_path.display(), "skills written");
-    Ok(skills_summary(output_path, index_path.as_deref(), &index))
+    // Only a full run knows every skill that should exist; a filtered run
+    // writes a subset and must not treat the rest as stale.
+    let tidy = if filter.is_empty() {
+        let produced: std::collections::HashSet<&str> =
+            index.iter().map(|e| e.name.as_str()).collect();
+        prune_stale_skills(output_path, &produced)?
+    } else {
+        Tidy::default()
+    };
+
+    tracing::info!(count = index.len(), pruned = tidy.pruned.len(), dir = %output_path.display(), "skills written");
+    Ok(skills_summary(
+        output_path,
+        index_path.as_deref(),
+        &index,
+        &tidy,
+    ))
+}
+
+/// First line after the front matter of every generated `SKILL.md`: marks the
+/// directory as owned by the generator, so a later run may delete it once the
+/// skill is no longer produced.
+/// (It names no command: skills must not steer agents toward the generator.)
+const GENERATED_MARKER: &str = "<!-- gwsr generated skill: do not edit by hand -->";
+
+/// Insert [`GENERATED_MARKER`] right after the YAML front matter.
+fn with_generated_marker(content: &str) -> Result<String, GwsError> {
+    let end = content
+        .strip_prefix("---\n")
+        .and_then(|rest| rest.find("\n---\n"))
+        .map(|i| 4 + i + "\n---\n".len())
+        .ok_or_else(|| {
+            GwsError::other(anyhow::anyhow!(
+                "internal error: generated skill has no YAML front matter"
+            ))
+        })?;
+    let (front, body) = content.split_at(end);
+    Ok(format!("{front}{GENERATED_MARKER}\n{body}"))
+}
+
+/// Directories removed or left alone by [`prune_stale_skills`].
+#[derive(Debug, Default)]
+struct Tidy {
+    /// Generated skill directories that are no longer produced, now deleted.
+    pruned: Vec<String>,
+    /// Directories in the output dir that this run did not produce and that
+    /// carry no generator marker; never touched, reported so leftovers from
+    /// hand edits or older generators are visible.
+    unmanaged: Vec<String>,
+}
+
+/// Delete generated skill directories under `base` that `produced` no longer
+/// contains. A directory is deleted only when its sole entry is a `SKILL.md`
+/// carrying [`GENERATED_MARKER`]; a marked directory holding anything else is
+/// an error rather than a partial delete.
+fn prune_stale_skills(
+    base: &Path,
+    produced: &std::collections::HashSet<&str>,
+) -> Result<Tidy, GwsError> {
+    let mut tidy = Tidy::default();
+    let entries = match std::fs::read_dir(base) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(tidy),
+        Err(e) => return Err(io_err(format!("failed to list {}", base.display()), e)),
+    };
+    let mut stale = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|e| io_err(format!("failed to list {}", base.display()), e))?;
+        let file_type = entry
+            .file_type()
+            .map_err(|e| io_err(format!("failed to inspect {}", entry.path().display()), e))?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if !file_type.is_dir() || produced.contains(name.as_str()) {
+            continue;
+        }
+        stale.push((name, entry.path()));
+    }
+    stale.sort();
+    for (name, dir) in stale {
+        let skill = dir.join("SKILL.md");
+        let owned = match std::fs::read_to_string(&skill) {
+            Ok(text) => text.lines().any(|l| l == GENERATED_MARKER),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
+            Err(e) => return Err(io_err(format!("failed to read {}", skill.display()), e)),
+        };
+        if !owned {
+            tidy.unmanaged.push(name);
+            continue;
+        }
+        let mut others = Vec::new();
+        for entry in std::fs::read_dir(&dir)
+            .map_err(|e| io_err(format!("failed to list {}", dir.display()), e))?
+        {
+            let entry =
+                entry.map_err(|e| io_err(format!("failed to list {}", dir.display()), e))?;
+            if entry.file_name() != "SKILL.md" {
+                others.push(entry.file_name().to_string_lossy().into_owned());
+            }
+        }
+        if !others.is_empty() {
+            return Err(GwsError::Validation(format!(
+                "stale generated skill {} also holds files the generator did not write ({}); \
+                 move them out or delete the directory, then rerun",
+                dir.display(),
+                others.join(", ")
+            )));
+        }
+        std::fs::remove_file(&skill)
+            .map_err(|e| io_err(format!("failed to remove {}", skill.display()), e))?;
+        std::fs::remove_dir(&dir)
+            .map_err(|e| io_err(format!("failed to remove {}", dir.display()), e))?;
+        tidy.pruned.push(name);
+    }
+    Ok(tidy)
 }
 
 fn skills_summary(
     output_path: &Path,
     index_path: Option<&Path>,
     index: &[SkillIndexEntry],
+    tidy: &Tidy,
 ) -> serde_json::Value {
     let skills: Vec<serde_json::Value> = index
         .iter()
@@ -318,6 +431,8 @@ fn skills_summary(
         "index": index_path.map(|p| p.display().to_string()),
         "count": skills.len(),
         "skills": skills,
+        "pruned": tidy.pruned,
+        "unmanaged": tidy.unmanaged,
     })
 }
 
@@ -326,7 +441,7 @@ fn write_skill(base: &Path, name: &str, content: &str) -> Result<(), GwsError> {
     std::fs::create_dir_all(&dir)
         .map_err(|e| io_err(format!("failed to create directory {}", dir.display()), e))?;
     let path = dir.join("SKILL.md");
-    std::fs::write(&path, content)
+    std::fs::write(&path, with_generated_marker(content)?)
         .map_err(|e| io_err(format!("failed to write {}", path.display()), e))?;
     Ok(())
 }
@@ -1083,11 +1198,81 @@ mod tests {
             description: "d".into(),
             category: "service".into(),
         }];
-        let v = skills_summary(Path::new("/out"), Some(Path::new("/idx.md")), &index);
+        let tidy = Tidy {
+            pruned: vec!["gwsr-old".into()],
+            unmanaged: vec!["notes".into()],
+        };
+        let v = skills_summary(Path::new("/out"), Some(Path::new("/idx.md")), &index, &tidy);
         assert_eq!(v["count"], 1);
+        assert_eq!(v["pruned"][0], "gwsr-old");
+        assert_eq!(v["unmanaged"][0], "notes");
         assert_eq!(v["output_dir"], "/out");
         assert_eq!(v["index"], "/idx.md");
         assert_eq!(v["skills"][0]["path"], "/out/gwsr-shared/SKILL.md");
+    }
+
+    #[test]
+    fn generated_skills_carry_the_marker_after_the_front_matter() {
+        let dir = tempfile::tempdir().unwrap();
+        write_skill(dir.path(), "gwsr-x", "---\nname: gwsr-x\n---\n\n# x\n").unwrap();
+        let text = std::fs::read_to_string(dir.path().join("gwsr-x/SKILL.md")).unwrap();
+        assert_eq!(
+            text,
+            format!("---\nname: gwsr-x\n---\n{GENERATED_MARKER}\n\n# x\n")
+        );
+        assert!(with_generated_marker("# no front matter").is_err());
+    }
+
+    #[test]
+    fn prune_removes_only_stale_generated_skill_dirs() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path();
+        let skill = "---\nname: s\n---\n\n# s\n";
+        write_skill(base, "gwsr-kept", skill).unwrap();
+        write_skill(base, "gwsr-stale", skill).unwrap();
+        // Not generated: no marker, or no SKILL.md at all, or not a directory.
+        std::fs::create_dir(base.join("hand-written")).unwrap();
+        std::fs::write(base.join("hand-written/SKILL.md"), skill).unwrap();
+        std::fs::create_dir(base.join("empty")).unwrap();
+        std::fs::write(base.join("README.md"), "x").unwrap();
+
+        let produced: std::collections::HashSet<&str> = ["gwsr-kept"].into();
+        let tidy = prune_stale_skills(base, &produced).unwrap();
+        assert_eq!(tidy.pruned, vec!["gwsr-stale"]);
+        assert_eq!(tidy.unmanaged, vec!["empty", "hand-written"]);
+        assert!(!base.join("gwsr-stale").exists());
+        assert!(base.join("gwsr-kept/SKILL.md").exists());
+        assert!(base.join("hand-written/SKILL.md").exists());
+        assert!(base.join("README.md").exists());
+    }
+
+    #[test]
+    fn prune_refuses_a_generated_dir_holding_other_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path();
+        write_skill(base, "gwsr-stale", "---\nname: s\n---\n").unwrap();
+        std::fs::write(base.join("gwsr-stale/notes.txt"), "mine").unwrap();
+        let err = prune_stale_skills(base, &std::collections::HashSet::new()).unwrap_err();
+        assert!(err.to_string().contains("notes.txt"), "{err}");
+        assert!(base.join("gwsr-stale/notes.txt").exists());
+        assert!(base.join("gwsr-stale/SKILL.md").exists());
+    }
+
+    /// CI's leftover check greps for the marker; keep the two in sync.
+    #[test]
+    fn ci_leftover_check_uses_the_marker() {
+        let ci =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.github/workflows/ci.yml");
+        let ci = std::fs::read_to_string(&ci).unwrap();
+        assert!(ci.contains(&format!("'{GENERATED_MARKER}'")));
+    }
+
+    #[test]
+    fn prune_of_a_missing_output_dir_is_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let tidy = prune_stale_skills(&dir.path().join("nope"), &std::collections::HashSet::new())
+            .unwrap();
+        assert!(tidy.pruned.is_empty() && tidy.unmanaged.is_empty());
     }
 
     #[test]
