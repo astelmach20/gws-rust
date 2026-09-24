@@ -4,43 +4,43 @@
 "area: auth":
   - changed-files:
       - any-glob-to-any-file:
-          - crates/google-workspace-cli/src/auth.rs
-          - crates/google-workspace-cli/src/auth_commands.rs
-          - crates/google-workspace-cli/src/setup.rs
-          - crates/google-workspace-cli/src/accounts.rs
-          - crates/google-workspace-cli/src/credential_store.rs
-          - crates/google-workspace-cli/src/token_storage.rs
-          - crates/google-workspace-cli/src/oauth_config.rs
+          - crates/gws-rust/src/auth.rs
+          - crates/gws-rust/src/auth_commands.rs
+          - crates/gws-rust/src/setup.rs
+          - crates/gws-rust/src/accounts.rs
+          - crates/gws-rust/src/credential_store.rs
+          - crates/gws-rust/src/token_storage.rs
+          - crates/gws-rust/src/oauth_config.rs
 
 "area: discovery":
   - changed-files:
       - any-glob-to-any-file:
-          - crates/google-workspace-cli/src/discovery.rs
-          - crates/google-workspace-cli/src/services.rs
-          - crates/google-workspace/src/discovery.rs
-          - crates/google-workspace/src/services.rs
+          - crates/gws-rust/src/discovery.rs
+          - crates/gws-rust/src/services.rs
+          - crates/gws-rust-core/src/discovery.rs
+          - crates/gws-rust-core/src/services.rs
 
 "area: http":
   - changed-files:
       - any-glob-to-any-file:
-          - crates/google-workspace-cli/src/executor.rs
-          - crates/google-workspace-cli/src/client.rs
-          - crates/google-workspace/src/client.rs
+          - crates/gws-rust/src/executor.rs
+          - crates/gws-rust/src/client.rs
+          - crates/gws-rust-core/src/client.rs
 
 "area: tui":
   - changed-files:
       - any-glob-to-any-file:
-          - crates/google-workspace-cli/src/setup_tui.rs
+          - crates/gws-rust/src/setup_tui.rs
 
 "area: mcp":
   - changed-files:
       - any-glob-to-any-file:
-          - crates/google-workspace-cli/src/mcp_server.rs
+          - crates/gws-rust/src/mcp_server.rs
 
 "area: skills":
   - changed-files:
       - any-glob-to-any-file:
-          - crates/google-workspace-cli/src/generate_skills.rs
+          - crates/gws-rust/src/generate_skills.rs
           - skills/**
 
 "area: docs":
@@ -61,18 +61,18 @@
 "area: core":
   - changed-files:
       - any-glob-to-any-file:
-          - crates/google-workspace-cli/src/main.rs
-          - crates/google-workspace-cli/src/commands.rs
-          - crates/google-workspace-cli/src/error.rs
-          - crates/google-workspace-cli/src/formatter.rs
-          - crates/google-workspace-cli/src/fs_util.rs
-          - crates/google-workspace-cli/src/helpers/**
-          - crates/google-workspace-cli/src/text.rs
-          - crates/google-workspace-cli/src/validate.rs
-          - crates/google-workspace-cli/src/schema.rs
+          - crates/gws-rust/src/main.rs
+          - crates/gws-rust/src/commands.rs
+          - crates/gws-rust/src/error.rs
+          - crates/gws-rust/src/formatter.rs
+          - crates/gws-rust/src/fs_util.rs
+          - crates/gws-rust/src/helpers/**
+          - crates/gws-rust/src/text.rs
+          - crates/gws-rust/src/validate.rs
+          - crates/gws-rust/src/schema.rs
 
-"crate: google-workspace":
+"crate: gws-rust-core":
   - changed-files:
       - any-glob-to-any-file:
-          - crates/google-workspace/src/**
-          - crates/google-workspace/Cargo.toml
+          - crates/gws-rust-core/src/**
+          - crates/gws-rust-core/Cargo.toml

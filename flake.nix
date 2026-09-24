@@ -12,7 +12,7 @@
         pkgs = nixpkgs.legacyPackages.${system};
 
         # Extract version from CLI crate's Cargo.toml
-        cargoToml = builtins.fromTOML (builtins.readFile ./crates/google-workspace-cli/Cargo.toml);
+        cargoToml = builtins.fromTOML (builtins.readFile ./crates/gws-rust/Cargo.toml);
         version = cargoToml.package.version;
 
         # System dependencies
@@ -27,8 +27,8 @@
           apple-sdk
         ];
 
-        gws = pkgs.rustPlatform.buildRustPackage {
-          pname = "gws";
+        gwsr = pkgs.rustPlatform.buildRustPackage {
+          pname = "gwsr";
           inherit version;
 
           src = ./.;
@@ -50,20 +50,20 @@
             homepage = cargoToml.package.homepage;
             license = licenses.asl20;
             maintainers = [{ name = "Justin Poehnelt"; email = "justin.poehnelt@gmail.com"; }];
-            mainProgram = "gws";
+            mainProgram = "gwsr";
           };
         };
       in
       {
-        packages.default = gws;
-        packages.gws = gws;
+        packages.default = gwsr;
+        packages.gwsr = gwsr;
 
         apps.default = flake-utils.lib.mkApp {
-          drv = gws;
+          drv = gwsr;
         };
 
         devShells.default = pkgs.mkShell {
-          inputsFrom = [ gws ];
+          inputsFrom = [ gwsr ];
           buildInputs = with pkgs; [
             rustc
             cargo

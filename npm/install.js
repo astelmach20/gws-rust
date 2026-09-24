@@ -18,7 +18,7 @@ const INSTALL_DIR = path.join(__dirname, "bin");
  */
 function getDownloadUrl(artifactName) {
   const { version } = require("./package.json");
-  return `https://github.com/googleworkspace/cli/releases/download/v${version}/${artifactName}`;
+  return `https://github.com/astelmach20/gws-rust/releases/download/v${version}/${artifactName}`;
 }
 
 /**
@@ -110,10 +110,10 @@ async function install() {
   if (fs.existsSync(binPath) && fs.existsSync(versionFile)) {
     const installed = fs.readFileSync(versionFile, "utf8").trim();
     if (installed === version) {
-      console.error(`gws v${version} is already installed, skipping.`);
+      console.error(`gwsr v${version} is already installed, skipping.`);
       return;
     }
-    console.error(`Upgrading gws from v${installed} to v${version}`);
+    console.error(`Upgrading gwsr from v${installed} to v${version}`);
   }
 
   // Clean and create install directory
@@ -123,12 +123,12 @@ async function install() {
   mkdirSync(INSTALL_DIR, { recursive: true });
 
   // Download to a temp file
-  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "gws-"));
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "gwsr-"));
   const archiveName = path.basename(platform.artifact);
   const tmpFile = path.join(tmpDir, archiveName);
 
   try {
-    console.error(`Downloading gws from ${url}`);
+    console.error(`Downloading gwsr from ${url}`);
     await download(url, tmpFile);
 
     // Verify SHA256 checksum
@@ -156,7 +156,7 @@ async function install() {
       fs.chmodSync(binPath, 0o755);
     }
 
-    console.error(`gws v${version} has been installed!`);
+    console.error(`gwsr v${version} has been installed!`);
     fs.writeFileSync(versionFile, version);
   } finally {
     // Clean up temp files
@@ -165,6 +165,6 @@ async function install() {
 }
 
 install().catch((err) => {
-  console.error(`Error installing gws: ${sanitize(err.message)}`);
+  console.error(`Error installing gwsr: ${sanitize(err.message)}`);
   process.exit(1);
 });

@@ -1,19 +1,19 @@
 {
-  "name": "@googleworkspace/cli",
+  "name": "gws-rust",
   "description": "Google Workspace CLI — dynamic command surface from Discovery Service",
   "version": "0.22.5",
   "license": "Apache-2.0",
   "author": "Justin Poehnelt",
   "repository": {
     "type": "git",
-    "url": "https://github.com/googleworkspace/cli.git"
+    "url": "https://github.com/astelmach20/gws-rust.git"
   },
-  "homepage": "https://github.com/googleworkspace/cli",
+  "homepage": "https://github.com/astelmach20/gws-rust",
   "bugs": {
-    "url": "https://github.com/googleworkspace/cli/issues"
+    "url": "https://github.com/astelmach20/gws-rust/issues"
   },
   "bin": {
-    "gws": "run.js"
+    "gwsr": "run.js"
   },
   "scripts": {
     "postinstall": "node install.js"
@@ -48,32 +48,32 @@
   },
   "supportedPlatforms": {
     "aarch64-apple-darwin": {
-      "artifact": "google-workspace-cli-aarch64-apple-darwin.tar.gz",
-      "binary": "gws"
+      "artifact": "gws-rust-aarch64-apple-darwin.tar.gz",
+      "binary": "gwsr"
     },
     "x86_64-apple-darwin": {
-      "artifact": "google-workspace-cli-x86_64-apple-darwin.tar.gz",
-      "binary": "gws"
+      "artifact": "gws-rust-x86_64-apple-darwin.tar.gz",
+      "binary": "gwsr"
     },
     "aarch64-unknown-linux-gnu": {
-      "artifact": "google-workspace-cli-aarch64-unknown-linux-gnu.tar.gz",
-      "binary": "gws"
+      "artifact": "gws-rust-aarch64-unknown-linux-gnu.tar.gz",
+      "binary": "gwsr"
     },
     "aarch64-unknown-linux-musl": {
-      "artifact": "google-workspace-cli-aarch64-unknown-linux-musl.tar.gz",
-      "binary": "gws"
+      "artifact": "gws-rust-aarch64-unknown-linux-musl.tar.gz",
+      "binary": "gwsr"
     },
     "x86_64-unknown-linux-gnu": {
-      "artifact": "google-workspace-cli-x86_64-unknown-linux-gnu.tar.gz",
-      "binary": "gws"
+      "artifact": "gws-rust-x86_64-unknown-linux-gnu.tar.gz",
+      "binary": "gwsr"
     },
     "x86_64-unknown-linux-musl": {
-      "artifact": "google-workspace-cli-x86_64-unknown-linux-musl.tar.gz",
-      "binary": "gws"
+      "artifact": "gws-rust-x86_64-unknown-linux-musl.tar.gz",
+      "binary": "gwsr"
     },
     "x86_64-pc-windows-msvc": {
-      "artifact": "google-workspace-cli-x86_64-pc-windows-msvc.zip",
-      "binary": "gws.exe"
+      "artifact": "gws-rust-x86_64-pc-windows-msvc.zip",
+      "binary": "gwsr.exe"
     }
   }
 }

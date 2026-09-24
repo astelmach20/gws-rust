@@ -36,7 +36,7 @@ Type@80ms '{"pageSize": 2}' Sleep 100ms
 - When building shell commands with nested quotes, split across multiple `Type` lines:
 
 ```
-Type "gws drive files list --params '" Sleep 100ms
+Type "gwsr drive files list --params '" Sleep 100ms
 Type@80ms '{"pageSize": 2, "fields": "nextPageToken,files(id)"}' Sleep 100ms
 Type "' --page-all" Sleep 300ms Enter
 ```

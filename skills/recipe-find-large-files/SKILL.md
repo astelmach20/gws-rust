@@ -8,19 +8,19 @@ metadata:
     domain: "productivity"
     requires:
       bins:
-        - gws
+        - gwsr
       skills:
-        - gws-drive
+        - gwsr-drive
 ---
 
 # Find Largest Files in Drive
 
-> **PREREQUISITE:** Load the following skills to execute this recipe: `gws-drive`
+> **PREREQUISITE:** Load the following skills to execute this recipe: `gwsr-drive`
 
 Identify large Google Drive files consuming storage quota.
 
 ## Steps
 
-1. List files sorted by size: `gws drive files list --params '{"orderBy": "quotaBytesUsed desc", "pageSize": 20, "fields": "files(id,name,size,mimeType,owners)"}' --format table`
+1. List files sorted by size: `gwsr drive files list --params '{"orderBy": "quotaBytesUsed desc", "pageSize": 20, "fields": "files(id,name,size,mimeType,owners)"}' --format table`
 2. Review the output and identify files to archive or move
 

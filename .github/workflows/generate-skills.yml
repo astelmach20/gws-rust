@@ -76,7 +76,7 @@ jobs:
           mkdir -p .changeset
           cat > .changeset/sync-skills.md << 'EOF'
           ---
-          "@googleworkspace/cli": patch
+          "gws-rust": patch
           ---
 
           Sync generated skills with latest Google Discovery API specs

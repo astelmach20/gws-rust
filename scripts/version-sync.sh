@@ -22,9 +22,9 @@ for cargo_toml in crates/*/Cargo.toml; do
   ' "$cargo_toml" > "$tmp" && mv "$tmp" "$cargo_toml"
 done
 
-# Update inter-crate dependency versions (e.g. google-workspace = { version = "X.Y.Z", path = "..." })
-sed -i.bak -E "s/(google-workspace = \{ version = \")[^\"]+/\1${VERSION}/" crates/google-workspace-cli/Cargo.toml
-rm -f crates/google-workspace-cli/Cargo.toml.bak
+# Update inter-crate dependency versions (e.g. gws-rust-core = { version = "X.Y.Z", path = "..." })
+sed -i.bak -E "s/(gws-rust-core = \{ version = \")[^\"]+/\1${VERSION}/" crates/gws-rust/Cargo.toml
+rm -f crates/gws-rust/Cargo.toml.bak
 
 # Update npm installer package.json version
 node -e "

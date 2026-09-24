@@ -17,7 +17,7 @@ yarn-error.log*
 # Build outputs
 /dist/
 *.tsbuildinfo
-/bin/gws-native*
+/bin/gwsr-native*
 
 # IDE
 .idea/

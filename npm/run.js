@@ -12,7 +12,7 @@ const binPath = path.join(__dirname, "bin", platform.binary);
 
 if (!fs.existsSync(binPath)) {
   console.error(
-    `gws binary not found at ${binPath}\nAuto-installing...`
+    `gwsr binary not found at ${binPath}\nAuto-installing...`
   );
   const install = spawnSync(process.execPath, [path.join(__dirname, "install.js")], {
     cwd: __dirname,
@@ -29,7 +29,7 @@ const result = spawnSync(binPath, process.argv.slice(2), {
 });
 
 if (result.error) {
-  console.error(`Error running gws: ${result.error.message}`);
+  console.error(`Error running gwsr: ${result.error.message}`);
   process.exit(1);
 }
 

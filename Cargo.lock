@@ -895,23 +895,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "google-workspace"
-version = "0.22.5"
-dependencies = [
- "anyhow",
- "percent-encoding",
- "reqwest",
- "serde",
- "serde_json",
- "serial_test",
- "tempfile",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "google-workspace-cli"
+name = "gws-rust"
 version = "0.22.5"
 dependencies = [
  "aes-gcm",
@@ -927,7 +911,7 @@ dependencies = [
  "dirs",
  "dotenvy",
  "futures-util",
- "google-workspace",
+ "gws-rust-core",
  "hostname",
  "iana-time-zone",
  "keyring",
@@ -952,6 +936,22 @@ dependencies = [
  "uuid",
  "yup-oauth2",
  "zeroize",
+]
+
+[[package]]
+name = "gws-rust-core"
+version = "0.22.5"
+dependencies = [
+ "anyhow",
+ "percent-encoding",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "serial_test",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
