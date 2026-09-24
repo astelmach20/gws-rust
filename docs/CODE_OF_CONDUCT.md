@@ -52,8 +52,8 @@ address, posting via an official social media account, or acting as an appointed
 representative at an online or offline event. Representation of a project may be
 further defined and clarified by project maintainers.
 
-This Code of Conduct also applies outside the project spaces when the Project
-Steward has a reasonable belief that an individual's behavior may have a
+This Code of Conduct also applies outside the project spaces when the project
+maintainer has a reasonable belief that an individual's behavior may have a
 negative impact on the project or its community.
 
 ## Conflict Resolution
@@ -69,12 +69,10 @@ dispute. If you are unable to resolve the matter for any reason, or if the
 behavior is threatening or harassing, report it. We are dedicated to providing
 an environment where participants feel welcome and safe.
 
-Reports should be directed to the Project Maintainers (opensource@google.com). It is the Project Steward’s duty to
-receive and address reported violations of the code of conduct. They will then
-work with a committee consisting of representatives from the Open Source
-Programs Office and the Google Open Source Strategy team. If for any reason you
-are uncomfortable reaching out to the Project Steward, please email
-opensource@google.com.
+Reports should be directed privately to the project maintainer,
+[@astelmach20](https://github.com/astelmach20), using the contact details on
+their GitHub profile. The maintainer will receive and address reported
+violations of the code of conduct.
 
 We will investigate every complaint, but you may not receive a direct response.
 We will use our discretion in determining when and how to follow up on reported
