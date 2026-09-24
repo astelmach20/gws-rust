@@ -1,239 +1,162 @@
 # AGENTS.md
 
-## Project Overview
+Guidance for anyone, human or agent, changing this repository. User-facing behavior is documented in [README.md](README.md). Agents that *use* the CLI should read [CONTEXT.md](CONTEXT.md) and the skills in `skills/`.
 
-`gwsr` is a Rust CLI tool for interacting with Google Workspace APIs. It dynamically generates its command surface at runtime by parsing Google Discovery Service JSON documents.
+## Project overview
 
-> [!IMPORTANT]
-> **Dynamic Discovery**: This project does NOT use generated Rust crates (e.g., `google-drive3`) for API interaction. Instead, it fetches the Discovery JSON at runtime and builds `clap` commands dynamically. When adding a new service, you only need to register it in `crates/gws-rust-core/src/services.rs` and verify the Discovery URL pattern in `crates/gws-rust-core/src/discovery.rs`. Do NOT add new crates to `Cargo.toml` for standard Google APIs.
-
-> [!NOTE]
-> **Package Manager**: Use `pnpm` instead of `npm` for Node.js package management in this repository.
-
-## Build & Test
+`gwsr` (package `gws-rust`) is a Rust CLI for every Google Workspace API. It builds its command tree at runtime from Google Discovery documents: there is no generated per-API client code.
 
 > [!IMPORTANT]
-> **Test Coverage**: The `codecov/patch` check requires that new or modified lines are covered by tests. When adding code, extract testable helper functions rather than embedding logic in `main`/`run` where it's hard to unit-test. Run `cargo test` locally and verify new branches are exercised.
+> **Do not add generated `google-*` API crates.** `scripts/check-changeset.sh` fails CI if a crate manifest depends on one. To add a service, add a `ServiceEntry` to `SERVICES` in `crates/gws-rust-core/src/services.rs`. If its Discovery document is only served at `https://<api>.googleapis.com/$discovery/rest`, check that `DiscoveryLoader::discovery_urls` in `crates/gws-rust-core/src/discovery/mod.rs` finds it. Any other API already works as `<api>:<version>`.
+
+## Project rules
+
+These rules are not optional. Reviews reject code that breaks them.
+
+1. **Best-practice security everywhere.** Treat every CLI argument as adversarial: it often comes from an LLM. See [Input validation](#input-validation-and-url-safety).
+2. **No silent failures; fail loudly.**
+   - No `let _ =` on a fallible result, and no `.ok()`, `unwrap_or_default()` or similar that hides an error.
+   - No "warn and continue", unless continuing is genuinely correct *and* the warning is explicit.
+   - Add context to errors: `thiserror` in the library, `anyhow::Context` in the binary.
+   - No `unwrap()`/`expect()`/`panic!` in non-test code (clippy `unwrap_used`, `expect_used` and `panic` are denied in CI).
+3. **No legacy or backward-compatibility shims.** No old environment variable aliases, deprecated flag aliases, config migrations or fallbacks "for compatibility". The project is pre-1.0: make clean breaks and record them in a changeset.
+4. **Refactor freely.** Split large modules, and replace hand-rolled code with well-maintained crates. Upstream structure has no special standing.
+5. **Modern tooling** at current versions (latest GitHub Actions pinned by SHA, `uv` rather than `pip`, current crates).
+6. **Every behavior change gets focused automated tests**: unit tests, or integration tests with `wiremock` / `assert_cmd` / `insta`. Test the rejection path as well as the happy path.
+7. **Machine-readable by default.**
+   - Every command's stdout is JSON, whether or not it is a terminal. Streams are NDJSON.
+   - Human formats (`table`, `yaml`, `csv`) are opt-in via `--format`.
+   - Progress, prompts and logs go to stderr only.
+   - Errors are one JSON envelope on stderr with a stable exit code.
+   - The only exceptions are `--help`, `--version`, `completions`, `dev man` and raw payloads the user asked for (`-o -`).
+8. **Never touch real accounts in tests or development tooling.** No real OAuth logins or credentialed Google API calls. Unauthenticated public Discovery fetches are fine.
+
+Use `pnpm`, not `npm`, for the Node tooling (changesets, lefthook, the npm launcher tests).
+
+## Development workflow
 
 ```bash
-cargo build          # Build in dev mode
-cargo clippy -- -D warnings  # Lint check
-cargo test           # Run tests
+nix develop          # optional: pinned toolchain plus just, cargo-deny, cargo-audit, cargo-llvm-cov, cargo-machete, shellcheck, actionlint
+pnpm install         # changesets CLI; installs the lefthook git hooks
+just                 # list recipes
 ```
 
-## Changesets
+| Recipe | Runs |
+|---|---|
+| `just build` / `just release` | `cargo build` (debug / release) |
+| `just fmt` / `just fmt-check` | rustfmt |
+| `just clippy` | `cargo clippy --workspace --all-targets --all-features --locked -- -D warnings` |
+| `just test` | `cargo test --workspace --all-targets --all-features --locked` |
+| `just test-js` | npm launcher tests |
+| `just coverage [--open\|--lcov]` | `scripts/coverage.sh`: cargo-llvm-cov, fails below the line-coverage floor (65%, `COVERAGE_MIN_LINES`) |
+| `just deny` | `cargo deny check` and `cargo audit --deny warnings` |
+| `just machete`, `just shellcheck`, `just workflows` | Unused dependencies, shell lint, actionlint + zizmor |
+| `just skills` | Regenerates `skills/` and `docs/skills.md` |
+| `just ci` | `lint test test-js deny`: the local equivalent of the CI gate |
 
-Every PR must include a changeset file. Create one at `.changeset/<descriptive-name>.md`:
+- **Toolchain:** Rust 1.98.1 is pinned in `rust-toolchain.toml`. The MSRV is 1.89 (CI checks it), the edition is 2024, and both crates forbid `unsafe` code.
+- **Git hooks (lefthook):** pre-commit runs fmt, clippy, shellcheck and actionlint on staged files. Pre-push runs the tests, `cargo deny` and the JS tests.
+- **Snapshots:** CLI help and output snapshots live in `crates/gws-rust/tests/snapshots`. Review them with `cargo insta review`, or update them with `INSTA_UPDATE=always cargo test`.
+- **Skills:** after changing help text, helper flags, `registry/*.toml` or the generator, run `just skills` and commit the result. CI fails when `skills/` or `docs/skills.md` drift. The generator does not delete skill directories; remove a skill's directory by hand when you remove the command.
+
+### Changesets
+
+Every PR that changes Rust code or a Cargo manifest needs a changeset (`pnpm changeset`, or write `.changeset/<name>.md` by hand):
 
 ```markdown
 ---
-"gws-rust": patch
+"gws-rust": minor
 ---
 
-Brief description of the change
+What changed, from the user's point of view. Call out breaking changes.
 ```
 
-Use `patch` for fixes/chores, `minor` for new features, `major` for breaking changes. The CI policy check will fail without a changeset.
+`gws-rust` is the only valid package name. Pre-1.0, use `minor` for features and breaking changes and `patch` for fixes. The release workflow turns pending changesets into a version PR and a `CHANGELOG.md` entry.
 
 ## Architecture
 
-The CLI uses a **two-phase argument parsing** strategy:
+The repository is a Cargo workspace with two crates, plus the npm launcher in `npm/` and the Nix flake.
 
-1. Parse argv to extract the service name (e.g., `drive`)
-2. Fetch the service's Discovery Document, build a dynamic `clap::Command` tree, then re-parse
+| Crate | Package | Purpose |
+|---|---|---|
+| `crates/gws-rust-core/` | `gws-rust-core` | Library: Discovery loading and caching, the service registry, the HTTP retry policy, validation, errors |
+| `crates/gws-rust/` | `gws-rust` | The `gwsr` binary |
 
-### Workspace Layout
+### Request flow
 
-The repository is a Cargo workspace with two crates:
+1. `main.rs` applies process hardening, loads `config.toml` and initializes logging. It then parses the static surface in `cli_args.rs`: global flags, `auth`, `schema`, `commands`, `batch`, `cache`, `completions`, `help`, `dev`.
+2. Anything else is a service. `service.rs` resolves the name (aliases, `<api>:<version>`, `--api-version`), then loads the Discovery document through the cache. `commands.rs` builds a `clap::Command` tree from it, and the service's helper (`helpers::get_helper`) injects its `+verb` subcommands.
+3. argv is parsed again against that tree. A helper handles the command, or the executor runs the generated method.
+4. `confirm.rs` gates destructive and outbound actions. `auth` supplies a token for the narrowest granted scope. `transport` sends the request. Results go to stdout through `formatter.rs` / `output.rs`; errors become the stderr envelope in `error.rs`.
 
-| Crate                          | Package                 | Purpose                                           |
-| ------------------------------ | ----------------------- | ------------------------------------------------- |
-| `crates/gws-rust-core/`     | `gws-rust-core`      | Publishable library — core types and helpers       |
-| `crates/gws-rust/` | `gws-rust`  | Binary crate — the `gwsr` CLI                       |
+### Library (`crates/gws-rust-core/src/`)
 
-#### Library (`crates/gws-rust-core/src/`)
+| Module | Purpose |
+|---|---|
+| `discovery/` | `DiscoveryLoader`: fetch, trust checks, stale fallback. `cache.rs`: the on-disk cache (0600 files, atomic writes). `model.rs`: Serde types for Discovery documents |
+| `services.rs` | `SERVICES` registry and `resolve_service()` (aliases, `<api>:<version>`) |
+| `client.rs` | The shared `reqwest` client, redirect policy, `RetryPolicy`, `send()` with backoff/jitter/`Retry-After` and `Idempotency` |
+| `validate/` | `mod.rs`: `encode_path_segment`, `validate_resource_name`, `validate_api_identifier`, `reject_dangerous_chars`. `paths.rs`: file-path policy (`GWSR_RESTRICT_PATHS`). `endpoint.rs`: which hosts may receive a token (`GWSR_API_BASE_URL`). `modelarmor.rs`: template-name parser |
+| `error.rs` | `GwsError`, exit codes 0–7, the JSON error envelope, retryability |
 
-| File             | Purpose                                                    |
-| ---------------- | ---------------------------------------------------------- |
-| `discovery.rs`   | Serde models for Discovery Document + async fetch/cache    |
-| `services.rs`    | Service alias → Discovery API name/version mapping         |
-| `error.rs`       | `GwsError` enum, exit codes, JSON serialization            |
-| `validate.rs`    | Path/URL/resource validators, `encode_path_segment()`      |
-| `client.rs`      | HTTP client with retry logic                               |
+### Binary (`crates/gws-rust/src/`)
 
-#### CLI (`crates/gws-rust/src/`)
+| Module | Purpose |
+|---|---|
+| `main.rs` | Entry point and two-phase dispatch |
+| `cli_args.rs` | Static command surface (clap derive), global flags, top-level help |
+| `config.rs` | `config.toml` loading and flag > env > config > default resolution |
+| `service.rs`, `commands.rs` | Discovery document to `clap::Command` tree, method flags |
+| `executor/` | Generated-method execution: `input.rs` (`--params`/`--json` validation), `body_schema.rs`, `url.rs`, `options.rs`, `pagination.rs`, `upload.rs` (multipart and resumable), `download.rs`, `operation.rs` (`--wait`), `batch.rs` (`gwsr batch`), `output.rs` (the executor's only stdout path) |
+| `transport/` | The one credential-attaching request path: token, quota project, endpoint trust, 401 refresh-and-retry |
+| `auth/` | `credentials.rs` (source resolution), `profiles.rs` (config dir layout), `keystore.rs` (AES-256-GCM, keyring/file backends), `token.rs`, `token_cache.rs`, `flow.rs` (PKCE loopback / `--no-localhost`), `scopes.rs` (scope sets and per-method selection), `client_config.rs`; `commands/` (`login`, `status`, `list`/`use`, `export`, `logout`, scope `picker`); `setup/` (`gwsr auth setup` with gcloud, TUI) |
+| `confirm.rs` | The single confirmation gate (`Impact::Destructive`/`Outbound`, `--yes`, `GWSR_REQUIRE_CONFIRM`) |
+| `formatter.rs`, `output.rs`, `jq.rs` | Output formats, terminal sanitization, `emit()`, `--jq` via jaq |
+| `schema.rs`, `inventory.rs` | `gwsr schema`, `gwsr commands` |
+| `completions.rs` | Dynamic shell completions and `dev man` |
+| `generate_skills.rs` | `gwsr dev generate-skills` (reads `registry/personas.toml`, `registry/recipes.toml`) |
+| `logging.rs`, `hardening.rs`, `fs_util.rs`, `timezone.rs`, `text.rs` | Logging, process hardening, secret-file I/O, account time zone, text utilities |
+| `helpers/` | `+verb` helpers per service. `http.rs` has `Api`, the helper REST client (dry-run planning, pagination, sanitization) and `OutputTarget`. Gmail is in `helpers/gmail/`, Workspace Events in `helpers/events/` |
 
-| File                | Purpose                                                                  |
-| ------------------- | ------------------------------------------------------------------------ |
-| `main.rs`           | Entrypoint, two-phase CLI parsing, method resolution                     |
-| `auth.rs`           | OAuth2 token acquisition via env vars, encrypted credentials, or ADC     |
-| `credential_store.rs` | AES-256-GCM encryption/decryption of credential files                  |
-| `auth_commands.rs`  | `gwsr auth` subcommands: `login`, `logout`, `setup`, `status`, `export`   |
-| `commands.rs`       | Recursive `clap::Command` builder from Discovery resources               |
-| `executor.rs`       | HTTP request construction, response handling, schema validation          |
-| `schema.rs`         | `gwsr schema` command — introspect API method schemas                     |
-| `logging.rs`        | Opt-in structured logging (stderr + file) via `tracing`                  |
-| `timezone.rs`       | Account timezone resolution: `--timezone` flag, Calendar Settings API    |
+Tests: unit tests sit next to the code; CLI integration tests are in `crates/gws-rust/tests/{cli.rs,helpers_cli.rs}` (assert_cmd, insta, wiremock); property tests are in `crates/gws-rust-core/tests/validate_props.rs`.
 
-## Demo Videos
-
-Demo recordings are generated with [VHS](https://github.com/charmbracelet/vhs) (`.tape` files).
-
-```bash
-vhs docs/demo.tape
-```
-
-### VHS quoting rules
-
-- Use **double quotes** for simple strings: `Type "gwsr --help" Enter`
-- Use **backtick quotes** when the typed text contains JSON with double quotes:
-  ```
-  Type `gwsr drive files list --params '{"pageSize":5}'` Enter
-  ```
-  `\"` escapes inside double-quoted `Type` strings are **not supported** by VHS and will cause parse errors.
-
-### Scene art
-
-ASCII art title cards live in `art/`. The `scripts/show-art.sh` helper clears the screen and cats the file. Portrait scenes use `scene*.txt`; landscape chapters use `long-*.txt`.
-
-## Input Validation & URL Safety
+## Input validation and URL safety
 
 > [!IMPORTANT]
-> This CLI is frequently invoked by AI/LLM agents. Always assume inputs can be adversarial — validate paths against traversal (`../../.ssh`), restrict format strings to allowlists, reject control characters, and encode user values before embedding them in URLs.
+> Assume every CLI argument is adversarial. Reject control characters, constrain enums, encode values before putting them in URLs, and never send a token to an unchecked host.
 
-> [!NOTE]
-> **Environment variables are trusted inputs.** The validation rules above apply to **CLI arguments** that may be passed by untrusted AI agents. Environment variables (e.g. `GWSR_CONFIG_DIR`) are set by the user themselves — in their shell profile or deployment config — and are not subject to path traversal validation. This is consistent with standard conventions like `XDG_CONFIG_HOME`, `CARGO_HOME`, etc.
+Environment variables and `config.toml` are set by the user, so they are trusted input. They are still parsed strictly: an invalid value is an error, never ignored.
 
-### Path Safety (`crates/gws-rust-core/src/validate.rs`)
+| Scenario | Use |
+|---|---|
+| Any HTTP request with credentials | `transport::Transport` (helpers: `helpers::http::Api`). Never build a `reqwest` request with a bearer token by hand |
+| Value in a URL path segment | `gws_rust_core::validate::encode_path_segment()` (`encode_path_preserving_slashes()` for `{+name}` templates) |
+| Query parameters | `ApiRequest::query()` / reqwest `.query()`, never string interpolation |
+| Resource names (project, space, topic, template) | `validate::validate_resource_name()` |
+| Service or API identifiers | `validate::validate_api_identifier()` |
+| Input file paths (`--upload`, `--file`, `@file`) | `validate::validate_safe_file_path()` |
+| Output / directory paths (`--output-dir`, `--dir`) | `validate::validate_safe_output_dir()` / `validate_safe_dir_path()` |
+| Single output file (`--output`, `-` for stdout) | `helpers::http::OutputTarget::parse()` (refuses to overwrite without `--overwrite`) |
+| Enum flags | clap `value_parser` / `PossibleValuesParser` |
+| Free text shown on a terminal | `output::sanitize_for_terminal()` |
+| API base URLs | `validate::validate_api_base()` (enforces the token-host policy) |
+| Destructive or outbound actions | `confirm::confirm(matches, Impact::…, "what will happen")`, and register `-y/--yes` with `confirm::with_yes()` |
 
-When adding new helpers or CLI flags that accept file paths, **always validate** using the shared helpers:
+Path validators apply `GWSR_RESTRICT_PATHS`. By default any path is allowed; `cwd` confines paths to the current directory. Either way they resolve symlinks and reject control characters.
 
-| Scenario                               | Validator                                | Rejects                                                              |
-| -------------------------------------- | ---------------------------------------- | -------------------------------------------------------------------- |
-| File path for writing (`--output-dir`) | `validate::validate_safe_output_dir()`   | Absolute paths, `../` traversal, symlinks outside CWD, control chars |
-| File path for reading (`--dir`)        | `validate::validate_safe_dir_path()`     | Absolute paths, `../` traversal, symlinks outside CWD, control chars |
-| Enum/allowlist values (`--msg-format`) | clap `value_parser` (see `gmail/mod.rs`) | Any value not in the allowlist                                       |
+## Helper commands (`+verb`)
 
-```rust
-// In your argument parser:
-if let Some(output_dir) = matches.get_one::<String>("output-dir") {
-    crate::validate::validate_safe_output_dir(output_dir)?;
-    builder.output_dir(Some(output_dir.clone()));
-}
-```
-
-### URL Encoding (`crates/gws-rust/src/helpers/mod.rs`)
-
-User-supplied values embedded in URL **path segments** must be percent-encoded. Use the shared helper:
-
-```rust
-// CORRECT — encodes slashes, spaces, and special characters
-let url = format!(
-    "https://www.googleapis.com/drive/v3/files/{}",
-    crate::helpers::encode_path_segment(file_id),
-);
-
-// WRONG — raw user input in URL path
-let url = format!("https://www.googleapis.com/drive/v3/files/{}", file_id);
-```
-
-For **query parameters**, use reqwest's `.query()` builder which handles encoding automatically:
-
-```rust
-// CORRECT — reqwest encodes query values
-client.get(url).query(&[("q", user_query)]).send().await?;
-
-// WRONG — manual string interpolation in query strings
-let url = format!("{}?q={}", base_url, user_query);
-```
-
-### Resource Name Validation (`crates/gws-rust/src/helpers/mod.rs`)
-
-When a user-supplied string is used as a GCP resource identifier (project ID, topic name, space name, etc.) that gets embedded in a URL path, validate it first:
-
-```rust
-// Validates the string does not contain path traversal segments (`..`), control characters, or URL-breaking characters like `?` and `#`.
-let project = crate::validate::validate_resource_name(&project_id)?;
-let url = format!("https://pubsub.googleapis.com/v1/projects/{}/topics/my-topic", project);
-```
-
-This prevents injection of query parameters, path traversal, or other malicious payloads through resource name arguments like `--project` or `--space`.
-
-### Checklist for New Features
-
-When adding a new helper or CLI command:
-
-1. **File paths** → Use `validate_safe_output_dir` / `validate_safe_dir_path`
-2. **Enum flags** → Constrain via clap `value_parser` or `validate_msg_format`
-3. **URL path segments** → Use `encode_path_segment()`
-4. **Query parameters** → Use reqwest `.query()` builder
-5. **Resource names** (project IDs, space names, topic names) → Use `validate_resource_name()`
-6. **Write tests** for both the happy path AND the rejection path (e.g., pass `../../.ssh` and assert `Err`)
-
-## PR Labels
-
-Use these labels to categorize pull requests and issues:
-
-- `area: discovery` — Discovery document fetching, caching, parsing
-- `area: http` — Request execution, URL building, response handling
-- `area: docs` — README, contributing guides, documentation
-- `area: tui` — Setup wizard, picker, input fields
-- `area: distribution` — Nix flake, npm packaging, GitHub Actions release workflow, install methods
-- `area: auth` — OAuth, credentials, multi-account, ADC
-- `area: skills` — AI skill generation and management
-
-## Helper Commands (`+verb`)
-
-Helpers are handwritten commands prefixed with `+` that provide value the schema-driven Discovery commands cannot: multi-step orchestration, format translation (e.g., Markdown → Docs JSON), or multi-API composition.
+Helpers are hand-written commands prefixed with `+`. They exist only when they add something the generated commands can't do: multi-step orchestration, format translation (Markdown to Docs, MIME for Gmail), or composing several APIs.
 
 > [!IMPORTANT]
-> **Do NOT add a helper that** wraps a single API call already available via Discovery, adds flags to expose data already in the API response, or re-implements Discovery parameters as custom flags. Helper flags must control orchestration logic — use `--params` and `--format`/`jq` for API parameters and output filtering.
+> **Do not add a helper that** wraps a single API call Discovery already exposes, adds flags for data already in the response, or re-implements Discovery parameters as custom flags. Output filtering is `--jq` / `--format`'s job.
 
-See [`src/helpers/README.md`](crates/gws-rust/src/helpers/README.md) for full guidelines, anti-patterns, and a checklist for new helpers.
+See [`crates/gws-rust/src/helpers/README.md`](crates/gws-rust/src/helpers/README.md) for flag naming, the `Helper` trait and a checklist.
 
-## Environment Variables
+## Demo recordings
 
-### Authentication
+`docs/demo.tape` is a [VHS](https://github.com/charmbracelet/vhs) script (`vhs docs/demo.tape`). In `Type` strings, use double quotes for plain text and backticks when the text contains JSON; VHS does not support `\"`. Title cards live in `art/` and are shown with `scripts/show-art.sh`.
 
-| Variable | Description |
-|---|---|
-| `GWSR_TOKEN` | Pre-obtained OAuth2 access token (highest priority; bypasses all credential file loading) |
-| `GWSR_CREDENTIALS_FILE` | Path to OAuth credentials JSON (no default; if unset, falls back to encrypted credentials in `~/.config/gwsr/`) |
-| `GWSR_KEYRING_BACKEND` | Keyring backend: `keyring` (default, uses OS keyring with file fallback) or `file` (file only, for Docker/CI/headless) |
+## PR labels
 
-| `GOOGLE_APPLICATION_CREDENTIALS` | Standard Google ADC path; used as fallback when no gwsr-specific credentials are configured |
-
-### Configuration
-
-| Variable | Description |
-|---|---|
-| `GWSR_CONFIG_DIR` | Override the config directory (default: `~/.config/gwsr`) |
-
-### OAuth Client
-
-| Variable | Description |
-|---|---|
-| `GWSR_CLIENT_ID` | OAuth client ID (for `gwsr auth login` when no `client_secret.json` is saved) |
-| `GWSR_CLIENT_SECRET` | OAuth client secret (paired with `CLIENT_ID` above) |
-
-### Sanitization (Model Armor)
-
-| Variable | Description |
-|---|---|
-| `GWSR_SANITIZE_TEMPLATE` | Default Model Armor template (overridden by `--sanitize` flag) |
-| `GWSR_SANITIZE_MODE` | `warn` (default) or `block` |
-
-### Helpers
-
-| Variable | Description |
-|---|---|
-| `GWSR_PROJECT_ID` | GCP project ID override for quota/billing and fallback for helper commands (overridden by `--project` flag) |
-
-### Logging
-
-| Variable | Description |
-|---|---|
-| `GWSR_LOG` | Log level filter for stderr output (e.g., `gwsr=debug`). Off by default. |
-| `GWSR_LOG_FILE` | Directory for JSON-line log files with daily rotation. Off by default. |
-
-`gwsr` never loads `.env` files: a `.env` in an untrusted checkout could otherwise redirect credentials or TLS trust.
+`area: discovery`, `area: http`, `area: auth`, `area: tui`, `area: skills`, `area: docs`, `area: distribution` (Nix, npm, release workflows, install methods).
