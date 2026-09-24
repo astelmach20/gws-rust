@@ -27,17 +27,18 @@ These rules are not optional. Reviews reject code that breaks them.
    - Every command's stdout is JSON, whether or not it is a terminal. Streams are NDJSON.
    - Human formats (`table`, `yaml`, `csv`) are opt-in via `--format`.
    - Progress, prompts and logs go to stderr only.
-   - Errors are one JSON envelope on stderr with a stable exit code.
+   - Errors are one JSON envelope on stderr with a stable exit code (0–11; add a `GwsError` variant rather than reusing an unrelated code).
    - The only exceptions are `--help`, `--version`, `completions`, `dev man` and raw payloads the user asked for (`-o -`).
 8. **Never touch real accounts in tests or development tooling.** No real OAuth logins or credentialed Google API calls. Unauthenticated public Discovery fetches are fine.
 
-Use `pnpm`, not `npm`, for the Node tooling (changesets, lefthook, the npm launcher tests).
+Use `pnpm` (pinned to 11.27.1 by `packageManager` in `package.json`), not `npm`, for the Node tooling: changesets, lefthook and the npm launcher tests.
 
 ## Development workflow
 
 ```bash
 nix develop          # optional: pinned toolchain plus just, cargo-deny, cargo-audit, cargo-llvm-cov, cargo-machete, shellcheck, actionlint
-pnpm install         # changesets CLI; installs the lefthook git hooks
+pnpm install         # changesets CLI and lefthook (does not install git hooks)
+pnpm run hooks       # optional: install the lefthook git hooks (refuses in a linked worktree)
 just                 # list recipes
 ```
 
@@ -55,9 +56,9 @@ just                 # list recipes
 | `just ci` | `lint test test-js deny`: the local equivalent of the CI gate |
 
 - **Toolchain:** Rust 1.98.1 is pinned in `rust-toolchain.toml`. The MSRV is 1.89 (CI checks it), the edition is 2024, and both crates forbid `unsafe` code.
-- **Git hooks (lefthook):** pre-commit runs fmt, clippy, shellcheck and actionlint on staged files. Pre-push runs the tests, `cargo deny` and the JS tests.
+- **Git hooks (lefthook, opt-in via `pnpm run hooks`):** pre-commit runs fmt, clippy, shellcheck and actionlint on staged files. Pre-push runs the tests, `cargo deny` and the JS tests. The install script refuses to run in a linked worktree, because all worktrees share one `.git/hooks`.
 - **Snapshots:** CLI help and output snapshots live in `crates/gws-rust/tests/snapshots`. Review them with `cargo insta review`, or update them with `INSTA_UPDATE=always cargo test`.
-- **Skills:** after changing help text, helper flags, `registry/*.toml` or the generator, run `just skills` and commit the result. CI fails when `skills/` or `docs/skills.md` drift. The generator does not delete skill directories; remove a skill's directory by hand when you remove the command.
+- **Skills:** after changing help text, helper flags, `registry/*.toml` or the generator, run `just skills` and commit the result, including new and deleted directories. CI fails when `skills/` or `docs/skills.md` drift, and warns about skill directories without the generator marker. Every generated `SKILL.md` carries `<!-- gwsr generated skill: do not edit by hand -->` after its front matter. A full (unfiltered) run deletes marked directories it no longer produces (`pruned` in its summary); unmarked directories are never touched and are listed as `unmanaged`; delete those by hand if they are stale. `--dry-run` reports what would be written and pruned without touching disk.
 
 ### Changesets
 
@@ -97,7 +98,7 @@ The repository is a Cargo workspace with two crates, plus the npm launcher in `n
 | `services.rs` | `SERVICES` registry and `resolve_service()` (aliases, `<api>:<version>`) |
 | `client.rs` | The shared `reqwest` client, redirect policy, `RetryPolicy`, `send()` with backoff/jitter/`Retry-After` and `Idempotency` |
 | `validate/` | `mod.rs`: `encode_path_segment`, `validate_resource_name`, `validate_api_identifier`, `reject_dangerous_chars`. `paths.rs`: file-path policy (`GWSR_RESTRICT_PATHS`). `endpoint.rs`: which hosts may receive a token (`GWSR_API_BASE_URL`). `modelarmor.rs`: template-name parser |
-| `error.rs` | `GwsError`, exit codes 0–7, the JSON error envelope, retryability |
+| `error.rs` | `GwsError`, exit codes 0–11, the JSON error envelope, retryability |
 
 ### Binary (`crates/gws-rust/src/`)
 
@@ -105,6 +106,8 @@ The repository is a Cargo workspace with two crates, plus the npm launcher in `n
 |---|---|
 | `main.rs` | Entry point and two-phase dispatch |
 | `cli_args.rs` | Static command surface (clap derive), global flags, top-level help |
+| `args.rs` | Fallible, typed accessors for parsed flags: the only way commands read arguments (a misdefined argument is an internal error, exit 5, never a panic or a silently absent value) |
+| `output_file.rs` | Atomic writes of user-requested output files (`-o`, exports, pulled sources), honoring `--overwrite` |
 | `config.rs` | `config.toml` loading and flag > env > config > default resolution |
 | `service.rs`, `commands.rs` | Discovery document to `clap::Command` tree, method flags |
 | `executor/` | Generated-method execution: `input.rs` (`--params`/`--json` validation), `body_schema.rs`, `url.rs`, `options.rs`, `pagination.rs`, `upload.rs` (multipart and resumable), `download.rs`, `operation.rs` (`--wait`), `batch.rs` (`gwsr batch`), `output.rs` (the executor's only stdout path) |
@@ -137,6 +140,9 @@ Environment variables and `config.toml` are set by the user, so they are trusted
 | Input file paths (`--upload`, `--file`, `@file`) | `validate::validate_safe_file_path()` |
 | Output / directory paths (`--output-dir`, `--dir`) | `validate::validate_safe_output_dir()` / `validate_safe_dir_path()` |
 | Single output file (`--output`, `-` for stdout) | `helpers::http::OutputTarget::parse()` (refuses to overwrite without `--overwrite`) |
+| Reading flags | `crate::args` accessors; never `ArgMatches::get_one`/`get_flag` (they panic) or `try_get_*().ok()` (it hides errors) |
+| Writing local files | `crate::output_file` for user output; `fs_util::atomic_write` for private config and credential files. Both rely on the `077` umask set in `hardening.rs` |
+| Uploads from helpers | `Api::upload_resumable` (resumes after failed chunks, keeps the session on the request's origin) |
 | Enum flags | clap `value_parser` / `PossibleValuesParser` |
 | Free text shown on a terminal | `output::sanitize_for_terminal()` |
 | API base URLs | `validate::validate_api_base()` (enforces the token-host policy) |

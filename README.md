@@ -106,7 +106,7 @@ gwsr <service> +<helper> [flags]
 | `gwsr commands [SERVICE]...` | JSON inventory of every service, resource, method and helper with its flags (`--format table\|csv` for one row per command) |
 | `gwsr batch <service>` | Many calls in `multipart/mixed` batch requests (see [Batch](#batch)) |
 | `gwsr auth ...` | `setup`, `login`, `status`, `list`, `use`, `export`, `logout` |
-| `gwsr cache clear` | Delete cached Discovery documents |
+| `gwsr cache clear` | Delete cached Discovery documents (`--dry-run` lists what would be deleted) |
 | `gwsr completions <shell>` | Shell completion script |
 | `gwsr help <path>` | Same as `<path> --help`, e.g. `gwsr help drive files list` |
 | `gwsr dev generate-skills`, `gwsr dev man` | Maintainer tools: agent skills and man pages |
@@ -303,6 +303,12 @@ The fields are `code`, `message`, `reason` and `retryable`, plus `hint` when the
 | `5` | Internal error: I/O, serialization, or other unexpected failure |
 | `6` | Retryable API error: 429, 5xx, or 403 `rateLimitExceeded`/`userRateLimitExceeded`; retry with backoff |
 | `7` | Confirmation required: a gated action ran without `--yes` and without a terminal, or the prompt was declined. Nothing was sent |
+| `8` | Configuration error (`configError`): an invalid environment variable, `config.toml`, profile name or OAuth client file |
+| `9` | Credential store error (`credentialStoreError`): the OS keyring, key file or stored credentials can't be read, written or decrypted |
+| `10` | Network error (`networkError`): no response (connection, DNS, TLS, timeout). Not marked retryable, because a non-idempotent call may already have been applied; check before retrying |
+| `11` | Blocked by Model Armor (`sanitizationBlocked`): `--sanitize` in `block` mode matched the output, which was withheld. The API request itself succeeded |
+
+Exit code 5 also covers internal programming errors, such as a command reading an argument it doesn't define.
 
 ### Logging
 
@@ -335,6 +341,10 @@ Ranges contain `!`, which interactive bash history-expands inside double quotes.
 - Idempotent requests are retried (up to 4 attempts) with capped exponential backoff and full jitter on 408, 429, 500, 502, 503 and 504, on connection errors and timeouts, and on Google 403 `rateLimitExceeded`/`userRateLimitExceeded`. `Retry-After` is honored; if it asks for more than 60 seconds, `gwsr` stops retrying and returns that response.
 - **Non-idempotent requests (POST/PATCH) are sent at most once**, unless the connection never opened or the request carries a `requestId`. A timed-out `gmail +send` is never re-sent.
 - A `401` triggers one forced token refresh and a retry, for every command, including long-running streams.
+
+### Quota project
+
+Requests carry an `x-goog-user-project` header naming the project that is billed and whose quota is used. It comes from `GWSR_PROJECT_ID`, then the OAuth client configuration's project, then `quota_project_id` in Application Default Credentials. A source that exists but can't be used is an error, not skipped: for example an unreadable client config or ADC file (exit `8` or `9`). Skipping it would silently bill a different project. Set `GWSR_PROJECT_ID`, or pass `--no-quota-project` (`GWSR_NO_QUOTA_PROJECT=1`) to send no header at all.
 
 ### Pagination
 
@@ -463,14 +473,14 @@ gwsr gmail users messages get --params '{"userId":"me","id":"MSG"}' \
 | `GWSR_SANITIZE_MODE` / `sanitize_mode` | `warn` (default) or `block`. Any other value is an error |
 
 - **`warn`:** output is printed. A match or a sanitization failure adds a `_sanitization` annotation and a warning on stderr.
-- **`block`:** fails closed. A match or a sanitization failure prints nothing on stdout and exits non-zero.
+- **`block`:** fails closed. A match prints nothing on stdout and exits `11` (`sanitizationBlocked`). If Model Armor can't be reached, the output is still withheld and the exit code is the cause's own (auth `2`, network `10`, API `1` or `6`).
 - The template name is parsed strictly, and the request always goes to `modelarmor.<location>.rep.googleapis.com`.
 
 `--sanitize` applies to generated methods and to the helpers that return user content (for example `gmail +read`, `+search`, `+triage`, `+watch`, `events +subscribe`, and the app helpers). `gwsr modelarmor +create-template --preset jailbreak` creates a template from the built-in preset.
 
 ## Configuration
 
-`~/.config/gwsr/config.toml` (or `$GWSR_CONFIG_DIR/config.toml`). Unknown keys and invalid values are errors. For every setting, a **command-line flag beats an environment variable, which beats the config file, which beats the default**.
+`~/.config/gwsr/config.toml` (or `$GWSR_CONFIG_DIR/config.toml`). Unknown keys and invalid values are configuration errors (exit `8`). For every setting, a **command-line flag beats an environment variable, which beats the config file, which beats the default**.
 
 ```toml
 format = "table"          # json | table | yaml | csv                 (GWSR_FORMAT, --format)
@@ -487,7 +497,7 @@ log_file = "/var/log/gwsr" # JSON log directory                        (GWSR_LOG
 
 ## Environment variables
 
-All are optional. `gwsr` never reads `.env` files; set variables in your shell or deployment config.
+All are optional. `gwsr` never reads `.env` files; set variables in your shell or deployment config. A value that isn't valid UTF-8 is a configuration error (exit `8`), never treated as unset.
 
 | Variable | Description |
 |---|---|
@@ -503,7 +513,7 @@ All are optional. `gwsr` never reads `.env` files; set variables in your shell o
 | `GWSR_CONFIG_DIR` | Config directory (default `~/.config/gwsr`) |
 | `GWSR_CACHE_DIR` | Cache directory, absolute path (default: platform cache dir + `/gwsr`) |
 | **Requests** | |
-| `GWSR_PROJECT_ID` | Quota/billing project sent as `x-goog-user-project`, and the default `--project` for Pub/Sub helpers |
+| `GWSR_PROJECT_ID` | Quota/billing project sent as `x-goog-user-project` (see [Quota project](#quota-project)), and the default `--project` for Pub/Sub helpers |
 | `GWSR_NO_QUOTA_PROJECT` | `1`: never send `x-goog-user-project` (same as `--no-quota-project`) |
 | `GWSR_TIMEOUT` | Request timeout in seconds (default 60, `0` disables) |
 | `GWSR_API_BASE_URL` | Trusted API endpoint override for private endpoints or recording proxies (`https`, or `http` on localhost only) |
@@ -548,7 +558,7 @@ Agent-friendly habits: use `--fields` or `--jq` to keep responses small, `gwsr s
 - **Least privilege.** Login is read-only by default, and each call uses the narrowest granted scope.
 - **Tokens only go to Google.** Credentials are attached only to `https://*.googleapis.com` (default port, no user info, query or fragment) or the origin you set in `GWSR_API_BASE_URL`. Discovery documents that point elsewhere are refused. Upload session and download URLs are checked too. HTTPS→HTTP redirects are refused, and `Authorization` is dropped on cross-host redirects.
 - **Secrets at rest** are encrypted, with the key in the OS keyring (or a `0600` key file you opt into). Secrets are zeroized in memory, never printed by default, and permission-loose credential files are refused.
-- **Process hardening.** At startup the umask is `077`, core dumps are disabled, and the process is marked non-dumpable on Linux. Log and output files are created `0600`. Both crates forbid `unsafe` code.
+- **Process hardening.** At startup the umask is set to `077`, so every file and directory `gwsr` creates (output and log files included) is private to your user. Core dumps are disabled, and the process is marked non-dumpable on Linux. Both crates forbid `unsafe` code.
 - **Untrusted input.** Arguments are treated as potentially adversarial (they often come from an LLM). Resource names are validated, path segments are encoded, and control characters are rejected. Terminal output is escaped, and CSV formula injection is neutralized.
 - **Supply chain.** Dependencies are checked by `cargo deny` and `cargo audit` on every PR and daily. Releases are reproducible, signed and attested (see [verification](#release-archives-and-verification)). The npm package runs no install scripts.
 
@@ -567,6 +577,9 @@ Report vulnerabilities privately; see [SECURITY.md](SECURITY.md).
 | 403 `accessNotConfigured` | The API isn't enabled in your project. Open the `enable_url` from the error, enable it, and retry after a few seconds (or run `gwsr auth setup`) |
 | 403 insufficient scopes | The error's `hint` has the exact `gwsr auth login --scopes ...` command. Logins are incremental |
 | Exit code `7` | Re-run with `--yes` once you (or the user) agree, or use `--dry-run` to preview |
+| Exit code `8` | The message names the setting to fix (environment variable, `config.toml`, profile or OAuth client file) |
+| Exit code `9` | The keyring or key file is unavailable, or stored credentials can't be decrypted. Check `gwsr auth status --offline`, or set `GWSR_KEYRING_BACKEND=file` on headless machines |
+| Exit code `10` | No response from Google. For creates and other non-idempotent calls, check whether the change was applied before retrying |
 | Offline | `gwsr` uses cached Discovery documents, with a warning if they are stale. `gwsr cache clear` forces a refetch |
 
 ## Development
@@ -577,6 +590,7 @@ just               # list recipes
 just ci            # the local CI gate: fmt, clippy, machete, shellcheck, actionlint, Rust and npm tests, cargo deny + audit
 just coverage      # tests under cargo-llvm-cov with the 65% line-coverage floor
 pnpm changeset     # every PR that changes Rust code needs a changeset
+pnpm run hooks     # optional: install the lefthook git hooks (primary checkout only)
 ```
 
 See [CONTRIBUTING](docs/CONTRIBUTING.md) and [AGENTS.md](AGENTS.md) for the architecture, coding standards and workflow.
