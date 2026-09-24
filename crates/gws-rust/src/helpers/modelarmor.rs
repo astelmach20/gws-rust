@@ -356,9 +356,12 @@ fn sanitization_failed(
     error: GwsError,
 ) -> Result<Sanitized, GwsError> {
     match config.mode {
-        SanitizeMode::Block => Err(GwsError::other(format!(
-            "Model Armor sanitization failed; output suppressed (block mode): {error}"
-        ))),
+        // Fail closed, keeping the cause's category (and exit code): an auth,
+        // network or API failure to reach Model Armor is actionable as such.
+        SanitizeMode::Block => Err(prefix_message(
+            error,
+            "Model Armor sanitization failed; output suppressed (block mode)",
+        )),
         SanitizeMode::Warn => {
             let msg = error.to_string();
             tracing::warn!(
@@ -370,14 +373,34 @@ fn sanitization_failed(
     }
 }
 
+/// Prefix an error's message with `context`, keeping its variant.
+fn prefix_message(error: GwsError, context: &str) -> GwsError {
+    let prefixed = |m: String| format!("{context}: {m}");
+    match error {
+        GwsError::Validation(m) => GwsError::Validation(prefixed(m)),
+        GwsError::Auth(m) => GwsError::Auth(prefixed(m)),
+        GwsError::Config(m) => GwsError::Config(prefixed(m)),
+        GwsError::CredentialStore(m) => GwsError::CredentialStore(prefixed(m)),
+        GwsError::Discovery(m) => GwsError::Discovery(prefixed(m)),
+        GwsError::ConfirmationRequired(m) => GwsError::ConfirmationRequired(prefixed(m)),
+        GwsError::SanitizationBlocked(m) => GwsError::SanitizationBlocked(prefixed(m)),
+        other => crate::transport::errors::with_context(other, context),
+    }
+}
+
+/// The error for output that Model Armor matched in block mode.
+pub fn blocked_error(result: &SanitizationResult) -> GwsError {
+    GwsError::SanitizationBlocked(format!(
+        "Content blocked by Model Armor (filterMatchState: {})",
+        result.filter_match_state
+    ))
+}
+
 /// Convert a [`Sanitized`] into a value to print, turning a block into an error.
 pub fn require_pass(outcome: Sanitized) -> Result<Value, GwsError> {
     match outcome {
         Sanitized::Pass(v) => Ok(v),
-        Sanitized::Blocked(result) => Err(GwsError::other(format!(
-            "Content blocked by Model Armor (filterMatchState: {})",
-            result.filter_match_state
-        ))),
+        Sanitized::Blocked(result) => Err(blocked_error(&result)),
     }
 }
 
@@ -783,6 +806,24 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.to_string().contains("output suppressed"));
+        // The cause keeps its category: a Model Armor 500 is a retryable API error.
+        assert!(matches!(err, GwsError::Api { code: 500, .. }), "{err:?}");
+        assert_eq!(err.exit_code(), GwsError::EXIT_CODE_API_RETRYABLE);
+    }
+
+    #[test]
+    fn fail_closed_prefix_keeps_the_error_category() {
+        let ctx = "suppressed";
+        for (err, exit) in [
+            (GwsError::Auth("no creds".into()), 2),
+            (GwsError::Config("bad".into()), 8),
+            (GwsError::Network("dns".into()), 10),
+            (GwsError::other("boom"), 5),
+        ] {
+            let e = prefix_message(err, ctx);
+            assert_eq!(e.exit_code(), exit, "{e:?}");
+            assert!(e.to_string().starts_with("suppressed: "), "{e}");
+        }
     }
 
     /// SEC-14: warn mode emits the content with an explicit error annotation.
@@ -816,7 +857,10 @@ mod tests {
             .await
             .unwrap();
         assert!(matches!(out, Sanitized::Blocked(_)));
-        assert!(require_pass(out).is_err());
+        let err = require_pass(out).unwrap_err();
+        assert!(matches!(err, GwsError::SanitizationBlocked(_)), "{err:?}");
+        assert_eq!(err.exit_code(), GwsError::EXIT_CODE_SANITIZATION_BLOCKED);
+        assert_eq!(err.to_json()["error"]["reason"], "sanitizationBlocked");
     }
 
     #[tokio::test]

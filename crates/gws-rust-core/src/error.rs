@@ -82,6 +82,11 @@ pub enum GwsError {
     #[error("{0}")]
     ConfirmationRequired(String),
 
+    /// Model Armor screening (`--sanitize` in `block` mode) matched the
+    /// output, so it was withheld. The request itself succeeded.
+    #[error("{0}")]
+    SanitizationBlocked(String),
+
     /// Any other unexpected failure. The source chain is preserved.
     #[error("{}", format_chain(.0.as_ref()))]
     Other(BoxError),
@@ -126,6 +131,8 @@ impl GwsError {
     pub const EXIT_CODE_CREDENTIAL_STORE: i32 = 9;
     /// Exit code for [`GwsError::Network`].
     pub const EXIT_CODE_NETWORK: i32 = 10;
+    /// Exit code for [`GwsError::SanitizationBlocked`].
+    pub const EXIT_CODE_SANITIZATION_BLOCKED: i32 = 11;
 
     /// Wrap any error (or message) as [`GwsError::Other`].
     pub fn other(err: impl Into<BoxError>) -> Self {
@@ -157,6 +164,7 @@ impl GwsError {
             GwsError::Config(_) => Self::EXIT_CODE_CONFIG,
             GwsError::CredentialStore(_) => Self::EXIT_CODE_CREDENTIAL_STORE,
             GwsError::Network(_) => Self::EXIT_CODE_NETWORK,
+            GwsError::SanitizationBlocked(_) => Self::EXIT_CODE_SANITIZATION_BLOCKED,
             GwsError::Other(_) => Self::EXIT_CODE_OTHER,
         }
     }
@@ -227,6 +235,13 @@ impl GwsError {
                     "code": 503,
                     "message": self.to_string(),
                     "reason": "networkError",
+                }
+            }),
+            GwsError::SanitizationBlocked(msg) => json!({
+                "error": {
+                    "code": 403,
+                    "message": msg,
+                    "reason": "sanitizationBlocked",
                 }
             }),
             GwsError::Other(_) => json!({
@@ -316,6 +331,7 @@ mod tests {
             GwsError::EXIT_CODE_CONFIG,
             GwsError::EXIT_CODE_CREDENTIAL_STORE,
             GwsError::EXIT_CODE_NETWORK,
+            GwsError::EXIT_CODE_SANITIZATION_BLOCKED,
         ];
         let unique: std::collections::HashSet<i32> = codes.iter().copied().collect();
         assert_eq!(
@@ -382,6 +398,12 @@ mod tests {
                 10,
                 "networkError",
                 503,
+            ),
+            (
+                GwsError::SanitizationBlocked("blocked".into()),
+                11,
+                "sanitizationBlocked",
+                403,
             ),
         ];
         for (err, exit, reason, code) in cases {
