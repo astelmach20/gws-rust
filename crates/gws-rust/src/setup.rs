@@ -166,6 +166,42 @@ const WORKSPACE_APIS: &[ApiEntry] = &[
         version: "v2",
     },
     ApiEntry {
+        id: "driveactivity.googleapis.com",
+        name: "Drive Activity",
+        discovery: "driveactivity",
+        version: "v2",
+    },
+    ApiEntry {
+        id: "drivelabels.googleapis.com",
+        name: "Drive Labels",
+        discovery: "drivelabels",
+        version: "v2",
+    },
+    ApiEntry {
+        id: "chromemanagement.googleapis.com",
+        name: "Chrome Management",
+        discovery: "chromemanagement",
+        version: "v1",
+    },
+    ApiEntry {
+        id: "chromepolicy.googleapis.com",
+        name: "Chrome Policy",
+        discovery: "chromepolicy",
+        version: "v1",
+    },
+    ApiEntry {
+        id: "gmailpostmastertools.googleapis.com",
+        name: "Gmail Postmaster Tools",
+        discovery: "gmailpostmastertools",
+        version: "v2",
+    },
+    ApiEntry {
+        id: "cloudsearch.googleapis.com",
+        name: "Cloud Search",
+        discovery: "cloudsearch",
+        version: "v1",
+    },
+    ApiEntry {
         id: "pubsub.googleapis.com",
         name: "Cloud Pub/Sub",
         discovery: "pubsub",
