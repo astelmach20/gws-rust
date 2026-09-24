@@ -17,7 +17,9 @@
 
 use super::Helper;
 use super::confirm::{self, Impact, with_yes};
-use super::http::{self, Api, ApiRequest, OutputTarget, encode_segment, flag, many, optional, required};
+use super::http::{
+    self, Api, ApiRequest, OutputTarget, encode_segment, flag, many, optional, required,
+};
 use crate::error::GwsError;
 use clap::{Arg, ArgAction, ArgGroup, ArgMatches, Command};
 use serde_json::{Value, json};
@@ -228,9 +230,15 @@ TIPS:
                             }
                             OutputTarget::File { path, overwrite } => {
                                 http::write_file_atomic(path, csv.as_bytes(), *overwrite)?;
-                                let rows = v.get("values").and_then(Value::as_array).map_or(0, Vec::len);
-                                api.emit(m, &json!({"output": path.display().to_string(), "rows": rows}))
-                                    .await?;
+                                let rows = v
+                                    .get("values")
+                                    .and_then(Value::as_array)
+                                    .map_or(0, Vec::len);
+                                api.emit(
+                                    m,
+                                    &json!({"output": path.display().to_string(), "rows": rows}),
+                                )
+                                .await?;
                             }
                         }
                         return Ok(true);
@@ -319,9 +327,15 @@ fn parse_csv(text: &str, what: &str) -> Result<Vec<Vec<Value>>, GwsError> {
         .from_reader(text.as_bytes());
     let mut rows = Vec::new();
     for (i, record) in reader.records().enumerate() {
-        let record = record
-            .map_err(|e| GwsError::Validation(format!("{what}: invalid CSV at record {}: {e}", i + 1)))?;
-        rows.push(record.iter().map(|c| Value::String(c.to_string())).collect());
+        let record = record.map_err(|e| {
+            GwsError::Validation(format!("{what}: invalid CSV at record {}: {e}", i + 1))
+        })?;
+        rows.push(
+            record
+                .iter()
+                .map(|c| Value::String(c.to_string()))
+                .collect(),
+        );
     }
     if rows.is_empty() {
         return Err(GwsError::Validation(format!("{what} contains no rows")));
@@ -488,7 +502,12 @@ mod tests {
     #[test]
     fn values_csv_row_handles_quotes() {
         let rows = values_of(&[
-            "gwsr", "+append", "--spreadsheet-id", "S", "--values", "a,\"b,c\",d",
+            "gwsr",
+            "+append",
+            "--spreadsheet-id",
+            "S",
+            "--values",
+            "a,\"b,c\",d",
         ])
         .unwrap();
         assert_eq!(rows, vec![vec![json!("a"), json!("b,c"), json!("d")]]);
@@ -500,7 +519,10 @@ mod tests {
             parse_json_rows(r#"[["a", 1, true, null]]"#).unwrap(),
             vec![vec![json!("a"), json!(1), json!(true), Value::Null]]
         );
-        assert_eq!(parse_json_rows(r#"["x","y"]"#).unwrap(), vec![vec![json!("x"), json!("y")]]);
+        assert_eq!(
+            parse_json_rows(r#"["x","y"]"#).unwrap(),
+            vec![vec![json!("x"), json!("y")]]
+        );
         assert!(parse_json_rows("not json").is_err());
         assert!(parse_json_rows("[]").is_err());
         assert!(parse_json_rows(r#"[["a"], "b"]"#).is_err());
@@ -521,7 +543,14 @@ mod tests {
         );
         assert!(
             cmd.try_get_matches_from([
-                "gwsr", "+append", "--spreadsheet-id", "S", "--values", "a", "--json-values", "[1]"
+                "gwsr",
+                "+append",
+                "--spreadsheet-id",
+                "S",
+                "--values",
+                "a",
+                "--json-values",
+                "[1]"
             ])
             .is_err()
         );
@@ -552,9 +581,15 @@ mod tests {
             .mount(&server)
             .await;
         let api = api(&server.uri(), "");
-        append(&api, "S1", "Sheet2!A1", vec![vec![json!("a"), json!(1)]], true)
-            .await
-            .unwrap();
+        append(
+            &api,
+            "S1",
+            "Sheet2!A1",
+            vec![vec![json!("a"), json!(1)]],
+            true,
+        )
+        .await
+        .unwrap();
     }
 
     #[tokio::test]
@@ -583,7 +618,10 @@ mod tests {
             .unwrap();
         let plan = api.planned();
         assert!(plan[0]["url"].as_str().unwrap().ends_with(":clear"));
-        assert_eq!(plan[1]["body"]["sheets"][1]["properties"]["title"], "Archive");
+        assert_eq!(
+            plan[1]["body"]["sheets"][1]["properties"]["title"],
+            "Archive"
+        );
     }
 
     #[test]
@@ -592,7 +630,14 @@ mod tests {
         if std::io::stdin().is_terminal() {
             return;
         }
-        let m = parse(&["gwsr", "+clear", "--spreadsheet-id", "S", "--range", "A1:B2"]);
+        let m = parse(&[
+            "gwsr",
+            "+clear",
+            "--spreadsheet-id",
+            "S",
+            "--range",
+            "A1:B2",
+        ]);
         let sub = m.subcommand_matches("+clear").unwrap();
         assert!(confirm::gate(sub, Impact::Destructive, "clear").is_err());
     }

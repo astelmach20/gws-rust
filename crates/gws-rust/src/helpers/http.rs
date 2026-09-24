@@ -324,6 +324,16 @@ impl Api {
         self.dry_run
     }
 
+    /// The bearer token (absent in dry-run mode).
+    pub fn token(&self) -> Option<&str> {
+        self.token.as_deref()
+    }
+
+    /// The shared HTTP client.
+    pub fn client(&self) -> &reqwest::Client {
+        &self.client
+    }
+
     /// `rootUrl + servicePath + path` (path given without leading slash).
     pub fn url(&self, path: &str) -> String {
         format!("{}{}", self.base, path.trim_start_matches('/'))
@@ -644,7 +654,9 @@ async fn screen(
                         "Content blocked by Model Armor (filterMatchState: MATCH_FOUND)"
                     )));
                 }
-                eprintln!("warning: Model Armor flagged this content (filterMatchState: MATCH_FOUND)");
+                eprintln!(
+                    "warning: Model Armor flagged this content (filterMatchState: MATCH_FOUND)"
+                );
             }
             Ok(verdict)
         }
