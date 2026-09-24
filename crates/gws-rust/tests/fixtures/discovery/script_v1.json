@@ -1,0 +1,408 @@
+{
+ "_note": "Stripped Discovery document used only by the registry validation test. Regenerate from https://www.googleapis.com/discovery/v1/apis/script/v1/rest",
+ "name": "script",
+ "parameters": {
+  "$.xgafv": {
+   "location": "query",
+   "type": "string"
+  },
+  "access_token": {
+   "location": "query",
+   "type": "string"
+  },
+  "alt": {
+   "location": "query",
+   "type": "string"
+  },
+  "callback": {
+   "location": "query",
+   "type": "string"
+  },
+  "fields": {
+   "location": "query",
+   "type": "string"
+  },
+  "key": {
+   "location": "query",
+   "type": "string"
+  },
+  "oauth_token": {
+   "location": "query",
+   "type": "string"
+  },
+  "prettyPrint": {
+   "location": "query",
+   "type": "boolean"
+  },
+  "quotaUser": {
+   "location": "query",
+   "type": "string"
+  },
+  "uploadType": {
+   "location": "query",
+   "type": "string"
+  },
+  "upload_protocol": {
+   "location": "query",
+   "type": "string"
+  }
+ },
+ "resources": {
+  "processes": {
+   "methods": {
+    "list": {
+     "httpMethod": "GET",
+     "id": "script.processes.list",
+     "parameters": {
+      "pageSize": {
+       "location": "query",
+       "type": "integer"
+      },
+      "pageToken": {
+       "location": "query",
+       "type": "string"
+      },
+      "userProcessFilter.deploymentId": {
+       "location": "query",
+       "type": "string"
+      },
+      "userProcessFilter.endTime": {
+       "location": "query",
+       "type": "string"
+      },
+      "userProcessFilter.functionName": {
+       "location": "query",
+       "type": "string"
+      },
+      "userProcessFilter.projectName": {
+       "location": "query",
+       "type": "string"
+      },
+      "userProcessFilter.scriptId": {
+       "location": "query",
+       "type": "string"
+      },
+      "userProcessFilter.startTime": {
+       "location": "query",
+       "type": "string"
+      },
+      "userProcessFilter.statuses": {
+       "location": "query",
+       "repeated": true,
+       "type": "string"
+      },
+      "userProcessFilter.types": {
+       "location": "query",
+       "repeated": true,
+       "type": "string"
+      },
+      "userProcessFilter.userAccessLevels": {
+       "location": "query",
+       "repeated": true,
+       "type": "string"
+      }
+     },
+     "path": "v1/processes"
+    },
+    "listScriptProcesses": {
+     "httpMethod": "GET",
+     "id": "script.processes.listScriptProcesses",
+     "parameters": {
+      "pageSize": {
+       "location": "query",
+       "type": "integer"
+      },
+      "pageToken": {
+       "location": "query",
+       "type": "string"
+      },
+      "scriptId": {
+       "location": "query",
+       "type": "string"
+      },
+      "scriptProcessFilter.deploymentId": {
+       "location": "query",
+       "type": "string"
+      },
+      "scriptProcessFilter.endTime": {
+       "location": "query",
+       "type": "string"
+      },
+      "scriptProcessFilter.functionName": {
+       "location": "query",
+       "type": "string"
+      },
+      "scriptProcessFilter.startTime": {
+       "location": "query",
+       "type": "string"
+      },
+      "scriptProcessFilter.statuses": {
+       "location": "query",
+       "repeated": true,
+       "type": "string"
+      },
+      "scriptProcessFilter.types": {
+       "location": "query",
+       "repeated": true,
+       "type": "string"
+      },
+      "scriptProcessFilter.userAccessLevels": {
+       "location": "query",
+       "repeated": true,
+       "type": "string"
+      }
+     },
+     "path": "v1/processes:listScriptProcesses"
+    }
+   }
+  },
+  "projects": {
+   "methods": {
+    "create": {
+     "httpMethod": "POST",
+     "id": "script.projects.create",
+     "path": "v1/projects",
+     "request": {
+      "$ref": "CreateProjectRequest"
+     }
+    },
+    "get": {
+     "httpMethod": "GET",
+     "id": "script.projects.get",
+     "parameters": {
+      "scriptId": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      }
+     },
+     "path": "v1/projects/{scriptId}"
+    },
+    "getContent": {
+     "httpMethod": "GET",
+     "id": "script.projects.getContent",
+     "parameters": {
+      "scriptId": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      },
+      "versionNumber": {
+       "location": "query",
+       "type": "integer"
+      }
+     },
+     "path": "v1/projects/{scriptId}/content"
+    },
+    "getMetrics": {
+     "httpMethod": "GET",
+     "id": "script.projects.getMetrics",
+     "parameters": {
+      "metricsFilter.deploymentId": {
+       "location": "query",
+       "type": "string"
+      },
+      "metricsGranularity": {
+       "location": "query",
+       "type": "string"
+      },
+      "scriptId": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      }
+     },
+     "path": "v1/projects/{scriptId}/metrics"
+    },
+    "updateContent": {
+     "httpMethod": "PUT",
+     "id": "script.projects.updateContent",
+     "parameters": {
+      "scriptId": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      }
+     },
+     "path": "v1/projects/{scriptId}/content",
+     "request": {
+      "$ref": "Content"
+     }
+    }
+   },
+   "resources": {
+    "deployments": {
+     "methods": {
+      "create": {
+       "httpMethod": "POST",
+       "id": "script.projects.deployments.create",
+       "parameters": {
+        "scriptId": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        }
+       },
+       "path": "v1/projects/{scriptId}/deployments",
+       "request": {
+        "$ref": "DeploymentConfig"
+       }
+      },
+      "delete": {
+       "httpMethod": "DELETE",
+       "id": "script.projects.deployments.delete",
+       "parameters": {
+        "deploymentId": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        },
+        "scriptId": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        }
+       },
+       "path": "v1/projects/{scriptId}/deployments/{deploymentId}"
+      },
+      "get": {
+       "httpMethod": "GET",
+       "id": "script.projects.deployments.get",
+       "parameters": {
+        "deploymentId": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        },
+        "scriptId": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        }
+       },
+       "path": "v1/projects/{scriptId}/deployments/{deploymentId}"
+      },
+      "list": {
+       "httpMethod": "GET",
+       "id": "script.projects.deployments.list",
+       "parameters": {
+        "pageSize": {
+         "location": "query",
+         "type": "integer"
+        },
+        "pageToken": {
+         "location": "query",
+         "type": "string"
+        },
+        "scriptId": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        }
+       },
+       "path": "v1/projects/{scriptId}/deployments"
+      },
+      "update": {
+       "httpMethod": "PUT",
+       "id": "script.projects.deployments.update",
+       "parameters": {
+        "deploymentId": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        },
+        "scriptId": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        }
+       },
+       "path": "v1/projects/{scriptId}/deployments/{deploymentId}",
+       "request": {
+        "$ref": "UpdateDeploymentRequest"
+       }
+      }
+     }
+    },
+    "versions": {
+     "methods": {
+      "create": {
+       "httpMethod": "POST",
+       "id": "script.projects.versions.create",
+       "parameters": {
+        "scriptId": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        }
+       },
+       "path": "v1/projects/{scriptId}/versions",
+       "request": {
+        "$ref": "Version"
+       }
+      },
+      "get": {
+       "httpMethod": "GET",
+       "id": "script.projects.versions.get",
+       "parameters": {
+        "scriptId": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        },
+        "versionNumber": {
+         "location": "path",
+         "required": true,
+         "type": "integer"
+        }
+       },
+       "path": "v1/projects/{scriptId}/versions/{versionNumber}"
+      },
+      "list": {
+       "httpMethod": "GET",
+       "id": "script.projects.versions.list",
+       "parameters": {
+        "pageSize": {
+         "location": "query",
+         "type": "integer"
+        },
+        "pageToken": {
+         "location": "query",
+         "type": "string"
+        },
+        "scriptId": {
+         "location": "path",
+         "required": true,
+         "type": "string"
+        }
+       },
+       "path": "v1/projects/{scriptId}/versions"
+      }
+     }
+    }
+   }
+  },
+  "scripts": {
+   "methods": {
+    "run": {
+     "httpMethod": "POST",
+     "id": "script.scripts.run",
+     "parameters": {
+      "scriptId": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      }
+     },
+     "path": "v1/scripts/{scriptId}:run",
+     "request": {
+      "$ref": "ExecutionRequest"
+     }
+    }
+   }
+  }
+ },
+ "rootUrl": "https://script.googleapis.com/",
+ "servicePath": "",
+ "version": "v1"
+}

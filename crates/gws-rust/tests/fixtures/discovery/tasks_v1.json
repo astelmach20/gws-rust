@@ -1,0 +1,334 @@
+{
+ "_note": "Stripped Discovery document used only by the registry validation test. Regenerate from https://www.googleapis.com/discovery/v1/apis/tasks/v1/rest",
+ "name": "tasks",
+ "parameters": {
+  "$.xgafv": {
+   "location": "query",
+   "type": "string"
+  },
+  "access_token": {
+   "location": "query",
+   "type": "string"
+  },
+  "alt": {
+   "location": "query",
+   "type": "string"
+  },
+  "callback": {
+   "location": "query",
+   "type": "string"
+  },
+  "fields": {
+   "location": "query",
+   "type": "string"
+  },
+  "key": {
+   "location": "query",
+   "type": "string"
+  },
+  "oauth_token": {
+   "location": "query",
+   "type": "string"
+  },
+  "prettyPrint": {
+   "location": "query",
+   "type": "boolean"
+  },
+  "quotaUser": {
+   "location": "query",
+   "type": "string"
+  },
+  "uploadType": {
+   "location": "query",
+   "type": "string"
+  },
+  "upload_protocol": {
+   "location": "query",
+   "type": "string"
+  }
+ },
+ "resources": {
+  "tasklists": {
+   "methods": {
+    "delete": {
+     "httpMethod": "DELETE",
+     "id": "tasks.tasklists.delete",
+     "parameters": {
+      "tasklist": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      }
+     },
+     "path": "tasks/v1/users/@me/lists/{tasklist}"
+    },
+    "get": {
+     "httpMethod": "GET",
+     "id": "tasks.tasklists.get",
+     "parameters": {
+      "tasklist": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      }
+     },
+     "path": "tasks/v1/users/@me/lists/{tasklist}"
+    },
+    "insert": {
+     "httpMethod": "POST",
+     "id": "tasks.tasklists.insert",
+     "path": "tasks/v1/users/@me/lists",
+     "request": {
+      "$ref": "TaskList"
+     }
+    },
+    "list": {
+     "httpMethod": "GET",
+     "id": "tasks.tasklists.list",
+     "parameters": {
+      "maxResults": {
+       "location": "query",
+       "type": "integer"
+      },
+      "pageToken": {
+       "location": "query",
+       "type": "string"
+      }
+     },
+     "path": "tasks/v1/users/@me/lists"
+    },
+    "patch": {
+     "httpMethod": "PATCH",
+     "id": "tasks.tasklists.patch",
+     "parameters": {
+      "tasklist": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      }
+     },
+     "path": "tasks/v1/users/@me/lists/{tasklist}",
+     "request": {
+      "$ref": "TaskList"
+     }
+    },
+    "update": {
+     "httpMethod": "PUT",
+     "id": "tasks.tasklists.update",
+     "parameters": {
+      "tasklist": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      }
+     },
+     "path": "tasks/v1/users/@me/lists/{tasklist}",
+     "request": {
+      "$ref": "TaskList"
+     }
+    }
+   }
+  },
+  "tasks": {
+   "methods": {
+    "clear": {
+     "httpMethod": "POST",
+     "id": "tasks.tasks.clear",
+     "parameters": {
+      "tasklist": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      }
+     },
+     "path": "tasks/v1/lists/{tasklist}/clear"
+    },
+    "delete": {
+     "httpMethod": "DELETE",
+     "id": "tasks.tasks.delete",
+     "parameters": {
+      "task": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      },
+      "tasklist": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      }
+     },
+     "path": "tasks/v1/lists/{tasklist}/tasks/{task}"
+    },
+    "get": {
+     "httpMethod": "GET",
+     "id": "tasks.tasks.get",
+     "parameters": {
+      "task": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      },
+      "tasklist": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      }
+     },
+     "path": "tasks/v1/lists/{tasklist}/tasks/{task}"
+    },
+    "insert": {
+     "httpMethod": "POST",
+     "id": "tasks.tasks.insert",
+     "parameters": {
+      "parent": {
+       "location": "query",
+       "type": "string"
+      },
+      "previous": {
+       "location": "query",
+       "type": "string"
+      },
+      "tasklist": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      }
+     },
+     "path": "tasks/v1/lists/{tasklist}/tasks",
+     "request": {
+      "$ref": "Task"
+     }
+    },
+    "list": {
+     "httpMethod": "GET",
+     "id": "tasks.tasks.list",
+     "parameters": {
+      "completedMax": {
+       "location": "query",
+       "type": "string"
+      },
+      "completedMin": {
+       "location": "query",
+       "type": "string"
+      },
+      "dueMax": {
+       "location": "query",
+       "type": "string"
+      },
+      "dueMin": {
+       "location": "query",
+       "type": "string"
+      },
+      "maxResults": {
+       "location": "query",
+       "type": "integer"
+      },
+      "pageToken": {
+       "location": "query",
+       "type": "string"
+      },
+      "showAssigned": {
+       "location": "query",
+       "type": "boolean"
+      },
+      "showCompleted": {
+       "location": "query",
+       "type": "boolean"
+      },
+      "showDeleted": {
+       "location": "query",
+       "type": "boolean"
+      },
+      "showHidden": {
+       "location": "query",
+       "type": "boolean"
+      },
+      "tasklist": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      },
+      "updatedMin": {
+       "location": "query",
+       "type": "string"
+      }
+     },
+     "path": "tasks/v1/lists/{tasklist}/tasks"
+    },
+    "move": {
+     "httpMethod": "POST",
+     "id": "tasks.tasks.move",
+     "parameters": {
+      "destinationTasklist": {
+       "location": "query",
+       "type": "string"
+      },
+      "parent": {
+       "location": "query",
+       "type": "string"
+      },
+      "previous": {
+       "location": "query",
+       "type": "string"
+      },
+      "task": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      },
+      "tasklist": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      }
+     },
+     "path": "tasks/v1/lists/{tasklist}/tasks/{task}/move"
+    },
+    "patch": {
+     "httpMethod": "PATCH",
+     "id": "tasks.tasks.patch",
+     "parameters": {
+      "task": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      },
+      "tasklist": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      }
+     },
+     "path": "tasks/v1/lists/{tasklist}/tasks/{task}",
+     "request": {
+      "$ref": "Task"
+     }
+    },
+    "update": {
+     "httpMethod": "PUT",
+     "id": "tasks.tasks.update",
+     "parameters": {
+      "task": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      },
+      "tasklist": {
+       "location": "path",
+       "required": true,
+       "type": "string"
+      }
+     },
+     "path": "tasks/v1/lists/{tasklist}/tasks/{task}",
+     "request": {
+      "$ref": "Task"
+     }
+    }
+   }
+  }
+ },
+ "rootUrl": "https://tasks.googleapis.com/",
+ "servicePath": "",
+ "version": "v1"
+}
