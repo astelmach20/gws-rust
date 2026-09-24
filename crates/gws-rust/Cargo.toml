@@ -41,7 +41,6 @@ chrono = "0.4.45"
 chrono-tz = "0.10"
 clap = { version = "4", features = ["derive", "string"] }
 crossterm = "0.29.0"
-derive_builder = "0.20.2"
 dirs = "7"
 futures-util = "0.3"
 iana-time-zone = "0.1"

@@ -16,7 +16,7 @@
 //!
 //! Completion is dynamic (`clap_complete`'s environment protocol): the script
 //! printed by `gwsr completions <shell>` calls back into `gwsr` with
-//! `GWSR_COMPLETE=<shell>` set on every <TAB>. The callback completes static
+//! `GWSR_COMPLETE=<shell>` set on every `<TAB>`. The callback completes static
 //! commands, service names and, from cached Discovery documents only (never
 //! the network), the resources, methods, helpers and flags of the service
 //! being typed.
