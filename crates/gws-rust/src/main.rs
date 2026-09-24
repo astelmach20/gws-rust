@@ -384,15 +384,22 @@ async fn dispatch(
         TopCommand::Dev {
             command: DevCommand::GenerateSkills(opts),
         } => {
-            let summary = generate_skills::handle_generate_skills(&opts).await?;
+            let summary =
+                generate_skills::handle_generate_skills(&opts, cli.global.dry_run).await?;
             emit_value(&summary, format)?;
         }
         TopCommand::Dev {
             command: DevCommand::Man { output_dir },
         } => {
-            let files = completions::write_man_pages(&output_dir)?;
+            let dry_run = cli.global.dry_run;
+            let files = completions::write_man_pages(&output_dir, dry_run)?;
             let names: Vec<String> = files.iter().map(|p| p.display().to_string()).collect();
-            emit_value(&serde_json::json!({ "written": names }), format)?;
+            let summary = if dry_run {
+                serde_json::json!({ "dry_run": true, "wouldWrite": names })
+            } else {
+                serde_json::json!({ "written": names })
+            };
+            emit_value(&summary, format)?;
         }
         TopCommand::Help { .. } | TopCommand::Service(_) => {
             // Handled by `parse_top_level` / above.

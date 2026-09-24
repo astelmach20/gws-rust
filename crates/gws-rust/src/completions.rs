@@ -113,14 +113,22 @@ pub fn registration_script(shell: CompletionShell, completer: &str) -> Result<St
 
 /// Write man pages for the static command tree into `dir`.
 /// Returns the files written.
-pub fn write_man_pages(dir: &Path) -> Result<Vec<std::path::PathBuf>, GwsError> {
-    std::fs::create_dir_all(dir).map_err(|e| {
-        GwsError::from(anyhow::Error::new(e).context(format!("failed to create {}", dir.display())))
-    })?;
+///
+/// With `dry_run` every page is still rendered (so failures surface) but
+/// nothing is created or written; the returned paths are the pages that
+/// would be written.
+pub fn write_man_pages(dir: &Path, dry_run: bool) -> Result<Vec<std::path::PathBuf>, GwsError> {
+    if !dry_run {
+        std::fs::create_dir_all(dir).map_err(|e| {
+            GwsError::from(
+                anyhow::Error::new(e).context(format!("failed to create {}", dir.display())),
+            )
+        })?;
+    }
     let mut root = crate::cli_args::command();
     root.build();
     let mut written = Vec::new();
-    write_page(&root, "gwsr", dir, &mut written)?;
+    write_page(&root, "gwsr", dir, dry_run, &mut written)?;
     Ok(written)
 }
 
@@ -128,6 +136,7 @@ fn write_page(
     cmd: &Command,
     name: &str,
     dir: &Path,
+    dry_run: bool,
     written: &mut Vec<std::path::PathBuf>,
 ) -> Result<(), GwsError> {
     let path = dir.join(format!("{name}.1"));
@@ -135,15 +144,25 @@ fn write_page(
     clap_mangen::Man::new(cmd.clone().name(name.to_string()))
         .render(&mut buf)
         .map_err(|e| GwsError::from(anyhow::Error::new(e).context("failed to render man page")))?;
-    std::fs::write(&path, buf).map_err(|e| {
-        GwsError::from(anyhow::Error::new(e).context(format!("failed to write {}", path.display())))
-    })?;
+    if !dry_run {
+        std::fs::write(&path, buf).map_err(|e| {
+            GwsError::from(
+                anyhow::Error::new(e).context(format!("failed to write {}", path.display())),
+            )
+        })?;
+    }
     written.push(path);
     for sub in cmd.get_subcommands() {
         if sub.is_hide_set() || sub.get_name() == "help" {
             continue;
         }
-        write_page(sub, &format!("{name}-{}", sub.get_name()), dir, written)?;
+        write_page(
+            sub,
+            &format!("{name}-{}", sub.get_name()),
+            dir,
+            dry_run,
+            written,
+        )?;
     }
     Ok(())
 }
@@ -208,7 +227,7 @@ mod tests {
     #[test]
     fn man_pages_are_written_for_static_commands() {
         let tmp = tempfile::tempdir().unwrap();
-        let files = write_man_pages(tmp.path()).unwrap();
+        let files = write_man_pages(tmp.path(), false).unwrap();
         let names: Vec<String> = files
             .iter()
             .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
@@ -223,5 +242,21 @@ mod tests {
         }
         let page = std::fs::read_to_string(tmp.path().join("gwsr.1")).unwrap();
         assert!(page.contains(".TH"));
+    }
+
+    #[test]
+    fn man_pages_dry_run_lists_pages_but_writes_nothing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let out = tmp.path().join("man");
+        let dry = write_man_pages(&out, true).unwrap();
+        assert!(
+            !out.exists(),
+            "dry run must not create the output directory"
+        );
+        let real = write_man_pages(&out, false).unwrap();
+        assert_eq!(
+            dry, real,
+            "a dry run reports exactly the pages a real run writes"
+        );
     }
 }
