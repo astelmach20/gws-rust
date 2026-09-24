@@ -20,10 +20,8 @@
 //! interactive prompts, and integration with Model Armor.
 
 mod auth;
-pub(crate) mod auth_commands;
 mod client;
 mod commands;
-pub(crate) mod credential_store;
 mod discovery;
 mod error;
 mod executor;
@@ -32,15 +30,11 @@ mod fs_util;
 mod generate_skills;
 mod helpers;
 mod logging;
-mod oauth_config;
 mod output;
 mod schema;
 mod services;
-mod setup;
-mod setup_tui;
 mod text;
 mod timezone;
-mod token_storage;
 pub(crate) mod validate;
 
 use error::{GwsError, print_error_json};
@@ -57,7 +51,9 @@ async fn main() {
 }
 
 async fn run() -> Result<(), GwsError> {
-    let args: Vec<String> = std::env::args().collect();
+    let mut args: Vec<String> = std::env::args().collect();
+    // Global auth flags (--profile, --impersonate) may appear anywhere.
+    auth::apply_global_flags(&mut args)?;
 
     if args.len() < 2 {
         print_usage();
@@ -143,7 +139,7 @@ async fn run() -> Result<(), GwsError> {
     // Handle the `auth` command
     if first_arg == "auth" {
         let auth_args: Vec<String> = args.iter().skip(2).cloned().collect();
-        return auth_commands::handle_auth_command(&auth_args).await;
+        return auth::commands::handle_auth_command(&auth_args).await;
     }
 
     // Parse service name and optional version override
@@ -224,17 +220,6 @@ async fn run() -> Result<(), GwsError> {
         &output_format,
     )
     .await
-}
-
-/// Select the best scope from a method's scope list.
-///
-/// Discovery Documents list method scopes as alternatives — any single scope
-/// grants access. The first scope is typically the broadest. Using all scopes
-/// causes issues when restrictive scopes (e.g., `gmail.metadata`) are included,
-/// as the API enforces that scope's restrictions even when broader scopes are
-/// also present.
-pub(crate) fn select_scope(scopes: &[String]) -> Option<&str> {
-    scopes.first().map(|s| s.as_str())
 }
 
 pub fn parse_service_and_version(
@@ -569,31 +554,5 @@ mod tests {
         ];
         let filtered = filter_args_for_subcommand(&args, "drive");
         assert_eq!(filtered, vec!["gwsr", "files", "list", "--format", "table"]);
-    }
-
-    #[test]
-    fn test_select_scope_picks_first() {
-        let scopes = vec![
-            "https://mail.google.com/".to_string(),
-            "https://www.googleapis.com/auth/gmail.metadata".to_string(),
-            "https://www.googleapis.com/auth/gmail.modify".to_string(),
-            "https://www.googleapis.com/auth/gmail.readonly".to_string(),
-        ];
-        assert_eq!(select_scope(&scopes), Some("https://mail.google.com/"));
-    }
-
-    #[test]
-    fn test_select_scope_single() {
-        let scopes = vec!["https://www.googleapis.com/auth/drive".to_string()];
-        assert_eq!(
-            select_scope(&scopes),
-            Some("https://www.googleapis.com/auth/drive")
-        );
-    }
-
-    #[test]
-    fn test_select_scope_empty() {
-        let scopes: Vec<String> = vec![];
-        assert_eq!(select_scope(&scopes), None);
     }
 }

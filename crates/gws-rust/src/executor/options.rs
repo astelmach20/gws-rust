@@ -131,21 +131,30 @@ pub fn parse_exec_options(m: &clap::ArgMatches) -> Result<ExecOptions, GwsError>
 /// Resolve credentials for `method`: a token plus a provider that can refresh
 /// it on 401. No stored credentials means an unauthenticated request.
 async fn resolve_credentials(method: &RestMethod) -> Result<Credentials, GwsError> {
-    let scopes: Vec<&str> = crate::select_scope(&method.scopes).into_iter().collect();
+    let scopes = crate::auth::scopes_for_method(&method.scopes, &method.http_method)
+        .map_err(|e| GwsError::Auth(format!("{e:#}")))?;
+    credentials_for_scopes(&scopes).await
+}
+
+/// Obtain a refreshable token for `scopes`. Only a complete absence of
+/// credentials ([`crate::auth::AuthError::NoCredentials`]) falls back to an
+/// unauthenticated request; every other failure is reported.
+pub(crate) async fn credentials_for_scopes(scopes: &[String]) -> Result<Credentials, GwsError> {
+    let scopes: Vec<&str> = scopes.iter().map(String::as_str).collect();
     match crate::auth::get_token(&scopes).await {
         Ok(token) => Ok(Credentials::Refreshable {
             token,
             provider: Arc::new(crate::auth::token_provider(&scopes)),
         }),
-        Err(e) => {
-            let msg = format!("{e:#}");
-            // NB: matches the bail!() message in auth::load_credentials_inner.
-            if msg.starts_with("No credentials found") {
-                Ok(Credentials::None)
-            } else {
-                Err(GwsError::Auth(format!("Authentication failed: {msg}")))
-            }
+        Err(e)
+            if matches!(
+                e.downcast_ref::<crate::auth::AuthError>(),
+                Some(crate::auth::AuthError::NoCredentials)
+            ) =>
+        {
+            Ok(Credentials::None)
         }
+        Err(e) => Err(GwsError::Auth(format!("Authentication failed: {e:#}"))),
     }
 }
 

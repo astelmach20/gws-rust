@@ -105,6 +105,14 @@ pub struct PickerState {
 pub struct InputState {
     pub value: String,
     title: String,
+    /// Render typed characters as `*` (for secrets).
+    masked: bool,
+}
+
+impl Drop for InputState {
+    fn drop(&mut self) {
+        zeroize::Zeroize::zeroize(&mut self.value);
+    }
 }
 
 impl InputState {
@@ -112,6 +120,24 @@ impl InputState {
         Self {
             value: initial.unwrap_or("").to_string(),
             title: title.to_string(),
+            masked: false,
+        }
+    }
+
+    /// An input whose contents are not shown on screen.
+    pub fn new_secret(title: &str) -> Self {
+        Self {
+            value: String::new(),
+            title: title.to_string(),
+            masked: true,
+        }
+    }
+
+    fn display_value(&self) -> String {
+        if self.masked {
+            "*".repeat(self.value.chars().count())
+        } else {
+            self.value.clone()
         }
     }
 
@@ -149,14 +175,15 @@ impl PickerState {
 
     fn toggle_current(&mut self) {
         if let Some(i) = self.list_state.selected()
-            && !self.items[i].is_fixed
+            && let Some(current) = self.items.get_mut(i)
+            && !current.is_fixed
         {
-            let current_label = self.items[i].label.clone();
-            let current_selected = !self.items[i].selected;
-            let is_template = self.items[i].is_template;
-            let template_selects = self.items[i].template_selects.clone();
+            let current_label = current.label.clone();
+            let current_selected = !current.selected;
+            let is_template = current.is_template;
+            let template_selects = current.template_selects.clone();
 
-            self.items[i].selected = current_selected;
+            current.selected = current_selected;
 
             if is_template {
                 // Turn off other templates
@@ -217,6 +244,9 @@ impl PickerState {
     }
 
     fn next(&mut self) {
+        if self.items.is_empty() {
+            return;
+        }
         let i = match self.list_state.selected() {
             Some(i) => (i + 1) % self.items.len(),
             None => 0,
@@ -225,6 +255,9 @@ impl PickerState {
     }
 
     fn previous(&mut self) {
+        if self.items.is_empty() {
+            return;
+        }
         let i = match self.list_state.selected() {
             Some(i) => {
                 if i == 0 {
@@ -367,7 +400,7 @@ fn run_picker_loop(
             frame.render_widget(title, chunks[0]);
 
             // List items
-            let items: Vec<ListItem> = state
+            let items: Vec<ListItem<'_>> = state
                 .items
                 .iter()
                 .map(|item| {
@@ -451,7 +484,8 @@ fn run_picker_loop(
 /// between TUI interactions.
 fn drain_pending_events() -> std::io::Result<()> {
     while crossterm::event::poll(std::time::Duration::ZERO)? {
-        let _ = event::read()?;
+        // Discard the stale event.
+        event::read()?;
     }
     Ok(())
 }
@@ -552,7 +586,7 @@ impl SetupWizard {
                 let area = frame.area();
                 let mut step_height = steps_snapshot.len() as u16 + 2;
                 let msg_lines = if let Some(m) = &msg {
-                    let wrapped = crate::setup_tui::wrap_text(m, area.width.saturating_sub(4));
+                    let wrapped = wrap_text(m, area.width.saturating_sub(4));
                     step_height += wrapped.len() as u16 + 1;
                     wrapped
                 } else {
@@ -606,7 +640,19 @@ impl SetupWizard {
         help_text: &str,
         initial: Option<&str>,
     ) -> std::io::Result<InputResult> {
-        let mut input = InputState::new(title, help_text, initial);
+        self.run_input(InputState::new(title, help_text, initial))
+    }
+
+    /// Like [`SetupWizard::show_input`] but the typed text is not displayed.
+    pub fn show_secret_input(
+        &mut self,
+        title: &str,
+        _help_text: &str,
+    ) -> std::io::Result<InputResult> {
+        self.run_input(InputState::new_secret(title))
+    }
+
+    fn run_input(&mut self, mut input: InputState) -> std::io::Result<InputResult> {
         drain_pending_events()?;
         loop {
             let steps_snapshot = self.steps.clone();
@@ -615,7 +661,7 @@ impl SetupWizard {
                 let area = frame.area();
                 let mut step_height = steps_snapshot.len() as u16 + 2;
                 let msg_lines = if let Some(m) = &msg {
-                    let wrapped = crate::setup_tui::wrap_text(m, area.width.saturating_sub(4));
+                    let wrapped = wrap_text(m, area.width.saturating_sub(4));
                     step_height += wrapped.len() as u16 + 1;
                     wrapped
                 } else {
@@ -669,7 +715,7 @@ impl SetupWizard {
             let area = frame.area();
             let mut step_height = steps_snapshot.len() as u16 + 2;
             let msg_lines = if let Some(m) = &msg {
-                let wrapped = crate::setup_tui::wrap_text(m, area.width.saturating_sub(4));
+                let wrapped = wrap_text(m, area.width.saturating_sub(4));
                 step_height += wrapped.len() as u16 + 1;
                 wrapped
             } else {
@@ -683,12 +729,12 @@ impl SetupWizard {
     }
 
     fn render_steps(
-        frame: &mut ratatui::Frame,
+        frame: &mut ratatui::Frame<'_>,
         area: ratatui::layout::Rect,
         steps: &[WizardStep],
         msg_lines: &[String],
     ) {
-        let mut items: Vec<ListItem> = steps
+        let mut items: Vec<ListItem<'_>> = steps
             .iter()
             .enumerate()
             .map(|(i, step)| {
@@ -764,11 +810,11 @@ impl SetupWizard {
     }
 
     fn render_picker(
-        frame: &mut ratatui::Frame,
+        frame: &mut ratatui::Frame<'_>,
         area: ratatui::layout::Rect,
         picker: &mut PickerState,
     ) {
-        let items: Vec<ListItem> = picker
+        let items: Vec<ListItem<'_>> = picker
             .items
             .iter()
             .map(|item| {
@@ -819,7 +865,7 @@ impl SetupWizard {
     }
 
     fn render_input(
-        frame: &mut ratatui::Frame,
+        frame: &mut ratatui::Frame<'_>,
         area: ratatui::layout::Rect,
         input: &mut InputState,
     ) {
@@ -830,7 +876,7 @@ impl SetupWizard {
 
         let p = Paragraph::new(Line::from(vec![
             Span::raw("> "),
-            Span::styled(&input.value, Style::default().fg(Color::White)),
+            Span::styled(input.display_value(), Style::default().fg(Color::White)),
             Span::styled(
                 "█",
                 Style::default()
