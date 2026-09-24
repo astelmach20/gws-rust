@@ -28,17 +28,23 @@ categories = ["api-bindings", "web-programming"]
 
 [dependencies]
 anyhow.workspace = true
+bytes = "1"
+http = "1"
+httpdate = "1"
 percent-encoding.workspace = true
+rand = "0.10"
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
+url = "2"
 
 [dev-dependencies]
 serial_test.workspace = true
 tempfile.workspace = true
+wiremock = "0.6.5"
 
 [lints]
 workspace = true
