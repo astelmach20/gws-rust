@@ -70,9 +70,7 @@ impl OutputFormat {
     /// loudly on stderr and JSON is used.
     pub fn from_str(s: &str) -> Self {
         Self::parse(s).unwrap_or_else(|unknown| {
-            crate::output::warn(&format!(
-                "internal: unvalidated output format '{unknown}', using json"
-            ));
+            tracing::warn!(format = %unknown, "internal: unvalidated output format, using json");
             Self::Json
         })
     }

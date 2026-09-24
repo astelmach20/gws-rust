@@ -20,10 +20,13 @@
 //!   write tokens or keys held in memory to a core dump, and other processes
 //!   of the same user cannot ptrace-read them.
 
-/// Apply all hardening steps. A step the OS refuses is reported on stderr;
-/// the command still runs because the refusal does not make it unsafe to
-/// continue, only less hardened.
-pub fn apply() {
+/// Apply all hardening steps. Steps the OS refuses are returned as warnings
+/// (logged by `main` once logging is up); the command still runs because the
+/// refusal does not make it unsafe to continue, only less hardened.
+#[must_use = "refused hardening steps must be reported"]
+pub fn apply() -> Vec<String> {
+    #[cfg_attr(not(unix), allow(unused_mut))]
+    let mut warnings = Vec::new();
     #[cfg(unix)]
     {
         rustix::process::umask(rustix::fs::Mode::from_raw_mode(0o077));
@@ -33,14 +36,15 @@ pub fn apply() {
             maximum: Some(0),
         };
         if let Err(e) = rustix::process::setrlimit(rustix::process::Resource::Core, no_core) {
-            crate::output::warn(&format!("could not disable core dumps: {e}"));
+            warnings.push(format!("could not disable core dumps: {e}"));
         }
 
         #[cfg(any(target_os = "linux", target_os = "android"))]
         if let Err(e) =
             rustix::process::set_dumpable_behavior(rustix::process::DumpableBehavior::NotDumpable)
         {
-            crate::output::warn(&format!("could not mark the process non-dumpable: {e}"));
+            warnings.push(format!("could not mark the process non-dumpable: {e}"));
         }
     }
+    warnings
 }

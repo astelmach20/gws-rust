@@ -126,13 +126,6 @@ fn write_line(w: &mut dyn Write, text: &str) -> std::io::Result<()> {
 
 // ── Stderr helpers ────────────────────────────────────────────────────
 
-/// Print a warning to stderr with a colored prefix. The message is
-/// sanitized before printing.
-pub(crate) fn warn(msg: &str) {
-    let prefix = colorize("warning:", "33"); // yellow
-    eprint_line(&format!("{prefix} {}", sanitize_for_terminal(msg)));
-}
-
 /// Print a line to stderr. Unlike `eprintln!`, a closed or failing stderr
 /// never panics: there is nowhere left to report the failure, so it is
 /// deliberately dropped.

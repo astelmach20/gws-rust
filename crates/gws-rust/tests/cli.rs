@@ -240,29 +240,89 @@ fn sanitize_help_names_the_real_env_var() {
 
 // ── Errors ──────────────────────────────────────────────────────────────
 
+/// Parse stderr as exactly one JSON error object.
+fn stderr_error(out: &std::process::Output) -> Value {
+    let stderr = stderr_of(out);
+    assert_eq!(
+        stderr.trim_end().lines().count(),
+        1,
+        "one line expected: {stderr}"
+    );
+    let v: Value = serde_json::from_str(stderr.trim_end()).unwrap();
+    assert!(v["error"].is_object(), "{stderr}");
+    v
+}
+
 #[test]
-fn piped_errors_emit_single_line_json_on_stdout_and_text_on_stderr() {
+fn errors_are_one_json_object_on_stderr_and_stdout_stays_clean() {
     let env = Env::new();
     let out = env.cmd().arg("drvie").assert().code(3).get_output().clone();
-    let stdout = stdout_of(&out);
-    assert_eq!(stdout.lines().count(), 1, "{stdout}");
-    let v: Value = serde_json::from_str(&stdout).unwrap();
+    assert!(stdout_of(&out).is_empty(), "{}", stdout_of(&out));
+    let v = stderr_error(&out);
     assert_eq!(v["error"]["reason"], "validationError");
     assert_eq!(v["error"]["retryable"], false);
+    assert!(
+        v["error"]["message"]
+            .as_str()
+            .unwrap()
+            .starts_with("Unknown service 'drvie'")
+    );
+}
+
+#[test]
+fn human_errors_are_opt_in_via_a_human_format() {
+    let env = Env::new();
+    let out = env
+        .cmd()
+        .args(["--format", "table", "drvie"])
+        .assert()
+        .code(3)
+        .get_output()
+        .clone();
+    assert!(stdout_of(&out).is_empty());
     let stderr = stderr_of(&out);
     assert!(
         stderr.starts_with("error[validation]: Unknown service 'drvie'"),
         "{stderr}"
     );
-    assert!(!stderr.contains("error: error"), "{stderr}");
+    // Also via env / config.
+    env.cmd()
+        .arg("drvie")
+        .env("GWSR_FORMAT", "yaml")
+        .assert()
+        .code(3)
+        .stderr(predicate::str::starts_with("error[validation]:"));
+    env.write_config("format = \"csv\"\n");
+    env.cmd()
+        .arg("drvie")
+        .assert()
+        .code(3)
+        .stderr(predicate::str::starts_with("error[validation]:"));
 }
 
 #[test]
-fn clap_errors_have_a_single_error_prefix() {
+fn clap_errors_are_json_with_a_single_prefix() {
     let env = Env::new();
     let out = env
         .cmd()
         .args(["cache", "clear", "--bogus"])
+        .assert()
+        .code(3)
+        .get_output()
+        .clone();
+    assert!(stdout_of(&out).is_empty());
+    let v = stderr_error(&out);
+    assert!(
+        v["error"]["message"]
+            .as_str()
+            .unwrap()
+            .starts_with("unexpected argument '--bogus'")
+    );
+
+    // Human form keeps clap's own rendering without a double prefix.
+    let out = env
+        .cmd()
+        .args(["--format", "table", "cache", "clear", "--bogus"])
         .assert()
         .code(3)
         .get_output()
@@ -273,13 +333,6 @@ fn clap_errors_have_a_single_error_prefix() {
         "{stderr}"
     );
     assert!(!stderr.contains("error[validation]: error"), "{stderr}");
-    let v: Value = serde_json::from_str(stdout_of(&out).trim()).unwrap();
-    assert!(
-        v["error"]["message"]
-            .as_str()
-            .unwrap()
-            .starts_with("unexpected argument")
-    );
 }
 
 #[test]
@@ -291,7 +344,8 @@ fn unknown_format_is_rejected_with_exit_3() {
         .code(3)
         .stderr(predicate::str::contains(
             "invalid value 'xml' for '--format <FORMAT>'",
-        ));
+        ))
+        .stdout("");
 }
 
 #[test]
@@ -426,6 +480,76 @@ fn schema_honors_format() {
         .stdout(predicate::str::contains("httpMethod: GET"));
 }
 
+// ── JSON by default ──
+
+#[test]
+fn every_owned_command_prints_json_by_default() {
+    let env = Env::new();
+    env.seed_drive("Lists files.");
+    let commands: &[&[&str]] = &[
+        &["cache", "clear"],
+        &["commands", "workflow"],
+        &["schema", "drive.files.list"],
+        &["drive", "files", "list", "--dry-run"],
+        &[
+            "dev",
+            "generate-skills",
+            "--output-dir",
+            "skills",
+            "--filter",
+            "shared",
+        ],
+    ];
+    for args in commands {
+        // Re-seed: `cache clear` removes the document.
+        env.seed_drive("Lists files.");
+        let out = env
+            .cmd()
+            .args(*args)
+            .assert()
+            .success()
+            .get_output()
+            .clone();
+        let stdout = stdout_of(&out);
+        let parsed: Result<Value, _> = serde_json::from_str(&stdout);
+        assert!(parsed.is_ok(), "{args:?} did not print JSON: {stdout}");
+    }
+}
+
+#[test]
+fn commands_table_is_opt_in() {
+    let env = Env::new();
+    env.cmd()
+        .args(["commands", "workflow", "--format", "csv"])
+        .assert()
+        .success()
+        .stdout(predicate::str::starts_with("about,command,kind"));
+    env.cmd()
+        .args(["commands", "--json"])
+        .assert()
+        .code(3)
+        .stdout("");
+}
+
+#[test]
+fn stderr_logs_are_json_lines_by_default() {
+    let env = Env::new();
+    let out = env
+        .cmd()
+        .args(["cache", "clear"])
+        .env("GWSR_LOG", "gwsr=debug")
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+    let stderr = stderr_of(&out);
+    assert!(!stderr.is_empty());
+    for line in stderr.lines() {
+        let v: Value = serde_json::from_str(line).unwrap_or_else(|e| panic!("{e}: {line}"));
+        assert!(v["level"].is_string(), "{line}");
+    }
+}
+
 // ── Commands inventory ──────────────────────────────────────────────────
 
 #[test]
@@ -433,7 +557,7 @@ fn commands_json_is_machine_readable() {
     let env = Env::new();
     let out = env
         .cmd()
-        .args(["commands", "--json", "workflow"])
+        .args(["commands", "workflow"])
         .assert()
         .success()
         .get_output()
@@ -545,7 +669,8 @@ fn generate_skills_requires_output_dir() {
 #[test]
 fn generate_skills_filters_are_exact_and_output_is_agent_safe() {
     let env = Env::new();
-    env.cmd()
+    let out = env
+        .cmd()
         .args([
             "dev",
             "generate-skills",
@@ -555,7 +680,14 @@ fn generate_skills_filters_are_exact_and_output_is_agent_safe() {
             "shared",
         ])
         .assert()
-        .success();
+        .success()
+        .get_output()
+        .clone();
+    let summary: Value = serde_json::from_str(&stdout_of(&out)).unwrap();
+    assert_eq!(summary["count"], 1);
+    assert_eq!(summary["skills"][0]["name"], "gwsr-shared");
+    assert_eq!(summary["skills"][0]["category"], "service");
+    assert!(summary["index"].is_null());
     let shared = std::fs::read_to_string(env.work_dir().join("out/gwsr-shared/SKILL.md")).unwrap();
     assert!(!shared.contains("generate-skills"));
     assert!(!shared.to_lowercase().contains("star the repo"));

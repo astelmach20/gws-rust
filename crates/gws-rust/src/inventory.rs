@@ -201,31 +201,6 @@ pub fn rows(inventory: &Value) -> Value {
     Value::Array(rows)
 }
 
-/// Aligned `command  description` lines for terminal display.
-pub fn text_listing(inventory: &Value) -> String {
-    let rows = rows(inventory);
-    let rows = rows.as_array().map(Vec::as_slice).unwrap_or_default();
-    let width = rows
-        .iter()
-        .filter_map(|r| r["command"].as_str())
-        .map(|c| c.chars().count())
-        .max()
-        .unwrap_or(0);
-    let mut out = String::new();
-    for row in rows {
-        let command = row["command"].as_str().unwrap_or_default();
-        let about = row["about"].as_str().unwrap_or_default();
-        let about = about.lines().next().unwrap_or_default();
-        let line = format!(
-            "{command:<width$}  {}",
-            crate::output::sanitize_for_terminal(about)
-        );
-        out.push_str(line.trim_end());
-        out.push('\n');
-    }
-    out.trim_end().to_string()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -345,11 +320,6 @@ mod tests {
                 .unwrap()
                 .iter()
                 .any(|r| r["command"] == "gwsr drive files list")
-        );
-        let text = text_listing(&inv);
-        assert!(
-            text.lines().any(|l| l.starts_with("gwsr drive files list")),
-            "{text}"
         );
     }
 }

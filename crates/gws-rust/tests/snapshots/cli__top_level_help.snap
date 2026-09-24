@@ -9,7 +9,7 @@ Usage: gwsr [OPTIONS] [COMMAND|SERVICE]
 Commands:
   auth         Sign in, inspect and manage credentials (run `gwsr auth --help`)
   schema       Show the request/response schema of a method or type
-  commands     List services, resources, methods and helpers with their flags
+  commands     Inventory of services, resources, methods and helpers with their flags (JSON; `--format table|csv` gives one row per command)
   completions  Print a shell completion script (dynamic: completes services, resources and methods from cached Discovery documents)
   cache        Manage the local Discovery document cache
   help         Show help for a command or service (`gwsr help drive files list`)
@@ -81,7 +81,8 @@ Exit codes:
   5    Internal       — unexpected failure (I/O, serialization, ...)
   6    API retryable  — rate limit (429/403 rateLimitExceeded) or server error (5xx); retry with backoff
 
-Errors: a human-readable message goes to stderr; when stdout is not a terminal a
-single-line JSON envelope {"error":{...}} is also written to stdout.
+Output is JSON by default (compact when piped); --format table|yaml|csv is opt-in.
+Errors: one JSON object {"error":{...}} on stderr (human text with a human --format);
+stdout stays empty on failure.
 Config: ~/.config/gwsr/config.toml (flag > env > config > default).
 This is not an officially supported Google product.

@@ -68,35 +68,42 @@ fn main() -> ExitCode {
     match completions::complete_if_requested() {
         Ok(true) => return ExitCode::SUCCESS,
         Ok(false) => {}
-        Err(e) => return finish(Err(CliError::from(e))),
+        Err(e) => return finish(Err(CliError::from(e)), false),
     }
 
     install_broken_pipe_hook();
-    hardening::apply();
+    let hardening_warnings = hardening::apply();
 
     let args: Vec<OsString> = std::env::args_os().collect();
     let prescan = cli_args::prescan(args.get(1..).unwrap_or_default());
+    // Before the config file is read, the error format comes from the flag or env.
+    let early_human = human_output(prescan.format.as_deref(), None);
 
     let cli = match parse_top_level(&args) {
         Ok(Some(cli)) => cli,
-        Ok(None) => return finish(Ok(())),
-        Err(e) => return finish(Err(e)),
+        Ok(None) => return finish(Ok(()), early_human),
+        Err(e) => return finish(Err(e), early_human),
     };
 
     let settings = match config::load() {
         Ok(s) => s,
-        Err(e) => return finish(Err(e.into())),
+        Err(e) => return finish(Err(e.into()), early_human),
     };
+    let human = human_output(prescan.format.as_deref(), Some(settings.format));
 
     let mut log_opts = logging::LogOptions::from_env(prescan.verbosity);
     log_opts.config_log = settings.log.clone();
+    log_opts.human = human || prescan.verbosity > 0;
     if log_opts.file_dir.is_none() {
         log_opts.file_dir = settings.log_file.clone();
     }
     let log_guard = match logging::init(&log_opts) {
         Ok(guard) => guard,
-        Err(e) => return finish(Err(e.into())),
+        Err(e) => return finish(Err(e.into()), human),
     };
+    for warning in hardening_warnings {
+        tracing::warn!("{warning}");
+    }
 
     let runtime = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -104,10 +111,13 @@ fn main() -> ExitCode {
     {
         Ok(rt) => rt,
         Err(e) => {
-            return finish(Err(GwsError::from(
-                anyhow::Error::new(e).context("failed to start the async runtime"),
-            )
-            .into()));
+            return finish(
+                Err(GwsError::from(
+                    anyhow::Error::new(e).context("failed to start the async runtime"),
+                )
+                .into()),
+                human,
+            );
         }
     };
 
@@ -115,20 +125,31 @@ fn main() -> ExitCode {
     let result = runtime.block_on(dispatch(cli, &args, &settings, &prescan));
     // Stop background tasks, then flush file logs before exiting.
     drop(runtime);
-    let code = finish(result);
+    let code = finish(result, human);
     drop(log_guard);
     code
 }
 
+/// True when the effective output format is a human one (not JSON):
+/// `--format` flag > `GWSR_FORMAT` > config file > JSON.
+fn human_output(flag: Option<&str>, config: Option<OutputFormat>) -> bool {
+    let from_flag = flag.and_then(|f| OutputFormat::parse(f).ok());
+    let from_env = std::env::var("GWSR_FORMAT")
+        .ok()
+        .and_then(|f| OutputFormat::parse(&f).ok());
+    let format = from_flag.or(from_env).or(config).unwrap_or_default();
+    format != OutputFormat::Json
+}
+
 /// Map the outcome to an exit code, reporting errors per the output contract
 /// in [`error`]. A closed stdout (`gwsr ... | head`) is a clean exit.
-fn finish(result: Result<(), CliError>) -> ExitCode {
+fn finish(result: Result<(), CliError>, human: bool) -> ExitCode {
     match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(_) if output::stdout_closed() => ExitCode::SUCCESS,
         Err(e) => {
             tracing::debug!(error = ?e, "command failed");
-            error::report(&e);
+            error::report(&e, human);
             ExitCode::from(u8::try_from(e.exit_code()).unwrap_or(u8::MAX))
         }
     }
@@ -287,14 +308,14 @@ async fn dispatch(
             let value = schema::handle_schema_command(&path, resolve_refs).await?;
             emit_value(&value, format)?;
         }
-        TopCommand::Commands { json, services } => {
+        TopCommand::Commands { services } => {
             let inventory = inventory::build(&services).await?;
-            if json {
-                emit_value(&inventory, OutputFormat::Json)?;
-            } else if let Some(format) = cli.global.format.as_deref() {
-                emit_value(&inventory::rows(&inventory), OutputFormat::from_str(format))?;
-            } else {
-                output::emit(&inventory::text_listing(&inventory))?;
+            match format {
+                // Tabular formats get one row per command.
+                OutputFormat::Table | OutputFormat::Csv => {
+                    emit_value(&inventory::rows(&inventory), format)?;
+                }
+                OutputFormat::Json | OutputFormat::Yaml => emit_value(&inventory, format)?,
             }
         }
         TopCommand::Completions { shell } => {
@@ -309,7 +330,10 @@ async fn dispatch(
         }
         TopCommand::Dev {
             command: DevCommand::GenerateSkills(opts),
-        } => generate_skills::handle_generate_skills(&opts).await?,
+        } => {
+            let summary = generate_skills::handle_generate_skills(&opts).await?;
+            emit_value(&summary, format)?;
+        }
         TopCommand::Dev {
             command: DevCommand::Man { output_dir },
         } => {
