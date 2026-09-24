@@ -39,10 +39,12 @@ pub async fn load_document(api_name: &str, version: &str) -> Result<RestDescript
     crate::discovery::fetch_discovery_document(api_name, version).await
 }
 
-/// Build the clap command for a service, named as the user invoked it.
-pub fn build_command(alias: &str, doc: &RestDescription) -> clap::Command {
+/// Build the clap command for a service, named as the user invoked it
+/// (`drive`, or `youtube:v3` for an `<api>:<version>` spec), so usage lines
+/// are commands that run.
+pub fn build_command(invoked_as: &str, doc: &RestDescription) -> clap::Command {
     crate::commands::build_cli(doc)
-        .name(alias.to_string())
-        .bin_name(format!("gwsr {alias}"))
+        .name(invoked_as.to_string())
+        .bin_name(format!("gwsr {invoked_as}"))
         .disable_version_flag(true)
 }

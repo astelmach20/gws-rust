@@ -239,6 +239,38 @@ fn service_method_help_shows_full_command_path_and_global_heading() {
 }
 
 #[test]
+fn versioned_service_help_shows_the_spec_as_typed() {
+    let env = Env::new();
+    env.seed_drive("Lists files.");
+    for args in [
+        vec!["drive:v3", "files", "list", "--help"],
+        vec!["--format", "json", "drive:v3", "files", "list", "--help"],
+    ] {
+        let out = env
+            .cmd()
+            .args(&args)
+            .assert()
+            .success()
+            .get_output()
+            .clone();
+        let help = stdout_of(&out);
+        assert!(
+            help.contains("Usage: gwsr drive:v3 files list [OPTIONS]"),
+            "{args:?}: {help}"
+        );
+    }
+    let out = env
+        .cmd()
+        .args(["drive:v3"])
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+    let help = stdout_of(&out);
+    assert!(help.contains("Usage: gwsr drive:v3 "), "{help}");
+}
+
+#[test]
 fn sanitize_help_names_the_real_env_var() {
     let env = Env::new();
     env.cmd()
