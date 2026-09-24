@@ -1,2 +1,3 @@
-# Downloaded binary (created during npm postinstall)
-bin/
+# Output of scripts/build-packages.mjs
+/dist/
+node_modules/

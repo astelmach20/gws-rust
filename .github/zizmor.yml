@@ -1,0 +1,15 @@
+# zizmor configuration (https://docs.zizmor.sh/configuration/). CI runs the pedantic persona.
+rules:
+  # zizmor recommends GitHub's `uses: $/...` self-repository syntax, but actionlint (which CI also
+  # runs) does not understand it yet. Re-enable once actionlint supports it.
+  self-repository:
+    disable: true
+  # release-check.yml installs the npm tarball it just built; that install is the behavior under test.
+  adhoc-packages:
+    ignore:
+      - release-check.yml
+  # peter-evans/create-pull-request handles branch reuse, force-updates and PR edits that a bare
+  # `gh pr create` script would have to reimplement.
+  superfluous-actions:
+    ignore:
+      - generate-skills.yml

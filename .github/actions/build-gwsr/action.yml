@@ -1,0 +1,77 @@
+name: Build gwsr
+description: >-
+  Builds the release `gwsr` binary for one target with the flags used for published releases
+  (path remapping for reproducibility, static CRT on Windows, cross with a digest-pinned image
+  for Linux). Expects the Rust toolchain and the target to be installed already.
+
+inputs:
+  target:
+    description: Rust target triple.
+    required: true
+  cross-image:
+    description: Digest-pinned cross-rs image. Empty means a native cargo build.
+    required: false
+    default: ""
+  working-directory:
+    description: Directory containing the workspace.
+    required: false
+    default: "."
+
+outputs:
+  binary:
+    description: Absolute path of the built binary.
+    value: ${{ steps.build.outputs.binary }}
+
+runs:
+  using: composite
+  steps:
+    - name: Install cross
+      if: inputs.cross-image != ''
+      shell: bash
+      env:
+        # cross-rs pinned to a commit and built with its lockfile.
+        CROSS_REV: 74e99b2223de06166f8cdcc1af7f1308ec52baf4
+      run: |
+        set -euo pipefail
+        if command -v cross >/dev/null; then
+          echo "cross already installed: $(cross --version | head -n 1)"
+        else
+          cargo install cross --git https://github.com/cross-rs/cross --rev "$CROSS_REV" --locked
+        fi
+
+    - id: build
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        TARGET: ${{ inputs.target }}
+        CROSS_IMAGE: ${{ inputs.cross-image }}
+      run: |
+        set -euo pipefail
+        workspace="$(pwd -P)"
+        cargo_home="${CARGO_HOME:-$HOME/.cargo}"
+        # Strip machine-specific paths from panic messages and debug info so the binary does not
+        # depend on the checkout location (cross mounts the project at /project, CARGO_HOME at /cargo).
+        RUSTFLAGS="--remap-path-prefix=${workspace}=/build --remap-path-prefix=/project=/build"
+        RUSTFLAGS+=" --remap-path-prefix=${cargo_home}=/cargo --remap-path-prefix=/cargo=/cargo"
+        case "$TARGET" in
+          # Static CRT: no Visual C++ redistributable needed on the user's machine.
+          *-windows-msvc) RUSTFLAGS+=" -C target-feature=+crt-static" ;;
+        esac
+        export RUSTFLAGS
+        if [[ -n "$CROSS_IMAGE" ]]; then
+          # cross reads CROSS_TARGET_<TRIPLE>_IMAGE to override the image for a target.
+          var="CROSS_TARGET_$(tr '[:lower:]-' '[:upper:]_' <<<"$TARGET")_IMAGE"
+          export "${var}=${CROSS_IMAGE}"
+          cross build --release --locked --bin gwsr --target "$TARGET"
+        else
+          cargo build --release --locked --bin gwsr --target "$TARGET"
+        fi
+        case "$TARGET" in
+          *windows*) binary="${workspace}/target/${TARGET}/release/gwsr.exe" ;;
+          *) binary="${workspace}/target/${TARGET}/release/gwsr" ;;
+        esac
+        if [[ ! -f "$binary" ]]; then
+          echo "::error::build succeeded but ${binary} does not exist"
+          exit 1
+        fi
+        echo "binary=${binary}" >> "$GITHUB_OUTPUT"

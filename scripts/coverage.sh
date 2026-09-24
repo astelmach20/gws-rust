@@ -1,34 +1,58 @@
-#!/bin/bash
-# Copyright 2026 Google LLC
+#!/usr/bin/env bash
+# Runs the workspace tests under cargo-llvm-cov and enforces the line-coverage floor.
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+#   scripts/coverage.sh            # text summary + HTML report in target/llvm-cov/html
+#   scripts/coverage.sh --open     # ...and open the HTML report
+#   scripts/coverage.sh --lcov     # write lcov.info instead of HTML (used by CI)
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-
+# The floor is COVERAGE_MIN_LINES (default below). Raise it as coverage improves; never lower it
+# to make a PR pass.
 set -euo pipefail
 
-# Check if cargo-llvm-cov is installed
-if ! cargo llvm-cov --version &> /dev/null; then
-  echo "cargo-llvm-cov is not installed. Installing..."
-  cargo install cargo-llvm-cov
+readonly DEFAULT_MIN_LINES=65
+min_lines="${COVERAGE_MIN_LINES:-$DEFAULT_MIN_LINES}"
+mode=html
+open_report=false
+
+for arg in "$@"; do
+  case "$arg" in
+    --open) open_report=true ;;
+    --lcov) mode=lcov ;;
+    -h | --help)
+      sed -n '2,9p' "$0"
+      exit 0
+      ;;
+    *)
+      echo "error: unknown argument: $arg" >&2
+      exit 2
+      ;;
+  esac
+done
+
+if ! cargo llvm-cov --version >/dev/null 2>&1; then
+  echo "error: cargo-llvm-cov is not installed. Install it with 'cargo install cargo-llvm-cov --locked'" >&2
+  echo "       (or enter 'nix develop', which provides it)." >&2
+  exit 1
 fi
 
-# Run coverage and generate HTML report
-echo "Running tests with coverage..."
-cargo llvm-cov --all-features --workspace --html
-cargo llvm-cov --all-features --workspace # Print text summary
+cargo llvm-cov clean --workspace
+cargo llvm-cov --workspace --all-features --locked --no-report
 
-echo "Coverage report generated at target/llvm-cov/html/index.html"
+if [[ "$mode" == lcov ]]; then
+  cargo llvm-cov report --lcov --output-path lcov.info
+  echo "Wrote lcov.info"
+else
+  cargo llvm-cov report --html
+  echo "HTML report: target/llvm-cov/html/index.html"
+fi
 
-# Open the report if on macOS
-if [[ "$OSTYPE" == "darwin"* ]]; then
-  open target/llvm-cov/html/index.html
+cargo llvm-cov report --summary-only --fail-under-lines "$min_lines"
+echo "Line coverage is at or above the ${min_lines}% floor."
+
+if [[ "$open_report" == true && "$mode" == html ]]; then
+  case "$(uname -s)" in
+    Darwin) open target/llvm-cov/html/index.html ;;
+    Linux) xdg-open target/llvm-cov/html/index.html ;;
+    *) echo "Open target/llvm-cov/html/index.html in a browser." ;;
+  esac
 fi
