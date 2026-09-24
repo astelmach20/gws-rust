@@ -31,7 +31,7 @@ use crate::services::resolve_service;
 ///
 /// Path format: `service.resource[.subresource].method`
 /// Example: `drive.files.list` or `drive.files.permissions.list`
-pub async fn handle_schema_command(path: &str, resolve_refs: bool) -> Result<(), GwsError> {
+pub async fn handle_schema_command(path: &str, resolve_refs: bool) -> Result<Value, GwsError> {
     let parts: Vec<&str> = path.split('.').collect();
     if parts.len() < 2 {
         return Err(GwsError::Validation(format!(
@@ -58,11 +58,7 @@ pub async fn handle_schema_command(path: &str, resolve_refs: bool) -> Result<(),
                 resolve_schema_refs(&mut output, &doc, &mut seen);
             }
 
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&output).unwrap_or_default()
-            );
-            return Ok(());
+            return Ok(output);
         } else {
             // It might be a resource path that is incomplete, but let's see if it's a schema typo first
             // or perhaps the user meant "drive.files" (resource) which we don't support dumping yet.
@@ -92,12 +88,7 @@ pub async fn handle_schema_command(path: &str, resolve_refs: bool) -> Result<(),
         let mut seen = std::collections::HashSet::new();
         resolve_schema_refs(&mut output, &doc, &mut seen);
     }
-    println!(
-        "{}",
-        serde_json::to_string_pretty(&output).unwrap_or_default()
-    );
-
-    Ok(())
+    Ok(output)
 }
 
 /// Walks the resource tree to find a method.

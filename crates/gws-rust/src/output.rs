@@ -22,6 +22,11 @@
 // Import dangerous-char detection from the library crate.
 pub(crate) use gws_rust_core::validate::is_dangerous_unicode;
 
+use std::io::Write;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+use crate::error::GwsError;
+
 // ── Sanitization ──────────────────────────────────────────────────────
 
 /// Strip dangerous characters from untrusted text before printing to the
@@ -42,48 +47,100 @@ pub(crate) fn sanitize_for_terminal(text: &str) -> String {
         .collect()
 }
 
+// ── Terminal detection ────────────────────────────────────────────────
+
+/// True when stdout is an interactive terminal.
+pub(crate) fn stdout_is_terminal() -> bool {
+    use std::io::IsTerminal;
+    std::io::stdout().is_terminal()
+}
+
+/// True when stderr is an interactive terminal.
+pub(crate) fn stderr_is_terminal() -> bool {
+    use std::io::IsTerminal;
+    std::io::stderr().is_terminal()
+}
+
 // ── Color ─────────────────────────────────────────────────────────────
 
 /// Returns true when stderr is connected to an interactive terminal and
 /// `NO_COLOR` is not set, meaning ANSI color codes will be visible.
 pub(crate) fn stderr_supports_color() -> bool {
-    use std::io::IsTerminal;
-    std::io::stderr().is_terminal() && std::env::var_os("NO_COLOR").is_none()
+    stderr_is_terminal() && std::env::var_os("NO_COLOR").is_none()
 }
 
 /// Wrap `text` in ANSI bold + the given color code, resetting afterwards.
 /// Returns the plain text unchanged when stderr is not a TTY or `NO_COLOR`
 /// is set.
 pub(crate) fn colorize(text: &str, ansi_color: &str) -> String {
-    if stderr_supports_color() && ansi_color.chars().all(|c| c.is_ascii_digit()) {
+    paint(text, ansi_color, stderr_supports_color())
+}
+
+fn paint(text: &str, ansi_color: &str, enabled: bool) -> String {
+    if enabled && ansi_color.chars().all(|c| c.is_ascii_digit()) {
         format!("\x1b[1;{ansi_color}m{text}\x1b[0m")
     } else {
         text.to_string()
     }
 }
 
-// ── Stderr helpers ────────────────────────────────────────────────────
+// ── Stdout ────────────────────────────────────────────────────────────
 
-/// Print a status message to stderr. The message is sanitized before
-/// printing to prevent terminal injection.
-#[allow(dead_code)]
-pub(crate) fn status(msg: &str) {
-    eprintln!("{}", sanitize_for_terminal(msg));
+/// Set once stdout's reader has gone away (EPIPE). `main` checks it to exit
+/// quietly with status 0 instead of reporting an error, the conventional
+/// behaviour for `gwsr ... | head`.
+static STDOUT_CLOSED: AtomicBool = AtomicBool::new(false);
+
+/// True once a write to stdout failed with `BrokenPipe`.
+pub(crate) fn stdout_closed() -> bool {
+    STDOUT_CLOSED.load(Ordering::Relaxed)
 }
+
+/// Write `text` followed by a newline to stdout and flush.
+///
+/// Every command writes its results through this function instead of
+/// `println!`, which panics when the reader closes the pipe. An empty `text`
+/// writes nothing. A closed pipe is recorded (see [`stdout_closed`]) and
+/// returned as an error so callers stop producing output; `main` turns it into
+/// a clean exit.
+pub(crate) fn emit(text: &str) -> Result<(), GwsError> {
+    if text.is_empty() {
+        return Ok(());
+    }
+    write_line(&mut std::io::stdout().lock(), text).map_err(|e| {
+        if e.kind() == std::io::ErrorKind::BrokenPipe {
+            STDOUT_CLOSED.store(true, Ordering::Relaxed);
+        }
+        GwsError::from(anyhow::Error::new(e).context("failed to write to stdout"))
+    })
+}
+
+fn write_line(w: &mut dyn Write, text: &str) -> std::io::Result<()> {
+    if STDOUT_CLOSED.load(Ordering::Relaxed) {
+        return Err(std::io::ErrorKind::BrokenPipe.into());
+    }
+    w.write_all(text.as_bytes())?;
+    w.write_all(b"\n")?;
+    w.flush()
+}
+
+// ── Stderr helpers ────────────────────────────────────────────────────
 
 /// Print a warning to stderr with a colored prefix. The message is
 /// sanitized before printing.
-#[allow(dead_code)]
 pub(crate) fn warn(msg: &str) {
     let prefix = colorize("warning:", "33"); // yellow
-    eprintln!("{prefix} {}", sanitize_for_terminal(msg));
+    eprint_line(&format!("{prefix} {}", sanitize_for_terminal(msg)));
 }
 
-/// Print an informational message to stderr. The message is sanitized
-/// before printing.
-#[allow(dead_code)]
-pub(crate) fn info(msg: &str) {
-    eprintln!("{}", sanitize_for_terminal(msg));
+/// Print a line to stderr. Unlike `eprintln!`, a closed or failing stderr
+/// never panics: there is nowhere left to report the failure, so it is
+/// deliberately dropped.
+pub(crate) fn eprint_line(text: &str) {
+    let mut err = std::io::stderr().lock();
+    if writeln!(err, "{text}").is_err() {
+        // stderr is gone; nothing more can be reported.
+    }
 }
 
 #[cfg(test)]
@@ -149,8 +206,33 @@ mod tests {
     // ── colorize ──────────────────────────────────────────────────
 
     #[test]
-    fn colorize_returns_text_in_no_color_mode() {
-        let result = colorize("hello", "31");
-        assert!(result.contains("hello"));
+    fn paint_respects_enabled_flag() {
+        assert_eq!(paint("hello", "31", false), "hello");
+        assert_eq!(paint("hello", "31", true), "\x1b[1;31mhello\x1b[0m");
+        // Non-numeric colour codes are never interpolated.
+        assert_eq!(paint("hello", "31m;evil", true), "hello");
+    }
+
+    struct ClosedPipe;
+    impl Write for ClosedPipe {
+        fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::ErrorKind::BrokenPipe.into())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn write_line_appends_newline() {
+        let mut buf = Vec::new();
+        write_line(&mut buf, "abc").unwrap();
+        assert_eq!(buf, b"abc\n");
+    }
+
+    #[test]
+    fn write_line_reports_broken_pipe() {
+        let err = write_line(&mut ClosedPipe, "abc").unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::BrokenPipe);
     }
 }

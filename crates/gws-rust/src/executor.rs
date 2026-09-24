@@ -301,15 +301,13 @@ async fn handle_json_response(
             captured.push(json_val.clone());
         } else if pagination.page_all {
             let is_first_page = *pages_fetched == 1;
-            println!(
-                "{}",
-                crate::formatter::format_value_paginated(&json_val, output_format, is_first_page)
-            );
+            crate::output::emit(&crate::formatter::format_value_paginated(
+                &json_val,
+                output_format,
+                is_first_page,
+            )?)?;
         } else {
-            println!(
-                "{}",
-                crate::formatter::format_value(&json_val, output_format)
-            );
+            crate::output::emit(&crate::formatter::format_value(&json_val, output_format)?)?;
         }
 
         // Check for nextPageToken to continue pagination
@@ -377,7 +375,7 @@ async fn handle_binary_response(
         return Ok(Some(result));
     }
 
-    println!("{}", crate::formatter::format_value(&result, output_format));
+    crate::output::emit(&crate::formatter::format_value(&result, output_format)?)?;
 
     Ok(None)
 }
@@ -423,10 +421,10 @@ pub async fn execute_method(
         if capture_output {
             return Ok(Some(dry_run_info));
         }
-        println!(
-            "{}",
-            crate::formatter::format_value(&dry_run_info, output_format)
-        );
+        crate::output::emit(&crate::formatter::format_value(
+            &dry_run_info,
+            output_format,
+        )?)?;
         return Ok(None);
     }
 
