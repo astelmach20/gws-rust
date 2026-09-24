@@ -226,7 +226,7 @@ impl RestDescription {
     /// The API root that requests (and credentials) go to.
     ///
     /// Returns `override_base` when given (the validated `GWSR_API_BASE_URL`,
-    /// see [`crate::validate::api_base_override`]); otherwise the document's
+    /// see [`crate::validate::parse_api_base_override`]); otherwise the document's
     /// `rootUrl`, which must pass [`validate_api_base_with`].
     pub fn api_root(&self, override_base: Option<&Url>) -> Result<Url, GwsError> {
         match override_base {

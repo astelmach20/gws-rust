@@ -265,8 +265,8 @@ pub fn after_help() -> String {
          Example: gwsr drive files list --params '{\"pageSize\": 5}' --format table\n",
     );
     out.push_str("\nEnvironment:\n");
-    for (name, desc) in ENVIRONMENT {
-        out.push_str(&format!("  {name:<24} {desc}\n"));
+    for var in crate::env::REGISTRY {
+        out.push_str(&format!("  {:<24} {}\n", var.name, var.help));
     }
     out.push_str("\nExit codes:\n");
     for (code, desc) in crate::error::EXIT_CODE_DOCUMENTATION {
@@ -281,95 +281,6 @@ pub fn after_help() -> String {
     );
     out
 }
-
-/// Environment variables shown in the top-level help.
-pub const ENVIRONMENT: &[(&str, &str)] = &[
-    (
-        "GWSR_TOKEN",
-        "Pre-obtained OAuth2 access token (highest priority)",
-    ),
-    (
-        "GWSR_TOKEN_FILE",
-        "File holding a pre-obtained access token",
-    ),
-    (
-        "GWSR_CREDENTIALS_FILE",
-        "Path to an OAuth or service-account credentials JSON file",
-    ),
-    ("GWSR_PROFILE", "Credential profile (same as --profile)"),
-    (
-        "GWSR_IMPERSONATE",
-        "Service accounts: user to act as (same as --impersonate)",
-    ),
-    ("GWSR_CLIENT_ID", "OAuth client ID (for gwsr auth login)"),
-    (
-        "GWSR_CLIENT_SECRET",
-        "OAuth client secret (for gwsr auth login)",
-    ),
-    (
-        "GWSR_CONFIG_DIR",
-        "Config directory (default: ~/.config/gwsr)",
-    ),
-    (
-        "GWSR_CACHE_DIR",
-        "Cache directory, absolute (default: platform cache dir + /gwsr)",
-    ),
-    (
-        "GWSR_KEYRING_BACKEND",
-        "Keyring backend: keyring (default) or file",
-    ),
-    ("GWSR_PROJECT_ID", "GCP project for quota and billing"),
-    (
-        "GWSR_NO_QUOTA_PROJECT",
-        "1: never send x-goog-user-project (same as --no-quota-project)",
-    ),
-    (
-        "GWSR_TIMEOUT",
-        "Request timeout in seconds (default 60; 0 disables; same as --timeout)",
-    ),
-    (
-        "GWSR_REQUIRE_CONFIRM",
-        "1: also require --yes for sending, sharing and running scripts",
-    ),
-    (
-        "GWSR_RESTRICT_PATHS",
-        "cwd: confine file flags (--output, --upload, ...) to the current directory",
-    ),
-    (
-        "GWSR_API_BASE_URL",
-        "Trusted API endpoint override (https, or http on localhost)",
-    ),
-    (
-        "GWSR_FORMAT",
-        "Default output format (json, table, yaml, csv)",
-    ),
-    (
-        "GWSR_JSON_STYLE",
-        "JSON layout: auto (default), compact, pretty",
-    ),
-    ("GWSR_PAGE_LIMIT", "Default --page-limit"),
-    ("GWSR_PAGE_DELAY_MS", "Default --page-delay"),
-    (
-        "GWSR_SANITIZE_TEMPLATE",
-        "Default Model Armor template (--sanitize)",
-    ),
-    (
-        "GWSR_SANITIZE_MODE",
-        "Sanitization mode: warn (default) or block",
-    ),
-    (
-        "GWSR_LOG",
-        "stderr log filter, e.g. gwsr=debug (RUST_LOG is also honored)",
-    ),
-    (
-        "GWSR_LOG_FILE",
-        "Directory for JSON log files (daily rotation, mode 0600)",
-    ),
-    (
-        "GWSR_COMPLETE",
-        "Set by the shell completion script; do not set manually",
-    ),
-];
 
 /// Facts extracted from raw argv before full parsing: logging must start
 /// before Discovery documents are fetched, and the API version selects which

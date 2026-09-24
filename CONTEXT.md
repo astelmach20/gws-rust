@@ -25,7 +25,7 @@
 | 5 | Internal error | Report it |
 | 6 | Retryable API error (429/5xx/rate limit) | Retry with backoff |
 | 7 | Confirmation required | Ask the user, then re-run with `--yes` |
-| 8 | Configuration error | Ask the user to fix the setting the message names |
+| 8 | Configuration error | Ask the user to fix the setting the message names. Every `GWSR_*` variable is checked at startup, so a bad or unknown one (e.g. a typo like `GWSR_TIMEOUT_SECS`) fails every command until it is fixed or unset |
 | 9 | Credential store error (keyring, stored credentials) | Ask the user; `gwsr auth status` shows the stored credential state |
 | 10 | Network error (no response) | For creates/sends, check whether it was applied before retrying |
 | 11 | Output blocked by Model Armor | Don't retry to get around it; the content was withheld on purpose |

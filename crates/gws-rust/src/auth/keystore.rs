@@ -108,12 +108,6 @@ pub enum KeystoreError {
     /// Not a gwsr v1 ciphertext.
     #[error("{what} is not in a supported encrypted format: {detail}")]
     UnsupportedFormat { what: String, detail: String },
-    /// Invalid `GWSR_KEYRING_BACKEND` value.
-    #[error(
-        "invalid GWSR_KEYRING_BACKEND={0:?}: expected \"keyring\" (OS credential store, the \
-         default) or \"file\" (key in a 0600 file in the config directory)"
-    )]
-    InvalidBackend(String),
     #[error("{context}: {source}")]
     Io {
         context: String,
@@ -220,34 +214,24 @@ pub fn decrypt(
         })
 }
 
-/// Which backend holds the data key.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Which backend holds the data key (`GWSR_KEYRING_BACKEND`, validated by
+/// [`crate::env`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum BackendKind {
+    /// The OS credential store (the default).
+    #[default]
     Keyring,
+    /// A 0600 key file in the config directory.
     File,
 }
 
 impl BackendKind {
-    /// Parse `GWSR_KEYRING_BACKEND` (unset or empty means `keyring`).
-    ///
-    /// # Errors
-    ///
-    /// Any other value is a hard error.
-    pub fn from_env() -> Result<Self, KeystoreError> {
-        match std::env::var("GWSR_KEYRING_BACKEND") {
-            Ok(v) => Self::parse(Some(&v)),
-            Err(std::env::VarError::NotPresent) => Self::parse(None),
-            Err(std::env::VarError::NotUnicode(v)) => Err(KeystoreError::InvalidBackend(
-                v.to_string_lossy().into_owned(),
-            )),
-        }
-    }
-
-    fn parse(value: Option<&str>) -> Result<Self, KeystoreError> {
+    /// Parse `keyring` or `file`; anything else is `None`.
+    pub fn parse(value: &str) -> Option<Self> {
         match value {
-            None | Some("") | Some("keyring") => Ok(BackendKind::Keyring),
-            Some("file") => Ok(BackendKind::File),
-            Some(other) => Err(KeystoreError::InvalidBackend(other.to_string())),
+            "keyring" => Some(BackendKind::Keyring),
+            "file" => Some(BackendKind::File),
+            _ => None,
         }
     }
 
@@ -447,18 +431,13 @@ impl std::fmt::Debug for Keystore {
 }
 
 impl Keystore {
-    /// Keystore for `base` using the backend selected by `GWSR_KEYRING_BACKEND`.
-    ///
-    /// # Errors
-    ///
-    /// Fails on an invalid backend value.
-    pub fn from_env(base: &Path) -> Result<Self, KeystoreError> {
-        let kind = BackendKind::from_env()?;
+    /// Keystore for `base` using the backend `kind`.
+    pub fn for_kind(base: &Path, kind: BackendKind) -> Self {
         let backend: Box<dyn KeyBackend> = match kind {
             BackendKind::Keyring => Box::new(OsKeyringBackend::new(base)),
             BackendKind::File => Box::new(FileKeyBackend::new(base)),
         };
-        Ok(Self::with_backend(base, kind, backend))
+        Self::with_backend(base, kind, backend)
     }
 
     /// Keystore with an explicit backend (used by tests).
@@ -749,18 +728,11 @@ mod tests {
 
     #[test]
     fn backend_parsing() {
-        assert_eq!(BackendKind::parse(None).unwrap(), BackendKind::Keyring);
-        assert_eq!(BackendKind::parse(Some("")).unwrap(), BackendKind::Keyring);
-        assert_eq!(
-            BackendKind::parse(Some("keyring")).unwrap(),
-            BackendKind::Keyring
-        );
-        assert_eq!(BackendKind::parse(Some("file")).unwrap(), BackendKind::File);
-        assert!(matches!(
-            BackendKind::parse(Some("File ")),
-            Err(KeystoreError::InvalidBackend(_))
-        ));
-        assert!(BackendKind::parse(Some("plaintext")).is_err());
+        assert_eq!(BackendKind::parse("keyring"), Some(BackendKind::Keyring));
+        assert_eq!(BackendKind::parse("file"), Some(BackendKind::File));
+        assert_eq!(BackendKind::parse("File "), None);
+        assert_eq!(BackendKind::parse("plaintext"), None);
+        assert_eq!(BackendKind::default(), BackendKind::Keyring);
     }
 
     #[test]

@@ -18,7 +18,8 @@ First release of `gws-rust`, the maintained fork of googleworkspace/cli. It does
   - Unknown `--params` and body fields are rejected; `--allow-unknown-params` / `--allow-unknown-fields` send them anyway.
   - Binary responses need `-o PATH` or `-o -`.
   - `GWSR_TIMEOUT_SECS` is replaced by `--timeout` / `GWSR_TIMEOUT`.
-  - Environment values that aren't valid UTF-8 are configuration errors instead of being read as unset.
+  - Every environment variable `gwsr` reads is validated at startup, before any command runs and whether or not the command uses it. An invalid value (including one that isn't valid UTF-8) is a configuration error (exit 8) naming the variable and the accepted values; before, some were accepted silently until a command used them and others failed with exit 3. `RUST_LOG`/`GWSR_LOG` must be valid filters with module-path targets, `GWSR_CONFIG_DIR`/`GWSR_LOG_FILE` must be absolute, and boolean variables all accept `1/true/yes/on` and `0/false/no/off`.
+  - An unknown `GWSR_*` environment variable is a configuration error (exit 8) with a "did you mean" suggestion, since it is almost always a typo or a removed name (`GWSR_TIMEOUT_SECS` suggests `GWSR_TIMEOUT`). Unset stale variables; there are no aliases.
   - A quota-project source that exists but can't be used (unreadable OAuth client config or ADC file) is an error instead of a warning; set `GWSR_PROJECT_ID` or pass `--no-quota-project`.
   - Output files (`-o`, exports, pulled sources) are written atomically and get the normal mode for the process umask. `gwsr` sets the umask to `077`, so they stay private to your user.
 - **Auth:**

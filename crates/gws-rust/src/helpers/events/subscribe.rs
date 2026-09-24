@@ -57,15 +57,7 @@ fn typed<T: Clone + Send + Sync + 'static>(
 fn parse_subscribe_args(matches: &ArgMatches) -> Result<SubscribeConfig, GwsError> {
     let project = match crate::args::value::<String>(matches, "project")? {
         Some(p) => Some(p.clone()),
-        None => match std::env::var("GWSR_PROJECT_ID") {
-            Ok(p) => Some(p),
-            Err(std::env::VarError::NotPresent) => None,
-            Err(std::env::VarError::NotUnicode(_)) => {
-                return Err(GwsError::Validation(
-                    "GWSR_PROJECT_ID is not valid UTF-8".to_string(),
-                ));
-            }
-        },
+        None => crate::env::get()?.project_id.clone(),
     };
     let config = SubscribeConfig {
         target: crate::args::value::<String>(matches, "target")?

@@ -127,17 +127,18 @@ pub struct ExecOptions {
 }
 
 impl ExecOptions {
-    /// Defaults with environment-driven settings (`GWSR_TIMEOUT`,
+    /// Defaults with environment-driven settings (the request timeout,
     /// `GWSR_API_BASE_URL`, `GWSR_NO_QUOTA_PROJECT`).
     pub fn from_env() -> Result<Self, GwsError> {
+        let env = crate::env::get()?;
         Ok(Self {
             dry_run: false,
             fields: None,
             page_items: None,
             wait: None,
-            retry: RetryPolicy::from_env()?,
-            endpoints: EndpointPolicy::from_env()?,
-            quota_project: !options::env_flag(options::NO_QUOTA_PROJECT_ENV)?,
+            retry: RetryPolicy::configured(),
+            endpoints: env.endpoint_policy(),
+            quota_project: !env.no_quota_project,
             upload_mode: UploadMode::Auto,
             upload_chunk_size: upload::DEFAULT_CHUNK_SIZE,
             decode_field: None,

@@ -43,12 +43,6 @@ use tracing_subscriber::prelude::*;
 
 use crate::error::GwsError;
 
-/// Environment variable with a filter directive for stderr logging.
-pub const ENV_LOG: &str = "GWSR_LOG";
-
-/// Environment variable naming the JSON log file directory.
-pub const ENV_LOG_FILE: &str = "GWSR_LOG_FILE";
-
 /// Crates whose verbosity `-v` raises.
 const OWN_TARGETS: &[&str] = &["gwsr", "gws_rust_core"];
 
@@ -78,20 +72,15 @@ pub struct LogOptions {
 }
 
 impl LogOptions {
-    /// Read the environment-provided parts.
-    ///
-    /// # Errors
-    ///
-    /// A variable that is set but not valid UTF-8.
-    pub fn from_env(verbosity: i8) -> Result<Self, crate::error::GwsError> {
-        Ok(Self {
+    /// The environment-provided filters (already validated by
+    /// [`crate::env`]).
+    pub fn from_env(verbosity: i8, env: &crate::env::Env) -> Self {
+        Self {
             verbosity,
-            gwsr_log: crate::config::env_var(ENV_LOG)?,
-            rust_log: crate::config::env_var("RUST_LOG")?,
-            config_log: None,
-            file_dir: crate::config::env_var(ENV_LOG_FILE)?.map(PathBuf::from),
-            human: false,
-        })
+            gwsr_log: env.log.clone(),
+            rust_log: env.rust_log.clone(),
+            ..Self::default()
+        }
     }
 }
 
@@ -117,9 +106,11 @@ pub fn stderr_directive(opts: &LogOptions) -> String {
     }
 }
 
+/// Every directive reaching here was validated with its source (environment
+/// or config file); a failure is still a configuration error.
 fn parse_filter(directive: &str) -> Result<EnvFilter, GwsError> {
     EnvFilter::try_new(directive)
-        .map_err(|e| GwsError::Validation(format!("invalid log filter '{directive}': {e}")))
+        .map_err(|e| GwsError::Config(format!("invalid log filter '{directive}': {e}")))
 }
 
 /// Create the log directory with owner-only permissions.
@@ -252,9 +243,9 @@ mod tests {
     }
 
     #[test]
-    fn invalid_filter_is_a_validation_error() {
+    fn invalid_filter_is_a_config_error() {
         let err = parse_filter("gwsr=notalevel").unwrap_err();
-        assert!(matches!(err, GwsError::Validation(_)), "{err:?}");
+        assert!(matches!(err, GwsError::Config(_)), "{err:?}");
     }
 
     #[cfg(unix)]

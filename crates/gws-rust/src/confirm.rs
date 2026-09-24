@@ -38,9 +38,6 @@ use clap::{Arg, ArgAction, ArgMatches, Command};
 use crate::discovery::RestMethod;
 use crate::error::GwsError;
 
-/// Environment variable that also gates [`Impact::Outbound`] actions.
-pub(crate) const REQUIRE_CONFIRM_ENV: &str = "GWSR_REQUIRE_CONFIRM";
-
 /// Non-DELETE API methods that permanently remove data.
 pub(crate) const PERMANENT_DELETE_METHODS: &[&str] = &[
     "gmail.users.messages.batchDelete",
@@ -79,29 +76,6 @@ pub(crate) fn yes_arg() -> Arg {
 /// Add [`yes_arg`] to a helper subcommand.
 pub(crate) fn with_yes(cmd: Command) -> Command {
     cmd.arg(yes_arg())
-}
-
-/// Parse a `GWSR_REQUIRE_CONFIRM` value: unset/empty/`0`/`false` is off,
-/// `1`/`true` is on, anything else is an error.
-pub(crate) fn parse_policy(value: Option<&str>) -> Result<bool, GwsError> {
-    match value.map(|v| v.trim().to_ascii_lowercase()).as_deref() {
-        None | Some("" | "0" | "false") => Ok(false),
-        Some("1" | "true") => Ok(true),
-        Some(other) => Err(GwsError::Validation(format!(
-            "{REQUIRE_CONFIRM_ENV} must be 1, true, 0 or false; got '{other}'"
-        ))),
-    }
-}
-
-/// Read `GWSR_REQUIRE_CONFIRM`.
-pub(crate) fn policy_from_env() -> Result<bool, GwsError> {
-    match std::env::var(REQUIRE_CONFIRM_ENV) {
-        Ok(v) => parse_policy(Some(&v)),
-        Err(std::env::VarError::NotPresent) => Ok(false),
-        Err(std::env::VarError::NotUnicode(_)) => Err(GwsError::Validation(format!(
-            "{REQUIRE_CONFIRM_ENV} is not valid UTF-8"
-        ))),
-    }
 }
 
 /// Whether both stdin and stderr are terminals (a human can answer).
@@ -163,9 +137,7 @@ impl Gate {
         action: &str,
         ask: impl FnOnce(&str) -> Result<bool, GwsError>,
     ) -> Result<(), GwsError> {
-        // Read the policy even when it does not matter, so a malformed value
-        // always fails loudly.
-        let require_outbound = policy_from_env()?;
+        let require_outbound = crate::env::get()?.require_confirm;
         match decide(
             impact,
             require_outbound,
@@ -267,17 +239,6 @@ mod tests {
         assert_eq!(decide(Impact::Outbound, true, false, false, false), Refuse);
         assert_eq!(decide(Impact::Outbound, true, false, false, true), Prompt);
         assert_eq!(decide(Impact::Outbound, true, true, false, false), Proceed);
-    }
-
-    #[test]
-    fn policy_parsing_is_strict() {
-        assert!(!parse_policy(None).unwrap());
-        assert!(!parse_policy(Some("")).unwrap());
-        assert!(!parse_policy(Some("0")).unwrap());
-        assert!(!parse_policy(Some("false")).unwrap());
-        assert!(parse_policy(Some("1")).unwrap());
-        assert!(parse_policy(Some("TRUE")).unwrap());
-        assert!(parse_policy(Some("yes")).is_err());
     }
 
     #[test]

@@ -128,18 +128,11 @@ impl Category {
             | AuthError::TokenEndpoint(_)
             | AuthError::Denied(_) => Category::Credential,
             AuthError::Config(_) => Category::Config,
-            AuthError::Keystore(k) => Category::of_keystore(k),
+            AuthError::Keystore(_) => Category::Store,
             AuthError::Storage(_) => Category::Store,
             AuthError::Network(_) => Category::Network,
             AuthError::Input(_) => Category::Input,
             AuthError::Internal(_) => Category::Internal,
-        }
-    }
-
-    fn of_keystore(e: &keystore::KeystoreError) -> Self {
-        match e {
-            keystore::KeystoreError::InvalidBackend(_) => Category::Config,
-            _ => Category::Store,
         }
     }
 
@@ -163,7 +156,7 @@ impl From<AuthError> for GwsError {
 
 impl From<keystore::KeystoreError> for GwsError {
     fn from(e: keystore::KeystoreError) -> Self {
-        Category::of_keystore(&e).error(e.to_string())
+        Category::Store.error(e.to_string())
     }
 }
 
@@ -182,9 +175,9 @@ pub(crate) fn to_gws_error(err: anyhow::Error) -> GwsError {
         .find_map(|cause| {
             if let Some(e) = cause.downcast_ref::<AuthError>() {
                 Some(Category::of(e))
-            } else if let Some(e) = cause.downcast_ref::<keystore::KeystoreError>() {
-                Some(Category::of_keystore(e))
-            } else if cause.downcast_ref::<std::io::Error>().is_some() {
+            } else if cause.downcast_ref::<keystore::KeystoreError>().is_some()
+                || cause.downcast_ref::<std::io::Error>().is_some()
+            {
                 Some(Category::Store)
             } else {
                 None
@@ -323,7 +316,7 @@ pub async fn get_token_fresh(
                 let cache = token_cache::TokenCache::new(
                     &env.paths.token_cache,
                     &env.paths.token_lock,
-                    env.keystore()?,
+                    env.keystore(),
                 );
                 cache.get_or_fetch(&key, freshness, fetch).await
             } else {
@@ -424,9 +417,10 @@ pub fn scopes_for_method(
 /// # Errors
 ///
 /// A source that exists but cannot be used is an error, not skipped: skipping
-/// it would silently bill a different project (or none). That covers a
-/// `GWSR_PROJECT_ID` that is not valid UTF-8 (exit 8), an unreadable or
-/// invalid OAuth client config, and an unreadable or invalid ADC file.
+/// it would silently bill a different project (or none). That covers an
+/// unreadable or invalid OAuth client config and an unreadable or invalid
+/// ADC file. (`GWSR_PROJECT_ID` itself is validated at startup by
+/// [`crate::env`].)
 /// `GWSR_NO_QUOTA_PROJECT` / `--no-quota-project` skip the lookup entirely.
 pub fn get_quota_project() -> Result<Option<String>, GwsError> {
     let adc = std::env::var_os("GOOGLE_APPLICATION_CREDENTIALS")
@@ -440,19 +434,19 @@ pub fn get_quota_project() -> Result<Option<String>, GwsError> {
             })
         });
     resolve_quota_project(
-        profiles::env_string("GWSR_PROJECT_ID"),
+        crate::env::get()?.project_id.clone(),
         client_config::load_saved,
         adc.as_deref(),
     )
 }
 
 fn resolve_quota_project(
-    env_project: anyhow::Result<Option<String>>,
+    env_project: Option<String>,
     load_client_config: impl FnOnce() -> anyhow::Result<Option<client_config::ClientConfig>>,
     adc_path: Option<&std::path::Path>,
 ) -> Result<Option<String>, GwsError> {
     let skip = "set GWSR_PROJECT_ID, or pass --no-quota-project to send no quota project";
-    if let Some(project) = env_project.map_err(|e| GwsError::Config(format!("{e:#}")))? {
+    if let Some(project) = env_project {
         return Ok(Some(project));
     }
     let client = load_client_config().map_err(|e| {
@@ -513,7 +507,7 @@ mod tests {
         std::fs::write(&adc, r#"{"quota_project_id":"from-adc"}"#).unwrap();
         let got = |env: Option<&str>, client: Option<&str>| {
             resolve_quota_project(
-                Ok(env.map(str::to_string)),
+                env.map(str::to_string),
                 || Ok(Some(client_with_project(client))),
                 Some(&adc),
             )
@@ -530,11 +524,11 @@ mod tests {
         assert_eq!(got(None, None).as_deref(), Some("from-adc"));
         let missing = dir.path().join("missing.json");
         assert_eq!(
-            resolve_quota_project(Ok(None), || Ok(None), Some(&missing)).unwrap(),
+            resolve_quota_project(None, || Ok(None), Some(&missing)).unwrap(),
             None
         );
         assert_eq!(
-            resolve_quota_project(Ok(None), || Ok(None), None).unwrap(),
+            resolve_quota_project(None, || Ok(None), None).unwrap(),
             None
         );
     }
@@ -542,20 +536,9 @@ mod tests {
     #[test]
     fn unusable_quota_project_sources_are_errors_not_skipped() {
         let dir = tempfile::tempdir().unwrap();
-        // GWSR_PROJECT_ID not valid UTF-8.
-        let err = resolve_quota_project(
-            Err(anyhow::anyhow!(
-                "environment variable GWSR_PROJECT_ID is not valid UTF-8"
-            )),
-            || Ok(None),
-            None,
-        )
-        .unwrap_err();
-        assert!(matches!(err, GwsError::Config(_)), "{err:?}");
-        assert_eq!(err.exit_code(), 8);
         // Unreadable OAuth client config.
         let err = resolve_quota_project(
-            Ok(None),
+            None,
             || Err(anyhow::anyhow!("client_secret.json: expected value")),
             None,
         )
@@ -563,7 +546,7 @@ mod tests {
         assert!(matches!(err, GwsError::Config(_)), "{err:?}");
         assert!(err.to_string().contains("OAuth client config"), "{err}");
         let err = resolve_quota_project(
-            Ok(None),
+            None,
             || Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied).into()),
             None,
         )
@@ -572,9 +555,9 @@ mod tests {
         // Invalid or unreadable ADC.
         let adc = dir.path().join("adc.json");
         std::fs::write(&adc, "not json").unwrap();
-        let err = resolve_quota_project(Ok(None), || Ok(None), Some(&adc)).unwrap_err();
+        let err = resolve_quota_project(None, || Ok(None), Some(&adc)).unwrap_err();
         assert!(err.to_string().contains("not valid JSON"), "{err}");
-        let err = resolve_quota_project(Ok(None), || Ok(None), Some(dir.path())).unwrap_err();
+        let err = resolve_quota_project(None, || Ok(None), Some(dir.path())).unwrap_err();
         assert!(matches!(err, GwsError::Config(_)), "{err:?}");
     }
 
@@ -610,11 +593,6 @@ mod tests {
             (AuthError::TokenEndpoint("HTTP 500".into()), 2, "authError"),
             (AuthError::Denied("access_denied".into()), 2, "authError"),
             (AuthError::Config("bad file".into()), 8, "configError"),
-            (
-                AuthError::Keystore(KeystoreError::InvalidBackend("x".into())),
-                8,
-                "configError",
-            ),
             (
                 AuthError::Keystore(KeystoreError::KeyUnavailable("locked".into())),
                 9,

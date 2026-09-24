@@ -31,32 +31,6 @@ use crate::error::GwsError;
 use crate::formatter::OutputFormat;
 use crate::helpers::modelarmor::SanitizeConfig;
 
-/// Set to `1` to never send `x-goog-user-project` (same as `--no-quota-project`).
-pub const NO_QUOTA_PROJECT_ENV: &str = "GWSR_NO_QUOTA_PROJECT";
-
-/// Parse a boolean environment variable strictly: unset/empty is false,
-/// `1`/`true`/`yes`/`on` true, `0`/`false`/`no`/`off` false, anything else is
-/// an error.
-pub fn env_flag(name: &str) -> Result<bool, GwsError> {
-    match std::env::var(name) {
-        Err(std::env::VarError::NotPresent) => Ok(false),
-        Err(std::env::VarError::NotUnicode(_)) => {
-            Err(GwsError::Validation(format!("{name} is not valid UTF-8")))
-        }
-        Ok(v) => parse_flag_value(name, &v),
-    }
-}
-
-fn parse_flag_value(name: &str, v: &str) -> Result<bool, GwsError> {
-    match v.trim().to_ascii_lowercase().as_str() {
-        "" | "0" | "false" | "no" | "off" => Ok(false),
-        "1" | "true" | "yes" | "on" => Ok(true),
-        other => Err(GwsError::Validation(format!(
-            "{name} must be 1 or 0 (true/false), got {other:?}"
-        ))),
-    }
-}
-
 // Generated methods do not all define the same request flags (`--upload`,
 // `--page-all`, ...), so an undefined flag reads as absent here.
 
@@ -303,12 +277,5 @@ mod tests {
         assert!(o.allow_unknown_params);
         let m = cmd().get_matches_from(["t", "--timeout", "abc"]);
         assert!(parse_exec_options(&m).is_err());
-    }
-
-    #[test]
-    fn flag_values() {
-        assert!(parse_flag_value("X", "1").unwrap());
-        assert!(!parse_flag_value("X", "off").unwrap());
-        assert!(parse_flag_value("X", "sure").is_err());
     }
 }

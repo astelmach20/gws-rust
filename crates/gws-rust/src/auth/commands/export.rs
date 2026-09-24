@@ -71,7 +71,7 @@ fn read_profile_plaintext(env: &AuthEnv) -> Result<Zeroizing<String>, GwsError> 
     let data = std::fs::read(path)
         .map_err(|e| GwsError::CredentialStore(format!("cannot read '{}': {e}", path.display())))?;
     let what = format!("the credentials of profile '{}'", env.profile.name);
-    let keystore = env.keystore()?;
+    let keystore = env.keystore();
     let pt = keystore.decrypt(Purpose::Credentials, &data, &what)?;
     let text = std::str::from_utf8(&pt)
         .map_err(|_| GwsError::CredentialStore(format!("{what} decrypted to invalid UTF-8")))?;

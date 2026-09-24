@@ -38,10 +38,6 @@ use reqwest::{Method, StatusCode, Url};
 
 use crate::error::GwsError;
 
-/// Environment variable holding the per-request timeout in seconds
-/// (`0` disables it).
-pub const TIMEOUT_ENV: &str = "GWSR_TIMEOUT";
-
 /// Default time allowed for a server to start responding.
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(60);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -112,44 +108,28 @@ pub fn parse_timeout_secs(raw: &str, source: &str) -> Result<Option<Duration>, G
     Ok((secs > 0).then(|| Duration::from_secs(secs)))
 }
 
-/// Timeout from the configuration file, installed once at startup by the
-/// binary. `Some(None)` means the config disables the timeout.
-static CONFIGURED_TIMEOUT: OnceLock<Option<Duration>> = OnceLock::new();
+/// The process-wide request timeout, installed once at startup by the
+/// binary after it has resolved its own precedence (flag, environment,
+/// configuration file). `None` inside means "no timeout". This library never
+/// reads the process environment itself.
+static REQUEST_TIMEOUT: OnceLock<Option<Duration>> = OnceLock::new();
 
-/// Install the timeout from the configuration file (`timeout_secs`; `0`
-/// disables it). It ranks below `--timeout` and `GWSR_TIMEOUT` and above
-/// [`DEFAULT_TIMEOUT`]. Call at most once per process.
-pub fn set_configured_timeout(secs: u64) -> Result<(), GwsError> {
-    CONFIGURED_TIMEOUT
-        .set((secs > 0).then(|| Duration::from_secs(secs)))
-        .map_err(|_| GwsError::other("the configured timeout was already installed"))
+/// Install the process-wide request timeout (`None` disables it). Call at
+/// most once per process; until then [`request_timeout`] is
+/// [`DEFAULT_TIMEOUT`].
+pub fn install_request_timeout(timeout: Option<Duration>) -> Result<(), GwsError> {
+    REQUEST_TIMEOUT
+        .set(timeout)
+        .map_err(|_| GwsError::other("the request timeout was already installed"))
 }
 
-/// The request timeout: `GWSR_TIMEOUT` > the configured timeout (see
-/// [`set_configured_timeout`]) > [`DEFAULT_TIMEOUT`]. An unparseable value is
-/// an error, never silently replaced by the default.
-pub fn timeout_from_env() -> Result<Option<Duration>, GwsError> {
-    let env = match std::env::var(TIMEOUT_ENV) {
-        Ok(raw) => Some(raw),
-        Err(std::env::VarError::NotPresent) => None,
-        Err(std::env::VarError::NotUnicode(_)) => {
-            return Err(GwsError::Validation(format!(
-                "{TIMEOUT_ENV} is not valid UTF-8"
-            )));
-        }
-    };
-    resolve_timeout(env.as_deref(), CONFIGURED_TIMEOUT.get().copied())
-}
-
-fn resolve_timeout(
-    env: Option<&str>,
-    configured: Option<Option<Duration>>,
-) -> Result<Option<Duration>, GwsError> {
-    match (env, configured) {
-        (Some(raw), _) => parse_timeout_secs(raw, TIMEOUT_ENV),
-        (None, Some(configured)) => Ok(configured),
-        (None, None) => Ok(Some(DEFAULT_TIMEOUT)),
-    }
+/// The installed request timeout (see [`install_request_timeout`]), or
+/// [`DEFAULT_TIMEOUT`] when none was installed.
+pub fn request_timeout() -> Option<Duration> {
+    REQUEST_TIMEOUT
+        .get()
+        .copied()
+        .unwrap_or(Some(DEFAULT_TIMEOUT))
 }
 
 // ── Retry policy ────────────────────────────────────────────────────────
@@ -210,12 +190,13 @@ impl Default for RetryPolicy {
 }
 
 impl RetryPolicy {
-    /// The default policy with the response timeout taken from `GWSR_TIMEOUT`.
-    pub fn from_env() -> Result<Self, GwsError> {
-        Ok(Self {
-            response_timeout: timeout_from_env()?,
+    /// The default policy with the installed process-wide response timeout
+    /// (see [`install_request_timeout`]).
+    pub fn configured() -> Self {
+        Self {
+            response_timeout: request_timeout(),
             ..Self::default()
-        })
+        }
     }
 
     /// Full-jitter backoff: a uniformly random delay in
@@ -557,22 +538,6 @@ fn redact_url(url: &Url) -> String {
 mod tests {
     use super::*;
 
-    #[test]
-    fn timeout_precedence_env_then_config_then_default() {
-        let config = Some(Some(Duration::from_secs(5)));
-        assert_eq!(
-            resolve_timeout(Some("7"), config).unwrap(),
-            Some(Duration::from_secs(7))
-        );
-        assert_eq!(resolve_timeout(Some("0"), config).unwrap(), None);
-        assert_eq!(
-            resolve_timeout(None, config).unwrap(),
-            Some(Duration::from_secs(5))
-        );
-        assert_eq!(resolve_timeout(None, Some(None)).unwrap(), None);
-        assert_eq!(resolve_timeout(None, None).unwrap(), Some(DEFAULT_TIMEOUT));
-        assert!(resolve_timeout(Some("soon"), config).is_err());
-    }
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU32, Ordering};
     use wiremock::matchers::{method, path};

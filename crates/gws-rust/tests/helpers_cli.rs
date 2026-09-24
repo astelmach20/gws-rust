@@ -222,8 +222,18 @@ fn outbound_helper_is_gated_only_under_policy() {
         ])
         .output()
         .unwrap();
-    // --dry-run proceeds, but a malformed policy value still fails loudly.
-    assert_eq!(out.status.code(), Some(3));
+    // --dry-run proceeds, but a malformed policy value still fails loudly,
+    // as a configuration error.
+    assert_eq!(out.status.code(), Some(8));
+    let err: Value = serde_json::from_slice(&out.stderr).unwrap();
+    assert_eq!(err["error"]["reason"], "configError", "{err}");
+    assert!(
+        err["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("GWSR_REQUIRE_CONFIRM"),
+        "{err}"
+    );
 }
 
 #[test]

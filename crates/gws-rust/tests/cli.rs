@@ -570,10 +570,62 @@ fn non_utf8_environment_values_are_config_errors_not_ignored() {
             .code(8)
             .stdout("")
             .stderr(predicate::str::contains("\"configError\""))
-            .stderr(predicate::str::contains(format!(
-                "{var} is not valid UTF-8"
-            )));
+            .stderr(predicate::str::contains(var))
+            .stderr(predicate::str::contains("not valid UTF-8"));
     }
+}
+
+/// Every GWSR_* variable is validated at startup, even when the command
+/// never uses it: `drive files list --dry-run` needs neither a keyring nor a
+/// path policy, yet a bad value still fails with exit 8 before dispatch.
+#[test]
+fn invalid_environment_values_fail_at_startup_with_exit_8() {
+    let env = Env::new();
+    env.seed_drive("Lists files.");
+    for (var, value, accepted) in [
+        ("GWSR_KEYRING_BACKEND", "bogus!!", "keyring or file"),
+        ("GWSR_RESTRICT_PATHS", "bogus!!", "expected cwd"),
+        ("GWSR_LOG", "bogus!!", "tracing filter"),
+        ("GWSR_TIMEOUT", "soon", "whole number of seconds"),
+    ] {
+        let out = env
+            .cmd()
+            .args(["drive", "files", "list", "--dry-run"])
+            .env(var, value)
+            .assert()
+            .code(8)
+            .stdout("")
+            .get_output()
+            .clone();
+        let err: Value = serde_json::from_slice(&out.stderr).unwrap();
+        assert_eq!(err["error"]["reason"], "configError", "{var}: {err}");
+        let message = err["error"]["message"].as_str().unwrap();
+        assert!(message.contains(&format!("{var}=\"{value}\"")), "{message}");
+        assert!(message.contains(accepted), "{message}");
+    }
+}
+
+#[test]
+fn unknown_gwsr_variable_fails_with_a_suggestion() {
+    let env = Env::new();
+    env.seed_drive("Lists files.");
+    let out = env
+        .cmd()
+        .args(["drive", "files", "list", "--dry-run"])
+        .env("GWSR_TIMEOUT_SECS", "30")
+        .assert()
+        .code(8)
+        .stdout("")
+        .get_output()
+        .clone();
+    let err: Value = serde_json::from_slice(&out.stderr).unwrap();
+    assert_eq!(err["error"]["reason"], "configError", "{err}");
+    let message = err["error"]["message"].as_str().unwrap();
+    assert!(
+        message.contains("unknown environment variable GWSR_TIMEOUT_SECS"),
+        "{message}"
+    );
+    assert!(message.contains("did you mean GWSR_TIMEOUT?"), "{message}");
 }
 
 #[test]

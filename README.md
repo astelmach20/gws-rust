@@ -410,7 +410,7 @@ One confirmation gate covers generated methods, `gwsr batch` and every helper.
 | **Destructive** | Any `DELETE` method; `gmail.users.messages.batchDelete`, `calendar.calendars.clear`, `people.people.batchDeleteContacts`, `tasks.tasks.clear`, `drive.files.emptyTrash`; `calendar +delete`, `sheets +clear`, `script +push`, `gmail +filter delete`, `admin +user-suspend`; `drive +share` for owner transfer or writer-level access for a whole domain or anyone with the link | Always |
 | **Outbound** | Actions that notify or grant access to other people, or run code: `gmail +send/+reply/+reply-all/+forward` (not `--draft`), `gmail +unsubscribe`, `chat +send`, `drive +share`, `calendar +insert` with attendees, `+update`, `+rsvp`, `script +run`, `admin +group-add-member`, `admin +user-suspend --unsuspend`, `workflow +file-announce` | Only when `GWSR_REQUIRE_CONFIRM=1` |
 
-A gated action proceeds without a prompt when `--yes`/`-y` or `--dry-run` is given. On a terminal it asks. Without a terminal it is refused with exit code `7` (`"reason":"confirmationRequired"`) and nothing is sent. Agents should ask the user, then re-run with `--yes`. `GWSR_REQUIRE_CONFIRM` accepts `1`/`true` or `0`/`false`; any other value makes a gated action fail with a validation error.
+A gated action proceeds without a prompt when `--yes`/`-y` or `--dry-run` is given. On a terminal it asks. Without a terminal it is refused with exit code `7` (`"reason":"confirmationRequired"`) and nothing is sent. Agents should ask the user, then re-run with `--yes`. `GWSR_REQUIRE_CONFIRM` accepts `1`/`true`/`yes`/`on` or `0`/`false`/`no`/`off`; any other value fails every command at startup with a configuration error (exit `8`).
 
 ## Helper commands
 
@@ -497,7 +497,9 @@ log_file = "/var/log/gwsr" # JSON log directory                        (GWSR_LOG
 
 ## Environment variables
 
-All are optional. `gwsr` never reads `.env` files; set variables in your shell or deployment config. A value that isn't valid UTF-8 is a configuration error (exit `8`), never treated as unset.
+All are optional. `gwsr` never reads `.env` files; set variables in your shell or deployment config.
+
+Every variable below is validated at startup, before any command runs and whether or not the command uses it. An empty value counts as unset. Anything else that doesn't match the variable's format (including a value that isn't valid UTF-8) is a configuration error (exit `8`) naming the variable and the accepted values. An unknown `GWSR_*` variable is also a configuration error, with a "did you mean" suggestion (`GWSR_TIMEOUT_SECS` → `GWSR_TIMEOUT`), because it is almost always a typo or a removed name. Boolean variables accept `1`/`true`/`yes`/`on` and `0`/`false`/`no`/`off`.
 
 | Variable | Description |
 |---|---|
@@ -510,7 +512,7 @@ All are optional. `gwsr` never reads `.env` files; set variables in your shell o
 | `GWSR_CLIENT_ID`, `GWSR_CLIENT_SECRET` | OAuth client for `gwsr auth login` (set both) |
 | `GWSR_KEYRING_BACKEND` | `keyring` (default) or `file` |
 | **Locations** | |
-| `GWSR_CONFIG_DIR` | Config directory (default `~/.config/gwsr`) |
+| `GWSR_CONFIG_DIR` | Config directory, absolute path (default `~/.config/gwsr`) |
 | `GWSR_CACHE_DIR` | Cache directory, absolute path (default: platform cache dir + `/gwsr`) |
 | **Requests** | |
 | `GWSR_PROJECT_ID` | Quota/billing project sent as `x-goog-user-project` (see [Quota project](#quota-project)), and the default `--project` for Pub/Sub helpers |
@@ -524,9 +526,12 @@ All are optional. `gwsr` never reads `.env` files; set variables in your shell o
 | `GWSR_JSON_STYLE` | `auto`, `compact` or `pretty` |
 | `GWSR_PAGE_LIMIT`, `GWSR_PAGE_DELAY_MS` | Pagination defaults |
 | `GWSR_SANITIZE_TEMPLATE`, `GWSR_SANITIZE_MODE` | Model Armor defaults |
-| `GWSR_LOG`, `GWSR_LOG_FILE` | stderr log filter; JSON log directory |
+| `GWSR_LOG`, `RUST_LOG` | stderr log filter such as `gwsr=debug` (`GWSR_LOG` wins); targets must be module paths |
+| `GWSR_LOG_FILE` | JSON log directory, absolute path |
+| **Internal** | |
+| `GWSR_COMPLETE` | Set by the completion scripts; don't set it yourself |
 
-`GOOGLE_APPLICATION_CREDENTIALS` is honored as the standard ADC fallback. `GWSR_COMPLETE` is set by the completion scripts; don't set it yourself.
+`GOOGLE_APPLICATION_CREDENTIALS` is honored as the standard ADC fallback. The build-time variables `GWSR_DEFAULT_CLIENT_ID` / `GWSR_DEFAULT_CLIENT_SECRET` (see [Authentication](#authentication)) are ignored at run time.
 
 ## Shell completions and man pages
 

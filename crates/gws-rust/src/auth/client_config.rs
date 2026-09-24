@@ -178,7 +178,7 @@ fn builtin_client() -> anyhow::Result<Option<(String, SecretString)>> {
             .map(str::to_string),
         BUILTIN_CLIENT_SECRET
             .filter(|v| !v.is_empty())
-            .map(str::to_string),
+            .map(|v| SecretString::from(v.to_string())),
         "this build of gwsr has only one of GWSR_DEFAULT_CLIENT_ID / GWSR_DEFAULT_CLIENT_SECRET \
          compiled in; rebuild with both or neither",
     )
@@ -186,11 +186,11 @@ fn builtin_client() -> anyhow::Result<Option<(String, SecretString)>> {
 
 fn resolve_pair(
     id: Option<String>,
-    secret: Option<String>,
+    secret: Option<SecretString>,
     mismatch: &str,
 ) -> anyhow::Result<Option<(String, SecretString)>> {
     match (id, secret) {
-        (Some(id), Some(secret)) => Ok(Some((id, SecretString::from(secret)))),
+        (Some(id), Some(secret)) => Ok(Some((id, secret))),
         (None, None) => Ok(None),
         _ => anyhow::bail!("{mismatch}"),
     }
@@ -205,9 +205,10 @@ fn resolve_pair(
 pub fn resolve() -> anyhow::Result<ClientConfig> {
     let path = client_config_path()?;
     let saved = load_from(&path)?;
+    let vars = crate::env::get()?;
     let env = resolve_pair(
-        super::profiles::env_string("GWSR_CLIENT_ID")?,
-        super::profiles::env_string("GWSR_CLIENT_SECRET")?,
+        vars.client_id.clone(),
+        vars.client_secret.clone(),
         "only one of GWSR_CLIENT_ID / GWSR_CLIENT_SECRET is set; set both or neither",
     )?;
     resolve_from(env, saved, builtin_client()?, &path)

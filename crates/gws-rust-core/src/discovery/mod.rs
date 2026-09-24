@@ -120,7 +120,7 @@ impl DiscoveryLoader {
     }
 
     /// Trust this API base in addition to `*.googleapis.com` when validating
-    /// document endpoints (see [`crate::validate::api_base_override`]).
+    /// document endpoints (see [`crate::validate::parse_api_base_override`]).
     pub fn with_api_base_override(mut self, base: Option<Url>) -> Self {
         self.api_base_override = base;
         self

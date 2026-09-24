@@ -24,33 +24,19 @@ pub use gws_rust_core::discovery::*;
 
 use crate::error::GwsError;
 
-/// Environment variable overriding the cache root (default: the platform
-/// cache directory joined with `gwsr`, e.g. `~/Library/Caches/gwsr` or
-/// `~/.cache/gwsr`).
-pub const CACHE_DIR_ENV: &str = "GWSR_CACHE_DIR";
-
-/// Resolve the cache root from the `GWSR_CACHE_DIR` value and the platform
-/// cache directory. The override must be an absolute path.
+/// The cache root: the validated `GWSR_CACHE_DIR` (always absolute) or the
+/// platform cache directory joined with `gwsr` (e.g. `~/Library/Caches/gwsr`
+/// or `~/.cache/gwsr`).
 fn cache_root(
-    env_value: Option<std::ffi::OsString>,
+    configured: Option<PathBuf>,
     platform_cache: Option<PathBuf>,
 ) -> Result<PathBuf, GwsError> {
-    match env_value.filter(|v| !v.is_empty()) {
-        Some(v) => {
-            let path = PathBuf::from(v);
-            if path.is_absolute() {
-                Ok(path)
-            } else {
-                Err(GwsError::Validation(format!(
-                    "{CACHE_DIR_ENV} must be an absolute path, got '{}'",
-                    path.display()
-                )))
-            }
-        }
+    match configured {
+        Some(path) => Ok(path),
         None => platform_cache.map(|d| d.join("gwsr")).ok_or_else(|| {
-            GwsError::Validation(format!(
-                "Could not determine the platform cache directory; set {CACHE_DIR_ENV}"
-            ))
+            GwsError::Config(
+                "Could not determine the platform cache directory; set GWSR_CACHE_DIR".to_string(),
+            )
         }),
     }
 }
@@ -58,7 +44,7 @@ fn cache_root(
 /// Root of every gwsr cache: `GWSR_CACHE_DIR`, or the platform cache
 /// directory joined with `gwsr`.
 pub fn gwsr_cache_root() -> Result<PathBuf, GwsError> {
-    cache_root(std::env::var_os(CACHE_DIR_ENV), dirs::cache_dir())
+    cache_root(crate::env::get()?.cache_dir.clone(), dirs::cache_dir())
 }
 
 /// The CLI's Discovery loader: cache under `GWSR_CACHE_DIR` (or the platform
@@ -70,7 +56,7 @@ pub fn loader() -> Result<DiscoveryLoader, GwsError> {
     let root = gwsr_cache_root()?;
     Ok(DiscoveryLoader::new()
         .with_cache(DiscoveryCache::new(root))
-        .with_api_base_override(crate::validate::api_base_override()?))
+        .with_api_base_override(crate::env::get()?.api_base_url.clone()))
 }
 
 /// Fetches (or reads from cache) a Discovery Document, printing any loader
@@ -91,7 +77,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn cache_root_prefers_absolute_override() {
+    fn cache_root_prefers_the_override() {
         let got = cache_root(Some("/custom/cache".into()), Some("/platform".into())).unwrap();
         assert_eq!(got, PathBuf::from("/custom/cache"));
     }
@@ -100,13 +86,11 @@ mod tests {
     fn cache_root_defaults_to_platform_dir() {
         let got = cache_root(None, Some("/platform".into())).unwrap();
         assert_eq!(got, PathBuf::from("/platform/gwsr"));
-        let got = cache_root(Some("".into()), Some("/platform".into())).unwrap();
-        assert_eq!(got, PathBuf::from("/platform/gwsr"));
     }
 
     #[test]
-    fn cache_root_rejects_relative_override_and_missing_platform_dir() {
-        assert!(cache_root(Some("relative/dir".into()), None).is_err());
-        assert!(cache_root(None, None).is_err());
+    fn missing_platform_dir_is_a_config_error() {
+        let err = cache_root(None, None).unwrap_err();
+        assert!(matches!(err, GwsError::Config(_)), "{err:?}");
     }
 }

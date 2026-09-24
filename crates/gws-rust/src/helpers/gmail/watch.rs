@@ -64,15 +64,7 @@ fn parse_watch_args(matches: &ArgMatches) -> Result<WatchConfig, GwsError> {
         .transpose()?;
     let project = match crate::args::value::<String>(matches, "project")? {
         Some(p) => Some(p.clone()),
-        None => match std::env::var("GWSR_PROJECT_ID") {
-            Ok(p) => Some(p),
-            Err(std::env::VarError::NotPresent) => None,
-            Err(std::env::VarError::NotUnicode(_)) => {
-                return Err(GwsError::Validation(
-                    "GWSR_PROJECT_ID is not valid UTF-8".to_string(),
-                ));
-            }
-        },
+        None => crate::env::get()?.project_id.clone(),
     }
     .map(|p| crate::validate::validate_resource_name(&p).map(str::to_string))
     .transpose()?;

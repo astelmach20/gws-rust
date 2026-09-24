@@ -85,7 +85,7 @@ The repository is a Cargo workspace with two crates, plus the npm launcher in `n
 
 ### Request flow
 
-1. `main.rs` applies process hardening, loads `config.toml` and initializes logging. It then parses the static surface in `cli_args.rs`: global flags, `auth`, `schema`, `commands`, `batch`, `cache`, `completions`, `help`, `dev`.
+1. `main.rs` applies process hardening, validates every environment variable (`env.rs`), loads `config.toml` and initializes logging. It then parses the static surface in `cli_args.rs`: global flags, `auth`, `schema`, `commands`, `batch`, `cache`, `completions`, `help`, `dev`.
 2. Anything else is a service. `service.rs` resolves the name (aliases, `<api>:<version>`, `--api-version`), then loads the Discovery document through the cache. `commands.rs` builds a `clap::Command` tree from it, and the service's helper (`helpers::get_helper`) injects its `+verb` subcommands.
 3. argv is parsed again against that tree. A helper handles the command, or the executor runs the generated method.
 4. `confirm.rs` gates destructive and outbound actions. `auth` supplies a token for the narrowest granted scope. `transport` sends the request. Results go to stdout through `formatter.rs` / `output.rs`; errors become the stderr envelope in `error.rs`.
@@ -97,7 +97,7 @@ The repository is a Cargo workspace with two crates, plus the npm launcher in `n
 | `discovery/` | `DiscoveryLoader`: fetch, trust checks, stale fallback. `cache.rs`: the on-disk cache (0600 files, atomic writes). `model.rs`: Serde types for Discovery documents |
 | `services.rs` | `SERVICES` registry and `resolve_service()` (aliases, `<api>:<version>`) |
 | `client.rs` | The shared `reqwest` client, redirect policy, `RetryPolicy`, `send()` with backoff/jitter/`Retry-After` and `Idempotency` |
-| `validate/` | `mod.rs`: `encode_path_segment`, `validate_resource_name`, `validate_api_identifier`, `reject_dangerous_chars`. `paths.rs`: file-path policy (`GWSR_RESTRICT_PATHS`). `endpoint.rs`: which hosts may receive a token (`GWSR_API_BASE_URL`). `modelarmor.rs`: template-name parser |
+| `validate/` | `mod.rs`: `encode_path_segment`, `validate_resource_name`, `validate_api_identifier`, `reject_dangerous_chars`. `paths.rs`: file-path policy (`PathPolicy`). `endpoint.rs`: which hosts may receive a token (`EndpointPolicy`). `modelarmor.rs`: template-name parser. The library never reads the process environment; the binary passes policies in |
 | `error.rs` | `GwsError`, exit codes 0–11, the JSON error envelope, retryability |
 
 ### Binary (`crates/gws-rust/src/`)
@@ -108,6 +108,7 @@ The repository is a Cargo workspace with two crates, plus the npm launcher in `n
 | `cli_args.rs` | Static command surface (clap derive), global flags, top-level help |
 | `args.rs` | Fallible, typed accessors for parsed flags: the only way commands read arguments (a misdefined argument is an internal error, exit 5, never a panic or a silently absent value) |
 | `output_file.rs` | Atomic writes of user-requested output files (`-o`, exports, pulled sources), honoring `--overwrite` |
+| `env.rs` | `REGISTRY` of every environment variable `gwsr` reads (name, help, accepted values) and the validated `Env` snapshot, parsed once by `env::get()`. The only place that reads `GWSR_*`/`RUST_LOG`; the help list and the README table are checked against it |
 | `config.rs` | `config.toml` loading and flag > env > config > default resolution |
 | `service.rs`, `commands.rs` | Discovery document to `clap::Command` tree, method flags |
 | `executor/` | Generated-method execution: `input.rs` (`--params`/`--json` validation), `body_schema.rs`, `url.rs`, `options.rs`, `pagination.rs`, `upload.rs` (multipart and resumable), `download.rs`, `operation.rs` (`--wait`), `batch.rs` (`gwsr batch`), `output.rs` (the executor's only stdout path) |
@@ -130,6 +131,8 @@ Tests: unit tests sit next to the code; CLI integration tests are in `crates/gws
 
 Environment variables and `config.toml` are set by the user, so they are trusted input. They are still parsed strictly: an invalid value is an error, never ignored.
 
+To add or change an environment variable, edit `env.rs` only: add a `REGISTRY` entry, a typed `Env` field and its parser arm, a row in the README table and a valid/invalid pair in its test `CASES`. Everything else reads `crate::env::get()?`, never `std::env::var`. Every variable is validated at startup whether or not the command uses it, an invalid value or unknown `GWSR_*` name is `GwsError::Config` (exit 8), and there are no aliases for removed names.
+
 | Scenario | Use |
 |---|---|
 | Any HTTP request with credentials | `transport::Transport` (helpers: `helpers::http::Api`). Never build a `reqwest` request with a bearer token by hand |
@@ -145,10 +148,10 @@ Environment variables and `config.toml` are set by the user, so they are trusted
 | Uploads from helpers | `Api::upload_resumable` (resumes after failed chunks, keeps the session on the request's origin) |
 | Enum flags | clap `value_parser` / `PossibleValuesParser` |
 | Free text shown on a terminal | `output::sanitize_for_terminal()` |
-| API base URLs | `validate::validate_api_base()` (enforces the token-host policy) |
+| API base URLs | `validate::validate_api_base_with()` / `EndpointPolicy` from `env::get()?.endpoint_policy()` (enforces the token-host policy) |
 | Destructive or outbound actions | `confirm::confirm(matches, Impact::…, "what will happen")`, and register `-y/--yes` with `confirm::with_yes()` |
 
-Path validators apply `GWSR_RESTRICT_PATHS`. By default any path is allowed; `cwd` confines paths to the current directory. Either way they resolve symlinks and reject control characters.
+The binary's path validators (`crate::validate`) apply the validated `GWSR_RESTRICT_PATHS`. By default any path is allowed; `cwd` confines paths to the current directory. Either way they resolve symlinks and reject control characters.
 
 ## Helper commands (`+verb`)
 
