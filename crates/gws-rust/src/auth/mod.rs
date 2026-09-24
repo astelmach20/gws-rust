@@ -330,10 +330,10 @@ pub fn scopes_for_method(
 /// Priority: `GWSR_PROJECT_ID`, then the OAuth client configuration's project,
 /// then `quota_project_id` from Application Default Credentials.
 pub fn get_quota_project() -> Option<String> {
-    if let Ok(project_id) = std::env::var("GWSR_PROJECT_ID")
-        && !project_id.is_empty()
-    {
-        return Some(project_id);
+    match profiles::env_string("GWSR_PROJECT_ID") {
+        Ok(Some(project_id)) => return Some(project_id),
+        Ok(None) => {}
+        Err(e) => eprintln!("warning: ignoring GWSR_PROJECT_ID: {e:#}"),
     }
     match client_config::load_saved() {
         Ok(Some(config)) => {

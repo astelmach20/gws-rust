@@ -56,7 +56,10 @@ pub(super) fn handle_use(m: &clap::ArgMatches) -> Result<(), GwsError> {
         .ok_or_else(|| GwsError::Validation("a profile name is required".into()))?;
     let base = profiles::try_config_dir().map_err(|e| auth_err(format!("{e:#}")))?;
     let mut report = use_profile(&base, name)?;
-    if std::env::var("GWSR_PROFILE").is_ok_and(|v| !v.is_empty()) {
+    if profiles::env_string("GWSR_PROFILE")
+        .map_err(|e| GwsError::Validation(format!("{e:#}")))?
+        .is_some()
+    {
         report["warning"] = json!(
             "GWSR_PROFILE is set in this environment and takes precedence over `gwsr auth use`"
         );

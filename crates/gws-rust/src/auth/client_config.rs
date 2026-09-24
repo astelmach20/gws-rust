@@ -171,10 +171,6 @@ pub fn load_saved() -> anyhow::Result<Option<ClientConfig>> {
     load_from(&client_config_path()?)
 }
 
-fn env_nonempty(name: &str) -> Option<String> {
-    std::env::var(name).ok().filter(|v| !v.is_empty())
-}
-
 fn builtin_client() -> anyhow::Result<Option<(String, SecretString)>> {
     resolve_pair(
         BUILTIN_CLIENT_ID
@@ -210,8 +206,8 @@ pub fn resolve() -> anyhow::Result<ClientConfig> {
     let path = client_config_path()?;
     let saved = load_from(&path)?;
     let env = resolve_pair(
-        env_nonempty("GWSR_CLIENT_ID"),
-        env_nonempty("GWSR_CLIENT_SECRET"),
+        super::profiles::env_string("GWSR_CLIENT_ID")?,
+        super::profiles::env_string("GWSR_CLIENT_SECRET")?,
         "only one of GWSR_CLIENT_ID / GWSR_CLIENT_SECRET is set; set both or neither",
     )?;
     resolve_from(env, saved, builtin_client()?, &path)

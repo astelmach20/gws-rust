@@ -39,6 +39,8 @@ pub struct SetupOptions {
     pub project: Option<String>,
     pub dry_run: bool,
     pub login: bool,
+    /// Never start the terminal UI or prompt, even on a terminal.
+    pub non_interactive: bool,
 }
 
 fn setup_command() -> clap::Command {
@@ -63,6 +65,12 @@ fn setup_command() -> clap::Command {
                 .help("Preview changes without making them")
                 .action(clap::ArgAction::SetTrue),
         )
+        .arg(
+            clap::Arg::new("non-interactive")
+                .long("non-interactive")
+                .help("Never show the terminal UI or prompt; print JSON with the next steps")
+                .action(clap::ArgAction::SetTrue),
+        )
 }
 
 /// Parse setup flags; `Ok(None)` if help was printed.
@@ -78,6 +86,7 @@ pub fn parse_setup_args(args: &[String]) -> Result<Option<SetupOptions>, GwsErro
         project: m.get_one::<String>("project").cloned(),
         dry_run: m.get_flag("dry-run"),
         login: m.get_flag("login"),
+        non_interactive: m.get_flag("non-interactive"),
     }))
 }
 
@@ -731,7 +740,10 @@ pub async fn run_setup(args: &[String]) -> Result<(), GwsError> {
     let Some(opts) = parse_setup_args(args)? else {
         return Ok(());
     };
-    let interactive = std::io::stdin().is_terminal() && !opts.dry_run;
+    let interactive = !opts.non_interactive
+        && !opts.dry_run
+        && std::io::stdin().is_terminal()
+        && std::io::stdout().is_terminal();
     if opts.dry_run {
         eprintln!("DRY RUN: no changes will be made\n");
     }
@@ -840,7 +852,8 @@ mod tests {
             SetupOptions {
                 project: None,
                 dry_run: false,
-                login: false
+                login: false,
+                non_interactive: false,
             }
         );
         let o = parse_setup_args(&["--project=p".into(), "--dry-run".into(), "--login".into()])
@@ -848,6 +861,10 @@ mod tests {
             .unwrap();
         assert_eq!(o.project.as_deref(), Some("p"));
         assert!(o.dry_run && o.login);
+        let o = parse_setup_args(&["--non-interactive".into()])
+            .unwrap()
+            .unwrap();
+        assert!(o.non_interactive);
         assert!(parse_setup_args(&["--verbose".into()]).is_err());
         assert!(parse_setup_args(&["--help".into()]).unwrap().is_none());
     }

@@ -134,6 +134,22 @@ pub(crate) fn extract_global_flags(args: &mut Vec<String>) -> Result<GlobalOverr
     Ok(out)
 }
 
+/// Read a string environment variable; unset or empty is `None`.
+///
+/// # Errors
+///
+/// The variable is set but not valid UTF-8 (never silently ignored).
+pub fn env_string(name: &str) -> anyhow::Result<Option<String>> {
+    match std::env::var(name) {
+        Ok(v) if v.is_empty() => Ok(None),
+        Ok(v) => Ok(Some(v)),
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(std::env::VarError::NotUnicode(_)) => {
+            anyhow::bail!("environment variable {name} is not valid UTF-8")
+        }
+    }
+}
+
 /// Base configuration directory: `GWSR_CONFIG_DIR` or `~/.config/gwsr`.
 ///
 /// # Errors
@@ -208,7 +224,7 @@ pub struct ActiveProfile {
 /// Fails on an invalid name or an unreadable `active_profile` file.
 pub fn active_profile(base: &Path) -> anyhow::Result<ActiveProfile> {
     let flag = overrides().and_then(|o| o.profile.clone());
-    let env = std::env::var("GWSR_PROFILE").ok().filter(|v| !v.is_empty());
+    let env = env_string("GWSR_PROFILE")?;
     resolve_active_profile(base, flag, env)
 }
 
@@ -395,11 +411,15 @@ pub fn save_metadata(path: &Path, meta: &ProfileMetadata) -> anyhow::Result<()> 
 
 /// The service-account subject to impersonate: `--impersonate`, then
 /// `GWSR_IMPERSONATE`.
-pub fn impersonation_subject() -> Option<String> {
-    overrides()
-        .and_then(|o| o.impersonate.clone())
-        .or_else(|| std::env::var("GWSR_IMPERSONATE").ok())
-        .filter(|s| !s.is_empty())
+///
+/// # Errors
+///
+/// `GWSR_IMPERSONATE` is not valid UTF-8.
+pub fn impersonation_subject() -> anyhow::Result<Option<String>> {
+    if let Some(s) = overrides().and_then(|o| o.impersonate.clone()) {
+        return Ok(Some(s));
+    }
+    env_string("GWSR_IMPERSONATE")
 }
 
 #[cfg(test)]
