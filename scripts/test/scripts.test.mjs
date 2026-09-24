@@ -167,3 +167,60 @@ describe("check-changeset.sh", () => {
     assert.match(res.stdout, /Generated google-\* crates are not allowed/);
   });
 });
+
+describe("install-hooks.sh", () => {
+  const git = (cwd, ...args) =>
+    execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@example.com", ...args], {
+      cwd,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+  // A fake `lefthook` that records that it ran, so no real hooks are touched.
+  const setup = () => {
+    const root = tmp("gwsr-hooks-");
+    const repo = path.join(root, "repo");
+    fs.mkdirSync(repo);
+    git(repo, "init", "-q");
+    git(repo, "commit", "-q", "--allow-empty", "-m", "init");
+    const bin = path.join(root, "bin");
+    fs.mkdirSync(bin);
+    const marker = path.join(root, "lefthook-ran");
+    fs.writeFileSync(path.join(bin, "lefthook"), `#!/bin/sh\necho "$@" > "${marker}"\n`, {
+      mode: 0o755,
+    });
+    const env = { ...process.env, PATH: `${bin}${path.delimiter}${process.env.PATH}` };
+    return { root, repo, marker, env };
+  };
+
+  it("installs from a primary checkout", () => {
+    const { repo, marker, env } = setup();
+    const res = run("install-hooks.sh", [], { cwd: repo, env });
+    assert.equal(res.status, 0, res.stderr);
+    assert.equal(fs.readFileSync(marker, "utf8").trim(), "install");
+  });
+
+  it("refuses in a linked worktree, whose hooks are the shared .git's", () => {
+    const { root, repo, marker, env } = setup();
+    const wt = path.join(root, "wt");
+    git(repo, "worktree", "add", "-q", wt);
+    const res = run("install-hooks.sh", [], { cwd: wt, env });
+    assert.equal(res.status, 1);
+    assert.match(res.stderr, /linked git worktree/);
+    assert.equal(fs.existsSync(marker), false, "lefthook must not run");
+  });
+});
+
+describe("package.json", () => {
+  const pkg = JSON.parse(fs.readFileSync(path.join(scriptsDir, "..", "package.json"), "utf8"));
+
+  it("never installs git hooks implicitly on install", () => {
+    for (const hook of ["prepare", "postinstall", "install", "preinstall"]) {
+      assert.equal(pkg.scripts[hook], undefined, `scripts.${hook} must not exist`);
+    }
+    assert.equal(pkg.scripts.hooks, "bash scripts/install-hooks.sh");
+  });
+
+  it("pins pnpm by version and sha512", () => {
+    assert.match(pkg.packageManager, /^pnpm@\d+\.\d+\.\d+\+sha512\.[0-9a-f]{128}$/);
+  });
+});
