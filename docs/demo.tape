@@ -1,4 +1,5 @@
-# GWS CLI — README Demo
+# gwsr: README demo
+# Records against a real (test) account. Use a throwaway account.
 # Run: vhs docs/demo.tape
 #
 # All cosmetic sleeps minimized. API sleeps kept for responses.
@@ -31,6 +32,8 @@ Type `gwsr drive files create --json "{\"name\":\"quarterly-report.csv\",\"mimeT
 Sleep 2s
 Type `gwsr drive files create --json "{\"name\":\"project-roadmap.md\",\"mimeType\":\"text/markdown\",\"parents\":[\"$DEMO\"]}" > /dev/null` Enter
 Sleep 2s
+Type `SHEET=$(gwsr sheets +create --title gwsr-demo | jq -r '.spreadsheetId')` Enter
+Sleep 3s
 Type `Q="'$DEMO' in parents"` Enter
 Sleep 500ms
 Type "clear" Enter
@@ -133,12 +136,8 @@ Sleep 1s
 Type "JOKE=$(gemini 'tell me a joke')" Enter
 Sleep 1s
 
-Type `MSG=$(echo -e "To: justin@example.com\nSubject: joke of the day\n\n$JOKE" | base64 | tr -d '\n' | tr '+/' '-_' | tr -d '=')` Enter
-
-Type "gwsr gmail users messages send" 
-Type ` --params '{"userId":"me"}'` 
-Type ` --json "{\"raw\":\"$MSG\"}"` 
-Type " | jq ." Enter
+Type "gwsr gmail +send --to justin@example.com --subject 'joke of the day'" 
+Type ` --body "$JOKE" --draft` Enter
 Sleep 3s
 
 # ── Scene 7: Calendar event ──
@@ -150,7 +149,7 @@ Sleep 1s
 
 Type "gwsr calendar events insert" 
 Type ` --params '{"calendarId":"primary"}'` 
-Type ` --json '{"summary":"Ship v1.0 🚀","start":{"dateTime":"2024-06-17T10:00:00-07:00"},"end":{"dateTime":"2024-06-17T10:30:00-07:00"}}'` 
+Type ` --json '{"summary":"Ship v1.0","start":{"dateTime":"2024-06-17T10:00:00-07:00"},"end":{"dateTime":"2024-06-17T10:30:00-07:00"}}'` 
 Type " | jq . | head -15" Enter
 Sleep 3s
 
@@ -162,7 +161,7 @@ Show
 Sleep 1s
 
 Type "gwsr sheets spreadsheets values append" 
-Type ` --params '{"spreadsheetId":"1izmtvgBC4NuxHhABFX6descuB6-SXTm3g7c6LYBngJQ","range":"Sheet1!A1","valueInputOption":"USER_ENTERED"}'` 
+Type ` --params "{\"spreadsheetId\":\"$SHEET\",\"range\":\"Sheet1!A1\",\"valueInputOption\":\"USER_ENTERED\"}"` 
 Type ` --json '{"values":[["Deploy","v1.0","=NOW()"]]}'` Enter
 Sleep 3s
 
@@ -193,5 +192,6 @@ Sleep 1s
 
 # ── Cleanup (hidden) ──
 Hide
-Type `gwsr drive files delete --params "{\"fileId\":\"$DEMO\"}" > /dev/null 2>&1` Enter
+Type `gwsr drive files delete --params "{\"fileId\":\"$DEMO\"}" --yes > /dev/null 2>&1` Enter
+Type `gwsr drive files delete --params "{\"fileId\":\"$SHEET\"}" --yes > /dev/null 2>&1` Enter
 Sleep 3s

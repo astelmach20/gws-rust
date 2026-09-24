@@ -1,40 +1,38 @@
 # gws-rust-core
 
-Core Rust library for interacting with Google Workspace APIs via the [Discovery Service](https://developers.google.com/discovery).
-
-This crate provides the foundational types and utilities used by the [`gws-rust`](https://crates.io/crates/gws-rust) (`gwsr`) command-line tool, and can be used independently for programmatic access.
-
-> **Dynamic Discovery** — this library fetches Google's Discovery Documents at runtime rather than relying on generated client crates. When Google adds or updates an API endpoint, your code picks it up automatically.
+The library behind [`gws-rust`](https://crates.io/crates/gws-rust) (the `gwsr` CLI). It works with Google Workspace APIs through the [Discovery Service](https://developers.google.com/discovery): it fetches Discovery documents at runtime instead of using generated per-API client crates.
 
 ## Modules
 
 | Module | Description |
 |---|---|
-| `discovery` | Discovery Document types (`RestDescription`, `RestMethod`, etc.) and async fetch with optional disk caching |
-| `services` | Service registry mapping aliases (e.g., `drive`) to API name/version pairs |
-| `error` | Structured `GwsError` enum with exit codes and JSON serialization |
-| `validate` | Input validation: path safety, resource name checks, URL encoding |
-| `client` | HTTP client builder with automatic retry logic |
+| `discovery` | Discovery document types (`RestDescription`, `RestResource`, `RestMethod`, ...) and `DiscoveryLoader`, which fetches, validates and optionally caches them on disk (`DiscoveryCache`: 0600 files, 24-hour TTL, stale fallback) |
+| `services` | The Workspace service registry (`SERVICES`) and `resolve_service()` for aliases and `<api>:<version>` specs |
+| `client` | The shared `reqwest` client, `RetryPolicy` and `send()` (exponential backoff with jitter, `Retry-After`, no re-send of non-idempotent requests) |
+| `validate` | Input validation: path policy, resource names, URL path encoding, API endpoint trust, Model Armor template names |
+| `error` | `GwsError` with stable exit codes and the JSON error envelope |
+
+The `anyhow` feature adds `From<anyhow::Error> for GwsError`.
 
 ## Usage
 
 ```rust
-use gws_rust_core::discovery::fetch_discovery_document;
+use gws_rust_core::discovery::{DiscoveryCache, DiscoveryLoader};
 use gws_rust_core::services::resolve_service;
 
 #[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    let (api, version) = resolve_service("drive").unwrap();
-    let doc = fetch_discovery_document(api, version, None).await?;
-
-    println!("{} {} — {} resources",
-        doc.name, doc.version,
-        doc.resources.len(),
-    );
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let (api, version) = resolve_service("drive")?;
+    let loaded = DiscoveryLoader::new()
+        .with_cache(DiscoveryCache::new(std::env::temp_dir().join("discovery")))
+        .load(&api, &version)
+        .await?;
+    let doc = loaded.doc;
+    println!("{} {}: {} resources", doc.name, doc.version, doc.resources.len());
     Ok(())
 }
 ```
 
 ## License
 
-Apache-2.0 — see [LICENSE](https://github.com/astelmach20/gws-rust/blob/main/LICENSE).
+Apache-2.0; see [LICENSE](https://github.com/astelmach20/gws-rust/blob/main/LICENSE) and [NOTICE](https://github.com/astelmach20/gws-rust/blob/main/NOTICE).
