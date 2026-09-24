@@ -430,6 +430,7 @@ struct Audit {
 
 /// `--since`: RFC 3339, or a look-back like `24h`/`7d`/`30m` relative to `now`.
 fn parse_since(s: &str, now: chrono::DateTime<chrono::Utc>) -> Result<String, GwsError> {
+    // Not RFC 3339 is not an error yet: it may be a look-back, parsed next.
     if let Ok(t) = chrono::DateTime::parse_from_rfc3339(s) {
         return Ok(t
             .with_timezone(&chrono::Utc)

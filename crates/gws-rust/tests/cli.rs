@@ -495,6 +495,26 @@ fn auth_configuration_errors_exit_with_the_config_code() {
         .stderr(predicate::str::contains("GWSR_PROFILE"));
 }
 
+#[cfg(unix)]
+#[test]
+fn non_utf8_environment_values_are_config_errors_not_ignored() {
+    use std::os::unix::ffi::OsStrExt;
+    let bad = std::ffi::OsStr::from_bytes(b"\xff");
+    for var in ["GWSR_FORMAT", "GWSR_LOG"] {
+        let env = Env::new();
+        env.cmd()
+            .args(["cache", "clear"])
+            .env(var, bad)
+            .assert()
+            .code(8)
+            .stdout("")
+            .stderr(predicate::str::contains("\"configError\""))
+            .stderr(predicate::str::contains(format!(
+                "{var} is not valid UTF-8"
+            )));
+    }
+}
+
 #[test]
 fn schema_honors_format() {
     let env = Env::new();

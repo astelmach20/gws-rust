@@ -917,18 +917,32 @@ async fn list_children(api: &Api, folder_id: &str) -> Result<Vec<Value>, GwsErro
     Ok(page.items)
 }
 
-fn is_up_to_date(local: &Path, remote_modified: Option<&str>) -> bool {
+/// Whether the local copy is at least as new as the Drive item. A missing
+/// local file or a missing/unparseable remote `modifiedTime` means "download
+/// it" (the safe answer); a local file that exists but cannot be inspected is
+/// an error rather than a silent re-download over it.
+fn is_up_to_date(local: &Path, remote_modified: Option<&str>) -> Result<bool, GwsError> {
     let Some(remote) = remote_modified.and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
     else {
-        return false;
+        return Ok(false);
     };
-    let Ok(meta) = std::fs::metadata(local) else {
-        return false;
+    let meta = match std::fs::metadata(local) {
+        Ok(m) => m,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(e) => {
+            return Err(GwsError::other(anyhow::anyhow!(
+                "cannot inspect '{}': {e}",
+                local.display()
+            )));
+        }
     };
-    let Ok(modified) = meta.modified() else {
-        return false;
-    };
-    chrono::DateTime::<chrono::Utc>::from(modified) >= remote.with_timezone(&chrono::Utc)
+    let modified = meta.modified().map_err(|e| {
+        GwsError::other(anyhow::anyhow!(
+            "cannot read the modification time of '{}': {e}",
+            local.display()
+        ))
+    })?;
+    Ok(chrono::DateTime::<chrono::Utc>::from(modified) >= remote.with_timezone(&chrono::Utc))
 }
 
 async fn sync(api: &Api, folder_id: &str, dir: &Path) -> Result<Value, GwsError> {
@@ -982,7 +996,7 @@ async fn sync(api: &Api, folder_id: &str, dir: &Path) -> Result<Value, GwsError>
                 used_names.insert(local_name.clone());
             }
             let path = local_dir.join(&local_name);
-            if is_up_to_date(&path, modified) {
+            if is_up_to_date(&path, modified)? {
                 unchanged.push(path.display().to_string());
                 continue;
             }
@@ -1426,5 +1440,27 @@ mod tests {
         ] {
             assert!(names.contains(&n), "{n}");
         }
+    }
+
+    #[test]
+    fn up_to_date_compares_mtimes_and_treats_missing_as_stale() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("f");
+        assert!(!is_up_to_date(&p, Some("2000-01-01T00:00:00Z")).unwrap());
+        std::fs::write(&p, b"x").unwrap();
+        assert!(is_up_to_date(&p, Some("2000-01-01T00:00:00Z")).unwrap());
+        assert!(!is_up_to_date(&p, Some("2999-01-01T00:00:00Z")).unwrap());
+        assert!(!is_up_to_date(&p, None).unwrap());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn up_to_date_surfaces_an_uninspectable_local_file() {
+        // A path through a regular file fails with NotADirectory, not NotFound.
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("f");
+        std::fs::write(&file, b"x").unwrap();
+        let err = is_up_to_date(&file.join("child"), Some("2000-01-01T00:00:00Z")).unwrap_err();
+        assert!(err.to_string().contains("cannot inspect"), "{err}");
     }
 }

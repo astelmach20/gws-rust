@@ -93,7 +93,10 @@ fn main() -> ExitCode {
         return finish(Err(e.into()), human);
     }
 
-    let mut log_opts = logging::LogOptions::from_env(prescan.verbosity);
+    let mut log_opts = match logging::LogOptions::from_env(prescan.verbosity) {
+        Ok(opts) => opts,
+        Err(e) => return finish(Err(e.into()), human),
+    };
     log_opts.config_log = settings.log.clone();
     log_opts.human = human || prescan.verbosity > 0;
     if log_opts.file_dir.is_none() {
@@ -134,6 +137,11 @@ fn main() -> ExitCode {
 
 /// True when the effective output format is a human one (not JSON):
 /// `--format` flag > `GWSR_FORMAT` > config file > JSON.
+///
+/// This only picks the form of an error report, possibly before the flag and
+/// config are validated, so unparseable values are skipped here on purpose:
+/// clap rejects a bad `--format` and `config::load` a bad `GWSR_FORMAT`, and
+/// those errors are then reported (as JSON, the default).
 fn human_output(flag: Option<&str>, config: Option<OutputFormat>) -> bool {
     let from_flag = flag.and_then(|f| OutputFormat::parse(f).ok());
     let from_env = std::env::var("GWSR_FORMAT")
@@ -152,6 +160,7 @@ fn finish(result: Result<(), CliError>, human: bool) -> ExitCode {
         Err(e) => {
             tracing::debug!(error = ?e, "command failed");
             error::report(&e, human);
+            // Exit codes are 1..=10; the saturation is unreachable.
             ExitCode::from(u8::try_from(e.exit_code()).unwrap_or(u8::MAX))
         }
     }

@@ -134,6 +134,10 @@ pub enum Callback {
 }
 
 /// Parse a request target (`/?state=..&code=..`) or a full pasted URL.
+///
+/// The target is untrusted input from whatever reaches the loopback port, so
+/// every parse failure maps to a defined outcome (`WrongPath`, `BadState`,
+/// `Malformed`) that the caller acts on, rather than to an error.
 pub fn parse_callback(target: &str, expected_state: &str) -> Callback {
     let base = Url::parse("http://127.0.0.1/").ok();
     let parsed = if target.starts_with("http://") || target.starts_with("https://") {
@@ -196,6 +200,11 @@ fn page(title: &str, message: &str) -> String {
 }
 
 /// Read the request line of one HTTP request (bounded size and time).
+///
+/// `None` means this connection is not a usable request (read error, timeout,
+/// not HTTP); the caller drops it and keeps waiting for the real redirect,
+/// since browsers open speculative connections and anything local can
+/// connect. The overall login timeout still bounds the wait.
 async fn read_request_target(stream: &mut tokio::net::TcpStream) -> Option<String> {
     let mut buf = Vec::with_capacity(1024);
     let read = async {
