@@ -874,12 +874,16 @@ async fn resumable_upload_resumes_after_chunk_failure() {
         .await;
 
     let data: Vec<u8> = (0..total).map(|i| (i % 251) as u8).collect();
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("big.bin");
+    std::fs::write(&file, &data).unwrap();
+    let file_path = file.to_str().unwrap().to_string();
     let d = doc(&server.uri());
     let mut call = Call::new(&d, "create", &server);
     call.body = Some(json!({"name": "big.bin"}));
-    call.upload = Some(UploadSource::Bytes {
-        data: &data,
-        content_type: "application/octet-stream",
+    call.upload = Some(UploadSource::File {
+        path: &file_path,
+        content_type: Some("application/octet-stream"),
     });
     call.options.upload_mode = UploadMode::Resumable;
     let em = Emitter::capturing();
@@ -902,11 +906,15 @@ async fn upload_session_uri_on_foreign_host_is_refused() {
         )
         .mount(&server)
         .await;
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("x.txt");
+    std::fs::write(&file, b"x").unwrap();
+    let file_path = file.to_str().unwrap().to_string();
     let d = doc(&server.uri());
     let mut call = Call::new(&d, "create", &server);
-    call.upload = Some(UploadSource::Bytes {
-        data: b"x",
-        content_type: "text/plain",
+    call.upload = Some(UploadSource::File {
+        path: &file_path,
+        content_type: None,
     });
     call.options.upload_mode = UploadMode::Resumable;
     let err = call.run(&Emitter::capturing()).await.unwrap_err();
