@@ -293,10 +293,6 @@ fn leaf_matches(m: &clap::ArgMatches) -> &clap::ArgMatches {
 }
 
 /// Convert an [`super::AuthError`] (or any error) into a CLI error.
-pub(crate) fn auth_err(e: impl std::fmt::Display) -> GwsError {
-    GwsError::Auth(e.to_string())
-}
-
 /// Print a command's JSON result to stdout in the configured format.
 pub(crate) fn print_json(value: &serde_json::Value) -> Result<(), GwsError> {
     crate::formatter::emit_default(value)

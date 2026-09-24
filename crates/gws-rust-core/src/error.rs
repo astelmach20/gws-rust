@@ -48,9 +48,29 @@ pub enum GwsError {
     #[error("{0}")]
     Validation(String),
 
-    /// Authentication or authorization failure.
+    /// Authentication or authorization failure: no usable credential, a
+    /// refresh token that was rejected, refused scopes, denied consent, or an
+    /// error from Google's OAuth token endpoint.
     #[error("{0}")]
     Auth(String),
+
+    /// Invalid, missing or conflicting local configuration: environment
+    /// variables, config files, profiles, OAuth client or service-account
+    /// files. Fixed by changing the configuration, not by retrying.
+    #[error("{0}")]
+    Config(String),
+
+    /// The local credential store failed: the OS keyring or key file, or
+    /// reading, writing or decrypting stored credentials and tokens.
+    #[error("{0}")]
+    CredentialStore(String),
+
+    /// No HTTP response was received: connection, DNS or TLS failure, a
+    /// timeout, or a body that stopped arriving. Not marked retryable: a
+    /// non-idempotent request may or may not have been applied. The source
+    /// chain is preserved.
+    #[error("{}", format_chain(.0.as_ref()))]
+    Network(BoxError),
 
     /// Discovery Document could not be fetched, parsed, or trusted.
     #[error("{0}")]
@@ -100,6 +120,12 @@ impl GwsError {
     pub const EXIT_CODE_API_RETRYABLE: i32 = 6;
     /// Exit code for [`GwsError::ConfirmationRequired`].
     pub const EXIT_CODE_CONFIRMATION_REQUIRED: i32 = 7;
+    /// Exit code for [`GwsError::Config`].
+    pub const EXIT_CODE_CONFIG: i32 = 8;
+    /// Exit code for [`GwsError::CredentialStore`].
+    pub const EXIT_CODE_CREDENTIAL_STORE: i32 = 9;
+    /// Exit code for [`GwsError::Network`].
+    pub const EXIT_CODE_NETWORK: i32 = 10;
 
     /// Wrap any error (or message) as [`GwsError::Other`].
     pub fn other(err: impl Into<BoxError>) -> Self {
@@ -128,6 +154,9 @@ impl GwsError {
             GwsError::Validation(_) => Self::EXIT_CODE_VALIDATION,
             GwsError::Discovery(_) => Self::EXIT_CODE_DISCOVERY,
             GwsError::ConfirmationRequired(_) => Self::EXIT_CODE_CONFIRMATION_REQUIRED,
+            GwsError::Config(_) => Self::EXIT_CODE_CONFIG,
+            GwsError::CredentialStore(_) => Self::EXIT_CODE_CREDENTIAL_STORE,
+            GwsError::Network(_) => Self::EXIT_CODE_NETWORK,
             GwsError::Other(_) => Self::EXIT_CODE_OTHER,
         }
     }
@@ -177,6 +206,27 @@ impl GwsError {
                     "code": 412,
                     "message": msg,
                     "reason": "confirmationRequired",
+                }
+            }),
+            GwsError::Config(msg) => json!({
+                "error": {
+                    "code": 400,
+                    "message": msg,
+                    "reason": "configError",
+                }
+            }),
+            GwsError::CredentialStore(msg) => json!({
+                "error": {
+                    "code": 500,
+                    "message": msg,
+                    "reason": "credentialStoreError",
+                }
+            }),
+            GwsError::Network(_) => json!({
+                "error": {
+                    "code": 503,
+                    "message": self.to_string(),
+                    "reason": "networkError",
                 }
             }),
             GwsError::Other(_) => json!({
@@ -263,6 +313,9 @@ mod tests {
             GwsError::EXIT_CODE_OTHER,
             GwsError::EXIT_CODE_API_RETRYABLE,
             GwsError::EXIT_CODE_CONFIRMATION_REQUIRED,
+            GwsError::EXIT_CODE_CONFIG,
+            GwsError::EXIT_CODE_CREDENTIAL_STORE,
+            GwsError::EXIT_CODE_NETWORK,
         ];
         let unique: std::collections::HashSet<i32> = codes.iter().copied().collect();
         assert_eq!(
@@ -312,6 +365,33 @@ mod tests {
         assert_eq!(json["error"]["code"], 500);
         assert_eq!(json["error"]["message"], "Failed to fetch doc");
         assert_eq!(json["error"]["reason"], "discoveryError");
+    }
+
+    #[test]
+    fn config_credential_store_and_network_have_own_codes_and_reasons() {
+        let cases = [
+            (GwsError::Config("bad env".into()), 8, "configError", 400),
+            (
+                GwsError::CredentialStore("keyring locked".into()),
+                9,
+                "credentialStoreError",
+                500,
+            ),
+            (
+                GwsError::Network("dns failure".into()),
+                10,
+                "networkError",
+                503,
+            ),
+        ];
+        for (err, exit, reason, code) in cases {
+            assert_eq!(err.exit_code(), exit, "{err:?}");
+            let json = err.to_json();
+            assert_eq!(json["error"]["reason"], reason);
+            assert_eq!(json["error"]["code"], code);
+            assert_eq!(json["error"]["message"], err.to_string());
+            assert!(!err.is_retryable());
+        }
     }
 
     #[test]

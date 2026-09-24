@@ -99,7 +99,7 @@ impl Credentials {
             {
                 Ok(Credentials::None)
             }
-            Err(e) => Err(GwsError::Auth(format!("Authentication failed: {e:#}"))),
+            Err(e) => Err(crate::auth::to_gws_error(e)),
         }
     }
 
@@ -251,9 +251,9 @@ impl Transport {
             return Ok(());
         };
         let fresh = provider.refresh_access_token().await.map_err(|e| {
-            GwsError::Auth(format!(
-                "Failed to refresh access token after HTTP 401: {e:#}"
-            ))
+            crate::auth::to_gws_error(
+                e.context("failed to refresh the access token after HTTP 401"),
+            )
         })?;
         let mut guard = self
             .shared
@@ -419,7 +419,7 @@ impl Transport {
 /// response timeout.
 pub(crate) fn is_timeout(err: &GwsError) -> bool {
     use gws_rust_core::client::SendError;
-    let GwsError::Other(e) = err else {
+    let (GwsError::Network(e) | GwsError::Other(e)) = err else {
         return false;
     };
     let root: &(dyn std::error::Error + 'static) = e.as_ref();
@@ -476,15 +476,23 @@ where
         Some(limit) => tokio::time::timeout(limit, stream.next())
             .await
             .map_err(|_| {
-                GwsError::other(anyhow::anyhow!(
-                    "no data received for {}s while reading the response body (see --timeout)",
-                    limit.as_secs()
-                ))
+                GwsError::Network(
+                    format!(
+                        "no data received for {}s while reading the response body (see --timeout)",
+                        limit.as_secs()
+                    )
+                    .into(),
+                )
             })?,
         None => stream.next().await,
     };
-    next.transpose()
-        .map_err(|e| GwsError::other(anyhow::Error::new(e).context("failed to read response body")))
+    next.transpose().map_err(|e| {
+        GwsError::Network(
+            anyhow::Error::new(e)
+                .context("failed to read response body")
+                .into(),
+        )
+    })
 }
 
 /// Timeout for a request that uploads `bytes`: the base response timeout plus
@@ -515,6 +523,26 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(v["ok"], true);
+    }
+
+    #[tokio::test]
+    async fn unreachable_server_is_a_network_error_with_context() {
+        // Bind then drop a listener so the port is closed.
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let base = format!("http://127.0.0.1:{port}");
+        let t = Transport::for_test(&base);
+        let err = t
+            .get_json(&format!("{base}/v1/x"), &[], "get x")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, GwsError::Network(_)), "{err:?}");
+        assert_eq!(err.exit_code(), GwsError::EXIT_CODE_NETWORK);
+        assert!(err.to_string().starts_with("get x"), "{err}");
+        assert!(!is_timeout(&err));
     }
 
     #[tokio::test]

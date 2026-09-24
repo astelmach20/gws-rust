@@ -313,7 +313,10 @@ impl From<SendError> for GwsError {
     fn from(err: SendError) -> Self {
         match err {
             SendError::Config(inner) => inner,
-            other => GwsError::other(other),
+            SendError::Build(_) => GwsError::other(err),
+            SendError::Transport { .. }
+            | SendError::Timeout { .. }
+            | SendError::ReadBody { .. } => GwsError::Network(Box::new(err)),
         }
     }
 }

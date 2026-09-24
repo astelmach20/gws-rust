@@ -232,7 +232,7 @@ jobs:
       # control, so drift is a warning here; the scheduled Generate Skills workflow opens a PR.
       - name: Check generated skills are current
         run: |
-          cargo run --locked -- generate-skills --output-dir skills
+          cargo run --locked -- dev generate-skills --output-dir skills --index docs/skills.md
           if ! git diff --quiet -- skills/; then
             git diff --stat -- skills/
             echo "::warning title=Skills drift::Generated skills differ from the committed ones. Run 'just skills' and commit the result if your change caused this."

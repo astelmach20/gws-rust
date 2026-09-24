@@ -746,7 +746,7 @@ Run `gwsr commands --json` for a machine-readable inventory of every service, re
 
 ## Errors and Exit Codes
 
-When stdout is piped, errors are printed to stdout as a single-line JSON object `{"error":{"code","message","reason","retryable","hint"?}}`; a human-readable message always goes to stderr. Exit codes: `0` success, `1` API error (permanent), `2` auth, `3` validation, `4` discovery, `5` internal, `6` API error that is safe to retry (429 / 5xx / rate limit).
+Errors are written to stderr as one JSON object `{"error":{"code","message","reason","retryable","hint"?}}` (human-readable text with a non-JSON `--format`); stdout stays empty on failure. Exit codes: `0` success, `1` API error (permanent), `2` auth, `3` validation, `4` discovery, `5` internal, `6` API error that is safe to retry (429 / 5xx / rate limit), `7` not confirmed (pass `--yes`), `8` configuration, `9` credential store (keyring / stored credentials), `10` network (no response; a non-idempotent call may have been applied).
 
 ## CLI Syntax
 

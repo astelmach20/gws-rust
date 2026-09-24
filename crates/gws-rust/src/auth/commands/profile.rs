@@ -18,23 +18,22 @@ use std::path::Path;
 
 use serde_json::{Value, json};
 
-use super::{auth_err, print_json};
+use super::print_json;
 use crate::auth::profiles::{self, ActiveProfile, ProfilePaths};
 use crate::error::GwsError;
 
 pub(super) fn handle_list() -> Result<(), GwsError> {
-    let base = profiles::try_config_dir().map_err(|e| auth_err(format!("{e:#}")))?;
-    let active = profiles::active_profile(&base).map_err(|e| auth_err(format!("{e:#}")))?;
+    let base = profiles::try_config_dir().map_err(crate::auth::to_gws_error)?;
+    let active = profiles::active_profile(&base).map_err(crate::auth::to_gws_error)?;
     print_json(&list_report(&base, &active)?)
 }
 
 pub(super) fn list_report(base: &Path, active: &ActiveProfile) -> Result<Value, GwsError> {
-    let names = profiles::list_profiles(base).map_err(|e| auth_err(format!("{e:#}")))?;
+    let names = profiles::list_profiles(base).map_err(crate::auth::to_gws_error)?;
     let mut rows = Vec::new();
     for name in names {
         let paths = ProfilePaths::new(base, &name);
-        let meta =
-            profiles::load_metadata(&paths.metadata).map_err(|e| auth_err(format!("{e:#}")))?;
+        let meta = profiles::load_metadata(&paths.metadata).map_err(crate::auth::to_gws_error)?;
         rows.push(json!({
             "name": name,
             "active": name == active.name,
@@ -53,7 +52,7 @@ pub(super) fn list_report(base: &Path, active: &ActiveProfile) -> Result<Value, 
 pub(super) fn handle_use(m: &clap::ArgMatches) -> Result<(), GwsError> {
     let name = crate::args::value::<String>(m, "name")?
         .ok_or_else(|| GwsError::Validation("a profile name is required".into()))?;
-    let base = profiles::try_config_dir().map_err(|e| auth_err(format!("{e:#}")))?;
+    let base = profiles::try_config_dir().map_err(crate::auth::to_gws_error)?;
     let mut report = use_profile(&base, name)?;
     if profiles::env_string("GWSR_PROFILE")
         .map_err(|e| GwsError::Validation(format!("{e:#}")))?
@@ -74,7 +73,7 @@ pub(super) fn use_profile(base: &Path, name: &str) -> Result<Value, GwsError> {
             "profile '{name}' has no credentials; create it with `gwsr auth login --profile {name}`"
         )));
     }
-    profiles::set_active_profile(base, name).map_err(|e| auth_err(format!("{e:#}")))?;
+    profiles::set_active_profile(base, name).map_err(crate::auth::to_gws_error)?;
     Ok(json!({"status": "success", "active_profile": name}))
 }
 
