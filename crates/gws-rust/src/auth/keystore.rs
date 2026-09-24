@@ -234,7 +234,13 @@ impl BackendKind {
     ///
     /// Any other value is a hard error.
     pub fn from_env() -> Result<Self, KeystoreError> {
-        Self::parse(std::env::var("GWSR_KEYRING_BACKEND").ok().as_deref())
+        match std::env::var("GWSR_KEYRING_BACKEND") {
+            Ok(v) => Self::parse(Some(&v)),
+            Err(std::env::VarError::NotPresent) => Self::parse(None),
+            Err(std::env::VarError::NotUnicode(v)) => Err(KeystoreError::InvalidBackend(
+                v.to_string_lossy().into_owned(),
+            )),
+        }
     }
 
     fn parse(value: Option<&str>) -> Result<Self, KeystoreError> {

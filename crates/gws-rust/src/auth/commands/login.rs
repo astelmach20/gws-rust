@@ -204,7 +204,9 @@ pub(crate) async fn handle(m: &clap::ArgMatches) -> Result<(), GwsError> {
         .map_err(|e| auth_err(format!("key setup task failed: {e}")))??;
     }
 
-    let interactive = std::io::stdin().is_terminal() && std::io::stderr().is_terminal();
+    // The scope picker draws on stdout, so it needs a terminal there too.
+    let interactive = std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
+    let stderr_tty = std::io::stderr().is_terminal();
     let requested = finalize_scopes(
         resolve_scopes(
             args.scope_mode,
@@ -219,7 +221,7 @@ pub(crate) async fn handle(m: &clap::ArgMatches) -> Result<(), GwsError> {
     let opts = LoginOptions {
         scopes: requested.clone(),
         mode: args.mode,
-        open_browser: args.open_browser && interactive && args.mode == RedirectMode::Loopback,
+        open_browser: args.open_browser && stderr_tty && args.mode == RedirectMode::Loopback,
         timeout: args.timeout,
         login_hint: args.login_hint,
     };

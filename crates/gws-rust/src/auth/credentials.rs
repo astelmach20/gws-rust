@@ -222,10 +222,7 @@ impl AuthEnv {
     pub fn from_process() -> anyhow::Result<Self> {
         let (base, profile, paths) = super::profiles::active_profile_paths()?;
         let mut env = Self::new(base, profile, paths);
-        env.token = std::env::var("GWSR_TOKEN")
-            .ok()
-            .filter(|t| !t.is_empty())
-            .map(SecretString::from);
+        env.token = super::profiles::env_string("GWSR_TOKEN")?.map(SecretString::from);
         env.token_file = env_path("GWSR_TOKEN_FILE");
         env.credentials_file = env_path("GWSR_CREDENTIALS_FILE");
         env.adc_env = env_path("GOOGLE_APPLICATION_CREDENTIALS");
@@ -235,7 +232,7 @@ impl AuthEnv {
                 .join("gcloud")
                 .join("application_default_credentials.json")
         });
-        env.impersonate = super::profiles::impersonation_subject();
+        env.impersonate = super::profiles::impersonation_subject()?;
         Ok(env)
     }
 
