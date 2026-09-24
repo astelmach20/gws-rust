@@ -83,6 +83,10 @@ pub const EXIT_CODE_DOCUMENTATION: &[(i32, &str)] = &[
         GwsError::EXIT_CODE_NETWORK,
         "Network        — no response (connection, DNS, TLS, timeout); a non-idempotent call may have been applied",
     ),
+    (
+        GwsError::EXIT_CODE_SANITIZATION_BLOCKED,
+        "Blocked        — --sanitize in block mode: Model Armor matched the output, which was withheld",
+    ),
 ];
 
 /// Any failure that ends a `gwsr` invocation.
@@ -184,6 +188,14 @@ pub fn hint_for(err: &GwsError, ctx: &ErrorContext) -> Option<String> {
              raise --timeout for slow links. Before re-running a create or other \
              non-idempotent call, check whether it was applied. Exit code 10 marks network \
              failures."
+                .to_string(),
+        ),
+        GwsError::SanitizationBlocked(_) => Some(
+            "The request succeeded, but Model Armor matched its output, so nothing was printed \
+             (sanitize mode `block`). Do not retry to get around it. To see the output with a \
+             `_sanitization` annotation instead, use sanitize mode `warn` \
+             (GWSR_SANITIZE_MODE=warn or `sanitize_mode` in config.toml). Exit code 11 marks \
+             blocked output."
                 .to_string(),
         ),
         GwsError::Validation(_) | GwsError::Discovery(_) | GwsError::Other(_) => None,
@@ -317,6 +329,7 @@ fn kind_label(err: &CliError) -> &'static str {
             GwsError::Config(_) => "config",
             GwsError::CredentialStore(_) => "credential-store",
             GwsError::Network(_) => "network",
+            GwsError::SanitizationBlocked(_) => "blocked",
             GwsError::Other(_) => "internal",
             #[allow(unreachable_patterns)] // GwsError is #[non_exhaustive] in core
             _ => "internal",

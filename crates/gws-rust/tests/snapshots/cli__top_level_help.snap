@@ -101,6 +101,7 @@ Exit codes:
   8    Config         — invalid or missing configuration (env vars, config.toml, profile, OAuth client file)
   9    Cred. store    — OS keyring / key file or stored credentials unreadable, unwritable or undecryptable
   10   Network        — no response (connection, DNS, TLS, timeout); a non-idempotent call may have been applied
+  11   Blocked        — --sanitize in block mode: Model Armor matched the output, which was withheld
 
 Output is JSON by default (compact when piped); --format table|yaml|csv is opt-in.
 Errors: one JSON object {"error":{...}} on stderr (human text with a human --format);
