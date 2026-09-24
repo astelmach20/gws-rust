@@ -43,13 +43,10 @@ mod timezone;
 mod token_storage;
 pub(crate) mod validate;
 
-use error::{print_error_json, GwsError};
+use error::{GwsError, print_error_json};
 
 #[tokio::main]
 async fn main() {
-    // Load .env file if present (silently ignored if missing)
-    let _ = dotenvy::dotenv();
-
     // Initialize structured logging (no-op if env vars are unset)
     logging::init_logging();
 
@@ -201,10 +198,10 @@ async fn run() -> Result<(), GwsError> {
     let sanitize_config = parse_sanitize_config(sanitize_template, &sanitize_mode)?;
 
     // Check if a helper wants to handle this command
-    if let Some(helper) = helpers::get_helper(&doc.name) {
-        if helper.handle(&doc, &matches, &sanitize_config).await? {
-            return Ok(());
-        }
+    if let Some(helper) = helpers::get_helper(&doc.name)
+        && helper.handle(&doc, &matches, &sanitize_config).await?
+    {
+        return Ok(());
     }
 
     // Walk the subcommand tree to find the target method
@@ -455,7 +452,9 @@ fn print_usage() {
     println!("    --params <JSON>       URL/Query parameters as JSON");
     println!("    --json <JSON>         Request body as JSON (POST/PATCH/PUT)");
     println!("    --upload <PATH>       Local file to upload as media content (multipart)");
-    println!("    --upload-content-type <MIME>  MIME type of the uploaded file (auto-detected from extension if omitted)");
+    println!(
+        "    --upload-content-type <MIME>  MIME type of the uploaded file (auto-detected from extension if omitted)"
+    );
     println!("    --output <PATH>       Output file path for binary responses");
     println!("    --format <FMT>        Output format: json (default), table, yaml, csv");
     println!("    --api-version <VER>   Override the API version (e.g., v2, v3)");
@@ -534,7 +533,7 @@ mod tests {
             .get_matches_from(vec!["test"]);
 
         let config = parse_pagination_config(&matches);
-        assert_eq!(config.page_all, false);
+        assert!(!config.page_all);
         assert_eq!(config.page_limit, 10);
         assert_eq!(config.page_delay_ms, 100);
     }
@@ -567,7 +566,7 @@ mod tests {
             ]);
 
         let config = parse_pagination_config(&matches);
-        assert_eq!(config.page_all, true);
+        assert!(config.page_all);
         assert_eq!(config.page_limit, 20);
         assert_eq!(config.page_delay_ms, 500);
     }

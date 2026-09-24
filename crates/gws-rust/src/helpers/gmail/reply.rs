@@ -429,7 +429,7 @@ fn parse_reply_args(matches: &ArgMatches) -> Result<ReplyConfig, GwsError> {
         Err(e) => {
             return Err(GwsError::Other(anyhow::anyhow!(
                 "Unexpected error reading --remove argument: {e}"
-            )))
+            )));
         }
     };
 
@@ -498,12 +498,16 @@ mod tests {
 
         let to_header = extract_header(&raw, "To").unwrap();
         assert!(to_header.contains("alice@example.com"));
-        assert!(extract_header(&raw, "Subject")
-            .unwrap()
-            .contains("Re: Hello"));
-        assert!(extract_header(&raw, "In-Reply-To")
-            .unwrap()
-            .contains("abc@example.com"));
+        assert!(
+            extract_header(&raw, "Subject")
+                .unwrap()
+                .contains("Re: Hello")
+        );
+        assert!(
+            extract_header(&raw, "In-Reply-To")
+                .unwrap()
+                .contains("abc@example.com")
+        );
         assert!(raw.contains("text/plain"));
         assert!(raw.contains("My reply"));
         assert!(raw.contains("> Original body"));
@@ -542,15 +546,21 @@ mod tests {
         };
         let raw = create_reply_raw_message(&envelope, &original, &[]).unwrap();
 
-        assert!(extract_header(&raw, "Cc")
-            .unwrap()
-            .contains("carol@example.com"));
-        assert!(extract_header(&raw, "Bcc")
-            .unwrap()
-            .contains("secret@example.com"));
-        assert!(extract_header(&raw, "From")
-            .unwrap()
-            .contains("alias@example.com"));
+        assert!(
+            extract_header(&raw, "Cc")
+                .unwrap()
+                .contains("carol@example.com")
+        );
+        assert!(
+            extract_header(&raw, "Bcc")
+                .unwrap()
+                .contains("secret@example.com")
+        );
+        assert!(
+            extract_header(&raw, "From")
+                .unwrap()
+                .contains("alias@example.com")
+        );
     }
 
     #[test]
@@ -787,7 +797,7 @@ mod tests {
                     .action(ArgAction::Append),
             );
         let matches = cmd
-            .try_get_matches_from(&["test", "--message-id", "abc", "--body", "hi"])
+            .try_get_matches_from(["test", "--message-id", "abc", "--body", "hi"])
             .unwrap();
         let config = parse_reply_args(&matches).unwrap();
         assert!(config.remove.is_none());
@@ -1394,9 +1404,11 @@ mod tests {
 
         let to_header = extract_header(&raw, "To").unwrap();
         assert!(to_header.contains("bob@example.com"));
-        assert!(extract_header(&raw, "Bcc")
-            .unwrap()
-            .contains("alice@example.com"));
+        assert!(
+            extract_header(&raw, "Bcc")
+                .unwrap()
+                .contains("alice@example.com")
+        );
         assert!(raw.contains("Hi Bob, nice to meet you!"));
     }
 
@@ -1483,9 +1495,11 @@ mod tests {
         let decoded = strip_qp_soft_breaks(&raw);
 
         assert!(decoded.contains("text/html"));
-        assert!(extract_header(&raw, "To")
-            .unwrap()
-            .contains("alice@example.com"));
+        assert!(
+            extract_header(&raw, "To")
+                .unwrap()
+                .contains("alice@example.com")
+        );
         assert!(decoded.contains("<p>My HTML reply</p>"));
         assert!(decoded.contains("gmail_quote"));
         assert!(decoded.contains("<p>Original</p>"));

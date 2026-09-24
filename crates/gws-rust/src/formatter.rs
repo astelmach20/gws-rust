@@ -96,10 +96,10 @@ fn extract_items(value: &Value) -> Option<(&str, &Vec<Value>)> {
             if key == "nextPageToken" || key == "kind" || key.starts_with('_') {
                 continue;
             }
-            if let Value::Array(arr) = val {
-                if !arr.is_empty() {
-                    return Some((key, arr));
-                }
+            if let Value::Array(arr) = val
+                && !arr.is_empty()
+            {
+                return Some((key, arr));
             }
         }
     }

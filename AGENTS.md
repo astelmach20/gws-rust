@@ -102,7 +102,7 @@ ASCII art title cards live in `art/`. The `scripts/show-art.sh` helper clears th
 > This CLI is frequently invoked by AI/LLM agents. Always assume inputs can be adversarial — validate paths against traversal (`../../.ssh`), restrict format strings to allowlists, reject control characters, and encode user values before embedding them in URLs.
 
 > [!NOTE]
-> **Environment variables are trusted inputs.** The validation rules above apply to **CLI arguments** that may be passed by untrusted AI agents. Environment variables (e.g. `GWSR_CONFIG_DIR`) are set by the user themselves — in their shell profile, `.env` file, or deployment config — and are not subject to path traversal validation. This is consistent with standard conventions like `XDG_CONFIG_HOME`, `CARGO_HOME`, etc.
+> **Environment variables are trusted inputs.** The validation rules above apply to **CLI arguments** that may be passed by untrusted AI agents. Environment variables (e.g. `GWSR_CONFIG_DIR`) are set by the user themselves — in their shell profile or deployment config — and are not subject to path traversal validation. This is consistent with standard conventions like `XDG_CONFIG_HOME`, `CARGO_HOME`, etc.
 
 ### Path Safety (`crates/gws-rust-core/src/validate.rs`)
 
@@ -236,4 +236,4 @@ See [`src/helpers/README.md`](crates/gws-rust/src/helpers/README.md) for full gu
 | `GWSR_LOG` | Log level filter for stderr output (e.g., `gwsr=debug`). Off by default. |
 | `GWSR_LOG_FILE` | Directory for JSON-line log files with daily rotation. Off by default. |
 
-All variables can also live in a `.env` file (loaded via `dotenvy`).
+`gwsr` never loads `.env` files: a `.env` in an untrusted checkout could otherwise redirect credentials or TLS trust.

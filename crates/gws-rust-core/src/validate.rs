@@ -275,7 +275,7 @@ fn normalize_non_existing(path: &Path) -> Result<PathBuf, GwsError> {
 /// Percent-encode a value for use as a single URL path segment (e.g., file ID,
 /// calendar ID, message ID). All non-alphanumeric characters are encoded.
 pub fn encode_path_segment(s: &str) -> String {
-    use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
+    use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
     utf8_percent_encode(s, NON_ALPHANUMERIC).to_string()
 }
 

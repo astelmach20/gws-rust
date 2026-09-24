@@ -81,16 +81,17 @@ pub fn init_logging() {
     // The guard is leaked intentionally so the non-blocking writer stays
     // alive for the lifetime of the process.
     let subscriber = registry.with(stderr_layer).with(file_layer);
-    if tracing::subscriber::set_global_default(subscriber).is_ok() {
-        if let Some(guard) = _guard {
-            // Leak the guard so the non-blocking writer lives for the process lifetime.
-            // This is the recommended pattern from tracing-appender docs.
-            std::mem::forget(guard);
-        }
+    if tracing::subscriber::set_global_default(subscriber).is_ok()
+        && let Some(guard) = _guard
+    {
+        // Leak the guard so the non-blocking writer lives for the process lifetime.
+        // This is the recommended pattern from tracing-appender docs.
+        std::mem::forget(guard);
     }
 }
 
 #[cfg(test)]
+#[allow(unsafe_code)] // tests mutate process env; they are serialized with #[serial]
 mod tests {
     use super::*;
 
@@ -99,8 +100,10 @@ mod tests {
         // With no env vars set, init_logging should be a no-op and not panic.
         // We can't truly test the global subscriber in unit tests (it's global state),
         // but we can verify the early-return path doesn't panic.
-        std::env::remove_var(ENV_LOG);
-        std::env::remove_var(ENV_LOG_FILE);
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::remove_var(ENV_LOG) };
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::remove_var(ENV_LOG_FILE) };
         init_logging();
     }
 

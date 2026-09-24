@@ -98,6 +98,7 @@ pub fn load_client_config() -> anyhow::Result<InstalledConfig> {
 }
 
 #[cfg(test)]
+#[allow(unsafe_code)] // tests mutate process env; they are serialized with #[serial]
 mod tests {
     use super::*;
 
@@ -203,7 +204,8 @@ mod tests {
     impl EnvGuard {
         fn new(key: &str, value: &str) -> Self {
             let original_value = std::env::var(key).ok();
-            std::env::set_var(key, value);
+            // FIXME: Audit that the environment access only happens in single-threaded code.
+            unsafe { std::env::set_var(key, value) };
             Self {
                 key: key.to_string(),
                 original_value,
@@ -214,9 +216,11 @@ mod tests {
     impl Drop for EnvGuard {
         fn drop(&mut self) {
             if let Some(val) = &self.original_value {
-                std::env::set_var(&self.key, val);
+                // FIXME: Audit that the environment access only happens in single-threaded code.
+                unsafe { std::env::set_var(&self.key, val) };
             } else {
-                std::env::remove_var(&self.key);
+                // FIXME: Audit that the environment access only happens in single-threaded code.
+                unsafe { std::env::remove_var(&self.key) };
             }
         }
     }
@@ -247,8 +251,9 @@ mod tests {
 
         let result = load_client_config();
         let err = result.unwrap_err();
-        assert!(err
-            .to_string()
-            .contains("Invalid client_secret.json format"));
+        assert!(
+            err.to_string()
+                .contains("Invalid client_secret.json format")
+        );
     }
 }

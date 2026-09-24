@@ -22,9 +22,9 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 use anyhow::Context;
-use futures_util::stream::TryStreamExt;
 use futures_util::StreamExt;
-use serde_json::{json, Map, Value};
+use futures_util::stream::TryStreamExt;
+use serde_json::{Map, Value, json};
 use tokio::io::AsyncWriteExt;
 
 use crate::discovery::{RestDescription, RestMethod};
@@ -110,10 +110,10 @@ fn parse_and_validate_inputs(
         let val: Value = serde_json::from_str(b)
             .map_err(|e| GwsError::Validation(format!("Invalid --json body: {e}")))?;
 
-        if let Some(ref req_ref) = method.request {
-            if let Some(ref schema_name) = req_ref.schema_ref {
-                validate_body_against_schema(&val, schema_name, doc)?;
-            }
+        if let Some(ref req_ref) = method.request
+            && let Some(ref schema_name) = req_ref.schema_ref
+        {
+            validate_body_against_schema(&val, schema_name, doc)?;
         }
 
         Some(val)
@@ -122,16 +122,15 @@ fn parse_and_validate_inputs(
     };
 
     for param_name in &method.parameter_order {
-        if let Some(param_def) = method.parameters.get(param_name) {
-            if param_def.required
-                && param_def.location.as_deref() == Some("path")
-                && !params.contains_key(param_name)
-            {
-                return Err(GwsError::Validation(format!(
-                    "Required path parameter {} is missing. Provide it via --params",
-                    param_name
-                )));
-            }
+        if let Some(param_def) = method.parameters.get(param_name)
+            && param_def.required
+            && param_def.location.as_deref() == Some("path")
+            && !params.contains_key(param_name)
+        {
+            return Err(GwsError::Validation(format!(
+                "Required path parameter {} is missing. Provide it via --params",
+                param_name
+            )));
         }
     }
 
@@ -177,14 +176,14 @@ async fn build_http_request(
         other => {
             return Err(GwsError::Other(anyhow::anyhow!(
                 "Unsupported HTTP method: {other}"
-            )))
+            )));
         }
     };
 
-    if let Some(token) = token {
-        if *auth_method == AuthMethod::OAuth {
-            request = request.bearer_auth(token);
-        }
+    if let Some(token) = token
+        && *auth_method == AuthMethod::OAuth
+    {
+        request = request.bearer_auth(token);
     }
 
     // Set quota project from ADC for billing/quota attribution
@@ -262,7 +261,9 @@ async fn handle_json_response(
                 Ok(result) => {
                     let is_match = result.filter_match_state == "MATCH_FOUND";
                     if is_match {
-                        eprintln!("⚠️  Model Armor: prompt injection detected (filterMatchState: MATCH_FOUND)");
+                        eprintln!(
+                            "⚠️  Model Armor: prompt injection detected (filterMatchState: MATCH_FOUND)"
+                        );
                     }
 
                     if is_match && *sanitize_mode == crate::helpers::modelarmor::SanitizeMode::Block
@@ -312,19 +313,16 @@ async fn handle_json_response(
         }
 
         // Check for nextPageToken to continue pagination
-        if pagination.page_all {
-            if let Some(next_token) = json_val.get("nextPageToken").and_then(|v| v.as_str()) {
-                if *pages_fetched < pagination.page_limit {
-                    *page_token = Some(next_token.to_string());
-                    if pagination.page_delay_ms > 0 {
-                        tokio::time::sleep(std::time::Duration::from_millis(
-                            pagination.page_delay_ms,
-                        ))
-                        .await;
-                    }
-                    return Ok(true); // continue paginating
-                }
+        if pagination.page_all
+            && let Some(next_token) = json_val.get("nextPageToken").and_then(|v| v.as_str())
+            && *pages_fetched < pagination.page_limit
+        {
+            *page_token = Some(next_token.to_string());
+            if pagination.page_delay_ms > 0 {
+                tokio::time::sleep(std::time::Duration::from_millis(pagination.page_delay_ms))
+                    .await;
             }
+            return Ok(true); // continue paginating
         }
     } else {
         // Not valid JSON, output as-is
@@ -568,11 +566,7 @@ fn build_url(
                     let plus = format!("{{+{name}}}");
                     fp.contains(&plain) || fp.contains(&plus)
                 });
-            if all_match {
-                fp
-            } else {
-                method.path.as_str()
-            }
+            if all_match { fp } else { method.path.as_str() }
         }
         None => method.path.as_str(),
     };
@@ -606,17 +600,15 @@ fn build_url(
             .map(|p| p.repeated)
             .unwrap_or(false);
 
-        if is_repeated {
-            if let Value::Array(arr) = value {
-                for item in arr {
-                    let val_str = match item {
-                        Value::String(s) => s.clone(),
-                        other => other.to_string(),
-                    };
-                    query_params.push((key.clone(), val_str));
-                }
-                continue;
+        if is_repeated && let Value::Array(arr) = value {
+            for item in arr {
+                let val_str = match item {
+                    Value::String(s) => s.clone(),
+                    other => other.to_string(),
+                };
+                query_params.push((key.clone(), val_str));
             }
+            continue;
         }
 
         if !is_repeated && value.is_array() {
@@ -765,43 +757,43 @@ fn handle_error_response<T>(
     }
 
     // Try to parse as Google API error
-    if let Ok(error_json) = serde_json::from_str::<Value>(error_body) {
-        if let Some(err_obj) = error_json.get("error") {
-            let code = err_obj
-                .get("code")
-                .and_then(|c| c.as_u64())
-                .unwrap_or(status.as_u16() as u64) as u16;
-            let message = err_obj
-                .get("message")
-                .and_then(|m| m.as_str())
-                .unwrap_or("Unknown error")
-                .to_string();
+    if let Ok(error_json) = serde_json::from_str::<Value>(error_body)
+        && let Some(err_obj) = error_json.get("error")
+    {
+        let code = err_obj
+            .get("code")
+            .and_then(|c| c.as_u64())
+            .unwrap_or(status.as_u16() as u64) as u16;
+        let message = err_obj
+            .get("message")
+            .and_then(|m| m.as_str())
+            .unwrap_or("Unknown error")
+            .to_string();
 
-            // Reason can appear in "errors[0].reason" or at the top-level "reason" field.
-            let reason = err_obj
-                .get("errors")
-                .and_then(|e| e.as_array())
-                .and_then(|arr| arr.first())
-                .and_then(|e| e.get("reason"))
-                .and_then(|r| r.as_str())
-                .or_else(|| err_obj.get("reason").and_then(|r| r.as_str()))
-                .unwrap_or("unknown")
-                .to_string();
+        // Reason can appear in "errors[0].reason" or at the top-level "reason" field.
+        let reason = err_obj
+            .get("errors")
+            .and_then(|e| e.as_array())
+            .and_then(|arr| arr.first())
+            .and_then(|e| e.get("reason"))
+            .and_then(|r| r.as_str())
+            .or_else(|| err_obj.get("reason").and_then(|r| r.as_str()))
+            .unwrap_or("unknown")
+            .to_string();
 
-            // For accessNotConfigured, extract the GCP enable URL from the message.
-            let enable_url = if reason == "accessNotConfigured" {
-                extract_enable_url(&message)
-            } else {
-                None
-            };
+        // For accessNotConfigured, extract the GCP enable URL from the message.
+        let enable_url = if reason == "accessNotConfigured" {
+            extract_enable_url(&message)
+        } else {
+            None
+        };
 
-            return Err(GwsError::Api {
-                code,
-                message,
-                reason,
-                enable_url,
-            });
-        }
+        return Err(GwsError::Api {
+            code,
+            message,
+            reason,
+            enable_url,
+        });
     }
 
     Err(GwsError::Api {
@@ -1108,34 +1100,33 @@ fn validate_property(
     }
 
     // 3. Array items validation
-    if prop_schema.prop_type.as_deref() == Some("array") {
-        if let Some(items_schema) = &prop_schema.items {
-            if let Value::Array(arr) = value {
-                for (i, item) in arr.iter().enumerate() {
-                    let item_path = format!("{path}[{i}]");
-                    validate_property(item, items_schema, doc, &item_path, errors);
-                }
-            }
+    if prop_schema.prop_type.as_deref() == Some("array")
+        && let Some(items_schema) = &prop_schema.items
+        && let Value::Array(arr) = value
+    {
+        for (i, item) in arr.iter().enumerate() {
+            let item_path = format!("{path}[{i}]");
+            validate_property(item, items_schema, doc, &item_path, errors);
         }
     }
 
     // 4. Object properties validation
-    if prop_schema.prop_type.as_deref() == Some("object") && !prop_schema.properties.is_empty() {
-        if let Value::Object(obj) = value {
-            validate_properties(obj, &prop_schema.properties, &[], doc, path, errors);
-        }
+    if prop_schema.prop_type.as_deref() == Some("object")
+        && !prop_schema.properties.is_empty()
+        && let Value::Object(obj) = value
+    {
+        validate_properties(obj, &prop_schema.properties, &[], doc, path, errors);
     }
 
     // 5. Enum validation
-    if let Some(enum_values) = &prop_schema.enum_values {
-        if let Value::String(s) = value {
-            if !enum_values.contains(s) {
-                errors.push(format!(
-                    "{path}: Value '{s}' is not a valid enum member. Valid options: {:?}",
-                    enum_values
-                ));
-            }
-        }
+    if let Some(enum_values) = &prop_schema.enum_values
+        && let Value::String(s) = value
+        && !enum_values.contains(s)
+    {
+        errors.push(format!(
+            "{path}: Value '{s}' is not a valid enum member. Valid options: {:?}",
+            enum_values
+        ));
     }
 }
 
@@ -1197,7 +1188,7 @@ mod tests {
     #[test]
     fn test_pagination_config_default() {
         let config = PaginationConfig::default();
-        assert_eq!(config.page_all, false);
+        assert!(!config.page_all);
         assert_eq!(config.page_limit, 10);
         assert_eq!(config.page_delay_ms, 100);
     }
@@ -1378,9 +1369,10 @@ mod tests {
         // Missing Required Field
         let body_missing = json!({ "name": "My File" });
         let err = validate_body_against_schema(&body_missing, "File", &doc).unwrap_err();
-        assert!(err
-            .to_string()
-            .contains("Missing required property 'status'"));
+        assert!(
+            err.to_string()
+                .contains("Missing required property 'status'")
+        );
 
         // Invalid Enum Value
         let body_bad_enum = json!({ "name": "My File", "status": "UNKNOWN" });
@@ -1390,9 +1382,10 @@ mod tests {
         // Invalid Type
         let body_bad_type = json!({ "name": "My File", "status": "ACTIVE", "count": "10" });
         let err = validate_body_against_schema(&body_bad_type, "File", &doc).unwrap_err();
-        assert!(err
-            .to_string()
-            .contains("Expected type 'integer', found string"));
+        assert!(
+            err.to_string()
+                .contains("Expected type 'integer', found string")
+        );
 
         // Deep Schema Reference Validation Failure
         let body_bad_ref = json!({
@@ -1906,9 +1899,10 @@ mod tests {
         params.insert("fileId".to_string(), json!("123"));
 
         let err = build_url(&doc, &method, &params, false).unwrap_err();
-        assert!(err
-            .to_string()
-            .contains("Path parameter 'fileId' was provided but is not present"));
+        assert!(
+            err.to_string()
+                .contains("Path parameter 'fileId' was provided but is not present")
+        );
     }
 
     #[test]
@@ -2144,10 +2138,12 @@ async fn test_execute_method_missing_path_param() {
     .await;
 
     assert!(result.is_err());
-    assert!(result
-        .unwrap_err()
-        .to_string()
-        .contains("Required path parameter"));
+    assert!(
+        result
+            .unwrap_err()
+            .to_string()
+            .contains("Required path parameter")
+    );
 }
 
 #[test]
@@ -2180,7 +2176,9 @@ fn test_extract_enable_url_typical_message() {
     let url = extract_enable_url(msg);
     assert_eq!(
         url.as_deref(),
-        Some("https://console.developers.google.com/apis/api/gmail.googleapis.com/overview?project=549352339482")
+        Some(
+            "https://console.developers.google.com/apis/api/gmail.googleapis.com/overview?project=549352339482"
+        )
     );
 }
 
@@ -2237,7 +2235,9 @@ fn test_handle_error_response_access_not_configured_with_url() {
             assert_eq!(reason, "accessNotConfigured");
             assert_eq!(
                 enable_url.as_deref(),
-                Some("https://console.developers.google.com/apis/api/gmail.googleapis.com/overview?project=549352339482")
+                Some(
+                    "https://console.developers.google.com/apis/api/gmail.googleapis.com/overview?project=549352339482"
+                )
             );
         }
         _ => panic!("Expected Api error"),

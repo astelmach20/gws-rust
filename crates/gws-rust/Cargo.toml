@@ -14,14 +14,15 @@
 
 [package]
 name = "gws-rust"
-version = "0.22.5"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
 description = "Google Workspace CLI — dynamic command surface from Discovery Service"
-license = "Apache-2.0"
-repository = "https://github.com/astelmach20/gws-rust"
-homepage = "https://github.com/astelmach20/gws-rust"
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
 readme = "README.md"
-authors = ["Justin Poehnelt"]
+authors.workspace = true
+rust-version.workspace = true
 keywords = ["cli", "google-workspace", "google", "drive", "gmail"]
 categories = ["command-line-utilities", "web-programming"]
 
@@ -31,50 +32,42 @@ path = "src/main.rs"
 
 [dependencies]
 gws-rust-core = { version = "0.22.5", path = "../gws-rust-core" }
-tempfile = "3"
-aes-gcm = "0.10"
-anyhow = "1"
-clap = { version = "4", features = ["derive", "string"] }
-dirs = "5"
-dotenvy = "0.15"
-hostname = "0.4"
-reqwest = { version = "0.12", features = ["json", "stream", "rustls-tls-native-roots", "socks"], default-features = false }
-rand = "0.8"
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-sha2 = "0.10"
-thiserror = "2"
-tokio = { version = "1", features = ["full"] }
-yup-oauth2 = "12"
-futures-util = "0.3"
-tokio-util = { version = "0.7", features = ["io"] }
+aes-gcm = { version = "0.11", features = ["getrandom", "zeroize"] }
+anyhow.workspace = true
+async-trait = "0.1.92"
+base64 = "0.23.1"
 bytes = "1"
-base64 = "0.22.1"
-derive_builder = "0.20.2"
-ratatui = "0.30.0"
-crossterm = "0.29.0"
-chrono = "0.4.44"
+chrono = "0.4.45"
 chrono-tz = "0.10"
+clap = { version = "4", features = ["derive", "string"] }
+crossterm = "0.29.0"
+derive_builder = "0.20.2"
+dirs = "7"
+futures-util = "0.3"
 iana-time-zone = "0.1"
-mail-builder = "0.4"
-async-trait = "0.1.89"
-toml = "0.8"
-percent-encoding = "2.3.2"
-zeroize = { version = "1.8.2", features = ["derive"] }
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
-tracing-appender = "0.2"
-uuid = { version = "1.22.0", features = ["v4", "v5"] }
+mail-builder = "1.0"
 mime_guess2 = "2.3.1"
-
-[target.'cfg(target_os = "macos")'.dependencies]
-keyring = { version = "3.6.3", features = ["apple-native"] }
-
-[target.'cfg(target_os = "windows")'.dependencies]
-keyring = { version = "3.6.3", features = ["windows-native"] }
-
-[target.'cfg(not(any(target_os = "macos", target_os = "windows")))'.dependencies]
-keyring = "3.6.3"
+percent-encoding.workspace = true
+rand = "0.10"
+ratatui = "0.30.2"
+reqwest = { workspace = true, features = ["stream", "socks"] }
+serde.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-util = { version = "0.7", features = ["io"] }
+toml = "1.1"
+tracing.workspace = true
+tracing-appender = "0.2"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+uuid = { version = "1.26.1", features = ["v4", "v5"] }
+yup-oauth2 = "12"
+keyring = "4.2.0"
+zeroize = { version = "1.9.0", features = ["derive"] }
 
 [dev-dependencies]
-serial_test = "3.4.0"
+serial_test.workspace = true
+
+[lints]
+workspace = true

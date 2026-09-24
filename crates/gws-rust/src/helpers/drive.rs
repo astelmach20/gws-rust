@@ -17,7 +17,7 @@ use crate::auth;
 use crate::error::GwsError;
 use crate::executor;
 use clap::{Arg, ArgMatches, Command};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::future::Future;
 use std::path::Path;
 use std::pin::Pin;

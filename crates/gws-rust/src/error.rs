@@ -76,22 +76,23 @@ pub fn print_error_json(err: &GwsError) {
     if let GwsError::Api {
         reason, enable_url, ..
     } = err
+        && reason == "accessNotConfigured"
     {
-        if reason == "accessNotConfigured" {
-            eprintln!();
-            let hint = colorize("hint:", "36"); // cyan
+        eprintln!();
+        let hint = colorize("hint:", "36"); // cyan
+        eprintln!(
+            "{} {hint} API not enabled for your GCP project.",
+            error_label(err)
+        );
+        if let Some(url) = enable_url {
+            eprintln!("      Enable it at: {url}");
+        } else {
             eprintln!(
-                "{} {hint} API not enabled for your GCP project.",
-                error_label(err)
+                "      Visit the GCP Console → APIs & Services → Library to enable the required API."
             );
-            if let Some(url) = enable_url {
-                eprintln!("      Enable it at: {url}");
-            } else {
-                eprintln!("      Visit the GCP Console → APIs & Services → Library to enable the required API.");
-            }
-            eprintln!("      After enabling, wait a few seconds and retry your command.");
-            return;
         }
+        eprintln!("      After enabling, wait a few seconds and retry your command.");
+        return;
     }
     eprintln!(
         "{} {}",
@@ -101,15 +102,18 @@ pub fn print_error_json(err: &GwsError) {
 }
 
 #[cfg(test)]
+#[allow(unsafe_code)] // tests mutate process env; they are serialized with #[serial]
 mod tests {
     use super::*;
 
     #[test]
     #[serial_test::serial]
     fn test_colorize_respects_no_color_env() {
-        std::env::set_var("NO_COLOR", "1");
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::set_var("NO_COLOR", "1") };
         let result = colorize("hello", "31");
-        std::env::remove_var("NO_COLOR");
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::remove_var("NO_COLOR") };
         assert_eq!(result, "hello");
     }
 

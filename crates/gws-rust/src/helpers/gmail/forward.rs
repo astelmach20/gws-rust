@@ -377,15 +377,21 @@ mod tests {
         };
         let raw = create_forward_raw_message(&envelope, &original, &[]).unwrap();
 
-        assert!(extract_header(&raw, "To")
-            .unwrap()
-            .contains("dave@example.com"));
-        assert!(extract_header(&raw, "Subject")
-            .unwrap()
-            .contains("Fwd: Hello"));
-        assert!(extract_header(&raw, "In-Reply-To")
-            .unwrap()
-            .contains("abc@example.com"));
+        assert!(
+            extract_header(&raw, "To")
+                .unwrap()
+                .contains("dave@example.com")
+        );
+        assert!(
+            extract_header(&raw, "Subject")
+                .unwrap()
+                .contains("Fwd: Hello")
+        );
+        assert!(
+            extract_header(&raw, "In-Reply-To")
+                .unwrap()
+                .contains("abc@example.com")
+        );
         assert!(raw.contains("---------- Forwarded message ---------"));
         assert!(raw.contains("From: alice@example.com"));
         assert!(raw.contains("Original content"));
@@ -425,18 +431,26 @@ mod tests {
         };
         let raw = create_forward_raw_message(&envelope, &original, &[]).unwrap();
 
-        assert!(extract_header(&raw, "To")
-            .unwrap()
-            .contains("dave@example.com"));
-        assert!(extract_header(&raw, "Cc")
-            .unwrap()
-            .contains("eve@example.com"));
-        assert!(extract_header(&raw, "Bcc")
-            .unwrap()
-            .contains("secret@example.com"));
-        assert!(extract_header(&raw, "From")
-            .unwrap()
-            .contains("alias@example.com"));
+        assert!(
+            extract_header(&raw, "To")
+                .unwrap()
+                .contains("dave@example.com")
+        );
+        assert!(
+            extract_header(&raw, "Cc")
+                .unwrap()
+                .contains("eve@example.com")
+        );
+        assert!(
+            extract_header(&raw, "Bcc")
+                .unwrap()
+                .contains("secret@example.com")
+        );
+        assert!(
+            extract_header(&raw, "From")
+                .unwrap()
+                .contains("alias@example.com")
+        );
         assert!(raw.contains("FYI see below"));
         assert!(raw.contains("carol@example.com")); // in forwarded block
     }
@@ -481,9 +495,11 @@ mod tests {
         assert!(refs_header.contains("msg-1@example.com"));
         assert!(refs_header.contains("msg-2@example.com"));
         // In-Reply-To should have only the direct parent
-        assert!(extract_header(&raw, "In-Reply-To")
-            .unwrap()
-            .contains("msg-2@example.com"));
+        assert!(
+            extract_header(&raw, "In-Reply-To")
+                .unwrap()
+                .contains("msg-2@example.com")
+        );
     }
 
     fn make_forward_matches(args: &[&str]) -> ArgMatches {
@@ -682,7 +698,9 @@ mod tests {
             ..Default::default()
         };
         let html = format_forwarded_message_html(&with_cc);
-        assert!(html.contains("Cc: <a href=\"mailto:carol%40example%2Ecom\">carol@example.com</a>"));
+        assert!(
+            html.contains("Cc: <a href=\"mailto:carol%40example%2Ecom\">carol@example.com</a>")
+        );
 
         let without_cc = OriginalMessage {
             cc: None,
@@ -725,9 +743,11 @@ mod tests {
         let decoded = strip_qp_soft_breaks(&raw);
 
         assert!(decoded.contains("text/html"));
-        assert!(extract_header(&raw, "To")
-            .unwrap()
-            .contains("dave@example.com"));
+        assert!(
+            extract_header(&raw, "To")
+                .unwrap()
+                .contains("dave@example.com")
+        );
         assert!(decoded.contains("gmail_quote"));
         assert!(decoded.contains("Forwarded message"));
         assert!(decoded.contains("<p>Original</p>"));

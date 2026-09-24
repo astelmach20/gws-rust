@@ -204,15 +204,14 @@ pub async fn fetch_discovery_document(
         tokio::fs::create_dir_all(dir).await?;
         let cache_file = dir.join(format!("{service}_{version}.json"));
 
-        if let Ok(metadata) = tokio::fs::metadata(&cache_file).await {
-            if let Ok(modified) = metadata.modified() {
-                if modified.elapsed().unwrap_or_default() < std::time::Duration::from_secs(86400) {
-                    let data = tokio::fs::read_to_string(&cache_file).await?;
-                    let doc: RestDescription = serde_json::from_str(&data)?;
-                    tracing::debug!(service = %service, version = %version, "Discovery cache hit");
-                    return Ok(doc);
-                }
-            }
+        if let Ok(metadata) = tokio::fs::metadata(&cache_file).await
+            && let Ok(modified) = metadata.modified()
+            && modified.elapsed().unwrap_or_default() < std::time::Duration::from_secs(86400)
+        {
+            let data = tokio::fs::read_to_string(&cache_file).await?;
+            let doc: RestDescription = serde_json::from_str(&data)?;
+            tracing::debug!(service = %service, version = %version, "Discovery cache hit");
+            return Ok(doc);
         }
     }
 

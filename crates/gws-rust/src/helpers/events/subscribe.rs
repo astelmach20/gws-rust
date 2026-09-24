@@ -114,10 +114,10 @@ pub(super) async fn handle_subscribe(
         eprintln!("🏃 DRY RUN — no changes will be made\n");
     }
 
-    if let Some(ref dir) = config.output_dir {
-        if !dry_run {
-            std::fs::create_dir_all(dir).context("Failed to create output dir")?;
-        }
+    if let Some(ref dir) = config.output_dir
+        && !dry_run
+    {
+        std::fs::create_dir_all(dir).context("Failed to create output dir")?;
     }
 
     let client = crate::client::build_client()?;
@@ -330,23 +330,28 @@ pub(super) async fn handle_subscribe(
         if config.cleanup {
             eprintln!("\nCleaning up Pub/Sub resources...");
             // Delete Pub/Sub subscription
-            if let Ok(pubsub_token) = pubsub_token_provider.access_token().await {
-                let _ = client
-                    .delete(format!("{PUBSUB_API_BASE}/{pubsub_subscription}"))
-                    .bearer_auth(&pubsub_token)
-                    .send()
-                    .await;
-                // Delete Pub/Sub topic
-                if let Some(ref topic) = topic_name {
+            match pubsub_token_provider.access_token().await {
+                Ok(pubsub_token) => {
                     let _ = client
-                        .delete(format!("{PUBSUB_API_BASE}/{topic}"))
+                        .delete(format!("{PUBSUB_API_BASE}/{pubsub_subscription}"))
                         .bearer_auth(&pubsub_token)
                         .send()
                         .await;
+                    // Delete Pub/Sub topic
+                    if let Some(ref topic) = topic_name {
+                        let _ = client
+                            .delete(format!("{PUBSUB_API_BASE}/{topic}"))
+                            .bearer_auth(&pubsub_token)
+                            .send()
+                            .await;
+                    }
+                    eprintln!("Cleanup complete.");
                 }
-                eprintln!("Cleanup complete.");
-            } else {
-                eprintln!("Warning: failed to refresh token for cleanup. Resources may need manual deletion.");
+                _ => {
+                    eprintln!(
+                        "Warning: failed to refresh token for cleanup. Resources may need manual deletion."
+                    );
+                }
             }
         } else {
             eprintln!("\n--- Reconnection Info ---");
@@ -509,7 +514,7 @@ fn process_events_pull_response(response: &Value) -> (Vec<String>, Vec<Value>) {
 
 /// Decodes a Pub/Sub message containing a CloudEvent.
 fn decode_cloud_event(pubsub_msg: &Value) -> Value {
-    use base64::{engine::general_purpose::STANDARD, Engine as _};
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
 
     let attributes = pubsub_msg.get("attributes").cloned().unwrap_or(json!({}));
 
@@ -783,7 +788,7 @@ mod tests {
 
     #[test]
     fn test_decode_cloud_event() {
-        use base64::{engine::general_purpose::STANDARD, Engine as _};
+        use base64::{Engine as _, engine::general_purpose::STANDARD};
 
         let data = json!({"foo": "bar"}).to_string();
         let encoded = STANDARD.encode(data);
@@ -806,7 +811,7 @@ mod tests {
 
     #[test]
     fn test_process_events_pull_response() {
-        use base64::{engine::general_purpose::STANDARD, Engine as _};
+        use base64::{Engine as _, engine::general_purpose::STANDARD};
 
         // Mock a Pub/Sub response with two messages
         let data1 = json!({"id": "1", "content": "hello"}).to_string();

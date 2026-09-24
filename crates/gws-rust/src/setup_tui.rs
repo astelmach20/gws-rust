@@ -19,16 +19,16 @@
 //! select all with 'a', and confirm with Enter.
 
 use crossterm::{
-    event::{self, Event, KeyCode, KeyEventKind},
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
     ExecutableCommand,
+    event::{self, Event, KeyCode, KeyEventKind},
+    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use ratatui::{
+    DefaultTerminal,
     layout::{Constraint, Layout},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, List, ListItem, ListState, Paragraph},
-    DefaultTerminal,
 };
 use std::io::stdout;
 
@@ -148,56 +148,56 @@ impl PickerState {
     }
 
     fn toggle_current(&mut self) {
-        if let Some(i) = self.list_state.selected() {
-            if !self.items[i].is_fixed {
-                let current_label = self.items[i].label.clone();
-                let current_selected = !self.items[i].selected;
-                let is_template = self.items[i].is_template;
-                let template_selects = self.items[i].template_selects.clone();
+        if let Some(i) = self.list_state.selected()
+            && !self.items[i].is_fixed
+        {
+            let current_label = self.items[i].label.clone();
+            let current_selected = !self.items[i].selected;
+            let is_template = self.items[i].is_template;
+            let template_selects = self.items[i].template_selects.clone();
 
-                self.items[i].selected = current_selected;
+            self.items[i].selected = current_selected;
 
-                if is_template {
-                    // Turn off other templates
-                    if current_selected {
-                        for item in &mut self.items {
-                            if item.is_template && item.label != current_label {
-                                item.selected = false;
-                            }
-                        }
-                        // Apply template selection to normal items
-                        for item in &mut self.items {
-                            if !item.is_template && !item.is_fixed {
-                                item.selected = template_selects.contains(&item.label);
-                            }
-                        }
-                    }
-                } else {
-                    // If a normal item is toggled, turn OFF all templates since the user is customizing
+            if is_template {
+                // Turn off other templates
+                if current_selected {
                     for item in &mut self.items {
-                        if item.is_template {
+                        if item.is_template && item.label != current_label {
                             item.selected = false;
                         }
                     }
-
-                    // Handle readonly/superset interdependency
-                    // Only deselect the counterpart when we are SELECTING an item
-                    if current_selected {
-                        let counterpart_to_deselect = if current_label.ends_with(".readonly") {
-                            current_label
-                                .strip_suffix(".readonly")
-                                .unwrap_or(&current_label)
-                                .to_string()
-                        } else {
-                            format!("{}.readonly", current_label)
-                        };
-
-                        self.items.iter_mut().for_each(|item| {
-                            if item.label == counterpart_to_deselect && !item.is_fixed {
-                                item.selected = false;
-                            }
-                        });
+                    // Apply template selection to normal items
+                    for item in &mut self.items {
+                        if !item.is_template && !item.is_fixed {
+                            item.selected = template_selects.contains(&item.label);
+                        }
                     }
+                }
+            } else {
+                // If a normal item is toggled, turn OFF all templates since the user is customizing
+                for item in &mut self.items {
+                    if item.is_template {
+                        item.selected = false;
+                    }
+                }
+
+                // Handle readonly/superset interdependency
+                // Only deselect the counterpart when we are SELECTING an item
+                if current_selected {
+                    let counterpart_to_deselect = if current_label.ends_with(".readonly") {
+                        current_label
+                            .strip_suffix(".readonly")
+                            .unwrap_or(&current_label)
+                            .to_string()
+                    } else {
+                        format!("{}.readonly", current_label)
+                    };
+
+                    self.items.iter_mut().for_each(|item| {
+                        if item.label == counterpart_to_deselect && !item.is_fixed {
+                            item.selected = false;
+                        }
+                    });
                 }
             }
         }
@@ -248,12 +248,12 @@ impl PickerState {
             KeyCode::Char('q') | KeyCode::Esc => Some(PickerResult::Cancelled),
             KeyCode::Left | KeyCode::Char('h') | KeyCode::Backspace => Some(PickerResult::GoBack),
             KeyCode::Enter => {
-                if !self.multiselect {
-                    if let Some(idx) = self.list_state.selected() {
-                        for (i, item) in self.items.iter_mut().enumerate() {
-                            if !item.is_fixed {
-                                item.selected = i == idx;
-                            }
+                if !self.multiselect
+                    && let Some(idx) = self.list_state.selected()
+                {
+                    for (i, item) in self.items.iter_mut().enumerate() {
+                        if !item.is_fixed {
+                            item.selected = i == idx;
                         }
                     }
                 }
@@ -279,12 +279,12 @@ impl PickerState {
             }
             KeyCode::Up | KeyCode::Char('k') => {
                 self.previous();
-                if !self.multiselect {
-                    if let Some(idx) = self.list_state.selected() {
-                        for (i, item) in self.items.iter_mut().enumerate() {
-                            if !item.is_fixed {
-                                item.selected = i == idx;
-                            }
+                if !self.multiselect
+                    && let Some(idx) = self.list_state.selected()
+                {
+                    for (i, item) in self.items.iter_mut().enumerate() {
+                        if !item.is_fixed {
+                            item.selected = i == idx;
                         }
                     }
                 }
@@ -292,12 +292,12 @@ impl PickerState {
             }
             KeyCode::Down | KeyCode::Char('j') => {
                 self.next();
-                if !self.multiselect {
-                    if let Some(idx) = self.list_state.selected() {
-                        for (i, item) in self.items.iter_mut().enumerate() {
-                            if !item.is_fixed {
-                                item.selected = i == idx;
-                            }
+                if !self.multiselect
+                    && let Some(idx) = self.list_state.selected()
+                {
+                    for (i, item) in self.items.iter_mut().enumerate() {
+                        if !item.is_fixed {
+                            item.selected = i == idx;
                         }
                     }
                 }
@@ -372,11 +372,7 @@ fn run_picker_loop(
                 .iter()
                 .map(|item| {
                     let checkbox = if state.multiselect {
-                        if item.selected {
-                            "[x] "
-                        } else {
-                            "[ ] "
-                        }
+                        if item.selected { "[x] " } else { "[ ] " }
                     } else if item.selected {
                         "◉ "
                     } else {
