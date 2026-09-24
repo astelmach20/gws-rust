@@ -381,19 +381,28 @@ impl KeyBackend for FileKeyBackend {
         let parent = self.path.parent().unwrap_or(Path::new("."));
         crate::fs_util::ensure_private_dir(parent)
             .map_err(io_err(format!("cannot create '{}'", parent.display())))?;
-        let mut opts = std::fs::OpenOptions::new();
-        opts.write(true).create_new(true);
+        let ctx = format!("cannot create '{}'", self.path.display());
+        // Write the complete key to a private temp file first, then publish it
+        // with a hard link. Linking never overwrites an existing key and makes
+        // the file appear fully written, so a concurrent unlocked `load` can
+        // never observe a partially written (e.g. empty) key file.
+        let mut tmp = tempfile::Builder::new()
+            .prefix(".encryption.key.")
+            .tempfile_in(parent)
+            .map_err(io_err(ctx.clone()))?;
         #[cfg(unix)]
         {
-            use std::os::unix::fs::OpenOptionsExt;
-            opts.mode(0o600);
+            use std::os::unix::fs::PermissionsExt;
+            tmp.as_file()
+                .set_permissions(std::fs::Permissions::from_mode(0o600))
+                .map_err(io_err(ctx.clone()))?;
         }
-        let ctx = format!("cannot create '{}'", self.path.display());
-        let mut file = opts.open(&self.path).map_err(io_err(ctx.clone()))?;
         let b64 = Zeroizing::new(B64.encode(key.as_ref()));
-        file.write_all(b64.as_bytes())
-            .map_err(io_err(ctx.clone()))?;
-        file.sync_all().map_err(io_err(ctx.clone()))?;
+        tmp.write_all(b64.as_bytes()).map_err(io_err(ctx.clone()))?;
+        tmp.as_file().sync_all().map_err(io_err(ctx.clone()))?;
+        std::fs::hard_link(tmp.path(), &self.path).map_err(io_err(ctx.clone()))?;
+        // Dropping `tmp` removes the temp name; the published link remains.
+        tmp.close().map_err(io_err(ctx.clone()))?;
         crate::fs_util::sync_dir(parent).map_err(io_err(ctx))
     }
 }

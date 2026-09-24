@@ -20,6 +20,11 @@
 //! programming error into a silently absent value. These accessors report it
 //! instead, as an internal error (exit code 5) naming the argument.
 //!
+//! clap only detects an *undefined* argument id in debug builds (release
+//! builds read it as absent), so that check is enforced by the debug test
+//! suite, which exercises every command's accessors. Type mismatches are
+//! reported in every build.
+//!
 //! The `*_if_defined` variants are for code shared by commands that do not
 //! all define the argument (generated API methods, `+reply` vs `+reply-all`):
 //! there an undefined id legitimately reads as absent, and only a type
@@ -174,6 +179,8 @@ mod tests {
         ));
     }
 
+    // clap reports undefined ids only with debug assertions (see module docs).
+    #[cfg(debug_assertions)]
     #[test]
     fn undefined_arguments_are_loud_errors() {
         let m = matches(&["t", "--name", "a"]);

@@ -68,6 +68,9 @@
           cargoLock.lockFile = ./Cargo.lock;
 
           nativeBuildInputs = [ pkgs.pkg-config ];
+          # The HTTP client loads the platform CA store when it is built, even
+          # for the loopback mock servers the tests use; the sandbox has none.
+          nativeCheckInputs = [ pkgs.cacert ];
 
           cargoBuildFlags = [
             "--package"
@@ -78,6 +81,7 @@
           cargoTestFlags = [ "--workspace" ];
           preCheck = ''
             export HOME="$(mktemp -d)"
+            export SSL_CERT_FILE="${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt"
           '';
 
           meta = {
