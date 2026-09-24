@@ -25,12 +25,12 @@
 //! * Unknown sanitize modes are rejected rather than silently becoming `warn`.
 
 use super::Helper;
-use crate::auth;
 use crate::discovery::RestDescription;
 use crate::error::GwsError;
-use crate::helpers::rest::{RestClient, Retry, other_error};
 use crate::output::sanitize_for_terminal;
+use crate::transport::Transport;
 use clap::{Arg, ArgMatches, Command};
+use gws_rust_core::client::Idempotency;
 use reqwest::Method;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -221,17 +221,14 @@ impl SanitizeMethod {
 /// A Model Armor client. `base_override` exists for tests only; production
 /// always derives the host from the validated template.
 pub(crate) struct ModelArmorClient {
-    rest: RestClient,
+    rest: Transport,
     base_override: Option<String>,
 }
 
 impl ModelArmorClient {
     pub(crate) async fn authenticated() -> Result<Self, GwsError> {
-        let token = auth::get_token(&[CLOUD_PLATFORM_SCOPE])
-            .await
-            .map_err(|e| GwsError::Auth(format!("Failed to get token for Model Armor: {e}")))?;
         Ok(Self {
-            rest: RestClient::new(crate::client::shared_client()?, token),
+            rest: Transport::for_scopes(&[CLOUD_PLATFORM_SCOPE]).await?,
             base_override: None,
         })
     }
@@ -239,7 +236,7 @@ impl ModelArmorClient {
     #[cfg(test)]
     pub(crate) fn for_test(base: &str) -> Self {
         Self {
-            rest: RestClient::new(reqwest::Client::new(), "test-token"),
+            rest: Transport::for_test(base),
             base_override: Some(base.to_string()),
         }
     }
@@ -266,7 +263,7 @@ impl ModelArmorClient {
                 &self.url(template, method),
                 &[],
                 Some(&body),
-                Retry::Idempotent,
+                Idempotency::Idempotent,
                 "Model Armor sanitization failed",
             )
             .await?;
@@ -278,22 +275,12 @@ impl ModelArmorClient {
 pub fn parse_sanitize_response(resp: &Value) -> Result<SanitizationResult, GwsError> {
     let result = resp
         .get("sanitizationResult")
-        .ok_or_else(|| other_error("No sanitizationResult in Model Armor response"))?;
+        .ok_or_else(|| GwsError::other("No sanitizationResult in Model Armor response"))?;
     serde_json::from_value(result.clone()).map_err(|e| {
-        other_error(format!(
+        GwsError::other(format!(
             "Failed to parse Model Armor sanitization result: {e}"
         ))
     })
-}
-
-/// Sanitize text through a Model Armor template (prompt-injection check on
-/// content that will be shown to a model).
-pub async fn sanitize_text(template: &str, text: &str) -> Result<SanitizationResult, GwsError> {
-    let template = ModelArmorTemplate::parse(template)?;
-    ModelArmorClient::authenticated()
-        .await?
-        .sanitize(&template, SanitizeMethod::UserPrompt, text)
-        .await
 }
 
 /// The outcome of sanitizing one output value.
@@ -341,8 +328,9 @@ pub(crate) async fn sanitize_value_with(
     config: &SanitizeConfig,
     value: Value,
 ) -> Result<Sanitized, GwsError> {
-    let text = serde_json::to_string(&value)
-        .map_err(|e| other_error(format!("Failed to serialize content for Model Armor: {e}")))?;
+    let text = serde_json::to_string(&value).map_err(|e| {
+        GwsError::other(format!("Failed to serialize content for Model Armor: {e}"))
+    })?;
     match client
         .sanitize(template, SanitizeMethod::UserPrompt, &text)
         .await
@@ -353,7 +341,7 @@ pub(crate) async fn sanitize_value_with(
             SanitizeMode::Warn => {
                 eprintln!("warning: Model Armor found a match (filterMatchState: MATCH_FOUND)");
                 let annotation = serde_json::to_value(&result).map_err(|e| {
-                    other_error(format!("Failed to serialize sanitization result: {e}"))
+                    GwsError::other(format!("Failed to serialize sanitization result: {e}"))
                 })?;
                 Ok(Sanitized::Pass(annotate(value, annotation)))
             }
@@ -368,7 +356,7 @@ fn sanitization_failed(
     error: GwsError,
 ) -> Result<Sanitized, GwsError> {
     match config.mode {
-        SanitizeMode::Block => Err(other_error(format!(
+        SanitizeMode::Block => Err(GwsError::other(format!(
             "Model Armor sanitization failed; output suppressed (block mode): {error}"
         ))),
         SanitizeMode::Warn => {
@@ -386,7 +374,7 @@ fn sanitization_failed(
 pub fn require_pass(outcome: Sanitized) -> Result<Value, GwsError> {
     match outcome {
         Sanitized::Pass(v) => Ok(v),
-        Sanitized::Blocked(result) => Err(other_error(format!(
+        Sanitized::Blocked(result) => Err(GwsError::other(format!(
             "Content blocked by Model Armor (filterMatchState: {})",
             result.filter_match_state
         ))),
@@ -559,13 +547,16 @@ fn required(matches: &ArgMatches, name: &str) -> Result<String, GwsError> {
 
 /// POST a JSON body to a Model Armor endpoint and print the response.
 async fn model_armor_post(matches: &ArgMatches, url: &str, body: &Value) -> Result<(), GwsError> {
-    if crate::helpers::rest::dry_run(matches)? {
-        return crate::helpers::rest::print_dry_run(vec![crate::helpers::rest::dry_run_request(
-            "POST",
-            url,
-            &[],
-            Some(body),
-        )]);
+    if crate::helpers::http::dry_run(matches) {
+        return crate::helpers::http::print_dry_run(
+            matches,
+            vec![crate::helpers::http::dry_run_request(
+                "POST",
+                url,
+                &[],
+                Some(body),
+            )],
+        );
     }
     let client = ModelArmorClient::authenticated().await?;
     let resp = client
@@ -575,12 +566,12 @@ async fn model_armor_post(matches: &ArgMatches, url: &str, body: &Value) -> Resu
             url,
             &[],
             Some(body),
-            Retry::Never,
+            Idempotency::NonIdempotent,
             "Model Armor request failed",
         )
         .await?;
     let text = serde_json::to_string_pretty(&resp)
-        .map_err(|e| other_error(format!("Failed to serialize response: {e}")))?;
+        .map_err(|e| GwsError::other(format!("Failed to serialize response: {e}")))?;
     println!("{text}");
     Ok(())
 }
@@ -653,7 +644,7 @@ fn load_preset_template(name: &str) -> Result<Value, GwsError> {
         }
     };
     serde_json::from_str(text)
-        .map_err(|e| other_error(format!("Built-in preset '{name}' is not valid JSON: {e}")))
+        .map_err(|e| GwsError::other(format!("Built-in preset '{name}' is not valid JSON: {e}")))
 }
 
 fn parse_sanitize_args(matches: &ArgMatches, data_field: &str) -> Result<Value, GwsError> {
@@ -665,7 +656,7 @@ fn parse_sanitize_args(matches: &ArgMatches, data_field: &str) -> Result<Value, 
         Some(text) => text.clone(),
         None => {
             let stdin_text = std::io::read_to_string(std::io::stdin())
-                .map_err(|e| other_error(format!("Failed to read stdin: {e}")))?;
+                .map_err(|e| GwsError::other(format!("Failed to read stdin: {e}")))?;
             let trimmed = stdin_text.trim();
             if trimmed.is_empty() {
                 return Err(GwsError::Validation(

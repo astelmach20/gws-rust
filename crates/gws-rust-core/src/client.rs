@@ -22,8 +22,7 @@
 //!   session cache. Its redirect policy refuses HTTPS→HTTP downgrades and
 //!   caps redirect chains; `reqwest` already strips `Authorization` on any
 //!   cross-origin hop.
-//! * **One retry policy.** [`send`] (and the convenience wrapper
-//!   [`send_with_retry`]) retries transient failures with capped exponential
+//! * **One retry policy.** [`send`] retries transient failures with capped exponential
 //!   backoff and full jitter, honours `Retry-After` in both its delta-seconds
 //!   and HTTP-date forms, and never re-sends a non-idempotent request unless
 //!   the failure proves the request never left this process.
@@ -328,13 +327,9 @@ enum Verdict {
     },
 }
 
-/// Google signals per-user and per-project rate limits with HTTP 403 and one
-/// of these reasons in `error.errors[].reason` (or `error.details[].reason`).
-const RATE_LIMIT_REASONS: &[&str] = &[
-    "rateLimitExceeded",
-    "userRateLimitExceeded",
-    "RATE_LIMIT_EXCEEDED",
-];
+// Google signals per-user and per-project rate limits with HTTP 403 and one
+// of these reasons in `error.errors[].reason` (or `error.details[].reason`).
+use crate::error::RATE_LIMIT_REASONS;
 
 /// Returns true when a Google error body names a retryable rate-limit reason.
 pub fn is_rate_limit_body(body: &[u8]) -> bool {
@@ -538,17 +533,6 @@ pub async fn send(
             }
         }
     }
-}
-
-/// [`send`] with [`RetryPolicy::from_env`] and idempotency inferred from the
-/// HTTP method. Returns only the response.
-pub async fn send_with_retry(
-    build: impl Fn() -> reqwest::RequestBuilder,
-) -> Result<reqwest::Response, SendError> {
-    let policy = RetryPolicy::from_env()?;
-    send(&policy, Idempotency::FromMethod, build)
-        .await
-        .map(|sent| sent.response)
 }
 
 /// Drop the query string from a URL before it goes into an error message or

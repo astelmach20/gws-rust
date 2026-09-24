@@ -24,7 +24,7 @@ const TEXT_RENDER_WIDTH: usize = 78;
 pub(super) fn html_to_text(html: &str) -> Result<String, GwsError> {
     html2text::config::plain()
         .string_from_read(html.as_bytes(), TEXT_RENDER_WIDTH)
-        .map_err(|e| other_error(format!("Failed to render HTML body as text: {e}")))
+        .map_err(|e| GwsError::other(format!("Failed to render HTML body as text: {e}")))
 }
 
 /// Resolve the HTML body for quoting or forwarding: use the original HTML

@@ -16,10 +16,10 @@
 //! import (`--csv-file`) and export (`+read --output`).
 
 use super::Helper;
-use super::confirm::{self, Impact, with_yes};
 use super::http::{
     self, Api, ApiRequest, OutputTarget, encode_segment, flag, many, optional, required,
 };
+use crate::confirm::{self, Impact, with_yes};
 use crate::error::GwsError;
 use clap::{Arg, ArgAction, ArgGroup, ArgMatches, Command};
 use serde_json::{Value, json};
@@ -248,7 +248,7 @@ TIPS:
                 }
                 "+clear" => {
                     let range = required(m, "range")?;
-                    confirm::gate(
+                    confirm::confirm(
                         m,
                         Impact::Destructive,
                         &format!("clear all values in {range} of spreadsheet {}", id()?),
@@ -640,6 +640,6 @@ mod tests {
             "A1:B2",
         ]);
         let sub = m.subcommand_matches("+clear").unwrap();
-        assert!(confirm::gate(sub, Impact::Destructive, "clear").is_err());
+        assert!(confirm::confirm(sub, Impact::Destructive, "clear").is_err());
     }
 }

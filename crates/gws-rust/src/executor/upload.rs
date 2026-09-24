@@ -25,8 +25,8 @@ use tokio::io::{AsyncReadExt, AsyncSeekExt};
 
 use gws_rust_core::client::{Idempotency, RetryPolicy, Sent};
 
-use super::transport::{Transport, upload_timeout};
 use crate::error::GwsError;
+use crate::transport::{Transport, upload_timeout};
 
 /// Files larger than this are uploaded with the resumable protocol when the
 /// method supports it (Google recommends resumable above 5 MiB).

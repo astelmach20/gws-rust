@@ -21,13 +21,12 @@
 
 use super::cli::{required_str, value_or_default};
 use super::prelude::*;
-use crate::auth::AccessTokenProvider;
 use crate::helpers::events::stream::{
     PubSubClient, StepError, StreamOptions, StreamStep, cleanup_resources, emit_diagnostic,
     run_stream,
 };
 use crate::helpers::modelarmor::{SanitizeConfig, Sanitized, sanitize_value};
-use crate::helpers::rest::RestClient;
+use crate::transport::Transport;
 use std::collections::{HashSet, VecDeque};
 use std::io::Write;
 use std::path::PathBuf;
@@ -124,10 +123,10 @@ fn notification_history_id(message: &Value) -> Result<u64, String> {
 fn parse_history_id(v: &Value, context: &str) -> Result<u64, GwsError> {
     let h = v
         .get("historyId")
-        .ok_or_else(|| other_error(format!("{context}: response has no historyId")))?;
+        .ok_or_else(|| GwsError::other(format!("{context}: response has no historyId")))?;
     h.as_u64()
         .or_else(|| h.as_str().and_then(|s| s.parse().ok()))
-        .ok_or_else(|| other_error(format!("{context}: invalid historyId {h}")))
+        .ok_or_else(|| GwsError::other(format!("{context}: invalid historyId {h}")))
 }
 
 /// Collect message IDs added in one history page (deduplicated, in order).
@@ -155,11 +154,8 @@ fn extract_message_ids_from_history(
 
 /// State for one `+watch` session.
 struct GmailWatchStep<'a> {
-    http: reqwest::Client,
+    gmail: GmailApi,
     pubsub: PubSubClient,
-    pubsub_tokens: &'a dyn AccessTokenProvider,
-    gmail_tokens: &'a dyn AccessTokenProvider,
-    gmail_base: String,
     subscription: String,
     config: WatchConfig,
     sanitize: &'a SanitizeConfig,
@@ -182,7 +178,7 @@ impl GmailWatchStep<'_> {
     }
 
     fn output(&self, id: &str, msg: &Value) -> Result<(), StepError> {
-        let fatal = |e: String| StepError::Fatal(other_error(e));
+        let fatal = |e: String| StepError::Fatal(GwsError::other(e));
         match &self.config.output_dir {
             Some(dir) => {
                 let path = dir.join(format!("{}.json", crate::validate::encode_path_segment(id)));
@@ -210,20 +206,7 @@ impl GmailWatchStep<'_> {
 
     /// Fetch, sanitize, and emit every message added since `last_history_id`.
     async fn emit_new_messages(&mut self) -> Result<(), StepError> {
-        let token = self
-            .gmail_tokens
-            .access_token()
-            .await
-            .map_err(|e| StepError::Transient {
-                status: None,
-                message: format!("Failed to get Gmail token: {e}"),
-            })?;
-        let api = GmailApi::with_bases(
-            RestClient::new(self.http.clone(), token),
-            &self.gmail_base,
-            &self.gmail_base,
-        );
-
+        let api = self.gmail.clone();
         let mut ids = Vec::new();
         let mut seen = HashSet::new();
         let mut page_token: Option<String> = None;
@@ -232,7 +215,7 @@ impl GmailWatchStep<'_> {
                 .history(self.last_history_id, page_token.as_deref())
                 .await
                 .map_err(|e| match e {
-                    GwsError::Api { code: 404, .. } => StepError::Fatal(other_error(format!(
+                    GwsError::Api { code: 404, .. } => StepError::Fatal(GwsError::other(format!(
                         "Gmail history since {} is no longer available ({e}); restart +watch",
                         self.last_history_id
                     ))),
@@ -280,18 +263,9 @@ impl GmailWatchStep<'_> {
 
 impl StreamStep for GmailWatchStep<'_> {
     async fn step(&mut self) -> Result<(), StepError> {
-        let token = self
-            .pubsub_tokens
-            .access_token()
-            .await
-            .map_err(|e| StepError::Transient {
-                status: None,
-                message: format!("Failed to get Pub/Sub token: {e}"),
-            })?;
         let received = self
             .pubsub
             .pull(
-                &token,
                 &self.subscription,
                 self.config.max_messages,
                 self.pull_timeout,
@@ -318,7 +292,7 @@ impl StreamStep for GmailWatchStep<'_> {
             self.last_history_id = max_history_id;
         }
         let ack_ids: Vec<String> = received.into_iter().map(|m| m.ack_id).collect();
-        self.pubsub.ack(&token, &self.subscription, &ack_ids).await
+        self.pubsub.ack(&self.subscription, &ack_ids).await
     }
 }
 
@@ -333,7 +307,6 @@ struct Created {
 async fn setup(
     config: &WatchConfig,
     pubsub: &PubSubClient,
-    pubsub_token: &str,
     gmail: &GmailApi,
 ) -> Result<(String, Option<Created>, u64), GwsError> {
     if let Some(sub) = &config.subscription {
@@ -354,12 +327,12 @@ async fn setup(
         None => {
             let t = format!("projects/{project}/topics/gwsr-gmail-watch-{suffix}");
             emit_diagnostic("info", "creating_topic", json!({ "topic": t }));
-            pubsub.create_topic(pubsub_token, &t).await?;
+            pubsub.create_topic(&t).await?;
             pubsub
-                .set_topic_publisher(pubsub_token, &t, GMAIL_PUSH_MEMBER)
+                .set_topic_publisher(&t, GMAIL_PUSH_MEMBER)
                 .await
-                .map_err(|e| other_error(format!(
-                    "{e}. Grant it manually: gcloud pubsub topics add-iam-policy-binding {t}                      --member={GMAIL_PUSH_MEMBER} --role=roles/pubsub.publisher"
+                .map_err(|e| GwsError::other(format!(
+                    "{e}. Grant it manually: gcloud pubsub topics add-iam-policy-binding {t} --member={GMAIL_PUSH_MEMBER} --role=roles/pubsub.publisher"
                 )))?;
             (t.clone(), Some(t))
         }
@@ -370,9 +343,7 @@ async fn setup(
         "creating_subscription",
         json!({ "subscription": sub }),
     );
-    pubsub
-        .create_subscription(pubsub_token, &sub, &topic)
-        .await?;
+    pubsub.create_subscription(&sub, &topic).await?;
 
     let mut watch_body = json!({ "topicName": topic });
     if !config.label_ids.is_empty() {
@@ -395,7 +366,7 @@ async fn setup(
     ))
 }
 
-fn dry_run_plan(config: &WatchConfig) -> Result<(), GwsError> {
+fn dry_run_plan(matches: &ArgMatches, config: &WatchConfig) -> Result<(), GwsError> {
     let plan = json!({
         "dry_run": true,
         "action": if config.subscription.is_some() { "listen to existing subscription" } else { "create Pub/Sub topic + subscription and start gmail.users.watch" },
@@ -404,10 +375,7 @@ fn dry_run_plan(config: &WatchConfig) -> Result<(), GwsError> {
         "topic": config.topic,
         "labelIds": config.label_ids,
     });
-    let text = serde_json::to_string_pretty(&plan)
-        .map_err(|e| other_error(format!("Failed to serialize plan: {e}")))?;
-    println!("{text}");
-    Ok(())
+    crate::helpers::http::print_value(matches, &plan)
 }
 
 /// Handles the `+watch` command.
@@ -416,39 +384,23 @@ pub(super) async fn handle_watch(
     sanitize_config: &SanitizeConfig,
 ) -> Result<(), GwsError> {
     let config = parse_watch_args(matches)?;
-    if crate::helpers::rest::dry_run(matches)? {
-        return dry_run_plan(&config);
+    if crate::helpers::http::dry_run(matches) {
+        return dry_run_plan(matches, &config);
     }
     if let Some(dir) = &config.output_dir {
         std::fs::create_dir_all(dir)
-            .map_err(|e| other_error(format!("Failed to create {}: {e}", dir.display())))?;
+            .map_err(|e| GwsError::other(format!("Failed to create {}: {e}", dir.display())))?;
     }
 
-    let http = crate::client::shared_client()?;
-    let gmail_tokens = auth::token_provider(&[GMAIL_SCOPE]);
-    let pubsub_tokens = auth::token_provider(&[PUBSUB_SCOPE]);
-    let pubsub = PubSubClient::new(http.clone());
+    let pubsub = PubSubClient::new(&Transport::for_scopes(&[PUBSUB_SCOPE]).await?);
+    let gmail = GmailApi::new(Transport::for_scopes(&[GMAIL_SCOPE]).await?);
 
-    let pubsub_token = pubsub_tokens
-        .access_token()
-        .await
-        .map_err(|e| GwsError::Auth(format!("Failed to get Pub/Sub token: {e}")))?;
-    let gmail_token = gmail_tokens
-        .access_token()
-        .await
-        .map_err(|e| GwsError::Auth(format!("Failed to get Gmail token: {e}")))?;
-    let gmail = GmailApi::new(RestClient::new(http.clone(), gmail_token));
-
-    let (subscription, created, history_id) =
-        setup(&config, &pubsub, &pubsub_token, &gmail).await?;
+    let (subscription, created, history_id) = setup(&config, &pubsub, &gmail).await?;
 
     let opts = StreamOptions::new(config.once, config.poll_interval, config.max_failures);
     let mut step = GmailWatchStep {
-        http,
+        gmail,
         pubsub: pubsub.clone(),
-        pubsub_tokens: &pubsub_tokens,
-        gmail_tokens: &gmail_tokens,
-        gmail_base: super::api::GMAIL_API_BASE.to_string(),
         subscription: subscription.clone(),
         pull_timeout: Duration::from_secs(config.poll_interval.max(10)),
         config: config.clone(),
@@ -467,11 +419,7 @@ pub(super) async fn handle_watch(
         if let Some(t) = &created.topic {
             names.push(t);
         }
-        let token = pubsub_tokens
-            .access_token()
-            .await
-            .map_err(|e| other_error(e.to_string()));
-        let cleaned = cleanup_resources(&pubsub, token, &names).await;
+        let cleaned = cleanup_resources(&pubsub, &names).await;
         return match (result, cleaned) {
             (Err(e), Err(c)) => {
                 emit_diagnostic(
@@ -501,7 +449,6 @@ pub(super) async fn handle_watch(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::auth::FakeTokenProvider;
     use crate::helpers::gmail::test_support::helper_matches;
     use wiremock::matchers::{header, method, path, query_param};
     use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -596,8 +543,6 @@ mod tests {
     }
 
     async fn run_once(server: &MockServer, sanitize: &SanitizeConfig) -> Result<u64, GwsError> {
-        let pubsub_tokens = FakeTokenProvider::new(["pubsub-1", "pubsub-2", "pubsub-3"]);
-        let gmail_tokens = FakeTokenProvider::new(["gmail-1", "gmail-2"]);
         let config = WatchConfig {
             project: None,
             subscription: Some("projects/test/subscriptions/demo".into()),
@@ -612,14 +557,11 @@ mod tests {
             output_dir: None,
         };
         let mut step = GmailWatchStep {
-            http: reqwest::Client::new(),
+            gmail: crate::helpers::gmail::test_support::mock_api(server),
             pubsub: PubSubClient::with_base(
-                reqwest::Client::new(),
+                &Transport::for_test(&server.uri()),
                 &format!("{}/v1", server.uri()),
             ),
-            pubsub_tokens: &pubsub_tokens,
-            gmail_tokens: &gmail_tokens,
-            gmail_base: format!("{}/gmail/v1", server.uri()),
             subscription: "projects/test/subscriptions/demo".into(),
             pull_timeout: Duration::from_secs(5),
             config,
@@ -647,13 +589,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn watch_pulls_fetches_emits_and_acks_with_fresh_tokens() {
+    async fn watch_pulls_fetches_emits_and_acks() {
         let server = MockServer::start().await;
         mount_pull(&server).await;
         Mock::given(method("GET"))
             .and(path("/gmail/v1/users/me/history"))
             .and(query_param("startHistoryId", "1"))
-            .and(header("authorization", "Bearer gmail-1"))
+            .and(header("authorization", "Bearer test-token"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
                 "history": [{ "messagesAdded": [{ "message": { "id": "msg-1" } }] }]
             })))
@@ -669,7 +611,7 @@ mod tests {
             .await;
         Mock::given(method("POST"))
             .and(path("/v1/projects/test/subscriptions/demo:acknowledge"))
-            .and(header("authorization", "Bearer pubsub-1"))
+            .and(header("authorization", "Bearer test-token"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
             .expect(1)
             .mount(&server)

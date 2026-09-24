@@ -19,6 +19,9 @@ use serde_json::Value;
 use super::AuthMethod;
 use crate::error::GwsError;
 
+/// Longest non-JSON error body quoted in an error message.
+const MAX_RAW_ERROR_CHARS: usize = 2000;
+
 /// Attempts to extract a GCP console enable URL from a Google API
 /// `accessNotConfigured` error message.
 ///
@@ -34,6 +37,50 @@ pub fn extract_enable_url(message: &str) -> Option<String> {
         })
         .filter(|s| s.starts_with("http"))?;
     Some(url.to_string())
+}
+
+/// Prefix `context` (e.g. "Failed to send message") to an API or internal
+/// error. Validation, auth and discovery errors already say what failed and
+/// are returned unchanged.
+pub(crate) fn with_context(err: GwsError, context: &str) -> GwsError {
+    match err {
+        GwsError::Api {
+            code,
+            message,
+            reason,
+            enable_url,
+        } => GwsError::Api {
+            code,
+            message: format!("{context}: {message}"),
+            reason,
+            enable_url,
+        },
+        GwsError::Other(source) => GwsError::Other(Box::new(Context {
+            context: context.to_string(),
+            source,
+        })),
+        other => other,
+    }
+}
+
+/// An internal error with a caller-supplied prefix. The original error stays
+/// reachable through `source()` (e.g. for [`super::is_timeout`]).
+#[derive(Debug)]
+struct Context {
+    context: String,
+    source: gws_rust_core::error::BoxError,
+}
+
+impl std::fmt::Display for Context {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.context)
+    }
+}
+
+impl std::error::Error for Context {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(self.source.as_ref())
+    }
 }
 
 /// Convert an error response into a [`GwsError`].
@@ -84,7 +131,7 @@ pub(crate) fn error_from_response(
             .or_else(|| err_obj.get("status").and_then(Value::as_str))
             .unwrap_or("unknown")
             .to_string();
-        let enable_url = if reason == "accessNotConfigured" {
+        let enable_url = if reason == "accessNotConfigured" || reason == "SERVICE_DISABLED" {
             extract_enable_url(&message)
         } else {
             None
@@ -97,10 +144,13 @@ pub(crate) fn error_from_response(
         };
     }
 
-    let message = if error_body.trim().is_empty() {
+    let trimmed = error_body.trim();
+    let message = if trimmed.is_empty() {
         format!("HTTP {status} with an empty response body")
     } else {
-        error_body.to_string()
+        // Non-JSON bodies (HTML error pages) are capped so they cannot flood
+        // the error line.
+        trimmed.chars().take(MAX_RAW_ERROR_CHARS).collect()
     };
     GwsError::Api {
         code: status.as_u16(),
@@ -243,5 +293,57 @@ mod tests {
             .as_deref(),
             Some("https://console.cloud.google.com/apis/library?project=test123")
         );
+    }
+
+    fn oauth(status: u16, body: &str) -> (u16, String, String, Option<String>) {
+        api_parts(error_from_response(
+            reqwest::StatusCode::from_u16(status).unwrap(),
+            body,
+            &AuthMethod::OAuth,
+            None,
+        ))
+    }
+
+    #[test]
+    fn non_json_and_empty_bodies_are_reported() {
+        assert!(oauth(502, "").1.contains("empty response body"));
+        assert_eq!(oauth(500, "<html>boom</html>").1, "<html>boom</html>");
+        assert_eq!(oauth(500, &"x".repeat(5000)).1.len(), MAX_RAW_ERROR_CHARS);
+        assert_eq!(oauth(502, "Bad Gateway").2, "httpError");
+    }
+
+    #[test]
+    fn v2_status_field_is_the_reason() {
+        let body = r#"{"error":{"code":403,"message":"denied","status":"PERMISSION_DENIED"}}"#;
+        assert_eq!(oauth(403, body).2, "PERMISSION_DENIED");
+    }
+
+    #[test]
+    fn service_disabled_carries_enable_url() {
+        let body = r#"{"error":{"code":403,"message":"Enable it by visiting https://console.developers.google.com/apis/api/x then retry.","status":"SERVICE_DISABLED"}}"#;
+        assert_eq!(
+            oauth(403, body).3.as_deref(),
+            Some("https://console.developers.google.com/apis/api/x")
+        );
+    }
+
+    #[test]
+    fn with_context_prefixes_api_and_internal_errors_only() {
+        let err = with_context(
+            error_from_response(
+                reqwest::StatusCode::NOT_FOUND,
+                "nope",
+                &AuthMethod::OAuth,
+                None,
+            ),
+            "Failed to get x",
+        );
+        assert_eq!(err.to_string(), "Failed to get x: nope");
+        assert_eq!(
+            with_context(GwsError::other("boom"), "ctx").to_string(),
+            "ctx: boom"
+        );
+        let v = with_context(GwsError::Validation("bad".into()), "ctx");
+        assert!(matches!(v, GwsError::Validation(ref m) if m == "bad"));
     }
 }

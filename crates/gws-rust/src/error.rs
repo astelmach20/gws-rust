@@ -37,10 +37,6 @@ pub use gws_rust_core::error::*;
 
 use crate::output::{colorize, sanitize_for_terminal};
 
-/// Exit code for API errors that are safe to retry (HTTP 429, 5xx, or a
-/// 403 rate-limit reason). Mirrors `GwsError::EXIT_CODE_API_RETRYABLE` in core.
-pub const EXIT_CODE_API_RETRYABLE: i32 = 6;
-
 /// Human-readable exit code table, keyed by (code, description).
 ///
 /// Rendered into the top-level `--help` so the documentation cannot drift
@@ -68,8 +64,12 @@ pub const EXIT_CODE_DOCUMENTATION: &[(i32, &str)] = &[
         "Internal       — unexpected failure (I/O, serialization, ...)",
     ),
     (
-        EXIT_CODE_API_RETRYABLE,
+        GwsError::EXIT_CODE_API_RETRYABLE,
         "API retryable  — rate limit (429/403 rateLimitExceeded) or server error (5xx); retry with backoff",
+    ),
+    (
+        GwsError::EXIT_CODE_CONFIRMATION_REQUIRED,
+        "Not confirmed  — destructive or gated action needs --yes (or a terminal to confirm); nothing was sent",
     ),
 ];
 
@@ -99,28 +99,8 @@ impl CliError {
     pub fn exit_code(&self) -> i32 {
         match self {
             CliError::Clap(_) => GwsError::EXIT_CODE_VALIDATION,
-            CliError::Gws(e) if is_retryable(e) => EXIT_CODE_API_RETRYABLE,
             CliError::Gws(e) => e.exit_code(),
         }
-    }
-}
-
-/// Reasons Google uses for rate limiting (retryable).
-const RATE_LIMIT_REASONS: &[&str] = &[
-    "rateLimitExceeded",
-    "userRateLimitExceeded",
-    "RATE_LIMIT_EXCEEDED",
-];
-
-/// True for API failures that a caller may retry unchanged after a backoff:
-/// HTTP 429, any 5xx, and 403 rate-limit reasons.
-pub fn is_retryable(err: &GwsError) -> bool {
-    match err {
-        GwsError::Api { code, reason, .. } => {
-            *code == 429 || *code >= 500 || RATE_LIMIT_REASONS.contains(&reason.as_str())
-        }
-        #[allow(unreachable_patterns)] // GwsError is #[non_exhaustive] in core
-        _ => false,
     }
 }
 
@@ -170,6 +150,11 @@ pub fn hint_for(err: &GwsError, ctx: &ErrorContext) -> Option<String> {
             reason,
             enable_url,
         } => api_hint(*code, message, reason, enable_url.as_deref(), ctx),
+        GwsError::ConfirmationRequired(_) => Some(
+            "Re-run with --yes to confirm, or with --dry-run to preview the request. \
+             Exit code 7 marks unconfirmed actions."
+                .to_string(),
+        ),
         GwsError::Auth(msg) if msg.contains("invalid_grant") => Some(
             "Your refresh token was revoked or has expired (tokens of OAuth apps in \
              \"Testing\" status expire after 7 days). Sign in again with `gwsr auth login`."
@@ -202,7 +187,7 @@ fn api_hint(
                      Console (APIs & Services → Library), wait a minute, then retry."
                 .to_string(),
         }),
-        r if RATE_LIMIT_REASONS.contains(&r) => Some(
+        "rateLimitExceeded" | "userRateLimitExceeded" | "RATE_LIMIT_EXCEEDED" => Some(
             "Rate limited by Google. Retry after an exponential backoff; for bulk work \
              add --page-delay or lower concurrency. Exit code 6 marks retryable errors."
                 .to_string(),
@@ -274,6 +259,7 @@ fn kind_label(err: &CliError) -> &'static str {
             GwsError::Auth(_) => "auth",
             GwsError::Validation(_) => "validation",
             GwsError::Discovery(_) => "discovery",
+            GwsError::ConfirmationRequired(_) => "confirmation",
             #[allow(unreachable_patterns)] // GwsError is #[non_exhaustive] in core
             _ => "internal",
         },
@@ -317,7 +303,7 @@ pub fn error_envelope(err: &CliError, ctx: &ErrorContext) -> Value {
                     let stripped = strip_error_prefix(m).to_string();
                     obj.insert("message".into(), Value::String(stripped));
                 }
-                obj.insert("retryable".into(), Value::Bool(is_retryable(e)));
+                obj.insert("retryable".into(), Value::Bool(e.is_retryable()));
                 if let Some(hint) = hint_for(e, ctx) {
                     obj.insert("hint".into(), Value::String(hint));
                 }
@@ -410,12 +396,13 @@ mod tests {
 
     #[test]
     fn retryable_classification() {
-        assert!(is_retryable(&api(429, "rateLimitExceeded")));
-        assert!(is_retryable(&api(503, "backendError")));
-        assert!(is_retryable(&api(403, "userRateLimitExceeded")));
-        assert!(!is_retryable(&api(403, "insufficientPermissions")));
-        assert!(!is_retryable(&api(404, "notFound")));
-        assert!(!is_retryable(&GwsError::Validation("x".into())));
+        assert!(api(429, "rateLimitExceeded").is_retryable());
+        assert!(api(503, "backendError").is_retryable());
+        assert!(api(403, "userRateLimitExceeded").is_retryable());
+        assert!(api(400, "RATE_LIMIT_EXCEEDED").is_retryable());
+        assert!(!api(403, "insufficientPermissions").is_retryable());
+        assert!(!api(404, "notFound").is_retryable());
+        assert!(!GwsError::Validation("x".into()).is_retryable());
     }
 
     #[test]
@@ -429,7 +416,11 @@ mod tests {
         let codes: std::collections::HashSet<i32> =
             EXIT_CODE_DOCUMENTATION.iter().map(|(c, _)| *c).collect();
         assert_eq!(codes.len(), EXIT_CODE_DOCUMENTATION.len());
-        assert!(codes.contains(&EXIT_CODE_API_RETRYABLE));
+        assert!(codes.contains(&GwsError::EXIT_CODE_API_RETRYABLE));
+        assert_eq!(
+            CliError::from(GwsError::ConfirmationRequired("x".into())).exit_code(),
+            GwsError::EXIT_CODE_CONFIRMATION_REQUIRED
+        );
     }
 
     #[test]

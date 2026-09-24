@@ -20,12 +20,13 @@ use super::stream::{
     run_stream,
 };
 use super::{PUBSUB_SCOPE, WORKSPACE_EVENTS_API_BASE, parse_event_types, scopes_for_event_types};
-use crate::auth::{self, AccessTokenProvider};
+
 use crate::error::GwsError;
 use crate::helpers::modelarmor::{SanitizeConfig, Sanitized, sanitize_value};
-use crate::helpers::rest::{RestClient, Retry, other_error};
+use crate::transport::Transport;
 use base64::Engine as _;
 use clap::ArgMatches;
+use gws_rust_core::client::Idempotency;
 use serde_json::{Value, json};
 use std::io::Write;
 use std::path::PathBuf;
@@ -53,7 +54,7 @@ fn typed<T: Clone + Send + Sync + 'static>(
     matches
         .get_one::<T>(name)
         .cloned()
-        .ok_or_else(|| other_error(format!("--{name} has no value (missing default)")))
+        .ok_or_else(|| GwsError::other(format!("--{name} has no value (missing default)")))
 }
 
 fn parse_subscribe_args(matches: &ArgMatches) -> Result<SubscribeConfig, GwsError> {
@@ -249,7 +250,7 @@ fn subscription_from_operation(op: &Value) -> Result<String, GwsError> {
         .or_else(|| op.get("name").and_then(Value::as_str).filter(|n| n.starts_with("subscriptions/")))
         .map(str::to_string)
         .ok_or_else(|| {
-            other_error(format!(
+            GwsError::other(format!(
                 "Workspace Events operation {} did not report a subscription name yet; check it with                  gwsr events operations get",
                 op.get("name").and_then(Value::as_str).unwrap_or("(unnamed)")
             ))
@@ -258,7 +259,6 @@ fn subscription_from_operation(op: &Value) -> Result<String, GwsError> {
 
 struct SubscribeStep<'a> {
     pubsub: PubSubClient,
-    tokens: &'a dyn AccessTokenProvider,
     subscription: String,
     config: SubscribeConfig,
     sanitize: &'a SanitizeConfig,
@@ -268,7 +268,7 @@ struct SubscribeStep<'a> {
 
 impl SubscribeStep<'_> {
     fn output(&mut self, event: &Value) -> Result<(), StepError> {
-        let fatal = |e: String| StepError::Fatal(other_error(e));
+        let fatal = |e: String| StepError::Fatal(GwsError::other(e));
         match &self.config.output_dir {
             Some(dir) => {
                 self.file_counter += 1;
@@ -299,18 +299,9 @@ impl SubscribeStep<'_> {
 
 impl StreamStep for SubscribeStep<'_> {
     async fn step(&mut self) -> Result<(), StepError> {
-        let token = self
-            .tokens
-            .access_token()
-            .await
-            .map_err(|e| StepError::Transient {
-                status: None,
-                message: format!("Failed to get Pub/Sub token: {e}"),
-            })?;
         let received = self
             .pubsub
             .pull(
-                &token,
                 &self.subscription,
                 self.config.max_messages,
                 self.pull_timeout,
@@ -337,7 +328,7 @@ impl StreamStep for SubscribeStep<'_> {
             return Ok(());
         }
         let ack_ids: Vec<String> = received.into_iter().map(|m| m.ack_id).collect();
-        self.pubsub.ack(&token, &self.subscription, &ack_ids).await
+        self.pubsub.ack(&self.subscription, &ack_ids).await
     }
 }
 
@@ -351,7 +342,6 @@ struct Created {
 async fn create_resources(
     config: &SubscribeConfig,
     pubsub: &PubSubClient,
-    pubsub_token: &str,
 ) -> Result<Created, GwsError> {
     let target = config
         .target
@@ -368,21 +358,16 @@ async fn create_resources(
     let sub = format!("projects/{project}/subscriptions/gwsr-{slug}-{suffix}");
 
     emit_diagnostic("info", "creating_topic", json!({ "topic": topic }));
-    pubsub.create_topic(pubsub_token, &topic).await?;
+    pubsub.create_topic(&topic).await?;
     emit_diagnostic(
         "info",
         "creating_subscription",
         json!({ "subscription": sub }),
     );
-    pubsub
-        .create_subscription(pubsub_token, &sub, &topic)
-        .await?;
+    pubsub.create_subscription(&sub, &topic).await?;
 
     let scopes = scopes_for_event_types(&config.event_types)?;
-    let ws_token = auth::get_token(&scopes)
-        .await
-        .map_err(|e| GwsError::Auth(format!("Failed to get Workspace Events token: {e}")))?;
-    let rest = RestClient::new(crate::client::shared_client()?, ws_token);
+    let rest = Transport::for_scopes(&scopes).await?;
     let body = json!({
         "targetResource": target,
         "eventTypes": config.event_types,
@@ -395,7 +380,7 @@ async fn create_resources(
             &format!("{WORKSPACE_EVENTS_API_BASE}/subscriptions"),
             &[],
             Some(&body),
-            Retry::Never,
+            Idempotency::NonIdempotent,
             "Failed to create Workspace Events subscription",
         )
         .await?;
@@ -412,7 +397,7 @@ async fn create_resources(
     })
 }
 
-fn dry_run_plan(config: &SubscribeConfig) -> Result<(), GwsError> {
+fn dry_run_plan(matches: &ArgMatches, config: &SubscribeConfig) -> Result<(), GwsError> {
     let plan = match &config.subscription {
         Some(sub) => json!({
             "dry_run": true,
@@ -427,10 +412,7 @@ fn dry_run_plan(config: &SubscribeConfig) -> Result<(), GwsError> {
             "project": config.project,
         }),
     };
-    let text = serde_json::to_string_pretty(&plan)
-        .map_err(|e| other_error(format!("Failed to serialize plan: {e}")))?;
-    println!("{text}");
-    Ok(())
+    crate::helpers::http::print_value(matches, &plan)
 }
 
 /// Handles the `+subscribe` command.
@@ -439,26 +421,20 @@ pub(super) async fn handle_subscribe(
     sanitize_config: &SanitizeConfig,
 ) -> Result<(), GwsError> {
     let config = parse_subscribe_args(matches)?;
-    if crate::helpers::rest::dry_run(matches)? {
-        return dry_run_plan(&config);
+    if crate::helpers::http::dry_run(matches) {
+        return dry_run_plan(matches, &config);
     }
     if let Some(dir) = &config.output_dir {
         std::fs::create_dir_all(dir)
-            .map_err(|e| other_error(format!("Failed to create {}: {e}", dir.display())))?;
+            .map_err(|e| GwsError::other(format!("Failed to create {}: {e}", dir.display())))?;
     }
 
-    let http = crate::client::shared_client()?;
-    let pubsub = PubSubClient::new(http);
-    let tokens = auth::token_provider(&[PUBSUB_SCOPE]);
+    let pubsub = PubSubClient::new(&Transport::for_scopes(&[PUBSUB_SCOPE]).await?);
 
     let (subscription, created) = match &config.subscription {
         Some(sub) => (sub.clone(), None),
         None => {
-            let token = tokens
-                .access_token()
-                .await
-                .map_err(|e| GwsError::Auth(format!("Failed to get Pub/Sub token: {e}")))?;
-            let created = create_resources(&config, &pubsub, &token).await?;
+            let created = create_resources(&config, &pubsub).await?;
             (created.subscription.clone(), Some(created))
         }
     };
@@ -466,7 +442,6 @@ pub(super) async fn handle_subscribe(
     let opts = StreamOptions::new(config.once, config.poll_interval, config.max_failures);
     let mut step = SubscribeStep {
         pubsub: pubsub.clone(),
-        tokens: &tokens,
         subscription: subscription.clone(),
         pull_timeout: Duration::from_secs(config.poll_interval.max(10)),
         config: config.clone(),
@@ -479,12 +454,7 @@ pub(super) async fn handle_subscribe(
         return result;
     };
     if config.cleanup {
-        let token = tokens
-            .access_token()
-            .await
-            .map_err(|e| other_error(e.to_string()));
-        let cleaned =
-            cleanup_resources(&pubsub, token, &[&created.subscription, &created.topic]).await;
+        let cleaned = cleanup_resources(&pubsub, &[&created.subscription, &created.topic]).await;
         emit_diagnostic(
             "info",
             "workspace_subscription_kept",
@@ -522,7 +492,7 @@ pub(super) async fn handle_subscribe(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::auth::FakeTokenProvider;
+
     use crate::helpers::events::events_matches;
     use wiremock::matchers::{header, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -711,18 +681,13 @@ mod tests {
         }
     }
 
-    async fn run(
-        server: &MockServer,
-        cfg: SubscribeConfig,
-        tokens: &FakeTokenProvider,
-    ) -> Result<(), GwsError> {
+    async fn run(server: &MockServer, cfg: SubscribeConfig) -> Result<(), GwsError> {
         let sanitize = SanitizeConfig::default();
         let mut step = SubscribeStep {
             pubsub: PubSubClient::with_base(
-                reqwest::Client::new(),
+                &Transport::for_test(&server.uri()),
                 &format!("{}/v1", server.uri()),
             ),
-            tokens,
             subscription: "projects/test/subscriptions/demo".into(),
             pull_timeout: Duration::from_secs(5),
             config: cfg,
@@ -738,7 +703,7 @@ mod tests {
     async fn mount_pull(server: &MockServer) {
         Mock::given(method("POST"))
             .and(path("/v1/projects/test/subscriptions/demo:pull"))
-            .and(header("authorization", "Bearer pubsub-1"))
+            .and(header("authorization", "Bearer test-token"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
                 "receivedMessages": [{ "ackId": "ack-1", "message": {
                     "attributes": { "type": "t" },
@@ -755,18 +720,12 @@ mod tests {
         mount_pull(&server).await;
         Mock::given(method("POST"))
             .and(path("/v1/projects/test/subscriptions/demo:acknowledge"))
-            .and(header("authorization", "Bearer pubsub-1"))
+            .and(header("authorization", "Bearer test-token"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
             .expect(1)
             .mount(&server)
             .await;
-        run(
-            &server,
-            config(false),
-            &FakeTokenProvider::new(["pubsub-1"]),
-        )
-        .await
-        .unwrap();
+        run(&server, config(false)).await.unwrap();
     }
 
     #[tokio::test]
@@ -779,9 +738,7 @@ mod tests {
             .expect(0)
             .mount(&server)
             .await;
-        run(&server, config(true), &FakeTokenProvider::new(["pubsub-1"]))
-            .await
-            .unwrap();
+        run(&server, config(true)).await.unwrap();
     }
 
     #[tokio::test]
@@ -793,13 +750,7 @@ mod tests {
             .expect(3)
             .mount(&server)
             .await;
-        let err = run(
-            &server,
-            config(false),
-            &FakeTokenProvider::new(["a", "b", "c"]),
-        )
-        .await
-        .unwrap_err();
+        let err = run(&server, config(false)).await.unwrap_err();
         assert!(matches!(err, GwsError::Api { code: 503, .. }), "{err:?}");
     }
 
@@ -816,9 +767,7 @@ mod tests {
             .expect(1)
             .mount(&server)
             .await;
-        let err = run(&server, config(false), &FakeTokenProvider::new(["a"]))
-            .await
-            .unwrap_err();
+        let err = run(&server, config(false)).await.unwrap_err();
         match err {
             GwsError::Api { code, message, .. } => {
                 assert_eq!(code, 404);

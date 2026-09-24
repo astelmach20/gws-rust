@@ -17,6 +17,13 @@
 use serde_json::json;
 use thiserror::Error;
 
+/// Error reasons Google uses for per-user and per-project rate limits.
+pub(crate) const RATE_LIMIT_REASONS: &[&str] = &[
+    "rateLimitExceeded",
+    "userRateLimitExceeded",
+    "RATE_LIMIT_EXCEEDED",
+];
+
 /// Boxed error type carried by [`GwsError::Other`].
 pub type BoxError = Box<dyn std::error::Error + Send + Sync + 'static>;
 
@@ -48,6 +55,12 @@ pub enum GwsError {
     /// Discovery Document could not be fetched, parsed, or trusted.
     #[error("{0}")]
     Discovery(String),
+
+    /// A destructive or gated action was not confirmed: no `--yes` and no
+    /// terminal to prompt on, or the user declined the prompt. Nothing was
+    /// sent.
+    #[error("{0}")]
+    ConfirmationRequired(String),
 
     /// Any other unexpected failure. The source chain is preserved.
     #[error("{}", format_chain(.0.as_ref()))]
@@ -85,6 +98,8 @@ impl GwsError {
     /// Exit code for retryable [`GwsError::Api`] errors (HTTP 429, 5xx, or
     /// 403 rate-limit reasons). See [`GwsError::is_retryable`].
     pub const EXIT_CODE_API_RETRYABLE: i32 = 6;
+    /// Exit code for [`GwsError::ConfirmationRequired`].
+    pub const EXIT_CODE_CONFIRMATION_REQUIRED: i32 = 7;
 
     /// Wrap any error (or message) as [`GwsError::Other`].
     pub fn other(err: impl Into<BoxError>) -> Self {
@@ -93,18 +108,12 @@ impl GwsError {
 
     /// Whether retrying the same request later may succeed.
     ///
-    /// True for API errors with HTTP 429, any 5xx, or HTTP 403 with reason
-    /// `rateLimitExceeded` / `userRateLimitExceeded`.
+    /// True for API errors with HTTP 429, any 5xx, or a rate-limit reason
+    /// (`rateLimitExceeded`, `userRateLimitExceeded`, `RATE_LIMIT_EXCEEDED`).
     pub fn is_retryable(&self) -> bool {
         match self {
             GwsError::Api { code, reason, .. } => {
-                *code == 429
-                    || *code >= 500
-                    || (*code == 403
-                        && matches!(
-                            reason.as_str(),
-                            "rateLimitExceeded" | "userRateLimitExceeded"
-                        ))
+                *code == 429 || *code >= 500 || RATE_LIMIT_REASONS.contains(&reason.as_str())
             }
             _ => false,
         }
@@ -118,6 +127,7 @@ impl GwsError {
             GwsError::Auth(_) => Self::EXIT_CODE_AUTH,
             GwsError::Validation(_) => Self::EXIT_CODE_VALIDATION,
             GwsError::Discovery(_) => Self::EXIT_CODE_DISCOVERY,
+            GwsError::ConfirmationRequired(_) => Self::EXIT_CODE_CONFIRMATION_REQUIRED,
             GwsError::Other(_) => Self::EXIT_CODE_OTHER,
         }
     }
@@ -160,6 +170,13 @@ impl GwsError {
                     "code": 500,
                     "message": msg,
                     "reason": "discoveryError",
+                }
+            }),
+            GwsError::ConfirmationRequired(msg) => json!({
+                "error": {
+                    "code": 412,
+                    "message": msg,
+                    "reason": "confirmationRequired",
                 }
             }),
             GwsError::Other(_) => json!({
@@ -229,6 +246,14 @@ mod tests {
     }
 
     #[test]
+    fn test_confirmation_required_has_its_own_exit_code_and_reason() {
+        let err = GwsError::ConfirmationRequired("pass --yes".to_string());
+        assert_eq!(err.exit_code(), GwsError::EXIT_CODE_CONFIRMATION_REQUIRED);
+        assert_eq!(err.to_json()["error"]["reason"], "confirmationRequired");
+        assert_eq!(err.to_json()["error"]["message"], "pass --yes");
+    }
+
+    #[test]
     fn test_exit_codes_are_distinct() {
         let codes = [
             GwsError::EXIT_CODE_API,
@@ -237,6 +262,7 @@ mod tests {
             GwsError::EXIT_CODE_DISCOVERY,
             GwsError::EXIT_CODE_OTHER,
             GwsError::EXIT_CODE_API_RETRYABLE,
+            GwsError::EXIT_CODE_CONFIRMATION_REQUIRED,
         ];
         let unique: std::collections::HashSet<i32> = codes.iter().copied().collect();
         assert_eq!(

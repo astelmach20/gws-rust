@@ -17,7 +17,7 @@
 use super::api::resolve_label_ids;
 use super::cli::{list_values, parse_optional_trimmed, required_str};
 use super::prelude::*;
-use crate::helpers::rest::confirm::{self, Impact};
+use crate::confirm::{self, Impact};
 
 /// A filter to create, with label names not yet resolved to IDs.
 #[derive(Debug, Clone, PartialEq)]
@@ -99,22 +99,27 @@ fn build_filter(spec: &FilterSpec, add: &[String], remove: &[String]) -> Value {
 }
 
 fn print(value: &Value, matches: &ArgMatches) -> Result<(), GwsError> {
-    let format =
-        crate::helpers::rest::output_format(matches, crate::formatter::OutputFormat::Json)?;
+    let format = crate::helpers::http::output_format(matches);
     crate::output::emit(&crate::formatter::format_value(value, &format)?)?;
     Ok(())
 }
 
 /// Handle `+filter`.
 pub(super) async fn handle_filter(matches: &ArgMatches) -> Result<(), GwsError> {
-    let dry_run = crate::helpers::rest::dry_run(matches)?;
+    let dry_run = crate::helpers::http::dry_run(matches);
     let base = format!("{}/users/me/settings/filters", super::api::GMAIL_API_BASE);
     match matches.subcommand() {
         Some(("list", sub)) => {
             if dry_run {
-                return crate::helpers::rest::print_dry_run(vec![
-                    crate::helpers::rest::dry_run_request("GET", &base, &[], None),
-                ]);
+                return crate::helpers::http::print_dry_run(
+                    matches,
+                    vec![crate::helpers::http::dry_run_request(
+                        "GET",
+                        &base,
+                        &[],
+                        None,
+                    )],
+                );
             }
             let api = super::api::authenticated(&[GMAIL_SETTINGS_SCOPE]).await?;
             let filters = api.list_filters().await?;
@@ -124,9 +129,15 @@ pub(super) async fn handle_filter(matches: &ArgMatches) -> Result<(), GwsError> 
             let spec = parse_create_args(sub)?;
             if dry_run {
                 let body = build_filter(&spec, &spec.add_labels, &spec.remove_labels);
-                return crate::helpers::rest::print_dry_run(vec![
-                    crate::helpers::rest::dry_run_request("POST", &base, &[], Some(&body)),
-                ]);
+                return crate::helpers::http::print_dry_run(
+                    matches,
+                    vec![crate::helpers::http::dry_run_request(
+                        "POST",
+                        &base,
+                        &[],
+                        Some(&body),
+                    )],
+                );
             }
             let api = super::api::authenticated(&[GMAIL_SETTINGS_SCOPE]).await?;
             let body = if spec.add_labels.is_empty() && spec.remove_labels.is_empty() {
@@ -149,15 +160,21 @@ pub(super) async fn handle_filter(matches: &ArgMatches) -> Result<(), GwsError> 
             )?;
             if dry_run {
                 let url = format!("{base}/{}", crate::validate::encode_path_segment(&id));
-                return crate::helpers::rest::print_dry_run(vec![
-                    crate::helpers::rest::dry_run_request("DELETE", &url, &[], None),
-                ]);
+                return crate::helpers::http::print_dry_run(
+                    matches,
+                    vec![crate::helpers::http::dry_run_request(
+                        "DELETE",
+                        &url,
+                        &[],
+                        None,
+                    )],
+                );
             }
             let api = super::api::authenticated(&[GMAIL_SETTINGS_SCOPE]).await?;
             api.delete_filter(&id).await?;
             print(&json!({ "deleted": true, "filterId": id }), sub)
         }
-        Some((other, _)) => Err(other_error(format!("unknown +filter action '{other}'"))),
+        Some((other, _)) => Err(GwsError::other(format!("unknown +filter action '{other}'"))),
         None => Err(GwsError::Validation(
             "Specify list, create, or delete".to_string(),
         )),

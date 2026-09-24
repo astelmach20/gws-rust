@@ -181,9 +181,9 @@ pub(super) fn thread_id_from_input(input: &str) -> Result<String, GwsError> {
 /// Handle the `+resolve-url` subcommand.
 pub(super) async fn handle_resolve_url(matches: &ArgMatches) -> Result<(), GwsError> {
     let resolved = resolve(&required_str(matches, "url")?)?;
-    let verify = !matches.get_flag("no-verify") && !crate::helpers::rest::dry_run(matches)?;
+    let verify = !matches.get_flag("no-verify") && !crate::helpers::http::dry_run(matches);
     let mut output = serde_json::to_value(&resolved)
-        .map_err(|e| other_error(format!("Failed to serialize result: {e}")))?;
+        .map_err(|e| GwsError::other(format!("Failed to serialize result: {e}")))?;
     if verify {
         let api = super::api::authenticated(&[GMAIL_READONLY_SCOPE]).await?;
         let found = match resolved.kind {
@@ -197,8 +197,7 @@ pub(super) async fn handle_resolve_url(matches: &ArgMatches) -> Result<(), GwsEr
     } else {
         output["verified"] = json!(false);
     }
-    let format =
-        crate::helpers::rest::output_format(matches, crate::formatter::OutputFormat::Json)?;
+    let format = crate::helpers::http::output_format(matches);
     crate::output::emit(&crate::formatter::format_value(&output, &format)?)?;
     Ok(())
 }

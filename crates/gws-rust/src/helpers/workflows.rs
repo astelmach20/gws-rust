@@ -20,13 +20,12 @@
 //! `--dry-run`, and non-idempotent writes are sent exactly once.
 
 use super::Helper;
-use crate::auth;
+use crate::confirm::{self, Impact, with_yes};
 use crate::error::GwsError;
-use crate::helpers::rest::confirm::{self, Impact, with_yes};
-use crate::helpers::rest::{
-    RestClient, Retry, dry_run, dry_run_request, other_error, output_format, print_dry_run,
-};
+use crate::helpers::http::{dry_run, dry_run_request, output_format};
+use crate::transport::Transport;
 use clap::{Arg, ArgMatches, Command};
+use gws_rust_core::client::Idempotency;
 use serde_json::{Value, json};
 use std::future::Future;
 use std::pin::Pin;
@@ -225,22 +224,19 @@ fn required(matches: &ArgMatches, name: &str) -> Result<String, GwsError> {
         .ok_or_else(|| GwsError::Validation(format!("--{name} is required")))
 }
 
-async fn authenticated(scopes: &[&str]) -> Result<RestClient, GwsError> {
-    let token = auth::get_token(scopes)
-        .await
-        .map_err(|e| GwsError::Auth(format!("Auth failed: {e}")))?;
-    Ok(RestClient::new(crate::client::shared_client()?, token))
+async fn authenticated(scopes: &[&str]) -> Result<Transport, GwsError> {
+    Transport::for_scopes(scopes).await
 }
 
 fn print(value: &Value, matches: &ArgMatches) -> Result<(), GwsError> {
-    let fmt = output_format(matches, crate::formatter::OutputFormat::Json)?;
+    let fmt = output_format(matches);
     crate::output::emit(&crate::formatter::format_value(value, &fmt)?)?;
     Ok(())
 }
 
 /// GET every page of a list endpoint and concatenate its `items`.
 async fn get_all_items(
-    rest: &RestClient,
+    rest: &Transport,
     url: &str,
     query: &[(&str, String)],
     context: &str,
@@ -252,11 +248,11 @@ async fn get_all_items(
         if let Some(t) = &page_token {
             q.push(("pageToken", t.clone()));
         }
-        let page = rest.get(url, &q, context).await?;
+        let page = rest.get_json(url, &q, context).await?;
         if let Some(page_items) = page.get("items") {
             let arr = page_items
                 .as_array()
-                .ok_or_else(|| other_error(format!("{context}: 'items' is not an array")))?;
+                .ok_or_else(|| GwsError::other(format!("{context}: 'items' is not an array")))?;
             items.extend(arr.iter().cloned());
         }
         match page.get("nextPageToken").and_then(Value::as_str) {
@@ -294,7 +290,7 @@ fn calendar_events_url(bases: &Bases, calendar_id: &str) -> String {
 
 /// Events between two instants, expanded and ordered by start time.
 async fn events_between(
-    rest: &RestClient,
+    rest: &Transport,
     bases: &Bases,
     time_min: &str,
     time_max: &str,
@@ -319,7 +315,7 @@ async fn events_between(
 // ---------------------------------------------------------------------------
 
 async fn standup_report(
-    rest: &RestClient,
+    rest: &Transport,
     bases: &Bases,
     time_min: &str,
     time_max: &str,
@@ -355,20 +351,22 @@ async fn standup_report(
 
 async fn handle_standup_report(matches: &ArgMatches) -> Result<(), GwsError> {
     let bases = Bases::default();
-    if dry_run(matches)? {
-        return print_dry_run(vec![
-            dry_run_request("GET", &calendar_events_url(&bases, "primary"), &[], None),
-            dry_run_request(
-                "GET",
-                &format!("{}/lists/@default/tasks", bases.tasks),
-                &[],
-                None,
-            ),
-        ]);
+    if dry_run(matches) {
+        return crate::helpers::http::print_dry_run(
+            matches,
+            vec![
+                dry_run_request("GET", &calendar_events_url(&bases, "primary"), &[], None),
+                dry_run_request(
+                    "GET",
+                    &format!("{}/lists/@default/tasks", bases.tasks),
+                    &[],
+                    None,
+                ),
+            ],
+        );
     }
     let rest = authenticated(&[CALENDAR_READONLY, TASKS_READONLY]).await?;
-    let http = crate::client::shared_client()?;
-    let tz = crate::timezone::resolve_account_timezone(&http, rest.token(), None).await?;
+    let tz = crate::timezone::resolve_account_timezone(&rest, None).await?;
     let start = crate::timezone::start_of_today(tz)?;
     let end = start + chrono::Duration::days(1);
     let report = standup_report(
@@ -387,13 +385,13 @@ async fn handle_standup_report(matches: &ArgMatches) -> Result<(), GwsError> {
 // ---------------------------------------------------------------------------
 
 async fn meeting_prep(
-    rest: &RestClient,
+    rest: &Transport,
     bases: &Bases,
     calendar_id: &str,
     now: &str,
 ) -> Result<Value, GwsError> {
     let page = rest
-        .get(
+        .get_json(
             &calendar_events_url(bases, calendar_id),
             &[
                 ("timeMin", now.to_string()),
@@ -436,13 +434,16 @@ async fn meeting_prep(
 async fn handle_meeting_prep(matches: &ArgMatches) -> Result<(), GwsError> {
     let bases = Bases::default();
     let calendar_id = required(matches, "calendar-id")?;
-    if dry_run(matches)? {
-        return print_dry_run(vec![dry_run_request(
-            "GET",
-            &calendar_events_url(&bases, &calendar_id),
-            &[],
-            None,
-        )]);
+    if dry_run(matches) {
+        return crate::helpers::http::print_dry_run(
+            matches,
+            vec![dry_run_request(
+                "GET",
+                &calendar_events_url(&bases, &calendar_id),
+                &[],
+                None,
+            )],
+        );
     }
     let rest = authenticated(&[CALENDAR_READONLY]).await?;
     let now = chrono::Utc::now().to_rfc3339();
@@ -471,13 +472,13 @@ fn tasks_insert_url(bases: &Bases, tasklist: &str) -> String {
 }
 
 async fn email_to_task(
-    rest: &RestClient,
+    rest: &Transport,
     bases: &Bases,
     message_id: &str,
     tasklist: &str,
 ) -> Result<Value, GwsError> {
     let msg = rest
-        .get(
+        .get_json(
             &message_url(bases, message_id),
             &[
                 ("format", "metadata".to_string()),
@@ -512,14 +513,14 @@ async fn email_to_task(
             &tasks_insert_url(bases, tasklist),
             &[],
             Some(&task_body),
-            Retry::Never,
+            Idempotency::NonIdempotent,
             "Failed to create task",
         )
         .await?;
     let task_id = task
         .get("id")
         .and_then(Value::as_str)
-        .ok_or_else(|| other_error("tasks.insert response has no task id"))?;
+        .ok_or_else(|| GwsError::other("tasks.insert response has no task id"))?;
     Ok(json!({
         "created": true,
         "taskId": task_id,
@@ -532,23 +533,26 @@ async fn handle_email_to_task(matches: &ArgMatches) -> Result<(), GwsError> {
     let bases = Bases::default();
     let message_id = required(matches, "message-id")?;
     let tasklist = required(matches, "tasklist-id")?;
-    if dry_run(matches)? {
-        return print_dry_run(vec![
-            dry_run_request(
-                "GET",
-                &message_url(&bases, &message_id),
-                &[("format", "metadata".to_string())],
-                None,
-            ),
-            dry_run_request(
-                "POST",
-                &tasks_insert_url(&bases, &tasklist),
-                &[],
-                Some(
-                    &json!({ "title": "<subject of the message>", "notes": format!("From email: {message_id}") }),
+    if dry_run(matches) {
+        return crate::helpers::http::print_dry_run(
+            matches,
+            vec![
+                dry_run_request(
+                    "GET",
+                    &message_url(&bases, &message_id),
+                    &[("format", "metadata".to_string())],
+                    None,
                 ),
-            ),
-        ]);
+                dry_run_request(
+                    "POST",
+                    &tasks_insert_url(&bases, &tasklist),
+                    &[],
+                    Some(
+                        &json!({ "title": "<subject of the message>", "notes": format!("From email: {message_id}") }),
+                    ),
+                ),
+            ],
+        );
     }
     let rest = authenticated(&[GMAIL_READONLY, TASKS]).await?;
     let out = email_to_task(&rest, &bases, &message_id, &tasklist).await?;
@@ -560,7 +564,7 @@ async fn handle_email_to_task(matches: &ArgMatches) -> Result<(), GwsError> {
 // ---------------------------------------------------------------------------
 
 async fn weekly_digest(
-    rest: &RestClient,
+    rest: &Transport,
     bases: &Bases,
     time_min: &str,
     time_max: &str,
@@ -571,7 +575,7 @@ async fn weekly_digest(
         .map(|e| json!({ "summary": event_summary(e), "start": event_time(e, "start") }))
         .collect();
     let unread = rest
-        .get(
+        .get_json(
             &format!("{}/users/me/messages", bases.gmail),
             &[
                 ("q", "is:unread".to_string()),
@@ -583,7 +587,7 @@ async fn weekly_digest(
     let unread_estimate = unread
         .get("resultSizeEstimate")
         .and_then(Value::as_u64)
-        .ok_or_else(|| other_error("messages.list response has no resultSizeEstimate"))?;
+        .ok_or_else(|| GwsError::other("messages.list response has no resultSizeEstimate"))?;
     Ok(json!({
         "meetings": meetings,
         "meetingCount": meetings.len(),
@@ -595,20 +599,22 @@ async fn weekly_digest(
 
 async fn handle_weekly_digest(matches: &ArgMatches) -> Result<(), GwsError> {
     let bases = Bases::default();
-    if dry_run(matches)? {
-        return print_dry_run(vec![
-            dry_run_request("GET", &calendar_events_url(&bases, "primary"), &[], None),
-            dry_run_request(
-                "GET",
-                &format!("{}/users/me/messages", bases.gmail),
-                &[("q", "is:unread".to_string())],
-                None,
-            ),
-        ]);
+    if dry_run(matches) {
+        return crate::helpers::http::print_dry_run(
+            matches,
+            vec![
+                dry_run_request("GET", &calendar_events_url(&bases, "primary"), &[], None),
+                dry_run_request(
+                    "GET",
+                    &format!("{}/users/me/messages", bases.gmail),
+                    &[("q", "is:unread".to_string())],
+                    None,
+                ),
+            ],
+        );
     }
     let rest = authenticated(&[CALENDAR_READONLY, GMAIL_READONLY]).await?;
-    let http = crate::client::shared_client()?;
-    let tz = crate::timezone::resolve_account_timezone(&http, rest.token(), None).await?;
+    let tz = crate::timezone::resolve_account_timezone(&rest, None).await?;
     let now = chrono::Utc::now().with_timezone(&tz);
     let end = now + chrono::Duration::days(7);
     let out = weekly_digest(&rest, &bases, &now.to_rfc3339(), &end.to_rfc3339()).await?;
@@ -640,7 +646,7 @@ fn announcement_text(custom: Option<&str>, file_name: &str, link: &str) -> Strin
 }
 
 async fn file_announce(
-    rest: &RestClient,
+    rest: &Transport,
     bases: &Bases,
     file_id: &str,
     space: &str,
@@ -648,7 +654,7 @@ async fn file_announce(
     request_id: &str,
 ) -> Result<Value, GwsError> {
     let file = rest
-        .get(
+        .get_json(
             &format!(
                 "{}/files/{}",
                 bases.drive,
@@ -664,11 +670,11 @@ async fn file_announce(
     let file_name = file
         .get("name")
         .and_then(Value::as_str)
-        .ok_or_else(|| other_error(format!("Drive file {file_id} has no name")))?;
+        .ok_or_else(|| GwsError::other(format!("Drive file {file_id} has no name")))?;
     let link = file
         .get("webViewLink")
         .and_then(Value::as_str)
-        .ok_or_else(|| other_error(format!("Drive file {file_id} has no webViewLink")))?;
+        .ok_or_else(|| GwsError::other(format!("Drive file {file_id} has no webViewLink")))?;
     let text = announcement_text(custom, file_name, link);
     // requestId makes the Chat create idempotent server-side; still sent once.
     let message = rest
@@ -677,7 +683,7 @@ async fn file_announce(
             &format!("{}/{space}/messages", bases.chat),
             &[("requestId", request_id.to_string())],
             Some(&json!({ "text": text })),
-            Retry::Never,
+            Idempotency::NonIdempotent,
             "Failed to send Chat message",
         )
         .await?;
@@ -700,25 +706,30 @@ async fn handle_file_announce(matches: &ArgMatches) -> Result<(), GwsError> {
         Impact::Outbound,
         &format!("post a Chat message to {space}"),
     )?;
-    if dry_run(matches)? {
-        return print_dry_run(vec![
-            dry_run_request(
-                "GET",
-                &format!(
-                    "{}/files/{}",
-                    bases.drive,
-                    crate::validate::encode_path_segment(&file_id)
+    if dry_run(matches) {
+        return crate::helpers::http::print_dry_run(
+            matches,
+            vec![
+                dry_run_request(
+                    "GET",
+                    &format!(
+                        "{}/files/{}",
+                        bases.drive,
+                        crate::validate::encode_path_segment(&file_id)
+                    ),
+                    &[],
+                    None,
                 ),
-                &[],
-                None,
-            ),
-            dry_run_request(
-                "POST",
-                &format!("{}/{space}/messages", bases.chat),
-                &[],
-                Some(&json!({ "text": announcement_text(custom, "<file name>", "<file link>") })),
-            ),
-        ]);
+                dry_run_request(
+                    "POST",
+                    &format!("{}/{space}/messages", bases.chat),
+                    &[],
+                    Some(
+                        &json!({ "text": announcement_text(custom, "<file name>", "<file link>") }),
+                    ),
+                ),
+            ],
+        );
     }
     let rest = authenticated(&[DRIVE_READONLY, CHAT_MESSAGES_CREATE]).await?;
     let request_id = uuid::Uuid::new_v4().to_string();
@@ -743,8 +754,8 @@ mod tests {
         }
     }
 
-    fn rest() -> RestClient {
-        RestClient::new(reqwest::Client::new(), "t")
+    fn rest(server: &MockServer) -> Transport {
+        Transport::for_test(&server.uri())
     }
 
     fn workflow_root() -> Command {
@@ -838,7 +849,7 @@ mod tests {
             .respond_with(ResponseTemplate::new(503))
             .mount(&server)
             .await;
-        let err = standup_report(&rest(), &bases(&server), "a", "b", "2026-01-01")
+        let err = standup_report(&rest(&server), &bases(&server), "a", "b", "2026-01-01")
             .await
             .unwrap_err();
         assert!(
@@ -866,7 +877,7 @@ mod tests {
             )
             .mount(&server)
             .await;
-        let out = standup_report(&rest(), &bases(&server), "a", "b", "2026-01-01")
+        let out = standup_report(&rest(&server), &bases(&server), "a", "b", "2026-01-01")
             .await
             .unwrap();
         assert_eq!(out["meetings"][0]["summary"], "(No title)");
@@ -884,7 +895,7 @@ mod tests {
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({"items": []})))
             .mount(&server)
             .await;
-        let out = meeting_prep(&rest(), &bases(&server), "primary", "now")
+        let out = meeting_prep(&rest(&server), &bases(&server), "primary", "now")
             .await
             .unwrap();
         assert!(out["event"].is_null());
@@ -910,7 +921,7 @@ mod tests {
             .expect(1)
             .mount(&server)
             .await;
-        let err = email_to_task(&rest(), &bases(&server), "m1", "@default")
+        let err = email_to_task(&rest(&server), &bases(&server), "m1", "@default")
             .await
             .unwrap_err();
         assert!(matches!(err, GwsError::Api { code: 500, .. }));
@@ -931,7 +942,7 @@ mod tests {
             )
             .mount(&server)
             .await;
-        let out = weekly_digest(&rest(), &bases(&server), "a", "b")
+        let out = weekly_digest(&rest(&server), &bases(&server), "a", "b")
             .await
             .unwrap();
         assert_eq!(out["unreadEmails"], 4);
@@ -959,9 +970,16 @@ mod tests {
             .expect(1)
             .mount(&server)
             .await;
-        let out = file_announce(&rest(), &bases(&server), "f1", "spaces/S", None, "req-1")
-            .await
-            .unwrap();
+        let out = file_announce(
+            &rest(&server),
+            &bases(&server),
+            "f1",
+            "spaces/S",
+            None,
+            "req-1",
+        )
+        .await
+        .unwrap();
         assert_eq!(out["messageName"], "spaces/S/messages/1");
     }
 
@@ -978,7 +996,7 @@ mod tests {
             .mount(&server)
             .await;
         assert!(
-            file_announce(&rest(), &bases(&server), "f1", "spaces/S", None, "r")
+            file_announce(&rest(&server), &bases(&server), "f1", "spaces/S", None, "r")
                 .await
                 .is_err()
         );

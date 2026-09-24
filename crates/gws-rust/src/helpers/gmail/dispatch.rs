@@ -16,7 +16,7 @@
 
 use super::api::GMAIL_UPLOAD_BASE;
 use super::prelude::*;
-use crate::helpers::rest::confirm::{self, Impact};
+use crate::confirm::{self, Impact};
 
 /// Whether the message is sent or saved as a draft, and whether this is a dry run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -29,7 +29,7 @@ impl Delivery {
     pub(super) fn from_matches(matches: &ArgMatches) -> Result<Self, GwsError> {
         Ok(Self {
             draft: matches.get_flag("draft"),
-            dry_run: crate::helpers::rest::dry_run(matches)?,
+            dry_run: crate::helpers::http::dry_run(matches),
         })
     }
 
@@ -84,24 +84,25 @@ pub(super) async fn deliver(
     if delivery.dry_run {
         let plan = dry_run_plan(raw_message, thread_id, delivery.draft);
         let text = serde_json::to_string_pretty(&plan)
-            .map_err(|e| other_error(format!("Failed to serialize dry-run plan: {e}")))?;
+            .map_err(|e| GwsError::other(format!("Failed to serialize dry-run plan: {e}")))?;
         println!("{text}");
         return Ok(());
     }
-    let api = api.ok_or_else(|| other_error("internal error: no Gmail client for a real send"))?;
+    let api =
+        api.ok_or_else(|| GwsError::other("internal error: no Gmail client for a real send"))?;
     let metadata = build_send_metadata(thread_id, delivery.draft);
     let response = api
         .upload_raw(raw_message.as_bytes(), &metadata, delivery.draft)
         .await?;
     let text = serde_json::to_string_pretty(&response)
-        .map_err(|e| other_error(format!("Failed to serialize response: {e}")))?;
+        .map_err(|e| GwsError::other(format!("Failed to serialize response: {e}")))?;
     println!("{text}");
 
     if delivery.draft {
         let id = response
             .get("id")
             .and_then(Value::as_str)
-            .ok_or_else(|| other_error("drafts.create response has no draft \"id\""))?;
+            .ok_or_else(|| GwsError::other("drafts.create response has no draft \"id\""))?;
         eprintln!("Draft saved. Send it with:");
         eprintln!(
             "  gwsr gmail users drafts send --params '{{\"userId\":\"me\"}}' --json '{{\"id\":\"{}\"}}'",

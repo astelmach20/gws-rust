@@ -16,24 +16,20 @@
 //!
 //! [`execute`] turns a Discovery method plus user input into HTTP requests:
 //! input validation ([`input`], [`body_schema`]), URL construction ([`url`]),
-//! the credential-attaching transport with retries and token refresh
-//! ([`transport`]), uploads ([`upload`]), pagination ([`pagination`]),
+//! the shared [`crate::transport`], uploads ([`upload`]), pagination ([`pagination`]),
 //! long-running operations ([`operation`]), downloads ([`download`]),
 //! Model Armor screening and the destructive-operation gate
-//! ([`safety`]). [`batch`] implements `gwsr batch`, and [`options`] maps CLI
+//! ([`crate::confirm`]). [`batch`] implements `gwsr batch`, and [`options`] maps CLI
 //! flags onto [`Invocation`].
 
 pub mod batch;
 mod body_schema;
 mod download;
-mod errors;
 mod input;
 mod operation;
 pub mod options;
 mod output;
 mod pagination;
-mod safety;
-mod transport;
 mod upload;
 mod url;
 
@@ -48,31 +44,20 @@ use serde_json::{Map, Value, json};
 use gws_rust_core::client::{Idempotency, RetryPolicy, Sent};
 use gws_rust_core::validate::EndpointPolicy;
 
+pub use crate::transport::Credentials;
 pub use download::OutputTarget;
-pub use errors::extract_enable_url;
 pub use operation::WaitConfig;
-pub use safety::ConfirmPolicy;
-pub use transport::Credentials;
 pub use upload::UploadMode;
 
 use crate::discovery::{RestDescription, RestMethod};
 use crate::error::GwsError;
 use crate::formatter::OutputFormat;
 use crate::helpers::modelarmor::SanitizeConfig;
-use errors::error_from_response;
+use crate::transport::errors::error_from_response;
+use crate::transport::{Transport, read_body};
 use output::Emitter;
-use transport::{Transport, read_body};
 use upload::UploadData;
 use url::{UrlTarget, build_url};
-
-/// Tracks what authentication method was used for the request.
-#[derive(Debug, Clone, PartialEq)]
-pub enum AuthMethod {
-    /// OAuth2 bearer token.
-    OAuth,
-    /// No authentication was provided.
-    None,
-}
 
 /// Media upload content: a file on disk, streamed. The content type is
 /// explicit, inferred from the extension, or taken from metadata `mimeType`.
@@ -81,9 +66,9 @@ pub struct UploadSource<'a> {
     pub content_type: Option<&'a str>,
 }
 
-/// Whether `method` is destructive (see [`safety`]).
+/// Whether `method` is destructive (see [`crate::confirm`]).
 pub fn is_destructive(method: &RestMethod) -> bool {
-    safety::is_destructive(method)
+    crate::confirm::is_destructive_method(method)
 }
 
 /// Configuration for auto-pagination.
@@ -137,14 +122,13 @@ pub struct ExecOptions {
     pub allow_unknown_fields: bool,
     /// `--yes`: skip the destructive-operation confirmation.
     pub assume_yes: bool,
-    pub confirm: ConfirmPolicy,
     /// Whether a human can answer a confirmation prompt.
     pub interactive: bool,
 }
 
 impl ExecOptions {
     /// Defaults with environment-driven settings (`GWSR_TIMEOUT`,
-    /// `GWSR_API_BASE_URL`, `GWSR_CONFIRM_DESTRUCTIVE`, `GWSR_NO_QUOTA_PROJECT`).
+    /// `GWSR_API_BASE_URL`, `GWSR_NO_QUOTA_PROJECT`).
     pub fn from_env() -> Result<Self, GwsError> {
         Ok(Self {
             dry_run: false,
@@ -160,9 +144,18 @@ impl ExecOptions {
             allow_unknown_params: false,
             allow_unknown_fields: false,
             assume_yes: false,
-            confirm: ConfirmPolicy::from_env()?,
-            interactive: safety::is_interactive(),
+            interactive: crate::confirm::is_interactive(),
         })
+    }
+
+    /// The confirmation gate for this invocation. Dry runs return before
+    /// the gate, so it never prompts for them.
+    pub(crate) fn gate(&self) -> crate::confirm::Gate {
+        crate::confirm::Gate {
+            yes: self.assume_yes,
+            dry_run: self.dry_run,
+            interactive: self.interactive,
+        }
     }
 
     fn idle_timeout(&self) -> Option<Duration> {
@@ -418,13 +411,10 @@ pub(crate) async fn execute_to(
         return Ok(None);
     }
 
-    if safety::is_destructive(method) {
-        safety::confirm(
-            method_id,
-            options.assume_yes,
-            options.confirm,
-            options.interactive,
-            safety::ask_on_terminal,
+    if is_destructive(method) {
+        options.gate().check(
+            crate::confirm::Impact::Destructive,
+            &format!("run destructive method {method_id}"),
         )?;
     }
 

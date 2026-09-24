@@ -284,7 +284,6 @@ fn options(server: &MockServer) -> ExecOptions {
         allow_unknown_params: false,
         allow_unknown_fields: false,
         assume_yes: false,
-        confirm: ConfirmPolicy::Interactive,
         interactive: false,
     }
 }
@@ -547,7 +546,6 @@ async fn dry_run_sends_nothing_and_reports_request() {
     let mut call = Call::new(&d, "delete", &server);
     call.params = json!({"fileId": "abc"});
     call.options.dry_run = true;
-    call.options.confirm = ConfirmPolicy::Always;
     let em = Emitter::capturing();
     call.run(&em).await.unwrap();
     let out = lines(&em);
@@ -633,7 +631,7 @@ struct QueueProvider(tokio::sync::Mutex<Vec<&'static str>>);
 
 #[async_trait::async_trait]
 impl crate::auth::AccessTokenProvider for QueueProvider {
-    async fn access_token(&self) -> anyhow::Result<String> {
+    async fn refresh_access_token(&self) -> anyhow::Result<String> {
         self.0
             .lock()
             .await
@@ -738,7 +736,7 @@ async fn http_googleapis_root_is_rejected() {
 // ── Destructive gate ────────────────────────────────────────────────────
 
 #[tokio::test]
-async fn destructive_call_requires_yes_when_policy_always() {
+async fn destructive_call_requires_yes_without_a_terminal() {
     let server = MockServer::start().await;
     Mock::given(method("DELETE"))
         .respond_with(ResponseTemplate::new(204))
@@ -747,14 +745,13 @@ async fn destructive_call_requires_yes_when_policy_always() {
     let d = doc(&server.uri());
     let mut call = Call::new(&d, "delete", &server);
     call.params = json!({"fileId": "1"});
-    call.options.confirm = ConfirmPolicy::Always;
     let err = call.run(&Emitter::capturing()).await.unwrap_err();
+    assert!(matches!(err, GwsError::ConfirmationRequired(_)), "{err:?}");
     assert!(err.to_string().contains("--yes"));
     assert!(server.received_requests().await.unwrap().is_empty());
 
     let mut call = Call::new(&d, "delete", &server);
     call.params = json!({"fileId": "1"});
-    call.options.confirm = ConfirmPolicy::Always;
     call.options.assume_yes = true;
     let em = Emitter::capturing();
     call.run(&em).await.unwrap();

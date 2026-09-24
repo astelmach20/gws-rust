@@ -31,10 +31,9 @@ pub(super) async fn handle_triage(
         include_spam_trash: false,
     };
     let show_labels = matches.get_flag("labels");
-    let format =
-        crate::helpers::rest::output_format(matches, crate::formatter::OutputFormat::Json)?;
-    if crate::helpers::rest::dry_run(matches)? {
-        return super::search::dry_run_list(&params);
+    let format = crate::helpers::http::output_format(matches);
+    if crate::helpers::http::dry_run(matches) {
+        return super::search::dry_run_list(matches, &params);
     }
 
     // gmail.readonly (not gmail.metadata) because the metadata scope rejects `q`.

@@ -17,10 +17,10 @@
 //! Every call sets `supportsAllDrives=true` so Shared Drive items work.
 
 use super::Helper;
-use super::confirm::{self, Impact, with_yes};
 use super::http::{
     self, Api, ApiRequest, OutputTarget, encode_segment, flag, optional, required, safe_filename,
 };
+use crate::confirm::{self, Impact, with_yes};
 use crate::error::GwsError;
 use clap::{Arg, ArgAction, ArgMatches, Command};
 use serde_json::{Value, json};
@@ -331,7 +331,7 @@ TIPS:
                 "+share" => {
                     let args = ShareArgs::parse(m)?;
                     let (impact, action) = args.impact();
-                    confirm::gate(m, impact, &action)?;
+                    confirm::confirm(m, impact, &action)?;
                     let api = Api::new(doc, &[SCOPE_DRIVE], dry, sanitize).await?;
                     let v = share(&api, &args).await?;
                     (api, v)
@@ -1178,7 +1178,7 @@ mod tests {
                 .unwrap()
                 .ends_with("/files/DOC1/export")
         );
-        assert_eq!(plan[0]["query"]["mimeType"], "application/pdf");
+        assert_eq!(plan[0]["query_params"]["mimeType"], "application/pdf");
     }
 
     #[tokio::test]
@@ -1242,7 +1242,7 @@ mod tests {
         let api = dry_api("drive/v3/");
         share(&api, &args).await.unwrap();
         let plan = api.planned();
-        assert_eq!(plan[0]["query"]["transferOwnership"], "true");
+        assert_eq!(plan[0]["query_params"]["transferOwnership"], "true");
         assert_eq!(plan[0]["body"]["type"], "user");
     }
 
@@ -1299,7 +1299,7 @@ mod tests {
         ]);
         let sub = m.subcommand_matches("+share").unwrap();
         let (impact, action) = ShareArgs::parse(sub).unwrap().impact();
-        assert!(confirm::gate(sub, impact, &action).is_err());
+        assert!(confirm::confirm(sub, impact, &action).is_err());
         let m = matches(&[
             "gwsr",
             "+share",
@@ -1311,7 +1311,7 @@ mod tests {
             "--yes",
         ]);
         let sub = m.subcommand_matches("+share").unwrap();
-        assert!(confirm::gate(sub, impact, &action).is_ok());
+        assert!(confirm::confirm(sub, impact, &action).is_ok());
     }
 
     #[tokio::test]
@@ -1352,7 +1352,7 @@ mod tests {
         share(&api, &args).await.unwrap();
         let plan = api.planned();
         assert_eq!(plan[0]["body"]["type"], "group");
-        assert_eq!(plan[0]["query"]["sendNotificationEmail"], "false");
+        assert_eq!(plan[0]["query_params"]["sendNotificationEmail"], "false");
     }
 
     #[tokio::test]

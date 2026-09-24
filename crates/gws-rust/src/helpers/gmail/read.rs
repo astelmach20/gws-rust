@@ -38,18 +38,21 @@ pub(super) async fn handle_read(
         html: matches.get_flag("html"),
     };
 
-    if crate::helpers::rest::dry_run(matches)? {
+    if crate::helpers::http::dry_run(matches) {
         let url = format!(
             "{}/users/me/messages/{}",
             super::api::GMAIL_API_BASE,
             crate::validate::encode_path_segment(&message_id)
         );
-        return crate::helpers::rest::print_dry_run(vec![crate::helpers::rest::dry_run_request(
-            "GET",
-            &url,
-            &[("format", "full".to_string())],
-            None,
-        )]);
+        return crate::helpers::http::print_dry_run(
+            matches,
+            vec![crate::helpers::http::dry_run_request(
+                "GET",
+                &url,
+                &[("format", "full".to_string())],
+                None,
+            )],
+        );
     }
 
     let api = super::api::authenticated(&[GMAIL_READONLY_SCOPE]).await?;
@@ -57,15 +60,15 @@ pub(super) async fn handle_read(
 
     // Run the configured Model Armor policy over the message before printing.
     let as_json = serde_json::to_value(&original)
-        .map_err(|e| other_error(format!("Failed to serialize message: {e}")))?;
+        .map_err(|e| GwsError::other(format!("Failed to serialize message: {e}")))?;
     let checked = require_pass(sanitize_value(sanitize_config, as_json).await?)?;
 
     let mut stdout = io::stdout().lock();
     if opts.json {
         let text = serde_json::to_string_pretty(&checked)
-            .map_err(|e| other_error(format!("Failed to serialize message: {e}")))?;
+            .map_err(|e| GwsError::other(format!("Failed to serialize message: {e}")))?;
         writeln!(stdout, "{text}")
-            .map_err(|e| other_error(format!("Failed to write output: {e}")))?;
+            .map_err(|e| GwsError::other(format!("Failed to write output: {e}")))?;
         return Ok(());
     }
     render(&original, opts, &mut stdout)
@@ -77,11 +80,11 @@ fn render(
     opts: ReadOptions,
     out: &mut impl Write,
 ) -> Result<(), GwsError> {
-    let io_err = |e: io::Error| other_error(format!("Failed to write output: {e}"));
+    let io_err = |e: io::Error| GwsError::other(format!("Failed to write output: {e}"));
 
     if opts.json {
         let text = serde_json::to_string_pretty(original)
-            .map_err(|e| other_error(format!("Failed to serialize message: {e}")))?;
+            .map_err(|e| GwsError::other(format!("Failed to serialize message: {e}")))?;
         return writeln!(out, "{text}").map_err(io_err);
     }
 

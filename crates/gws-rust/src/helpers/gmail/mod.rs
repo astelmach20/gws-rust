@@ -62,9 +62,7 @@ mod prelude {
     pub(super) use super::message::*;
     pub(super) use super::mime::*;
     pub(super) use super::{GMAIL_READONLY_SCOPE, GMAIL_SCOPE, GMAIL_SETTINGS_SCOPE, PUBSUB_SCOPE};
-    pub(super) use crate::auth;
     pub(super) use crate::error::GwsError;
-    pub(super) use crate::helpers::rest::other_error;
     pub(super) use crate::output::sanitize_for_terminal;
     pub(super) use base64::Engine as _;
     pub(super) use clap::{Arg, ArgAction, ArgMatches, Command};

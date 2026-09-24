@@ -21,7 +21,7 @@
 //! * `--dry-run` and `--format` are global flags, never redefined here.
 
 use super::prelude::*;
-use crate::helpers::rest::confirm::with_yes;
+use crate::confirm::with_yes;
 
 /// Read a required string argument. Clap enforces presence; this turns an
 /// impossible absence into an error instead of a panic.
@@ -40,7 +40,7 @@ pub(super) fn value_or_default<T: Clone + Send + Sync + 'static>(
     matches
         .get_one::<T>(name)
         .cloned()
-        .ok_or_else(|| other_error(format!("--{name} has no value (missing default)")))
+        .ok_or_else(|| GwsError::other(format!("--{name} has no value (missing default)")))
 }
 
 /// Parse an optional clap argument, trimming whitespace and treating

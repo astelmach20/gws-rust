@@ -18,8 +18,8 @@
 mod time;
 
 use super::Helper;
-use super::confirm::{self, Impact, with_yes};
 use super::http::{self, Api, ApiRequest, encode_segment, flag, many, optional, required};
+use crate::confirm::{self, Impact, with_yes};
 use crate::error::GwsError;
 use chrono_tz::Tz;
 use clap::{Arg, ArgAction, ArgGroup, ArgMatches, Command};
@@ -335,7 +335,7 @@ TIPS:
                     let attendees = many(m, "attendee");
                     let send_updates = required(m, "send-updates")?;
                     if !attendees.is_empty() && send_updates != "none" {
-                        confirm::gate(
+                        confirm::confirm(
                             m,
                             Impact::Outbound,
                             &format!("email invitations to {}", attendees.join(", ")),
@@ -359,7 +359,7 @@ TIPS:
                     (api, v)
                 }
                 "+update" => {
-                    confirm::gate(
+                    confirm::confirm(
                         m,
                         Impact::Outbound,
                         &format!("update event {}", required(m, "event-id")?),
@@ -371,7 +371,7 @@ TIPS:
                 }
                 "+delete" => {
                     let event = required(m, "event-id")?;
-                    confirm::gate(m, Impact::Destructive, &format!("delete event {event}"))?;
+                    confirm::confirm(m, Impact::Destructive, &format!("delete event {event}"))?;
                     let api = Api::new(doc, &[SCOPE_CALENDAR], dry, sanitize).await?;
                     let v = delete(
                         &api,
@@ -385,7 +385,7 @@ TIPS:
                 "+rsvp" => {
                     let response = required(m, "response")?;
                     let event = required(m, "event-id")?;
-                    confirm::gate(
+                    confirm::confirm(
                         m,
                         Impact::Outbound,
                         &format!("send RSVP '{response}' for event {event}"),
@@ -428,10 +428,9 @@ impl TzInfo {
                 explicit: true,
             });
         }
-        match api.token() {
-            Some(token) => {
-                let tz =
-                    crate::timezone::resolve_account_timezone(api.client(), token, None).await?;
+        match api.transport() {
+            Some(transport) => {
+                let tz = crate::timezone::resolve_account_timezone(transport, None).await?;
                 Ok(Self {
                     tz,
                     name: tz.name().to_string(),
@@ -1476,7 +1475,7 @@ mod tests {
         delete(&api, "primary", "E1", "none").await.unwrap();
         let plan = api.planned();
         assert_eq!(plan[0]["method"], "DELETE");
-        assert_eq!(plan[0]["query"]["sendUpdates"], "none");
+        assert_eq!(plan[0]["query_params"]["sendUpdates"], "none");
     }
 
     #[test]

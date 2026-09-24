@@ -25,7 +25,8 @@
 //!   NDJSON data stream.
 
 use crate::error::GwsError;
-use crate::helpers::rest::{error_from_response, json_body, other_error};
+use crate::transport::Transport;
+use gws_rust_core::client::{Idempotency, RetryPolicy};
 use serde_json::{Value, json};
 use std::time::Duration;
 
@@ -202,7 +203,7 @@ pub(crate) async fn run_stream<S: StreamStep>(
                             reason: "transientFailureBudgetExhausted".to_string(),
                             enable_url: None,
                         },
-                        None => other_error(summary),
+                        None => GwsError::other(summary),
                     });
                 };
                 emit_diagnostic(
@@ -237,16 +238,16 @@ pub(crate) fn parse_pull_response(resp: &Value) -> Result<Vec<ReceivedMessage>, 
     let Some(received) = resp.get("receivedMessages") else {
         return Ok(Vec::new());
     };
-    let received = received
-        .as_array()
-        .ok_or_else(|| other_error("Pub/Sub pull response: receivedMessages is not an array"))?;
+    let received = received.as_array().ok_or_else(|| {
+        GwsError::other("Pub/Sub pull response: receivedMessages is not an array")
+    })?;
     received
         .iter()
         .map(|m| {
             let ack_id = m
                 .get("ackId")
                 .and_then(Value::as_str)
-                .ok_or_else(|| other_error("Pub/Sub pull response: message without ackId"))?;
+                .ok_or_else(|| GwsError::other("Pub/Sub pull response: message without ackId"))?;
             Ok(ReceivedMessage {
                 ack_id: ack_id.to_string(),
                 message: m.get("message").cloned().unwrap_or(Value::Null),
@@ -255,21 +256,29 @@ pub(crate) fn parse_pull_response(resp: &Value) -> Result<Vec<ReceivedMessage>, 
         .collect()
 }
 
-/// Minimal Pub/Sub REST client.
+/// Minimal Pub/Sub REST client on the shared transport.
+///
+/// Every call is a single attempt: the pull loop's [`FailureBudget`] owns
+/// retries, so core retries would only multiply the backoff. The transport
+/// still refreshes the token once on a 401.
 #[derive(Clone)]
 pub(crate) struct PubSubClient {
-    http: reqwest::Client,
+    transport: Transport,
     base: String,
 }
 
 impl PubSubClient {
-    pub(crate) fn new(http: reqwest::Client) -> Self {
-        Self::with_base(http, crate::helpers::PUBSUB_API_BASE)
+    pub(crate) fn new(transport: &Transport) -> Self {
+        Self::with_base(transport, crate::helpers::PUBSUB_API_BASE)
     }
 
-    pub(crate) fn with_base(http: reqwest::Client, base: &str) -> Self {
+    pub(crate) fn with_base(transport: &Transport, base: &str) -> Self {
+        let single = transport.with_retry(RetryPolicy {
+            max_attempts: 1,
+            ..transport.retry.clone()
+        });
         Self {
-            http,
+            transport: single,
             base: base.trim_end_matches('/').to_string(),
         }
     }
@@ -282,36 +291,21 @@ impl PubSubClient {
         &self,
         method: reqwest::Method,
         url: String,
-        token: &str,
         body: Option<&Value>,
-        timeout: Option<Duration>,
         context: &str,
     ) -> Result<Value, StepError> {
-        let mut rb = self.http.request(method, &url).bearer_auth(token);
-        if let Some(b) = body {
-            rb = rb.json(b);
-        }
-        if let Some(t) = timeout {
-            rb = rb.timeout(t);
-        }
-        let resp = rb.send().await.map_err(|e| StepError::Transient {
-            status: None,
-            message: format!("{context}: request failed: {e}"),
-        })?;
-        if !resp.status().is_success() {
-            return Err(StepError::from(error_from_response(resp, context).await));
-        }
-        json_body(resp, context).await.map_err(StepError::from)
+        self.transport
+            .json(method, &url, &[], body, Idempotency::FromMethod, context)
+            .await
+            .map_err(StepError::from)
     }
 
     /// Create a topic (PUT).
-    pub(crate) async fn create_topic(&self, token: &str, topic: &str) -> Result<(), GwsError> {
+    pub(crate) async fn create_topic(&self, topic: &str) -> Result<(), GwsError> {
         self.call(
             reqwest::Method::PUT,
             self.url(topic),
-            token,
             Some(&json!({})),
-            None,
             "Failed to create Pub/Sub topic",
         )
         .await
@@ -320,19 +314,12 @@ impl PubSubClient {
     }
 
     /// Create a pull subscription on `topic`.
-    pub(crate) async fn create_subscription(
-        &self,
-        token: &str,
-        sub: &str,
-        topic: &str,
-    ) -> Result<(), GwsError> {
+    pub(crate) async fn create_subscription(&self, sub: &str, topic: &str) -> Result<(), GwsError> {
         let body = json!({ "topic": topic, "ackDeadlineSeconds": 60 });
         self.call(
             reqwest::Method::PUT,
             self.url(sub),
-            token,
             Some(&body),
-            None,
             "Failed to create Pub/Sub subscription",
         )
         .await
@@ -343,7 +330,6 @@ impl PubSubClient {
     /// Grant `role` on `topic` to `member` (replaces the topic policy).
     pub(crate) async fn set_topic_publisher(
         &self,
-        token: &str,
         topic: &str,
         member: &str,
     ) -> Result<(), GwsError> {
@@ -353,9 +339,7 @@ impl PubSubClient {
         self.call(
             reqwest::Method::POST,
             format!("{}:setIamPolicy", self.url(topic)),
-            token,
             Some(&body),
-            None,
             "Failed to grant publish permission on the Pub/Sub topic",
         )
         .await
@@ -363,60 +347,51 @@ impl PubSubClient {
         .map_err(into_gws)
     }
 
-    /// Pull up to `max` messages. A timeout means "no messages yet".
+    /// Pull up to `max` messages. No response within `timeout` means "no
+    /// messages yet".
     pub(crate) async fn pull(
         &self,
-        token: &str,
         sub: &str,
         max: u32,
         timeout: Duration,
     ) -> Result<Vec<ReceivedMessage>, StepError> {
         let body = json!({ "maxMessages": max });
         let url = format!("{}:pull", self.url(sub));
-        let mut rb = self
-            .http
-            .post(&url)
-            .bearer_auth(token)
-            .json(&body)
-            .timeout(timeout);
-        rb = rb.header(reqwest::header::ACCEPT, "application/json");
-        let resp = match rb.send().await {
-            Ok(r) => r,
-            Err(e) if e.is_timeout() => return Ok(Vec::new()),
-            Err(e) => {
-                return Err(StepError::Transient {
-                    status: None,
-                    message: format!("Pub/Sub pull failed: request failed: {e}"),
-                });
-            }
+        let policy = RetryPolicy {
+            max_attempts: 1,
+            response_timeout: Some(timeout),
+            ..self.transport.retry.clone()
         };
-        if !resp.status().is_success() {
-            return Err(StepError::from(
-                error_from_response(resp, "Pub/Sub pull failed").await,
-            ));
-        }
-        let value = json_body(resp, "Pub/Sub pull failed")
+        let value = match self
+            .transport
+            .with_retry(policy)
+            .json(
+                reqwest::Method::POST,
+                &url,
+                &[],
+                Some(&body),
+                // Pulling is safe to repeat: unacknowledged messages are redelivered.
+                Idempotency::Idempotent,
+                "Pub/Sub pull failed",
+            )
             .await
-            .map_err(StepError::from)?;
+        {
+            Ok(v) => v,
+            Err(e) if crate::transport::is_timeout(&e) => return Ok(Vec::new()),
+            Err(e) => return Err(StepError::from(e)),
+        };
         parse_pull_response(&value).map_err(StepError::Fatal)
     }
 
     /// Acknowledge messages.
-    pub(crate) async fn ack(
-        &self,
-        token: &str,
-        sub: &str,
-        ack_ids: &[String],
-    ) -> Result<(), StepError> {
+    pub(crate) async fn ack(&self, sub: &str, ack_ids: &[String]) -> Result<(), StepError> {
         if ack_ids.is_empty() {
             return Ok(());
         }
         self.call(
             reqwest::Method::POST,
             format!("{}:acknowledge", self.url(sub)),
-            token,
             Some(&json!({ "ackIds": ack_ids })),
-            None,
             "Pub/Sub acknowledge failed",
         )
         .await
@@ -424,12 +399,10 @@ impl PubSubClient {
     }
 
     /// Delete a topic or subscription.
-    pub(crate) async fn delete(&self, token: &str, name: &str) -> Result<(), GwsError> {
+    pub(crate) async fn delete(&self, name: &str) -> Result<(), GwsError> {
         self.call(
             reqwest::Method::DELETE,
             self.url(name),
-            token,
-            None,
             None,
             &format!("Failed to delete {name}"),
         )
@@ -455,7 +428,7 @@ pub(crate) fn into_gws(e: StepError) -> GwsError {
         StepError::Transient {
             status: None,
             message,
-        } => other_error(message),
+        } => GwsError::other(message),
     }
 }
 
@@ -463,18 +436,11 @@ pub(crate) fn into_gws(e: StepError) -> GwsError {
 /// error listing the resources that could not be deleted.
 pub(crate) async fn cleanup_resources(
     client: &PubSubClient,
-    token: Result<String, GwsError>,
     names: &[&str],
 ) -> Result<(), GwsError> {
-    let token = token.map_err(|e| {
-        other_error(format!(
-            "Could not get a token to clean up Pub/Sub resources ({e}); delete manually: {}",
-            names.join(", ")
-        ))
-    })?;
     let mut failed = Vec::new();
     for name in names {
-        match client.delete(&token, name).await {
+        match client.delete(name).await {
             Ok(()) => emit_diagnostic("info", "deleted", json!({ "resource": name })),
             Err(e) => failed.push(format!("{name} ({e})")),
         }
@@ -482,7 +448,7 @@ pub(crate) async fn cleanup_resources(
     if failed.is_empty() {
         Ok(())
     } else {
-        Err(other_error(format!(
+        Err(GwsError::other(format!(
             "Failed to delete Pub/Sub resources: {}",
             failed.join("; ")
         )))
@@ -528,7 +494,7 @@ mod tests {
             StepError::Fatal(_)
         ));
         assert!(matches!(
-            StepError::from(other_error("net")),
+            StepError::from(GwsError::other("net")),
             StepError::Transient { status: None, .. }
         ));
     }
@@ -655,17 +621,16 @@ mod tests {
         Mock::given(method("POST"))
             .and(path("/v1/projects/p/subscriptions/s:pull"))
             .respond_with(ResponseTemplate::new(503).set_body_string("unavailable"))
+            // The loop's failure budget owns retries: one attempt per step.
+            .expect(1)
             .mount(&server)
             .await;
-        let client =
-            PubSubClient::with_base(reqwest::Client::new(), &format!("{}/v1", server.uri()));
+        let client = PubSubClient::with_base(
+            &Transport::for_test(&server.uri()),
+            &format!("{}/v1", server.uri()),
+        );
         let err = client
-            .pull(
-                "t",
-                "projects/p/subscriptions/s",
-                10,
-                Duration::from_secs(5),
-            )
+            .pull("projects/p/subscriptions/s", 10, Duration::from_secs(5))
             .await
             .unwrap_err();
         assert!(matches!(
@@ -684,9 +649,9 @@ mod tests {
             .respond_with(ResponseTemplate::new(200).set_delay(Duration::from_millis(500)))
             .mount(&server)
             .await;
-        let client = PubSubClient::with_base(reqwest::Client::new(), &server.uri());
+        let client = PubSubClient::with_base(&Transport::for_test(&server.uri()), &server.uri());
         let got = client
-            .pull("t", "s", 1, Duration::from_millis(50))
+            .pull("s", 1, Duration::from_millis(50))
             .await
             .unwrap();
         assert!(got.is_empty());
@@ -705,16 +670,11 @@ mod tests {
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
             .mount(&server)
             .await;
-        let client = PubSubClient::with_base(reqwest::Client::new(), &server.uri());
-        let err = cleanup_resources(&client, Ok("t".into()), &["subscriptions/s", "topics/t"])
+        let client = PubSubClient::with_base(&Transport::for_test(&server.uri()), &server.uri());
+        let err = cleanup_resources(&client, &["subscriptions/s", "topics/t"])
             .await
             .unwrap_err();
         assert!(err.to_string().contains("topics/t"));
         assert!(!err.to_string().contains("subscriptions/s ("));
-        assert!(
-            cleanup_resources(&client, Err(other_error("no token")), &["x"])
-                .await
-                .is_err()
-        );
     }
 }

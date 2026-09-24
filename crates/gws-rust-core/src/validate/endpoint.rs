@@ -199,9 +199,13 @@ impl EndpointPolicy {
         let mut shown = parsed.clone();
         shown.set_query(None);
         shown.set_fragment(None);
-        // Never echo embedded credentials.
-        let _ = shown.set_username("");
-        let _ = shown.set_password(None);
+        // Never echo embedded credentials. Clearing them only fails for
+        // URLs that cannot carry userinfo; show just the origin then.
+        let shown = if shown.set_username("").is_ok() && shown.set_password(None).is_ok() {
+            shown.to_string()
+        } else {
+            shown.origin().ascii_serialization()
+        };
         Err(GwsError::Validation(format!(
             "Refusing to send credentials to {shown}: only https://*.googleapis.com is trusted \
              (set {API_BASE_URL_ENV} to route requests to another endpoint)"

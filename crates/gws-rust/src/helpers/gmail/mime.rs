@@ -123,7 +123,7 @@ pub(super) fn finalize_message(
             let mut related_parts = vec![html_part];
             for att in &inline {
                 let Some(cid) = att.content_id.as_deref() else {
-                    return Err(other_error(format!(
+                    return Err(GwsError::other(format!(
                         "inline part '{}' has no Content-ID",
                         att.filename
                     )));
@@ -159,7 +159,7 @@ pub(super) fn finalize_message(
 
     mb.body(root)
         .write_to_string()
-        .map_err(|e| other_error(format!("Failed to serialize email: {e}")))
+        .map_err(|e| GwsError::other(format!("Failed to serialize email: {e}")))
 }
 
 #[cfg(test)]

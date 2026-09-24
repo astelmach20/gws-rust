@@ -39,6 +39,7 @@ use secrecy::{ExposeSecret, SecretString};
 
 use credentials::{AuthEnv, Credential, CredentialSource, Resolved};
 pub use profiles::try_config_dir;
+use token_cache::Freshness;
 
 /// Authentication failures, classified so callers can print precise hints.
 #[derive(Debug, thiserror::Error)]
@@ -94,13 +95,15 @@ pub enum AuthError {
     Network(String),
 }
 
-/// Fetches access tokens for a fixed set of scopes.
+/// Mints replacement access tokens for a fixed set of scopes.
 ///
-/// Long-running helpers use this trait so they can request a fresh token before
-/// each API call instead of holding a single token string until it expires.
+/// [`crate::transport::Transport`] calls this once when an API rejects the
+/// current token, so long-running commands survive token expiry.
 #[async_trait::async_trait]
 pub trait AccessTokenProvider: Send + Sync {
-    async fn access_token(&self) -> anyhow::Result<String>;
+    /// A newly minted token that bypasses the cache. Called after an API
+    /// rejected the current token with HTTP 401.
+    async fn refresh_access_token(&self) -> anyhow::Result<String>;
 }
 
 /// A token provider backed by [`get_token`].
@@ -119,43 +122,14 @@ impl ScopedTokenProvider {
 
 #[async_trait::async_trait]
 impl AccessTokenProvider for ScopedTokenProvider {
-    async fn access_token(&self) -> anyhow::Result<String> {
+    async fn refresh_access_token(&self) -> anyhow::Result<String> {
         let scopes: Vec<&str> = self.scopes.iter().map(String::as_str).collect();
-        get_token(&scopes).await
+        refresh_token(&scopes).await
     }
 }
 
 pub fn token_provider(scopes: &[&str]) -> ScopedTokenProvider {
     ScopedTokenProvider::new(scopes)
-}
-
-/// A fake [`AccessTokenProvider`] for tests that returns tokens from a queue.
-#[cfg(test)]
-pub struct FakeTokenProvider {
-    tokens: std::sync::Arc<tokio::sync::Mutex<std::collections::VecDeque<String>>>,
-}
-
-#[cfg(test)]
-impl FakeTokenProvider {
-    pub fn new(tokens: impl IntoIterator<Item = &'static str>) -> Self {
-        Self {
-            tokens: std::sync::Arc::new(tokio::sync::Mutex::new(
-                tokens.into_iter().map(|t| t.to_string()).collect(),
-            )),
-        }
-    }
-}
-
-#[cfg(test)]
-#[async_trait::async_trait]
-impl AccessTokenProvider for FakeTokenProvider {
-    async fn access_token(&self) -> anyhow::Result<String> {
-        self.tokens
-            .lock()
-            .await
-            .pop_front()
-            .ok_or_else(|| anyhow::anyhow!("no test token remaining"))
-    }
 }
 
 /// Obtain an access token for `scopes` using the configured credentials
@@ -169,9 +143,23 @@ impl AccessTokenProvider for FakeTokenProvider {
 ///
 /// Any credential-resolution, storage or token-endpoint failure.
 pub async fn get_token(scopes: &[&str]) -> anyhow::Result<String> {
+    token_for(scopes, Freshness::Cached).await
+}
+
+/// Like [`get_token`], but never reuses a cached token: used after an API
+/// answered HTTP 401 to the cached one.
+///
+/// # Errors
+///
+/// See [`get_token`].
+pub async fn refresh_token(scopes: &[&str]) -> anyhow::Result<String> {
+    token_for(scopes, Freshness::ForceRefresh).await
+}
+
+async fn token_for(scopes: &[&str], freshness: Freshness) -> anyhow::Result<String> {
     let env = AuthEnv::from_process()?;
     let scopes: Vec<String> = scopes.iter().map(|s| (*s).to_string()).collect();
-    let token = get_token_with(&env, &scopes).await?;
+    let token = get_token_fresh(&env, &scopes, freshness).await?;
     Ok(token.expose_secret().to_string())
 }
 
@@ -184,12 +172,17 @@ fn login_command(env: &AuthEnv) -> String {
     }
 }
 
-/// [`get_token`] with an explicit environment (testable, no globals).
+/// [`get_token`] with an explicit environment (testable, no globals) and
+/// explicit cache freshness.
 ///
 /// # Errors
 ///
 /// See [`get_token`].
-pub async fn get_token_with(env: &AuthEnv, scopes: &[String]) -> Result<SecretString, AuthError> {
+pub async fn get_token_fresh(
+    env: &AuthEnv,
+    scopes: &[String],
+    freshness: Freshness,
+) -> Result<SecretString, AuthError> {
     let load_env = env.clone();
     let (source, resolved) = tokio::task::spawn_blocking(move || load_env.load())
         .await
@@ -233,7 +226,7 @@ pub async fn get_token_with(env: &AuthEnv, scopes: &[String]) -> Result<SecretSt
                     &env.paths.token_lock,
                     env.keystore()?,
                 );
-                cache.get_or_fetch(&key, fetch).await
+                cache.get_or_fetch(&key, freshness, fetch).await
             } else {
                 Ok(fetch().await?.token)
             }
@@ -449,7 +442,9 @@ mod tests {
         .unwrap();
         let scopes = vec!["gmail.readonly".to_string()];
         for _ in 0..2 {
-            let t = get_token_with(&env, &scopes).await.unwrap();
+            let t = get_token_fresh(&env, &scopes, Freshness::Cached)
+                .await
+                .unwrap();
             assert_eq!(t.expose_secret(), "ya29.ro");
         }
         assert!(env.paths.token_cache.exists());
@@ -471,7 +466,9 @@ mod tests {
             .mount(&server)
             .await;
         let env = profile_env(dir.path(), &server);
-        let err = get_token_with(&env, &["x".to_string()]).await.unwrap_err();
+        let err = get_token_fresh(&env, &["x".to_string()], Freshness::Cached)
+            .await
+            .unwrap_err();
         assert!(matches!(err, AuthError::InvalidGrant { .. }));
         assert!(err.to_string().contains("gwsr auth login"));
         assert!(
@@ -491,7 +488,10 @@ mod tests {
             },
             ProfilePaths::new(dir.path(), "default"),
         );
-        let err: anyhow::Error = get_token_with(&env, &[]).await.unwrap_err().into();
+        let err: anyhow::Error = get_token_fresh(&env, &[], Freshness::Cached)
+            .await
+            .unwrap_err()
+            .into();
         assert!(matches!(
             err.downcast_ref::<AuthError>(),
             Some(AuthError::NoCredentials)
@@ -511,7 +511,10 @@ mod tests {
         );
         env.token = Some(SecretString::from("tok".to_string()));
         assert_eq!(
-            get_token_with(&env, &[]).await.unwrap().expose_secret(),
+            get_token_fresh(&env, &[], Freshness::Cached)
+                .await
+                .unwrap()
+                .expose_secret(),
             "tok"
         );
         assert_eq!(granted_scopes_for(&env).unwrap(), None);

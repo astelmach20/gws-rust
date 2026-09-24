@@ -26,11 +26,11 @@ use serde_json::{Map, Value, json};
 
 use gws_rust_core::client::Idempotency;
 
-use super::errors::error_from_response;
-use super::transport::{Transport, read_body};
 use super::url::{UrlTarget, build_url};
 use crate::discovery::{RestDescription, RestMethod, RestResource};
 use crate::error::GwsError;
+use crate::transport::errors::error_from_response;
+use crate::transport::{Transport, read_body};
 
 /// Polling settings for `--wait`.
 #[derive(Debug, Clone)]

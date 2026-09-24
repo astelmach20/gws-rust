@@ -119,7 +119,7 @@ mod tests {
         courses(&api, Some("teacher"), Some("active"), None)
             .await
             .unwrap();
-        let q = &api.planned()[0]["query"];
+        let q = &api.planned()[0]["query_params"];
         assert_eq!(q["teacherId"], "me");
         assert_eq!(q["courseStates"], "ACTIVE");
     }

@@ -36,13 +36,13 @@ use tokio::io::AsyncReadExt;
 use gws_rust_core::client::Idempotency;
 use gws_rust_core::validate::EndpointPolicy;
 
-use super::errors::error_from_response;
 use super::output::Emitter;
-use super::transport::{Credentials, Transport, read_body};
 use super::url::{UrlTarget, build_url};
-use super::{ExecOptions, body_schema, input, safety};
+use super::{ExecOptions, body_schema, input};
 use crate::discovery::{RestDescription, RestMethod, RestResource};
 use crate::error::GwsError;
+use crate::transport::errors::error_from_response;
+use crate::transport::{Credentials, Transport, read_body};
 
 /// Google's maximum number of calls per batch request.
 pub(crate) const MAX_BATCH: usize = 100;
@@ -145,7 +145,7 @@ async fn batch_credentials(calls: &[BatchCall<'_>]) -> Result<Credentials, GwsEr
     }
     scopes.sort_unstable();
     scopes.dedup();
-    super::options::credentials_for_scopes(&scopes).await
+    Credentials::for_scopes(&scopes).await
 }
 
 /// Resolve `files.get`, `drive.files.get` or `permissions.list` style names.
@@ -392,7 +392,7 @@ pub(crate) async fn run_batch(
 ) -> Result<(), GwsError> {
     let destructive: Vec<&str> = calls
         .iter()
-        .filter(|c| safety::is_destructive(c.method))
+        .filter(|c| super::is_destructive(c.method))
         .map(|c| c.id.as_str())
         .collect();
     let batch_url = format!(
@@ -413,16 +413,13 @@ pub(crate) async fn run_batch(
         return Ok(());
     }
     if !destructive.is_empty() {
-        safety::confirm(
+        options.gate().check(
+            crate::confirm::Impact::Destructive,
             &format!(
-                "This batch ({} destructive call(s): {})",
+                "run a batch with {} destructive call(s): {}",
                 destructive.len(),
                 destructive.join(", ")
             ),
-            options.assume_yes,
-            options.confirm,
-            options.interactive,
-            safety::ask_on_terminal,
         )?;
     }
 

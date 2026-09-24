@@ -165,7 +165,7 @@ async fn fetch_user_email(api: &GmailApi) -> Result<String, GwsError> {
         .get("emailAddress")
         .and_then(Value::as_str)
         .map(str::to_string)
-        .ok_or_else(|| other_error("Gmail profile response is missing emailAddress"))
+        .ok_or_else(|| GwsError::other("Gmail profile response is missing emailAddress"))
 }
 
 // --- Message construction ---
@@ -389,7 +389,7 @@ fn parse_reply_args(matches: &ArgMatches) -> Result<ReplyConfig, GwsError> {
             .filter(|v| !v.is_empty()),
         Err(clap::parser::MatchesError::UnknownArgument { .. }) => None,
         Err(e) => {
-            return Err(other_error(format!(
+            return Err(GwsError::other(format!(
                 "Unexpected error reading --remove argument: {e}"
             )));
         }

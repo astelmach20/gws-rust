@@ -195,12 +195,12 @@ pub(super) fn parse_original_message(msg: &Value) -> Result<OriginalMessage, Gws
         .unwrap_or_default();
 
     if parsed_headers.from.is_empty() {
-        return Err(other_error("Message is missing From header"));
+        return Err(GwsError::other("Message is missing From header"));
     }
 
     let message_id = strip_angle_brackets(&parsed_headers.message_id);
     if message_id.is_empty() {
-        return Err(other_error("Message is missing Message-ID header"));
+        return Err(GwsError::other("Message is missing Message-ID header"));
     }
 
     let PayloadContents {
@@ -276,8 +276,9 @@ pub(super) fn decode_base64url(data: &str) -> Result<Vec<u8>, base64::DecodeErro
 /// not valid UTF-8 (legacy charsets) are decoded lossily with an explicit
 /// warning, since the text is still useful for quoting and reading.
 fn decode_text_body(data: &str, mime_label: &str) -> Result<String, GwsError> {
-    let decoded = decode_base64url(data)
-        .map_err(|e| other_error(format!("{mime_label} body has invalid base64url data: {e}")))?;
+    let decoded = decode_base64url(data).map_err(|e| {
+        GwsError::other(format!("{mime_label} body has invalid base64url data: {e}"))
+    })?;
     match String::from_utf8(decoded) {
         Ok(s) => Ok(s),
         Err(e) => {

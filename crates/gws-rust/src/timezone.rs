@@ -21,6 +21,7 @@
 //! 4. Machine-local timezone (fallback with warning)
 
 use crate::error::GwsError;
+use crate::transport::Transport;
 use chrono_tz::Tz;
 use std::path::PathBuf;
 
@@ -103,34 +104,11 @@ fn write_cache(path: &std::path::Path, tz_name: &str) {
 }
 
 /// Fetch the account timezone from the Google Calendar Settings API.
-async fn fetch_account_timezone(client: &reqwest::Client, token: &str) -> Result<Tz, GwsError> {
+async fn fetch_account_timezone(transport: &Transport) -> Result<Tz, GwsError> {
     let url = "https://www.googleapis.com/calendar/v3/users/me/settings/timezone";
-    let resp = client
-        .get(url)
-        .bearer_auth(token)
-        .send()
-        .await
-        .map_err(|e| GwsError::other(anyhow::anyhow!("Failed to fetch account timezone: {e}")))?;
-
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let body = resp.text().await.map_err(|e| {
-            GwsError::from(anyhow::anyhow!(
-                "Failed to read the timezone error response (HTTP {status}): {e}"
-            ))
-        })?;
-        return Err(GwsError::Api {
-            code: status.as_u16(),
-            message: body,
-            reason: "timezone_fetch_failed".to_string(),
-            enable_url: None,
-        });
-    }
-
-    let json: serde_json::Value = resp
-        .json()
-        .await
-        .map_err(|e| GwsError::other(anyhow::anyhow!("Failed to parse timezone response: {e}")))?;
+    let json = transport
+        .get_json(url, &[], "Failed to fetch account timezone")
+        .await?;
 
     let tz_name = json
         .get("value")
@@ -173,9 +151,8 @@ pub fn parse_timezone(tz_str: &str) -> Result<Tz, GwsError> {
 /// 2. Cached value in config dir — use if < 24h old
 /// 3. Google Calendar Settings API — fetch and cache
 /// 4. Machine-local timezone (log warning)
-pub async fn resolve_account_timezone(
-    client: &reqwest::Client,
-    token: &str,
+pub(crate) async fn resolve_account_timezone(
+    transport: &Transport,
     tz_override: Option<&str>,
 ) -> Result<Tz, GwsError> {
     // 1. Explicit override — fail if invalid
@@ -196,7 +173,7 @@ pub async fn resolve_account_timezone(
     }
 
     // 3. Fetch from Calendar Settings API
-    let api_error = match fetch_account_timezone(client, token).await {
+    let api_error = match fetch_account_timezone(transport).await {
         Ok(tz) => return Ok(tz),
         Err(e) => e,
     };

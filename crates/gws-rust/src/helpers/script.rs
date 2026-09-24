@@ -17,8 +17,8 @@
 //! Script IDs are encoded per RFC 3986 so `-`/`_` stay literal (#842).
 
 use super::Helper;
-use super::confirm::{self, Impact, with_yes};
 use super::http::{self, Api, ApiRequest, encode_segment, flag, many, optional, required};
+use crate::confirm::{self, Impact, with_yes};
 use crate::error::GwsError;
 use clap::{Arg, ArgAction, ArgMatches, Command};
 use serde_json::{Value, json};
@@ -184,7 +184,7 @@ TIPS:
                 "+push" => {
                     let dir = crate::validate::validate_safe_dir_path(required(m, "dir")?)?;
                     let files = collect_files(&dir)?;
-                    confirm::gate(
+                    confirm::confirm(
                         m,
                         Impact::Destructive,
                         &format!(
@@ -205,7 +205,7 @@ TIPS:
                 "+run" => {
                     let function = required(m, "function")?;
                     let args = parse_args(optional(m, "args"))?;
-                    confirm::gate(
+                    confirm::confirm(
                         m,
                         Impact::Outbound,
                         &format!(
