@@ -10,6 +10,7 @@ metadata:
         - gwsr
     cliHelp: "gwsr gmail +send --help"
 ---
+<!-- gwsr generated skill: do not edit by hand -->
 
 # gmail +send
 

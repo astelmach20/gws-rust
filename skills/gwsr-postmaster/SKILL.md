@@ -10,6 +10,7 @@ metadata:
         - gwsr
     cliHelp: "gwsr postmaster --help"
 ---
+<!-- gwsr generated skill: do not edit by hand -->
 
 # postmaster (v2)
 

@@ -14,6 +14,7 @@ metadata:
         - gwsr-calendar
         - gwsr-chat
 ---
+<!-- gwsr generated skill: do not edit by hand -->
 
 # Set Up Post-Mortem
 

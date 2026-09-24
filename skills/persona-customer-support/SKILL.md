@@ -14,6 +14,7 @@ metadata:
         - gwsr-chat
         - gwsr-calendar
 ---
+<!-- gwsr generated skill: do not edit by hand -->
 
 # Customer Support Agent
 

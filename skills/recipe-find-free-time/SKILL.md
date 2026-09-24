@@ -12,6 +12,7 @@ metadata:
       skills:
         - gwsr-calendar
 ---
+<!-- gwsr generated skill: do not edit by hand -->
 
 # Find Free Time Across Calendars
 

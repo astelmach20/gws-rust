@@ -10,6 +10,7 @@ metadata:
         - gwsr
     cliHelp: "gwsr script +run --help"
 ---
+<!-- gwsr generated skill: do not edit by hand -->
 
 # script +run
 

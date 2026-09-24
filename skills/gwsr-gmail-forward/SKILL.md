@@ -10,6 +10,7 @@ metadata:
         - gwsr
     cliHelp: "gwsr gmail +forward --help"
 ---
+<!-- gwsr generated skill: do not edit by hand -->
 
 # gmail +forward
 

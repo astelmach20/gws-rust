@@ -12,6 +12,7 @@ metadata:
       skills:
         - gwsr-events
 ---
+<!-- gwsr generated skill: do not edit by hand -->
 
 # Watch for Drive Changes
 

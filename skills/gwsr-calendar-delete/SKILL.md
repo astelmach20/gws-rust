@@ -10,6 +10,7 @@ metadata:
         - gwsr
     cliHelp: "gwsr calendar +delete --help"
 ---
+<!-- gwsr generated skill: do not edit by hand -->
 
 # calendar +delete
 

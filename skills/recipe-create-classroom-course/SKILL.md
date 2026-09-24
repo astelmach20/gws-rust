@@ -12,6 +12,7 @@ metadata:
       skills:
         - gwsr-classroom
 ---
+<!-- gwsr generated skill: do not edit by hand -->
 
 # Create a Google Classroom Course
 

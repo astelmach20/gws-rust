@@ -10,6 +10,7 @@ metadata:
         - gwsr
     cliHelp: "gwsr tasks +lists --help"
 ---
+<!-- gwsr generated skill: do not edit by hand -->
 
 # tasks +lists
 

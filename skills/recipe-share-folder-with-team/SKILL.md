@@ -12,6 +12,7 @@ metadata:
       skills:
         - gwsr-drive
 ---
+<!-- gwsr generated skill: do not edit by hand -->
 
 # Share a Google Drive Folder with a Team
 

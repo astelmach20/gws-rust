@@ -12,6 +12,7 @@ metadata:
       skills:
         - gwsr-sheets
 ---
+<!-- gwsr generated skill: do not edit by hand -->
 
 # Copy a Google Sheet for a New Month
 

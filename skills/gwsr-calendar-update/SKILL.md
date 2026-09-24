@@ -10,6 +10,7 @@ metadata:
         - gwsr
     cliHelp: "gwsr calendar +update --help"
 ---
+<!-- gwsr generated skill: do not edit by hand -->
 
 # calendar +update
 

@@ -13,6 +13,7 @@ metadata:
         - gwsr-meet
         - gwsr-gmail
 ---
+<!-- gwsr generated skill: do not edit by hand -->
 
 # Create a Google Meet Conference
 

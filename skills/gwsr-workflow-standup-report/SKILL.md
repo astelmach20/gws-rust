@@ -10,6 +10,7 @@ metadata:
         - gwsr
     cliHelp: "gwsr workflow +standup-report --help"
 ---
+<!-- gwsr generated skill: do not edit by hand -->
 
 # workflow +standup-report
 

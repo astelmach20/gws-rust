@@ -13,6 +13,7 @@ metadata:
         - gwsr-sheets
         - gwsr-drive
 ---
+<!-- gwsr generated skill: do not edit by hand -->
 
 # Export a Google Sheet as CSV
 

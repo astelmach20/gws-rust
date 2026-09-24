@@ -10,6 +10,7 @@ metadata:
         - gwsr
     cliHelp: "gwsr script +pull --help"
 ---
+<!-- gwsr generated skill: do not edit by hand -->
 
 # script +pull
 

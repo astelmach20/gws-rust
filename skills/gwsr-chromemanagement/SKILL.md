@@ -10,6 +10,7 @@ metadata:
         - gwsr
     cliHelp: "gwsr chromemanagement --help"
 ---
+<!-- gwsr generated skill: do not edit by hand -->
 
 # chromemanagement (v1)
 

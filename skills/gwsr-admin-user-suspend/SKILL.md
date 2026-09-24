@@ -10,6 +10,7 @@ metadata:
         - gwsr
     cliHelp: "gwsr admin +user-suspend --help"
 ---
+<!-- gwsr generated skill: do not edit by hand -->
 
 # admin +user-suspend
 

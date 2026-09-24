@@ -10,6 +10,7 @@ metadata:
         - gwsr
     cliHelp: "gwsr calendar +rsvp --help"
 ---
+<!-- gwsr generated skill: do not edit by hand -->
 
 # calendar +rsvp
 

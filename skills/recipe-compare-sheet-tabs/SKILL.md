@@ -12,6 +12,7 @@ metadata:
       skills:
         - gwsr-sheets
 ---
+<!-- gwsr generated skill: do not edit by hand -->
 
 # Compare Two Google Sheets Tabs
 

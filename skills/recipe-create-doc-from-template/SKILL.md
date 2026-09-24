@@ -13,6 +13,7 @@ metadata:
         - gwsr-drive
         - gwsr-docs
 ---
+<!-- gwsr generated skill: do not edit by hand -->
 
 # Create a Google Doc from a Template
 

@@ -10,6 +10,7 @@ metadata:
         - gwsr
     cliHelp: "gwsr admin-reports --help"
 ---
+<!-- gwsr generated skill: do not edit by hand -->
 
 # admin-reports (reports_v1)
 

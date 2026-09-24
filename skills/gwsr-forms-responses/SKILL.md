@@ -10,6 +10,7 @@ metadata:
         - gwsr
     cliHelp: "gwsr forms +responses --help"
 ---
+<!-- gwsr generated skill: do not edit by hand -->
 
 # forms +responses
 

@@ -12,6 +12,7 @@ metadata:
       skills:
         - gwsr-calendar
 ---
+<!-- gwsr generated skill: do not edit by hand -->
 
 # Plan Your Weekly Google Calendar Schedule
 

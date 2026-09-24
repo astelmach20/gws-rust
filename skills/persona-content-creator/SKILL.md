@@ -15,6 +15,7 @@ metadata:
         - gwsr-chat
         - gwsr-slides
 ---
+<!-- gwsr generated skill: do not edit by hand -->
 
 # Content Creator
 

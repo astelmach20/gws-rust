@@ -10,6 +10,7 @@ metadata:
         - gwsr
     cliHelp: "gwsr datatransfer --help"
 ---
+<!-- gwsr generated skill: do not edit by hand -->
 
 # datatransfer (datatransfer_v1)
 

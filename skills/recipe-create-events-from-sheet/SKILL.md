@@ -13,6 +13,7 @@ metadata:
         - gwsr-sheets
         - gwsr-calendar
 ---
+<!-- gwsr generated skill: do not edit by hand -->
 
 # Create Google Calendar Events from a Sheet
 

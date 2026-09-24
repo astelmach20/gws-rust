@@ -10,6 +10,7 @@ metadata:
         - gwsr
     cliHelp: "gwsr modelarmor --help"
 ---
+<!-- gwsr generated skill: do not edit by hand -->
 
 # modelarmor (v1)
 

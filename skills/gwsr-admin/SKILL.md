@@ -10,6 +10,7 @@ metadata:
         - gwsr
     cliHelp: "gwsr admin --help"
 ---
+<!-- gwsr generated skill: do not edit by hand -->
 
 # admin (directory_v1)
 

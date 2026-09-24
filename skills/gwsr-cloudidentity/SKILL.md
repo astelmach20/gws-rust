@@ -10,6 +10,7 @@ metadata:
         - gwsr
     cliHelp: "gwsr cloudidentity --help"
 ---
+<!-- gwsr generated skill: do not edit by hand -->
 
 # cloudidentity (v1)
 

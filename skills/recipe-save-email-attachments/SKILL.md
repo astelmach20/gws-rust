@@ -13,6 +13,7 @@ metadata:
         - gwsr-gmail
         - gwsr-drive
 ---
+<!-- gwsr generated skill: do not edit by hand -->
 
 # Save Gmail Attachments to Google Drive
 

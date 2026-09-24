@@ -10,6 +10,7 @@ metadata:
         - gwsr
     cliHelp: "gwsr alertcenter --help"
 ---
+<!-- gwsr generated skill: do not edit by hand -->
 
 # alertcenter (v1beta1)
 

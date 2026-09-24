@@ -10,6 +10,7 @@ metadata:
         - gwsr
     cliHelp: "gwsr chat +send --help"
 ---
+<!-- gwsr generated skill: do not edit by hand -->
 
 # chat +send
 

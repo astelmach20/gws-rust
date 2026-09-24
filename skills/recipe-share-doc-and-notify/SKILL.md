@@ -14,6 +14,7 @@ metadata:
         - gwsr-docs
         - gwsr-gmail
 ---
+<!-- gwsr generated skill: do not edit by hand -->
 
 # Share a Google Doc and Notify Collaborators
 

@@ -10,6 +10,7 @@ metadata:
         - gwsr
     cliHelp: "gwsr slides +read --help"
 ---
+<!-- gwsr generated skill: do not edit by hand -->
 
 # slides +read
 

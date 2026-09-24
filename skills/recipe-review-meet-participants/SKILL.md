@@ -12,6 +12,7 @@ metadata:
       skills:
         - gwsr-meet
 ---
+<!-- gwsr generated skill: do not edit by hand -->
 
 # Review Google Meet Attendance
 

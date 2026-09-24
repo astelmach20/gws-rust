@@ -10,6 +10,7 @@ metadata:
         - gwsr
     cliHelp: "gwsr modelarmor +sanitize-response --help"
 ---
+<!-- gwsr generated skill: do not edit by hand -->
 
 # modelarmor +sanitize-response
 

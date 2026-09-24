@@ -10,6 +10,7 @@ metadata:
         - gwsr
     cliHelp: "gwsr keep --help"
 ---
+<!-- gwsr generated skill: do not edit by hand -->
 
 # keep (v1)
 

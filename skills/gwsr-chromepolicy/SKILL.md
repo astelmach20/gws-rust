@@ -10,6 +10,7 @@ metadata:
         - gwsr
     cliHelp: "gwsr chromepolicy --help"
 ---
+<!-- gwsr generated skill: do not edit by hand -->
 
 # chromepolicy (v1)
 
