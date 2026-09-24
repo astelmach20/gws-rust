@@ -16,11 +16,10 @@ use std::path::PathBuf;
 
 use crate::output::sanitize_for_terminal;
 
-use aes_gcm::aead::{Aead, KeyInit, OsRng};
-use aes_gcm::{AeadCore, Aes256Gcm, Nonce};
+use aes_gcm::aead::{Aead, Generate, KeyInit};
+use aes_gcm::{Aes256Gcm, Nonce};
 
 use keyring::Entry;
-use rand::RngCore;
 use std::sync::OnceLock;
 use zeroize::Zeroize;
 
@@ -72,7 +71,7 @@ fn save_key_file(path: &std::path::Path, b64_key: &str) -> std::io::Result<()> {
     crate::fs_util::atomic_write(path, b64_key.as_bytes())
 }
 fn read_key_file(path: &std::path::Path) -> Option<[u8; 32]> {
-    use base64::{engine::general_purpose::STANDARD, Engine as _};
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
 
     // Item 4: validate file permissions on read
     #[cfg(unix)]
@@ -108,7 +107,7 @@ fn read_key_file(path: &std::path::Path) -> Option<[u8; 32]> {
 /// Generate a random 256-bit key.
 fn generate_random_key() -> [u8; 32] {
     let mut key = [0u8; 32];
-    rand::thread_rng().fill_bytes(&mut key);
+    rand::fill(&mut key);
     key
 }
 
@@ -198,7 +197,7 @@ fn resolve_key(
     provider: &dyn KeyringProvider,
     key_file: &std::path::Path,
 ) -> anyhow::Result<[u8; 32]> {
-    use base64::{engine::general_purpose::STANDARD, Engine as _};
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
 
     // --- 1. Try keyring (only when backend = Keyring) --------------------
     if backend == KeyringBackend::Keyring {
@@ -206,23 +205,23 @@ fn resolve_key(
         {
             match provider.get_password() {
                 Ok(b64_key) => {
-                    if let Ok(decoded) = STANDARD.decode(&b64_key) {
-                        if decoded.len() == 32 {
-                            let mut arr = [0u8; 32];
-                            arr.copy_from_slice(&decoded);
-                            // Cleanup insecure file fallback if it still exists.
-                            // TOCTOU race condition is a known limitation.
-                            if let Err(e) = std::fs::remove_file(key_file) {
-                                if e.kind() != std::io::ErrorKind::NotFound {
-                                    eprintln!(
-                                        "Warning: failed to remove legacy key file at '{}': {}",
-                                        key_file.display(),
-                                        e
-                                    );
-                                }
-                            }
-                            return Ok(arr);
+                    if let Ok(decoded) = STANDARD.decode(&b64_key)
+                        && decoded.len() == 32
+                    {
+                        let mut arr = [0u8; 32];
+                        arr.copy_from_slice(&decoded);
+                        // Cleanup insecure file fallback if it still exists.
+                        // TOCTOU race condition is a known limitation.
+                        if let Err(e) = std::fs::remove_file(key_file)
+                            && e.kind() != std::io::ErrorKind::NotFound
+                        {
+                            eprintln!(
+                                "Warning: failed to remove legacy key file at '{}': {}",
+                                key_file.display(),
+                                e
+                            );
                         }
+                        return Ok(arr);
                     }
                     // Keyring contained invalid data — fall through to generate new.
                 }
@@ -246,14 +245,14 @@ fn resolve_key(
                     sanitize_for_terminal(&e.to_string())
                 );
             }
-            if let Err(e) = std::fs::remove_file(key_file) {
-                if e.kind() != std::io::ErrorKind::NotFound {
-                    eprintln!(
-                        "Warning: failed to remove legacy key file at '{}': {}",
-                        key_file.display(),
-                        e
-                    );
-                }
+            if let Err(e) = std::fs::remove_file(key_file)
+                && e.kind() != std::io::ErrorKind::NotFound
+            {
+                eprintln!(
+                    "Warning: failed to remove legacy key file at '{}': {}",
+                    key_file.display(),
+                    e
+                );
             }
             return Ok(key);
         }
@@ -388,7 +387,8 @@ pub fn encrypt(plaintext: &[u8]) -> anyhow::Result<Vec<u8>> {
     let cipher = Aes256Gcm::new_from_slice(&key)
         .map_err(|e| anyhow::anyhow!("Failed to create cipher: {e}"))?;
 
-    let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
+    let nonce =
+        Nonce::try_generate().map_err(|e| anyhow::anyhow!("Failed to generate nonce: {e}"))?;
     let ciphertext = cipher
         .encrypt(&nonce, plaintext)
         .map_err(|e| anyhow::anyhow!("Encryption failed: {e}"))?;
@@ -560,7 +560,7 @@ mod tests {
     }
 
     fn write_test_key(dir: &std::path::Path) -> ([u8; 32], std::path::PathBuf) {
-        use base64::{engine::general_purpose::STANDARD, Engine as _};
+        use base64::{Engine as _, engine::general_purpose::STANDARD};
         let key = [42u8; 32];
         let path = dir.join(".encryption_key");
         std::fs::write(&path, STANDARD.encode(key)).unwrap();
@@ -571,7 +571,7 @@ mod tests {
 
     #[test]
     fn keyring_backend_returns_keyring_key() {
-        use base64::{engine::general_purpose::STANDARD, Engine as _};
+        use base64::{Engine as _, engine::general_purpose::STANDARD};
         let dir = tempfile::tempdir().unwrap();
         let key_file = dir.path().join(".encryption_key");
         let expected = [7u8; 32];
@@ -585,7 +585,7 @@ mod tests {
     #[test]
     #[cfg(any(target_os = "macos", target_os = "windows"))]
     fn keyring_backend_cleans_up_legacy_file_on_success() {
-        use base64::{engine::general_purpose::STANDARD, Engine as _};
+        use base64::{Engine as _, engine::general_purpose::STANDARD};
         let dir = tempfile::tempdir().unwrap();
         let key_file = dir.path().join(".encryption_key");
 
@@ -637,10 +637,12 @@ mod tests {
         let result = resolve_key(KeyringBackend::Keyring, &mock, &key_file);
 
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("OS keyring failed"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("OS keyring failed")
+        );
     }
 
     // ---- Backend::Keyring tests (Linux fallback behavior) ----
@@ -648,7 +650,7 @@ mod tests {
     #[test]
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     fn keyring_backend_creates_file_backup_when_missing() {
-        use base64::{engine::general_purpose::STANDARD, Engine as _};
+        use base64::{Engine as _, engine::general_purpose::STANDARD};
         let dir = tempfile::tempdir().unwrap();
         let key_file = dir.path().join(".encryption_key");
         let expected = [7u8; 32];
@@ -670,7 +672,7 @@ mod tests {
     #[test]
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     fn keyring_backend_syncs_file_when_keyring_differs() {
-        use base64::{engine::general_purpose::STANDARD, Engine as _};
+        use base64::{Engine as _, engine::general_purpose::STANDARD};
         let dir = tempfile::tempdir().unwrap();
         // Write a file with one key, but put a different key in the keyring.
         let (file_key, key_file) = write_test_key(dir.path());
@@ -753,7 +755,7 @@ mod tests {
     #[test]
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     fn keyring_backend_invalid_keyring_data_uses_file() {
-        use base64::{engine::general_purpose::STANDARD, Engine as _};
+        use base64::{Engine as _, engine::general_purpose::STANDARD};
         let dir = tempfile::tempdir().unwrap();
         let (expected, key_file) = write_test_key(dir.path());
         let mock = MockKeyring::with_password(&STANDARD.encode([1u8; 16])); // wrong length
@@ -788,7 +790,7 @@ mod tests {
 
     #[test]
     fn file_backend_skips_keyring_entirely() {
-        use base64::{engine::general_purpose::STANDARD, Engine as _};
+        use base64::{Engine as _, engine::general_purpose::STANDARD};
         let dir = tempfile::tempdir().unwrap();
         let (file_key, key_file) = write_test_key(dir.path());
         // Keyring has a DIFFERENT key — file backend should ignore it.
@@ -822,7 +824,7 @@ mod tests {
 
     #[test]
     fn read_key_file_valid() {
-        use base64::{engine::general_purpose::STANDARD, Engine as _};
+        use base64::{Engine as _, engine::general_purpose::STANDARD};
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("key");
         let key = [99u8; 32];
@@ -838,7 +840,7 @@ mod tests {
 
     #[test]
     fn read_key_file_wrong_length() {
-        use base64::{engine::general_purpose::STANDARD, Engine as _};
+        use base64::{Engine as _, engine::general_purpose::STANDARD};
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("key");
         std::fs::write(&path, STANDARD.encode([1u8; 16])).unwrap();
@@ -1001,7 +1003,7 @@ mod tests {
     #[test]
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     fn race_loser_syncs_winner_key_to_keyring() {
-        use base64::{engine::general_purpose::STANDARD, Engine as _};
+        use base64::{Engine as _, engine::general_purpose::STANDARD};
         let dir = tempfile::tempdir().unwrap();
         let key_file = dir.path().join(".encryption_key");
 

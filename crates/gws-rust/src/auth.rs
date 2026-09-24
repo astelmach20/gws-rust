@@ -88,17 +88,17 @@ async fn refresh_token_with_reqwest(
 /// 3. `quota_project_id` from Application Default Credentials (ADC).
 pub fn get_quota_project() -> Option<String> {
     // 1. Explicit environment variable (highest priority)
-    if let Ok(project_id) = std::env::var("GWSR_PROJECT_ID") {
-        if !project_id.is_empty() {
-            return Some(project_id);
-        }
+    if let Ok(project_id) = std::env::var("GWSR_PROJECT_ID")
+        && !project_id.is_empty()
+    {
+        return Some(project_id);
     }
 
     // 2. Project ID from the OAuth client configuration (set via `gwsr auth setup`)
-    if let Ok(config) = crate::oauth_config::load_client_config() {
-        if !config.project_id.is_empty() {
-            return Some(config.project_id);
-        }
+    if let Ok(config) = crate::oauth_config::load_client_config()
+        && !config.project_id.is_empty()
+    {
+        return Some(config.project_id);
     }
 
     // 3. Fallback to Application Default Credentials (ADC)
@@ -213,10 +213,10 @@ impl AccessTokenProvider for FakeTokenProvider {
 ///      (populated by `gcloud auth application-default login`)
 pub async fn get_token(scopes: &[&str]) -> anyhow::Result<String> {
     // 0. Direct token from env var (highest priority, bypasses all credential loading)
-    if let Ok(token) = std::env::var("GWSR_TOKEN") {
-        if !token.is_empty() {
-            return Ok(token);
-        }
+    if let Ok(token) = std::env::var("GWSR_TOKEN")
+        && !token.is_empty()
+    {
+        return Ok(token);
     }
 
     let creds_file = std::env::var("GWSR_CREDENTIALS_FILE").ok();
@@ -373,13 +373,13 @@ async fn load_credentials_inner(
                 // Also remove stale token caches that used the old key.
                 for cache_file in ["token_cache.json", "sa_token_cache.json"] {
                     let path = enc_path.with_file_name(cache_file);
-                    if let Err(err) = tokio::fs::remove_file(&path).await {
-                        if err.kind() != std::io::ErrorKind::NotFound {
-                            eprintln!(
-                                "Warning: failed to remove stale token cache '{}': {err}",
-                                path.display()
-                            );
-                        }
+                    if let Err(err) = tokio::fs::remove_file(&path).await
+                        && err.kind() != std::io::ErrorKind::NotFound
+                    {
+                        eprintln!(
+                            "Warning: failed to remove stale token cache '{}': {err}",
+                            path.display()
+                        );
                     }
                 }
                 // Fall through to remaining credential sources below.
@@ -414,13 +414,13 @@ async fn load_credentials_inner(
 
     // 4b. Well-known ADC path: ~/.config/gcloud/application_default_credentials.json
     // (populated by `gcloud auth application-default login`). Silent if absent.
-    if let Some(well_known) = adc_well_known_path() {
-        if well_known.exists() {
-            let content = tokio::fs::read_to_string(&well_known)
-                .await
-                .with_context(|| format!("Failed to read ADC from {}", well_known.display()))?;
-            return parse_credential_file(&well_known, &content).await;
-        }
+    if let Some(well_known) = adc_well_known_path()
+        && well_known.exists()
+    {
+        let content = tokio::fs::read_to_string(&well_known)
+            .await
+            .with_context(|| format!("Failed to read ADC from {}", well_known.display()))?;
+        return parse_credential_file(&well_known, &content).await;
     }
 
     anyhow::bail!(
@@ -432,6 +432,7 @@ async fn load_credentials_inner(
 }
 
 #[cfg(test)]
+#[allow(unsafe_code)] // tests mutate process env; they are serialized with #[serial]
 mod tests {
     use super::*;
     use std::io::Write;
@@ -448,7 +449,8 @@ mod tests {
         /// Save the current value of `name`, then set it to `value`.
         fn set(name: &str, value: impl AsRef<std::ffi::OsStr>) -> Self {
             let original = std::env::var_os(name);
-            std::env::set_var(name, value);
+            // FIXME: Audit that the environment access only happens in single-threaded code.
+            unsafe { std::env::set_var(name, value) };
             Self {
                 name: name.to_string(),
                 original,
@@ -458,7 +460,8 @@ mod tests {
         /// Save the current value of `name`, then remove it.
         fn remove(name: &str) -> Self {
             let original = std::env::var_os(name);
-            std::env::remove_var(name);
+            // FIXME: Audit that the environment access only happens in single-threaded code.
+            unsafe { std::env::remove_var(name) };
             Self {
                 name: name.to_string(),
                 original,
@@ -469,8 +472,10 @@ mod tests {
     impl Drop for EnvVarGuard {
         fn drop(&mut self) {
             match &self.original {
-                Some(v) => std::env::set_var(&self.name, v),
-                None => std::env::remove_var(&self.name),
+                // FIXME: Audit that the environment access only happens in single-threaded code.
+                Some(v) => unsafe { std::env::set_var(&self.name, v) },
+                // FIXME: Audit that the environment access only happens in single-threaded code.
+                None => unsafe { std::env::remove_var(&self.name) },
             }
         }
     }
@@ -529,10 +534,11 @@ mod tests {
         .await;
 
         assert!(err.is_err());
-        assert!(err
-            .unwrap_err()
-            .to_string()
-            .contains("No credentials found"));
+        assert!(
+            err.unwrap_err()
+                .to_string()
+                .contains("No credentials found")
+        );
     }
 
     #[tokio::test]
@@ -762,7 +768,8 @@ mod tests {
         let enc_path = dir.path().join("credentials.enc");
 
         // Isolate global config dir to prevent races with other tests
-        std::env::set_var("GWSR_CONFIG_DIR", dir.path());
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::set_var("GWSR_CONFIG_DIR", dir.path()) };
 
         // Encrypt and write
         let encrypted = crate::credential_store::encrypt(json.as_bytes()).unwrap();
@@ -915,10 +922,12 @@ mod tests {
         // Should fall through to normal credential loading, which fails
         // because we pointed at non-existent paths
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("No credentials found"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("No credentials found")
+        );
     }
 
     #[test]

@@ -174,11 +174,7 @@ fn build_resource_command(name: &str, resource: &RestResource) -> Option<Command
         }
     }
 
-    if has_children {
-        Some(cmd)
-    } else {
-        None
-    }
+    if has_children { Some(cmd) } else { None }
 }
 
 #[cfg(test)]

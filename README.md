@@ -213,7 +213,7 @@ export GWSR_TOKEN=$(gcloud auth print-access-token)
 | 3        | Encrypted credentials  | `gwsr auth login`                        |
 | 4        | Plaintext credentials  | `~/.config/gwsr/credentials.json`        |
 
-Environment variables can also live in a `.env` file.
+`gwsr` does not load `.env` files; export variables in your shell or deployment config.
 
 ## AI Agent Skills
 
@@ -388,7 +388,7 @@ All variables are optional. See [`.env.example`](.env.example) for a copy-paste 
 | `GWSR_LOG_FILE` | Directory for JSON log files with daily rotation. Off by default. |
 | `GWSR_PROJECT_ID` | GCP project ID override for quota/billing and fallback for helper commands |
 
-Environment variables can also be set in a `.env` file (loaded via [dotenvy](https://crates.io/crates/dotenvy)).
+`gwsr` does not load `.env` files; export variables in your shell or deployment config.
 
 ## Exit Codes
 

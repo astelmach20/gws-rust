@@ -29,164 +29,163 @@ pub(super) async fn handle_watch(
         .await
         .context("Failed to get Pub/Sub token")?;
 
-    let (pubsub_subscription, topic_name, created_resources) = if let Some(ref sub_name) =
-        config.subscription
-    {
-        (sub_name.clone(), None, false)
-    } else {
-        let project = config
-            .project
-            .clone()
-            .or_else(|| std::env::var("GWSR_PROJECT_ID").ok())
-            .ok_or_else(|| {
-                GwsError::Validation(
+    let (pubsub_subscription, topic_name, created_resources) =
+        if let Some(ref sub_name) = config.subscription {
+            (sub_name.clone(), None, false)
+        } else {
+            let project = config
+                .project
+                .clone()
+                .or_else(|| std::env::var("GWSR_PROJECT_ID").ok())
+                .ok_or_else(|| {
+                    GwsError::Validation(
                     "--project is required when not using --subscription (or set GWSR_PROJECT_ID)"
                         .to_string(),
                 )
-            })?;
+                })?;
 
-        let suffix = format!("{:08x}", rand::random::<u32>());
-        let topic = if let Some(ref t) = config.topic {
-            crate::validate::validate_resource_name(t)?.to_string()
-        } else {
+            let suffix = format!("{:08x}", rand::random::<u32>());
+            let topic = if let Some(ref t) = config.topic {
+                crate::validate::validate_resource_name(t)?.to_string()
+            } else {
+                let project = crate::validate::validate_resource_name(&project)?;
+                let t = format!("projects/{project}/topics/gwsr-gmail-watch-{suffix}");
+                // Create Pub/Sub topic
+                eprintln!("Creating Pub/Sub topic: {t}");
+                let resp = client
+                    .put(format!("{PUBSUB_API_BASE}/{t}"))
+                    .bearer_auth(&pubsub_token)
+                    .header("Content-Type", "application/json")
+                    .body("{}")
+                    .send()
+                    .await
+                    .context("Failed to create topic")?;
+
+                if !resp.status().is_success() {
+                    let body = resp.text().await.unwrap_or_default();
+                    return Err(GwsError::Api {
+                        code: 400,
+                        message: format!("Failed to create Pub/Sub topic: {body}"),
+                        reason: "pubsubError".to_string(),
+                        enable_url: None,
+                    });
+                }
+
+                // Grant Gmail publish permission on the topic
+                eprintln!("Granting Gmail push permission on topic...");
+                let iam_body = json!({
+                    "policy": {
+                        "bindings": [{
+                            "role": "roles/pubsub.publisher",
+                            "members": ["serviceAccount:gmail-api-push@system.gserviceaccount.com"]
+                        }]
+                    }
+                });
+                let resp = client
+                    .post(format!("{PUBSUB_API_BASE}/{t}:setIamPolicy"))
+                    .bearer_auth(&pubsub_token)
+                    .header("Content-Type", "application/json")
+                    .json(&iam_body)
+                    .send()
+                    .await
+                    .context("Failed to set topic IAM policy")?;
+
+                if !resp.status().is_success() {
+                    let body = resp.text().await.unwrap_or_default();
+                    eprintln!("Warning: Could not auto-grant Gmail push permission.");
+                    eprintln!("You may need to manually grant publisher access:");
+                    eprintln!(
+                        "  gcloud pubsub topics add-iam-policy-binding {} \\",
+                        t.split('/').rfind(|s| !s.is_empty()).unwrap_or(&t)
+                    );
+                    eprintln!(
+                        "    --member=serviceAccount:gmail-api-push@system.gserviceaccount.com \\"
+                    );
+                    eprintln!("    --role=roles/pubsub.publisher");
+                    eprintln!("Error: {}", sanitize_for_terminal(&body));
+                }
+
+                t
+            };
+
             let project = crate::validate::validate_resource_name(&project)?;
-            let t = format!("projects/{project}/topics/gwsr-gmail-watch-{suffix}");
-            // Create Pub/Sub topic
-            eprintln!("Creating Pub/Sub topic: {t}");
+            let sub = format!("projects/{project}/subscriptions/gwsr-gmail-watch-{suffix}");
+
+            // 3. Create Pub/Sub subscription
+            eprintln!("Creating Pub/Sub subscription: {sub}");
+            let sub_body = json!({
+                "topic": topic,
+                "ackDeadlineSeconds": 60,
+            });
             let resp = client
-                .put(format!("{PUBSUB_API_BASE}/{t}"))
+                .put(format!("{PUBSUB_API_BASE}/{sub}"))
                 .bearer_auth(&pubsub_token)
                 .header("Content-Type", "application/json")
-                .body("{}")
+                .json(&sub_body)
                 .send()
                 .await
-                .context("Failed to create topic")?;
+                .context("Failed to create subscription")?;
 
             if !resp.status().is_success() {
                 let body = resp.text().await.unwrap_or_default();
                 return Err(GwsError::Api {
                     code: 400,
-                    message: format!("Failed to create Pub/Sub topic: {body}"),
+                    message: format!("Failed to create Pub/Sub subscription: {body}"),
                     reason: "pubsubError".to_string(),
                     enable_url: None,
                 });
             }
 
-            // Grant Gmail publish permission on the topic
-            eprintln!("Granting Gmail push permission on topic...");
-            let iam_body = json!({
-                "policy": {
-                    "bindings": [{
-                        "role": "roles/pubsub.publisher",
-                        "members": ["serviceAccount:gmail-api-push@system.gserviceaccount.com"]
-                    }]
-                }
+            // 4. Call gmail.users.watch
+            eprintln!("Setting up Gmail watch...");
+            let mut watch_body = json!({
+                "topicName": topic,
             });
-            let resp = client
-                .post(format!("{PUBSUB_API_BASE}/{t}:setIamPolicy"))
-                .bearer_auth(&pubsub_token)
-                .header("Content-Type", "application/json")
-                .json(&iam_body)
-                .send()
-                .await
-                .context("Failed to set topic IAM policy")?;
-
-            if !resp.status().is_success() {
-                let body = resp.text().await.unwrap_or_default();
-                eprintln!("Warning: Could not auto-grant Gmail push permission.");
-                eprintln!("You may need to manually grant publisher access:");
-                eprintln!(
-                    "  gcloud pubsub topics add-iam-policy-binding {} \\",
-                    t.split('/').rfind(|s| !s.is_empty()).unwrap_or(&t)
-                );
-                eprintln!(
-                    "    --member=serviceAccount:gmail-api-push@system.gserviceaccount.com \\"
-                );
-                eprintln!("    --role=roles/pubsub.publisher");
-                eprintln!("Error: {}", sanitize_for_terminal(&body));
+            if let Some(ref label_ids) = config.label_ids {
+                let labels: Vec<&str> = label_ids.split(',').map(|s| s.trim()).collect();
+                watch_body["labelIds"] = json!(labels);
             }
 
-            t
+            let resp = client
+                .post(format!("{GMAIL_API_BASE}/users/me/watch"))
+                .bearer_auth(&gmail_token)
+                .header("Content-Type", "application/json")
+                .json(&watch_body)
+                .send()
+                .await
+                .context("Failed to call gmail.users.watch")?;
+
+            let watch_resp: Value = resp
+                .json()
+                .await
+                .context("Failed to parse watch response")?;
+
+            if let Some(err) = watch_resp.get("error") {
+                return Err(GwsError::Api {
+                    code: err.get("code").and_then(|c| c.as_u64()).unwrap_or(400) as u16,
+                    message: format!(
+                        "gmail.users.watch failed: {}",
+                        serde_json::to_string(err).unwrap_or_default()
+                    ),
+                    reason: "gmailError".to_string(),
+                    enable_url: None,
+                });
+            }
+
+            let history_id = watch_resp
+                .get("historyId")
+                .and_then(|h| h.as_str())
+                .unwrap_or("0");
+            let expiration = watch_resp
+                .get("expiration")
+                .and_then(|e| e.as_str())
+                .unwrap_or("unknown");
+
+            eprintln!("Gmail watch active (historyId: {history_id}, expires: {expiration})");
+            eprintln!("Listening for new emails...\n");
+
+            (sub, Some(topic), true)
         };
-
-        let project = crate::validate::validate_resource_name(&project)?;
-        let sub = format!("projects/{project}/subscriptions/gwsr-gmail-watch-{suffix}");
-
-        // 3. Create Pub/Sub subscription
-        eprintln!("Creating Pub/Sub subscription: {sub}");
-        let sub_body = json!({
-            "topic": topic,
-            "ackDeadlineSeconds": 60,
-        });
-        let resp = client
-            .put(format!("{PUBSUB_API_BASE}/{sub}"))
-            .bearer_auth(&pubsub_token)
-            .header("Content-Type", "application/json")
-            .json(&sub_body)
-            .send()
-            .await
-            .context("Failed to create subscription")?;
-
-        if !resp.status().is_success() {
-            let body = resp.text().await.unwrap_or_default();
-            return Err(GwsError::Api {
-                code: 400,
-                message: format!("Failed to create Pub/Sub subscription: {body}"),
-                reason: "pubsubError".to_string(),
-                enable_url: None,
-            });
-        }
-
-        // 4. Call gmail.users.watch
-        eprintln!("Setting up Gmail watch...");
-        let mut watch_body = json!({
-            "topicName": topic,
-        });
-        if let Some(ref label_ids) = config.label_ids {
-            let labels: Vec<&str> = label_ids.split(',').map(|s| s.trim()).collect();
-            watch_body["labelIds"] = json!(labels);
-        }
-
-        let resp = client
-            .post(format!("{GMAIL_API_BASE}/users/me/watch"))
-            .bearer_auth(&gmail_token)
-            .header("Content-Type", "application/json")
-            .json(&watch_body)
-            .send()
-            .await
-            .context("Failed to call gmail.users.watch")?;
-
-        let watch_resp: Value = resp
-            .json()
-            .await
-            .context("Failed to parse watch response")?;
-
-        if let Some(err) = watch_resp.get("error") {
-            return Err(GwsError::Api {
-                code: err.get("code").and_then(|c| c.as_u64()).unwrap_or(400) as u16,
-                message: format!(
-                    "gmail.users.watch failed: {}",
-                    serde_json::to_string(err).unwrap_or_default()
-                ),
-                reason: "gmailError".to_string(),
-                enable_url: None,
-            });
-        }
-
-        let history_id = watch_resp
-            .get("historyId")
-            .and_then(|h| h.as_str())
-            .unwrap_or("0");
-        let expiration = watch_resp
-            .get("expiration")
-            .and_then(|e| e.as_str())
-            .unwrap_or("unknown");
-
-        eprintln!("Gmail watch active (historyId: {history_id}, expires: {expiration})");
-        eprintln!("Listening for new emails...\n");
-
-        (sub, Some(topic), true)
-    };
 
     // Get initial historyId for tracking
     let profile_resp = client
@@ -225,22 +224,27 @@ pub(super) async fn handle_watch(
     if created_resources {
         if config.cleanup {
             eprintln!("\nCleaning up Pub/Sub resources...");
-            if let Ok(pubsub_token) = pubsub_token_provider.access_token().await {
-                let _ = client
-                    .delete(format!("{PUBSUB_API_BASE}/{}", pubsub_subscription))
-                    .bearer_auth(&pubsub_token)
-                    .send()
-                    .await;
-                if let Some(ref topic) = topic_name {
+            match pubsub_token_provider.access_token().await {
+                Ok(pubsub_token) => {
                     let _ = client
-                        .delete(format!("{PUBSUB_API_BASE}/{}", topic))
+                        .delete(format!("{PUBSUB_API_BASE}/{}", pubsub_subscription))
                         .bearer_auth(&pubsub_token)
                         .send()
                         .await;
+                    if let Some(ref topic) = topic_name {
+                        let _ = client
+                            .delete(format!("{PUBSUB_API_BASE}/{}", topic))
+                            .bearer_auth(&pubsub_token)
+                            .send()
+                            .await;
+                    }
+                    eprintln!("Cleanup complete.");
                 }
-                eprintln!("Cleanup complete.");
-            } else {
-                eprintln!("Warning: failed to refresh token for cleanup. Resources may need manual deletion.");
+                _ => {
+                    eprintln!(
+                        "Warning: failed to refresh token for cleanup. Resources may need manual deletion."
+                    );
+                }
             }
         } else {
             eprintln!("\n--- Reconnection Info ---");
@@ -437,57 +441,53 @@ async fn fetch_and_output_messages(
             .send()
             .await;
 
-        if let Ok(resp) = msg_resp {
-            if let Ok(mut full_msg) = resp.json::<Value>().await {
-                // Apply sanitization if configured
-                if let Some(ref template) = sanitize_config.template {
-                    let text_to_check = serde_json::to_string(&full_msg).unwrap_or_default();
-                    match crate::helpers::modelarmor::sanitize_text(template, &text_to_check).await
-                    {
-                        Ok(result) => {
-                            if let Some(sanitized_msg) = apply_sanitization_result(
-                                full_msg,
-                                sanitize_config,
-                                &result,
-                                &msg_id,
-                            ) {
-                                full_msg = sanitized_msg;
-                            } else {
-                                continue;
-                            }
-                        }
-                        Err(e) => {
-                            eprintln!(
-                                "{} Model Armor sanitization failed for message {msg_id}: {}",
-                                colorize("warning:", "33"),
-                                sanitize_for_terminal(&e.to_string())
-                            );
+        if let Ok(resp) = msg_resp
+            && let Ok(mut full_msg) = resp.json::<Value>().await
+        {
+            // Apply sanitization if configured
+            if let Some(ref template) = sanitize_config.template {
+                let text_to_check = serde_json::to_string(&full_msg).unwrap_or_default();
+                match crate::helpers::modelarmor::sanitize_text(template, &text_to_check).await {
+                    Ok(result) => {
+                        if let Some(sanitized_msg) =
+                            apply_sanitization_result(full_msg, sanitize_config, &result, &msg_id)
+                        {
+                            full_msg = sanitized_msg;
+                        } else {
+                            continue;
                         }
                     }
-                }
-
-                let json_str =
-                    serde_json::to_string_pretty(&full_msg).unwrap_or_else(|_| "{}".to_string());
-                if let Some(dir) = output_dir {
-                    let path = dir.join(format!(
-                        "{}.json",
-                        crate::validate::encode_path_segment(&msg_id)
-                    ));
-                    if let Err(e) = std::fs::write(&path, &json_str) {
+                    Err(e) => {
                         eprintln!(
-                            "Warning: failed to write {}: {}",
-                            path.display(),
+                            "{} Model Armor sanitization failed for message {msg_id}: {}",
+                            colorize("warning:", "33"),
                             sanitize_for_terminal(&e.to_string())
                         );
-                    } else {
-                        eprintln!("Wrote {}", path.display());
                     }
-                } else {
-                    println!(
-                        "{}",
-                        serde_json::to_string(&full_msg).unwrap_or_else(|_| "{}".to_string())
-                    );
                 }
+            }
+
+            let json_str =
+                serde_json::to_string_pretty(&full_msg).unwrap_or_else(|_| "{}".to_string());
+            if let Some(dir) = output_dir {
+                let path = dir.join(format!(
+                    "{}.json",
+                    crate::validate::encode_path_segment(&msg_id)
+                ));
+                if let Err(e) = std::fs::write(&path, &json_str) {
+                    eprintln!(
+                        "Warning: failed to write {}: {}",
+                        path.display(),
+                        sanitize_for_terminal(&e.to_string())
+                    );
+                } else {
+                    eprintln!("Wrote {}", path.display());
+                }
+            } else {
+                println!(
+                    "{}",
+                    serde_json::to_string(&full_msg).unwrap_or_else(|_| "{}".to_string())
+                );
             }
         }
     }
@@ -537,10 +537,9 @@ fn extract_message_ids_from_history(history_body: &Value) -> Vec<String> {
                         .get("message")
                         .and_then(|m| m.get("id"))
                         .and_then(|id| id.as_str())
+                        && seen_ids.insert(msg_id.to_string())
                     {
-                        if seen_ids.insert(msg_id.to_string()) {
-                            result.push(msg_id.to_string());
-                        }
+                        result.push(msg_id.to_string());
                     }
                 }
             }

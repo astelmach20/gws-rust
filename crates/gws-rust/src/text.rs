@@ -82,15 +82,15 @@ fn strip_markdown_links(s: &str) -> String {
     while i < len {
         if chars[i] == '[' {
             // Look for the closing ] followed by (
-            if let Some(close_bracket) = find_char_from(&chars, ']', i + 1) {
-                if close_bracket + 1 < len && chars[close_bracket + 1] == '(' {
-                    if let Some(close_paren) = find_char_from(&chars, ')', close_bracket + 2) {
-                        // Found a complete [text](url) — emit just the text
-                        result.extend(&chars[i + 1..close_bracket]);
-                        i = close_paren + 1;
-                        continue;
-                    }
-                }
+            if let Some(close_bracket) = find_char_from(&chars, ']', i + 1)
+                && close_bracket + 1 < len
+                && chars[close_bracket + 1] == '('
+                && let Some(close_paren) = find_char_from(&chars, ')', close_bracket + 2)
+            {
+                // Found a complete [text](url) — emit just the text
+                result.extend(&chars[i + 1..close_bracket]);
+                i = close_paren + 1;
+                continue;
             }
         }
         result.push(chars[i]);

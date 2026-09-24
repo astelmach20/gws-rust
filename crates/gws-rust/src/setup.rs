@@ -273,89 +273,84 @@ pub async fn fetch_scopes_for_apis(enabled_api_ids: &[String]) -> Vec<Discovered
             Err(_) => continue, // skip APIs we can't find a discovery doc for
         };
 
-        if let Some(auth) = &doc.auth {
-            if let Some(oauth2) = &auth.oauth2 {
-                if let Some(scopes) = &oauth2.scopes {
-                    for (url, desc) in scopes {
-                        // Deduplicate (some APIs share scopes)
-                        if all_scopes.iter().any(|s| s.url == *url) {
-                            continue;
-                        }
-
-                        // Filter out legacy endpoints like m8/feeds or calendar/feeds
-                        if !url.starts_with("https://www.googleapis.com/auth/") {
-                            continue;
-                        }
-                        // Filter out scopes that can't be used with user OAuth consent
-                        // (they require a Chat app or service account)
-                        if url.contains("/auth/chat.app.")
-                            || url.contains("/auth/chat.bot")
-                            || url.contains("/auth/chat.import")
-                            || url.contains("/auth/keep")
-                            || url.contains("/auth/apps.alerts")
-                        {
-                            continue;
-                        }
-                        let short = url
-                            .strip_prefix("https://www.googleapis.com/auth/")
-                            .unwrap_or(url)
-                            .to_string();
-                        let is_readonly = short.contains("readonly");
-
-                        let classification = if RESTRICTED_SCOPES.contains(&url.as_str()) {
-                            ScopeClassification::Restricted
-                        } else if SENSITIVE_SCOPES.contains(&url.as_str()) {
-                            ScopeClassification::Sensitive
-                        } else {
-                            ScopeClassification::NonSensitive
-                        };
-
-                        let description = if let Some(desc) = &desc.description {
-                            if !desc.is_empty() {
-                                desc.clone()
-                            } else {
-                                // Generate a friendly name from the short URL
-                                short
-                                    .split('.')
-                                    .map(|s| {
-                                        let mut c = s.chars();
-                                        match c.next() {
-                                            None => String::new(),
-                                            Some(f) => {
-                                                f.to_uppercase().collect::<String>() + c.as_str()
-                                            }
-                                        }
-                                    })
-                                    .collect::<Vec<String>>()
-                                    .join(" ")
-                            }
-                        } else {
-                            // Generate a friendly name from the short URL
-                            short
-                                .split('.')
-                                .map(|s| {
-                                    let mut c = s.chars();
-                                    match c.next() {
-                                        None => String::new(),
-                                        Some(f) => {
-                                            f.to_uppercase().collect::<String>() + c.as_str()
-                                        }
-                                    }
-                                })
-                                .collect::<Vec<String>>()
-                                .join(" ")
-                        };
-
-                        all_scopes.push(DiscoveredScope {
-                            url: url.clone(),
-                            description,
-                            short,
-                            is_readonly,
-                            api_name: api_entry.name.to_string(),
-                            classification,
-                        });
-                    }
+        if let Some(auth) = &doc.auth
+            && let Some(oauth2) = &auth.oauth2
+            && let Some(scopes) = &oauth2.scopes
+        {
+            for (url, desc) in scopes {
+                // Deduplicate (some APIs share scopes)
+                if all_scopes.iter().any(|s| s.url == *url) {
+                    continue;
                 }
+
+                // Filter out legacy endpoints like m8/feeds or calendar/feeds
+                if !url.starts_with("https://www.googleapis.com/auth/") {
+                    continue;
+                }
+                // Filter out scopes that can't be used with user OAuth consent
+                // (they require a Chat app or service account)
+                if url.contains("/auth/chat.app.")
+                    || url.contains("/auth/chat.bot")
+                    || url.contains("/auth/chat.import")
+                    || url.contains("/auth/keep")
+                    || url.contains("/auth/apps.alerts")
+                {
+                    continue;
+                }
+                let short = url
+                    .strip_prefix("https://www.googleapis.com/auth/")
+                    .unwrap_or(url)
+                    .to_string();
+                let is_readonly = short.contains("readonly");
+
+                let classification = if RESTRICTED_SCOPES.contains(&url.as_str()) {
+                    ScopeClassification::Restricted
+                } else if SENSITIVE_SCOPES.contains(&url.as_str()) {
+                    ScopeClassification::Sensitive
+                } else {
+                    ScopeClassification::NonSensitive
+                };
+
+                let description = if let Some(desc) = &desc.description {
+                    if !desc.is_empty() {
+                        desc.clone()
+                    } else {
+                        // Generate a friendly name from the short URL
+                        short
+                            .split('.')
+                            .map(|s| {
+                                let mut c = s.chars();
+                                match c.next() {
+                                    None => String::new(),
+                                    Some(f) => f.to_uppercase().collect::<String>() + c.as_str(),
+                                }
+                            })
+                            .collect::<Vec<String>>()
+                            .join(" ")
+                    }
+                } else {
+                    // Generate a friendly name from the short URL
+                    short
+                        .split('.')
+                        .map(|s| {
+                            let mut c = s.chars();
+                            match c.next() {
+                                None => String::new(),
+                                Some(f) => f.to_uppercase().collect::<String>() + c.as_str(),
+                            }
+                        })
+                        .collect::<Vec<String>>()
+                        .join(" ")
+                };
+
+                all_scopes.push(DiscoveredScope {
+                    url: url.clone(),
+                    description,
+                    short,
+                    is_readonly,
+                    api_name: api_entry.name.to_string(),
+                    classification,
+                });
             }
         }
     }
@@ -876,10 +871,10 @@ async fn configure_consent_screen(
 
     if check_res.status().is_success() {
         let data: serde_json::Value = check_res.json().await.unwrap_or_else(|_| json!({}));
-        if let Some(brands) = data.get("brands").and_then(|b| b.as_array()) {
-            if !brands.is_empty() {
-                return Ok(());
-            }
+        if let Some(brands) = data.get("brands").and_then(|b| b.as_array())
+            && !brands.is_empty()
+        {
+            return Ok(());
         }
     }
 
@@ -1109,10 +1104,10 @@ fn stage_project(ctx: &mut SetupContext) -> Result<SetupStage, GwsError> {
             let _ = w.show_message("Loading projects...");
         }
         let (projects, list_err) = list_gcloud_projects();
-        if let Some(err) = &list_err {
-            if let Some(ref mut w) = ctx.wizard {
-                let _ = w.show_message(&format!("⚠ Could not list projects: {err}"));
-            }
+        if let Some(err) = &list_err
+            && let Some(ref mut w) = ctx.wizard
+        {
+            let _ = w.show_message(&format!("⚠ Could not list projects: {err}"));
         }
         let current = get_gcloud_project()?.unwrap_or_default();
 
@@ -1254,7 +1249,7 @@ fn stage_project(ctx: &mut SetupContext) -> Result<SetupStage, GwsError> {
                             _ => {
                                 return Err(GwsError::Validation(
                                     "Project entry cancelled by user".to_string(),
-                                ))
+                                ));
                             }
                         };
                         set_gcloud_project(&project_id)?;
@@ -1837,7 +1832,7 @@ mod tests {
                 continue;
             }
             assert!(
-                api_ids.iter().any(|id| *id == expected_suffix),
+                api_ids.contains(&expected_suffix),
                 "Missing API ID for service '{}' (expected {})",
                 entry.api_name,
                 expected_suffix

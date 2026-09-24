@@ -14,9 +14,48 @@
 
 [workspace]
 members = ["crates/gws-rust", "crates/gws-rust-core"]
-resolver = "2"
+resolver = "3"
 
-# The profile that 'cargo dist' will build with
-[profile.dist]
-inherits = "release"
+[workspace.package]
+version = "0.22.5"
+edition = "2024"
+rust-version = "1.89"
+license = "Apache-2.0"
+repository = "https://github.com/astelmach20/gws-rust"
+homepage = "https://github.com/astelmach20/gws-rust"
+authors = ["The gws-rust Authors"]
+
+[workspace.dependencies]
+anyhow = "1"
+percent-encoding = "2.3"
+reqwest = { version = "0.13", features = ["json", "form", "query", "gzip"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "fs", "io-util", "io-std", "net", "signal", "sync", "process"] }
+tracing = "0.1"
+serial_test = "3.5"
+tempfile = "3"
+
+[workspace.lints.rust]
+unsafe_code = "deny"
+unreachable_pub = "allow"
+rust_2018_idioms = { level = "warn", priority = -1 }
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+unwrap_used = "warn"
+expect_used = "warn"
+panic = "warn"
+todo = "warn"
+unimplemented = "warn"
+dbg_macro = "warn"
+let_underscore_must_use = "warn"
+let_underscore_future = "warn"
+print_stderr = "allow"
+large_futures = "warn"
+
+[profile.release]
 lto = "thin"
+codegen-units = 1
+strip = "symbols"

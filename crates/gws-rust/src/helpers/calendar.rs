@@ -17,8 +17,8 @@ use crate::auth;
 use crate::error::GwsError;
 use crate::executor;
 use clap::{Arg, ArgAction, ArgMatches, Command};
-use serde_json::json;
 use serde_json::Value;
+use serde_json::json;
 use std::future::Future;
 use std::pin::Pin;
 
@@ -306,10 +306,11 @@ async fn handle_agenda(matches: &ArgMatches) -> Result<(), GwsError> {
                 .unwrap_or(cal_id);
 
             // Apply calendar filter
-            if let Some(filter) = calendar_filter {
-                if !cal_summary.contains(filter.as_str()) && cal_id != filter.as_str() {
-                    return None;
-                }
+            if let Some(filter) = calendar_filter
+                && !cal_summary.contains(filter.as_str())
+                && cal_id != filter.as_str()
+            {
+                return None;
             }
 
             Some(CalInfo {

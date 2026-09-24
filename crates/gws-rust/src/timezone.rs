@@ -39,10 +39,10 @@ fn cache_path() -> PathBuf {
 /// invalidate stale values when the account changes.
 pub fn invalidate_cache() {
     let path = cache_path();
-    if let Err(e) = std::fs::remove_file(&path) {
-        if e.kind() != std::io::ErrorKind::NotFound {
-            tracing::warn!(path = %path.display(), error = %e, "failed to invalidate timezone cache");
-        }
+    if let Err(e) = std::fs::remove_file(&path)
+        && e.kind() != std::io::ErrorKind::NotFound
+    {
+        tracing::warn!(path = %path.display(), error = %e, "failed to invalidate timezone cache");
     }
 }
 
@@ -63,11 +63,11 @@ fn read_cache() -> Option<Tz> {
 /// Write a timezone name to the cache file.
 fn write_cache(tz_name: &str) {
     let path = cache_path();
-    if let Some(parent) = path.parent() {
-        if let Err(e) = std::fs::create_dir_all(parent) {
-            tracing::warn!(path = %parent.display(), error = %e, "failed to create timezone cache directory");
-            return;
-        }
+    if let Some(parent) = path.parent()
+        && let Err(e) = std::fs::create_dir_all(parent)
+    {
+        tracing::warn!(path = %parent.display(), error = %e, "failed to create timezone cache directory");
+        return;
     }
     if let Err(e) = std::fs::write(&path, tz_name) {
         tracing::warn!(path = %path.display(), error = %e, "failed to write timezone cache");

@@ -259,12 +259,16 @@ mod tests {
         let decoded = strip_qp_soft_breaks(&raw);
 
         assert!(decoded.contains("text/html"));
-        assert!(extract_header(&raw, "To")
-            .unwrap()
-            .contains("bob@example.com"));
-        assert!(extract_header(&raw, "Subject")
-            .unwrap()
-            .contains("HTML test"));
+        assert!(
+            extract_header(&raw, "To")
+                .unwrap()
+                .contains("bob@example.com")
+        );
+        assert!(
+            extract_header(&raw, "Subject")
+                .unwrap()
+                .contains("HTML test")
+        );
         assert!(decoded.contains("<p>Hello <b>world</b></p>"));
         assert!(extract_header(&raw, "Cc").is_none());
     }
@@ -283,9 +287,11 @@ mod tests {
         };
         let raw = create_send_raw_message(&config).unwrap();
 
-        assert!(extract_header(&raw, "To")
-            .unwrap()
-            .contains("bob@example.com"));
+        assert!(
+            extract_header(&raw, "To")
+                .unwrap()
+                .contains("bob@example.com")
+        );
         assert!(extract_header(&raw, "Subject").unwrap().contains("Hello"));
         assert!(raw.contains("text/plain"));
         assert!(raw.contains("World"));
@@ -305,22 +311,32 @@ mod tests {
         };
         let raw = create_send_raw_message(&config).unwrap();
 
-        assert!(extract_header(&raw, "To")
-            .unwrap()
-            .contains("alice@example.com"));
-        assert!(extract_header(&raw, "Cc")
-            .unwrap()
-            .contains("carol@example.com"));
-        assert!(extract_header(&raw, "Bcc")
-            .unwrap()
-            .contains("secret@example.com"));
+        assert!(
+            extract_header(&raw, "To")
+                .unwrap()
+                .contains("alice@example.com")
+        );
+        assert!(
+            extract_header(&raw, "Cc")
+                .unwrap()
+                .contains("carol@example.com")
+        );
+        assert!(
+            extract_header(&raw, "Bcc")
+                .unwrap()
+                .contains("secret@example.com")
+        );
         // Verify no leakage between headers
-        assert!(!extract_header(&raw, "To")
-            .unwrap()
-            .contains("carol@example.com"));
-        assert!(!extract_header(&raw, "To")
-            .unwrap()
-            .contains("secret@example.com"));
+        assert!(
+            !extract_header(&raw, "To")
+                .unwrap()
+                .contains("carol@example.com")
+        );
+        assert!(
+            !extract_header(&raw, "To")
+                .unwrap()
+                .contains("secret@example.com")
+        );
     }
 
     #[test]
@@ -337,12 +353,16 @@ mod tests {
         };
         let raw = create_send_raw_message(&config).unwrap();
 
-        assert!(extract_header(&raw, "From")
-            .unwrap()
-            .contains("alias@example.com"));
-        assert!(extract_header(&raw, "To")
-            .unwrap()
-            .contains("bob@example.com"));
+        assert!(
+            extract_header(&raw, "From")
+                .unwrap()
+                .contains("alias@example.com")
+        );
+        assert!(
+            extract_header(&raw, "To")
+                .unwrap()
+                .contains("bob@example.com")
+        );
     }
 
     #[test]
@@ -402,9 +422,11 @@ mod tests {
             "CRLF injection via --from should not create Bcc header"
         );
         // The From header should contain the sanitized email
-        assert!(extract_header(&raw, "From")
-            .unwrap()
-            .contains("sender@example.com"));
+        assert!(
+            extract_header(&raw, "From")
+                .unwrap()
+                .contains("sender@example.com")
+        );
     }
 
     #[test]
@@ -427,9 +449,11 @@ mod tests {
             extract_header(&raw, "X-Injected").is_none(),
             "CRLF injection via --cc should not create X-Injected header"
         );
-        assert!(extract_header(&raw, "Cc")
-            .unwrap()
-            .contains("carol@example.com"));
+        assert!(
+            extract_header(&raw, "Cc")
+                .unwrap()
+                .contains("carol@example.com")
+        );
     }
 
     #[test]
@@ -454,8 +478,10 @@ mod tests {
         assert!(raw.contains("multipart/mixed"));
         assert!(raw.contains("report.pdf"));
         assert!(raw.contains("See attached"));
-        assert!(extract_header(&raw, "To")
-            .unwrap()
-            .contains("alice@example.com"));
+        assert!(
+            extract_header(&raw, "To")
+                .unwrap()
+                .contains("alice@example.com")
+        );
     }
 }

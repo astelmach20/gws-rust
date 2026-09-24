@@ -137,14 +137,14 @@ pub(super) async fn handle_renew(
 fn filter_subscriptions_to_renew(subs: &[Value], now_secs: u64, within_secs: u64) -> Vec<String> {
     let mut result = Vec::new();
     for sub in subs {
-        if let Some(expire_time) = sub.get("expireTime").and_then(|e| e.as_str()) {
-            if let Some(expire_secs) = parse_rfc3339_rough(expire_time) {
-                let remaining = expire_secs.saturating_sub(now_secs);
-                if remaining < within_secs {
-                    if let Some(name) = sub.get("name").and_then(|n| n.as_str()) {
-                        result.push(name.to_string());
-                    }
-                }
+        if let Some(expire_time) = sub.get("expireTime").and_then(|e| e.as_str())
+            && let Some(expire_secs) = parse_rfc3339_rough(expire_time)
+        {
+            let remaining = expire_secs.saturating_sub(now_secs);
+            if remaining < within_secs
+                && let Some(name) = sub.get("name").and_then(|n| n.as_str())
+            {
+                result.push(name.to_string());
             }
         }
     }

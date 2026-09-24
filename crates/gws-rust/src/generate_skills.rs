@@ -274,10 +274,10 @@ pub async fn handle_generate_skills(args: &[String]) -> Result<(), GwsError> {
 
 fn parse_output_dir(args: &[String]) -> String {
     for (i, arg) in args.iter().enumerate() {
-        if arg == "--output-dir" {
-            if let Some(val) = args.get(i + 1) {
-                return val.clone();
-            }
+        if arg == "--output-dir"
+            && let Some(val) = args.get(i + 1)
+        {
+            return val.clone();
         }
     }
     "skills".to_string()
@@ -286,10 +286,10 @@ fn parse_output_dir(args: &[String]) -> String {
 /// Parse `--filter <match>` into a substring filter.
 fn parse_filter(args: &[String]) -> Option<String> {
     for (i, arg) in args.iter().enumerate() {
-        if arg == "--filter" {
-            if let Some(val) = args.get(i + 1) {
-                return Some(val.trim().to_string());
-            }
+        if arg == "--filter"
+            && let Some(val) = args.get(i + 1)
+        {
+            return Some(val.trim().to_string());
         }
     }
     None
@@ -917,14 +917,14 @@ fn lookup_method_description(
 ) -> Option<String> {
     let resource = doc.resources.get(resource_name)?;
     // Try direct method lookup first
-    if let Some(method) = resource.methods.get(method_name) {
-        if let Some(desc) = &method.description {
-            return Some(crate::text::truncate_description(
-                desc,
-                crate::text::SKILL_BODY_DESCRIPTION_LIMIT,
-                false,
-            ));
-        }
+    if let Some(method) = resource.methods.get(method_name)
+        && let Some(desc) = &method.description
+    {
+        return Some(crate::text::truncate_description(
+            desc,
+            crate::text::SKILL_BODY_DESCRIPTION_LIMIT,
+            false,
+        ));
     }
     // For sub-resources listed as methods in the clap tree, return None
     // (they show as "Operations on the 'X' resource" which is fine)

@@ -18,11 +18,11 @@
 //! schemas before dispatching requests. This ensures immediate client-side feedback
 //! for invalid API payloads.
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::discovery::{
-    fetch_discovery_document, JsonSchema, MethodParameter, RestDescription, RestMethod,
-    RestResource,
+    JsonSchema, MethodParameter, RestDescription, RestMethod, RestResource,
+    fetch_discovery_document,
 };
 use crate::error::GwsError;
 use crate::services::resolve_service;
@@ -162,27 +162,27 @@ fn build_schema_output(doc: &RestDescription, method: &RestMethod) -> Value {
     }
 
     // Resolve request body schema
-    if let Some(ref req_ref) = method.request {
-        if let Some(ref schema_name) = req_ref.schema_ref {
-            output["requestBody"] = json!({
-                "schemaRef": schema_name,
-            });
-            if let Some(schema) = doc.schemas.get(schema_name) {
-                output["requestBody"]["schema"] = schema_to_json(schema);
-            }
+    if let Some(ref req_ref) = method.request
+        && let Some(ref schema_name) = req_ref.schema_ref
+    {
+        output["requestBody"] = json!({
+            "schemaRef": schema_name,
+        });
+        if let Some(schema) = doc.schemas.get(schema_name) {
+            output["requestBody"]["schema"] = schema_to_json(schema);
         }
     }
 
     // Response schema ref
-    if let Some(ref resp_ref) = method.response {
-        if let Some(ref schema_name) = resp_ref.schema_ref {
-            output["response"] = json!({
-                "schemaRef": schema_name,
-            });
-            // Also inline the response schema structure if available
-            if let Some(schema) = doc.schemas.get(schema_name) {
-                output["response"]["schema"] = schema_to_json(schema);
-            }
+    if let Some(ref resp_ref) = method.response
+        && let Some(ref schema_name) = resp_ref.schema_ref
+    {
+        output["response"] = json!({
+            "schemaRef": schema_name,
+        });
+        // Also inline the response schema structure if available
+        if let Some(schema) = doc.schemas.get(schema_name) {
+            output["response"]["schema"] = schema_to_json(schema);
         }
     }
 
@@ -285,20 +285,20 @@ fn resolve_schema_refs(
                 .map(|s| s.to_string())
             {
                 // If we haven't seen this schema yet in this branch
-                if !seen.contains(&ref_name) {
-                    if let Some(schema) = doc.schemas.get(&ref_name) {
-                        seen.insert(ref_name.clone());
-                        let mut resolved = schema_to_json(schema);
-                        // Recursively resolve the resolved schema
-                        resolve_schema_refs(&mut resolved, doc, seen);
-                        seen.remove(&ref_name);
+                if !seen.contains(&ref_name)
+                    && let Some(schema) = doc.schemas.get(&ref_name)
+                {
+                    seen.insert(ref_name.clone());
+                    let mut resolved = schema_to_json(schema);
+                    // Recursively resolve the resolved schema
+                    resolve_schema_refs(&mut resolved, doc, seen);
+                    seen.remove(&ref_name);
 
-                        // Merge resolved schema into current object, but preserve existing fields
-                        // (though usually $ref stands alone)
-                        if let Value::Object(resolved_map) = resolved {
-                            for (k, v) in resolved_map {
-                                map.entry(k).or_insert(v);
-                            }
+                    // Merge resolved schema into current object, but preserve existing fields
+                    // (though usually $ref stands alone)
+                    if let Value::Object(resolved_map) = resolved {
+                        for (k, v) in resolved_map {
+                            map.entry(k).or_insert(v);
                         }
                     }
                 }

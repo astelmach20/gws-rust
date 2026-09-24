@@ -32,11 +32,11 @@ pub(super) use crate::error::GwsError;
 pub(super) use crate::executor;
 use crate::output::sanitize_for_terminal;
 pub(super) use anyhow::Context;
-pub(super) use base64::{engine::general_purpose::URL_SAFE, Engine as _};
+pub(super) use base64::{Engine as _, engine::general_purpose::URL_SAFE};
 pub(super) use clap::{Arg, ArgAction, ArgMatches, Command};
 pub(super) use mail_builder::headers::address::Address as MbAddress;
 pub(super) use serde::Serialize;
-pub(super) use serde_json::{json, Value};
+pub(super) use serde_json::{Value, json};
 use std::future::Future;
 use std::pin::Pin;
 
@@ -77,22 +77,22 @@ impl Mailbox {
     /// syntactic email validation is left to the Gmail API.
     pub fn parse(raw: &str) -> Self {
         let raw = raw.trim();
-        if let Some(start) = raw.rfind('<') {
-            if let Some(end) = raw[start..].find('>') {
-                let email = sanitize_control_chars(raw[start + 1..start + end].trim());
-                let name_part = raw[..start].trim();
-                let name = if name_part.is_empty() {
-                    None
-                } else {
-                    // Strip surrounding quotes: "Alice Smith" → Alice Smith
-                    let unquoted = name_part
-                        .strip_prefix('"')
-                        .and_then(|s| s.strip_suffix('"'))
-                        .unwrap_or(name_part);
-                    Some(sanitize_control_chars(unquoted))
-                };
-                return Self { name, email };
-            }
+        if let Some(start) = raw.rfind('<')
+            && let Some(end) = raw[start..].find('>')
+        {
+            let email = sanitize_control_chars(raw[start + 1..start + end].trim());
+            let name_part = raw[..start].trim();
+            let name = if name_part.is_empty() {
+                None
+            } else {
+                // Strip surrounding quotes: "Alice Smith" → Alice Smith
+                let unquoted = name_part
+                    .strip_prefix('"')
+                    .and_then(|s| s.strip_suffix('"'))
+                    .unwrap_or(name_part);
+                Some(sanitize_control_chars(unquoted))
+            };
+            return Self { name, email };
         }
         Self {
             name: None,
@@ -276,20 +276,12 @@ fn parse_message_headers(headers: &[Value]) -> ParsedMessageHeaders {
 
 /// Convert an empty string to `None`, or apply `f` to the non-empty string.
 fn non_empty_then<T>(s: &str, f: impl FnOnce(&str) -> T) -> Option<T> {
-    if s.is_empty() {
-        None
-    } else {
-        Some(f(s))
-    }
+    if s.is_empty() { None } else { Some(f(s)) }
 }
 
 /// Convert an empty slice to `None`, non-empty to `Some(slice)`.
 pub(super) fn non_empty_slice<T>(s: &[T]) -> Option<&[T]> {
-    if s.is_empty() {
-        None
-    } else {
-        Some(s)
-    }
+    if s.is_empty() { None } else { Some(s) }
 }
 
 fn parse_original_message(msg: &Value) -> Result<OriginalMessage, GwsError> {
@@ -569,10 +561,10 @@ pub(super) async fn resolve_sender(
     from: Option<&[Mailbox]>,
 ) -> Result<Option<Vec<Mailbox>>, GwsError> {
     // All provided mailboxes already have display names — skip API call.
-    if let Some(addrs) = from {
-        if addrs.iter().all(|m| m.name.is_some()) {
-            return Ok(Some(addrs.to_vec()));
-        }
+    if let Some(addrs) = from
+        && addrs.iter().all(|m| m.name.is_some())
+    {
+        return Ok(Some(addrs.to_vec()));
     }
 
     let identities = match fetch_send_as_identities(client, token).await {
@@ -1052,7 +1044,7 @@ fn split_raw_mailbox_list(header: &str) -> Vec<&str> {
 /// The email is percent-encoded in the href to prevent mailto parameter
 /// injection (e.g., `?cc=evil@example.com`) and HTML-escaped in the display text.
 pub(super) fn format_email_link(email: &str) -> String {
-    use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
+    use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
     let url_encoded = utf8_percent_encode(email, NON_ALPHANUMERIC);
     let display_escaped = html_escape(email);
     format!("<a href=\"mailto:{url_encoded}\">{display_escaped}</a>")
@@ -3663,9 +3655,11 @@ mod tests {
             } => {
                 assert_eq!(reason, "accessNotConfigured");
                 assert!(enable_url.is_some());
-                assert!(enable_url
-                    .unwrap()
-                    .contains("console.developers.google.com"));
+                assert!(
+                    enable_url
+                        .unwrap()
+                        .contains("console.developers.google.com")
+                );
             }
             _ => panic!("Expected GwsError::Api"),
         }
