@@ -737,8 +737,17 @@ mod tests {
 
     #[test]
     fn non_utf8_values_are_config_errors() {
-        use std::os::unix::ffi::OsStringExt;
-        let bad = OsString::from_vec(vec![0x66, 0xff, 0x6f]);
+        #[cfg(unix)]
+        let bad = {
+            use std::os::unix::ffi::OsStringExt;
+            OsString::from_vec(vec![0x66, 0xff, 0x6f])
+        };
+        // An unpaired surrogate is the Windows equivalent of invalid UTF-8.
+        #[cfg(windows)]
+        let bad = {
+            use std::os::windows::ffi::OsStringExt;
+            OsString::from_wide(&[0x66, 0xD800, 0x6f])
+        };
         let result = Env::from_vars([(OsString::from("GWSR_CONFIG_DIR"), bad)]);
         match result {
             Err(GwsError::Config(message)) => {

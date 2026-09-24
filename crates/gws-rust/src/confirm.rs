@@ -286,9 +286,13 @@ mod tests {
         assert!(g.dry_run);
         // A gated command that does not define --yes is a programming error,
         // reported instead of silently refusing every non-interactive run.
-        let bare = Command::new("t").try_get_matches_from(["t"]).unwrap();
-        let err = Gate::from_matches(&bare).unwrap_err();
-        assert!(err.to_string().contains("--yes"), "{err}");
+        // clap detects undefined ids only with debug assertions (see crate::args).
+        #[cfg(debug_assertions)]
+        {
+            let bare = Command::new("t").try_get_matches_from(["t"]).unwrap();
+            let err = Gate::from_matches(&bare).unwrap_err();
+            assert!(err.to_string().contains("--yes"), "{err}");
+        }
     }
 
     #[test]
