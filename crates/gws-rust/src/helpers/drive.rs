@@ -285,7 +285,7 @@ TIPS:
         &'a self,
         doc: &'a crate::discovery::RestDescription,
         matches: &'a ArgMatches,
-        _sanitize_config: &'a crate::helpers::modelarmor::SanitizeConfig,
+        sanitize: &'a crate::helpers::modelarmor::SanitizeConfig,
     ) -> Pin<Box<dyn Future<Output = Result<bool, GwsError>> + Send + 'a>> {
         Box::pin(async move {
             let Some((name, m)) = matches.subcommand() else {
@@ -295,12 +295,12 @@ TIPS:
             let result = match name {
                 "+upload" => {
                     let args = UploadArgs::parse(m)?;
-                    let api = Api::new(doc, &[SCOPE_DRIVE], dry).await?;
+                    let api = Api::new(doc, &[SCOPE_DRIVE], dry, sanitize).await?;
                     let v = upload(&api, &args).await?;
                     (api, v)
                 }
                 "+download" => {
-                    let api = Api::new(doc, &[SCOPE_DRIVE_READONLY], dry).await?;
+                    let api = Api::new(doc, &[SCOPE_DRIVE_READONLY], dry, sanitize).await?;
                     let v = download(
                         &api,
                         required(m, "file-id")?,
@@ -311,7 +311,7 @@ TIPS:
                     (api, v)
                 }
                 "+export" => {
-                    let api = Api::new(doc, &[SCOPE_DRIVE_READONLY], dry).await?;
+                    let api = Api::new(doc, &[SCOPE_DRIVE_READONLY], dry, sanitize).await?;
                     let v = export(
                         &api,
                         required(m, "file-id")?,
@@ -323,7 +323,7 @@ TIPS:
                     (api, v)
                 }
                 "+move" => {
-                    let api = Api::new(doc, &[SCOPE_DRIVE], dry).await?;
+                    let api = Api::new(doc, &[SCOPE_DRIVE], dry, sanitize).await?;
                     let v =
                         move_file(&api, required(m, "file-id")?, required(m, "folder-id")?).await?;
                     (api, v)
@@ -332,20 +332,20 @@ TIPS:
                     let args = ShareArgs::parse(m)?;
                     let (impact, action) = args.impact();
                     confirm::gate(m, impact, &action)?;
-                    let api = Api::new(doc, &[SCOPE_DRIVE], dry).await?;
+                    let api = Api::new(doc, &[SCOPE_DRIVE], dry, sanitize).await?;
                     let v = share(&api, &args).await?;
                     (api, v)
                 }
                 "+sync" => {
                     let dir = crate::validate::validate_safe_output_dir(required(m, "dir")?)?;
-                    let api = Api::new(doc, &[SCOPE_DRIVE_READONLY], dry).await?;
+                    let api = Api::new(doc, &[SCOPE_DRIVE_READONLY], dry, sanitize).await?;
                     let v = sync(&api, required(m, "folder-id")?, &dir).await?;
                     (api, v)
                 }
                 _ => return Ok(false),
             };
             let (api, value) = result;
-            api.emit(m, &value)?;
+            api.emit(m, &value).await?;
             Ok(true)
         })
     }
