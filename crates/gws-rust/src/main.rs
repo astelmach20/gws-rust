@@ -441,8 +441,9 @@ async fn run_service(
     tracing::debug!(service = %alias, api = %api_name, version = %version, "resolving service");
 
     let doc = service::load_document(&api_name, &version).await?;
-    let cmd = service::build_command(&alias, &doc);
-    let matches = match cmd.try_get_matches_from(service_argv(args, service_args, &alias)) {
+    // Usage lines show the service as typed, so `youtube:v3` stays runnable.
+    let cmd = service::build_command(service_token, &doc);
+    let matches = match cmd.try_get_matches_from(service_argv(args, service_args, service_token)) {
         Ok(m) => m,
         Err(e) if is_display_request(&e) => return print_display(&e),
         Err(e) => return Err(e.into()),
