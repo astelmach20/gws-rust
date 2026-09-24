@@ -416,16 +416,6 @@ impl Api {
         })
     }
 
-    /// Send a request and return the raw response (for streaming downloads).
-    /// Returns `None` in dry-run mode after recording the request.
-    pub async fn send_raw(&self, req: ApiRequest) -> Result<Option<reqwest::Response>, GwsError> {
-        if self.dry_run {
-            self.record(req.describe())?;
-            return Ok(None);
-        }
-        self.execute(&req).await.map(Some)
-    }
-
     /// Follow `nextPageToken` until exhausted or `limit` items are collected.
     ///
     /// `items_key` is the array field in each page. A missing array on a page
