@@ -28,8 +28,8 @@ pub(super) struct Targets {
 
 impl Targets {
     pub(super) fn from_matches(matches: &ArgMatches) -> Result<Self, GwsError> {
-        let messages = list_values(matches, "message-id");
-        let threads = list_values(matches, "thread-id")
+        let messages = list_values(matches, "message-id")?;
+        let threads = list_values(matches, "thread-id")?
             .iter()
             .map(|t| thread_id_from_input(t))
             .collect::<Result<Vec<_>, _>>()?;
@@ -95,7 +95,7 @@ fn plan(api: &GmailApi, targets: &Targets, add: &[String], remove: &[String]) ->
 }
 
 fn print(value: &Value, matches: &ArgMatches) -> Result<(), GwsError> {
-    let format = crate::helpers::http::output_format(matches);
+    let format = crate::helpers::http::output_format(matches)?;
     crate::output::emit(&crate::formatter::format_value(value, &format)?)?;
     Ok(())
 }
@@ -111,15 +111,15 @@ fn offline_api() -> Result<GmailApi, GwsError> {
 pub(super) async fn handle_label(matches: &ArgMatches) -> Result<(), GwsError> {
     let targets = Targets::from_matches(matches)?;
     let change = LabelChange {
-        add: list_values(matches, "add"),
-        remove: list_values(matches, "remove"),
+        add: list_values(matches, "add")?,
+        remove: list_values(matches, "remove")?,
     };
     if change.add.is_empty() && change.remove.is_empty() {
         return Err(GwsError::Validation(
             "Provide --add and/or --remove".to_string(),
         ));
     }
-    if crate::helpers::http::dry_run(matches) {
+    if crate::args::dry_run(matches)? {
         // Label names are resolved to IDs at run time; the plan shows them as given.
         return crate::helpers::http::print_dry_run(
             matches,
@@ -138,7 +138,7 @@ pub(super) async fn handle_label(matches: &ArgMatches) -> Result<(), GwsError> {
 pub(super) async fn handle_archive(matches: &ArgMatches) -> Result<(), GwsError> {
     let targets = Targets::from_matches(matches)?;
     let remove = vec!["INBOX".to_string()];
-    if crate::helpers::http::dry_run(matches) {
+    if crate::args::dry_run(matches)? {
         return crate::helpers::http::print_dry_run(
             matches,
             plan(&offline_api()?, &targets, &[], &remove),
@@ -158,7 +158,7 @@ pub(super) async fn handle_trash(matches: &ArgMatches) -> Result<(), GwsError> {
         .map(|m| (TargetKind::Message, m))
         .chain(targets.threads.iter().map(|t| (TargetKind::Thread, t)))
         .collect();
-    if crate::helpers::http::dry_run(matches) {
+    if crate::args::dry_run(matches)? {
         let api = offline_api()?;
         let requests = items
             .iter()

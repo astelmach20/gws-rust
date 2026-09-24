@@ -18,7 +18,8 @@ mod markdown;
 mod reader;
 
 use super::Helper;
-use super::http::{self, Api, ApiRequest, flag, optional, required};
+use super::http::{self, Api, ApiRequest};
+use crate::args::{flag, optional, required};
 use crate::error::GwsError;
 use crate::validate::encode_path_segment;
 use clap::{Arg, ArgAction, ArgGroup, ArgMatches, Command};
@@ -202,7 +203,7 @@ TIPS:
             let Some((name, m)) = matches.subcommand() else {
                 return Ok(false);
             };
-            let dry = http::dry_run(m);
+            let dry = crate::args::dry_run(m)?;
             match name {
                 "+create" => {
                     let content = Content::parse(m)?;
@@ -213,8 +214,8 @@ TIPS:
                 "+read" => {
                     let api = Api::new(doc, &[SCOPE_DOCS_READONLY], dry, sanitize).await?;
                     let format = required(m, "body-format")?;
-                    let target = optional(m, "output")
-                        .map(|o| http::OutputTarget::parse(o, flag(m, "overwrite")))
+                    let target = optional(m, "output")?
+                        .map(|o| http::OutputTarget::parse(o, flag(m, "overwrite")?))
                         .transpose()?;
                     if format == "raw" && target.is_some() {
                         return Err(GwsError::Validation(
@@ -265,7 +266,7 @@ TIPS:
                         required(m, "document-id")?,
                         required(m, "find")?,
                         required(m, "replace-with")?,
-                        flag(m, "match-case"),
+                        flag(m, "match-case")?,
                     )
                     .await?;
                     api.emit(m, &v).await?;
@@ -286,11 +287,11 @@ struct Content {
 
 impl Content {
     fn parse(m: &ArgMatches) -> Result<Option<Self>, GwsError> {
-        let text = match (optional(m, "text"), optional(m, "text-file")) {
+        let text = match (optional(m, "text")?, optional(m, "text-file")?) {
             (Some(t), _) => t.to_string(),
             (None, Some(path)) => http::read_text_input(path, "--text-file")?,
             (None, None) => {
-                if flag(m, "markdown") {
+                if flag(m, "markdown")? {
                     return Err(GwsError::Validation(
                         "--markdown needs --text or --text-file".into(),
                     ));
@@ -303,7 +304,7 @@ impl Content {
         }
         Ok(Some(Self {
             text,
-            markdown: flag(m, "markdown"),
+            markdown: flag(m, "markdown")?,
         }))
     }
 }

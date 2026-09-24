@@ -30,9 +30,9 @@ pub(super) struct Delivery {
 impl Delivery {
     pub(super) fn from_matches(matches: &ArgMatches) -> Result<Self, GwsError> {
         Ok(Self {
-            draft: matches.get_flag("draft"),
-            dry_run: crate::helpers::http::dry_run(matches),
-            format: crate::helpers::http::output_format(matches),
+            draft: crate::args::flag(matches, "draft")?,
+            dry_run: crate::args::dry_run(matches)?,
+            format: crate::helpers::http::output_format(matches)?,
         })
     }
 

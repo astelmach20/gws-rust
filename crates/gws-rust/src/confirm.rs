@@ -149,8 +149,8 @@ impl Gate {
     /// `--yes`/`--dry-run` from `matches`, and whether a terminal is attached.
     pub(crate) fn from_matches(matches: &ArgMatches) -> Result<Self, GwsError> {
         Ok(Self {
-            yes: bool_flag(matches, "yes")?,
-            dry_run: bool_flag(matches, "dry-run")?,
+            yes: crate::args::flag(matches, "yes")?,
+            dry_run: crate::args::dry_run(matches)?,
             interactive: is_interactive(),
         })
     }
@@ -198,17 +198,6 @@ impl Gate {
 /// Gate a helper action using its `--yes`/`--dry-run` flags.
 pub(crate) fn confirm(matches: &ArgMatches, impact: Impact, action: &str) -> Result<(), GwsError> {
     Gate::from_matches(matches)?.check(impact, action)
-}
-
-fn bool_flag(matches: &ArgMatches, name: &str) -> Result<bool, GwsError> {
-    match matches.try_get_one::<bool>(name) {
-        Ok(v) => Ok(v.copied().unwrap_or(false)),
-        // A command without the flag simply does not offer it.
-        Err(clap::parser::MatchesError::UnknownArgument { .. }) => Ok(false),
-        Err(e) => Err(GwsError::other(anyhow::anyhow!(
-            "internal error reading --{name}: {e}"
-        ))),
-    }
 }
 
 /// Prompt on stderr and read a y/N answer from stdin.
@@ -323,7 +312,7 @@ mod tests {
     }
 
     #[test]
-    fn gate_reads_flags_and_tolerates_commands_without_them() {
+    fn gate_reads_flags_and_rejects_commands_without_them() {
         let cmd = with_yes(Command::new("t")).arg(
             Arg::new("dry-run")
                 .long("dry-run")
@@ -334,9 +323,11 @@ mod tests {
         assert!(g.yes && !g.dry_run);
         let g = Gate::from_matches(&cmd.try_get_matches_from(["t", "--dry-run"]).unwrap()).unwrap();
         assert!(g.dry_run);
+        // A gated command that does not define --yes is a programming error,
+        // reported instead of silently refusing every non-interactive run.
         let bare = Command::new("t").try_get_matches_from(["t"]).unwrap();
-        let g = Gate::from_matches(&bare).unwrap();
-        assert!(!g.yes && !g.dry_run);
+        let err = Gate::from_matches(&bare).unwrap_err();
+        assert!(err.to_string().contains("--yes"), "{err}");
     }
 
     #[test]

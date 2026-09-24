@@ -51,8 +51,7 @@ pub(super) fn list_report(base: &Path, active: &ActiveProfile) -> Result<Value, 
 }
 
 pub(super) fn handle_use(m: &clap::ArgMatches) -> Result<(), GwsError> {
-    let name = m
-        .get_one::<String>("name")
+    let name = crate::args::value::<String>(m, "name")?
         .ok_or_else(|| GwsError::Validation("a profile name is required".into()))?;
     let base = profiles::try_config_dir().map_err(|e| auth_err(format!("{e:#}")))?;
     let mut report = use_profile(&base, name)?;

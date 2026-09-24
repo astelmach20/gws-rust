@@ -23,13 +23,9 @@
 use super::prelude::*;
 use crate::confirm::with_yes;
 
-/// Read a required string argument. Clap enforces presence; this turns an
-/// impossible absence into an error instead of a panic.
+/// Read a required string argument.
 pub(super) fn required_str(matches: &ArgMatches, name: &str) -> Result<String, GwsError> {
-    matches
-        .get_one::<String>(name)
-        .cloned()
-        .ok_or_else(|| GwsError::Validation(format!("--{name} is required")))
+    Ok(crate::args::required(matches, name)?.to_string())
 }
 
 /// Read a typed argument that has a default value.
@@ -37,41 +33,40 @@ pub(super) fn value_or_default<T: Clone + Send + Sync + 'static>(
     matches: &ArgMatches,
     name: &str,
 ) -> Result<T, GwsError> {
-    matches
-        .get_one::<T>(name)
-        .cloned()
-        .ok_or_else(|| GwsError::other(format!("--{name} has no value (missing default)")))
+    crate::args::defaulted(matches, name)
 }
 
 /// Parse an optional clap argument, trimming whitespace and treating
 /// empty/whitespace-only values as None.
-pub(super) fn parse_optional_trimmed(matches: &ArgMatches, name: &str) -> Option<String> {
-    matches
-        .get_one::<String>(name)
+pub(super) fn parse_optional_trimmed(
+    matches: &ArgMatches,
+    name: &str,
+) -> Result<Option<String>, GwsError> {
+    Ok(crate::args::optional(matches, name)?
         .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
+        .filter(|s| !s.is_empty()))
 }
 
 /// Parse an optional clap argument as a comma-separated mailbox list.
 /// Returns `None` when the argument is absent, empty, or yields no valid addresses.
-pub(super) fn parse_optional_mailboxes(matches: &ArgMatches, name: &str) -> Option<Vec<Mailbox>> {
-    parse_optional_trimmed(matches, name)
+pub(super) fn parse_optional_mailboxes(
+    matches: &ArgMatches,
+    name: &str,
+) -> Result<Option<Vec<Mailbox>>, GwsError> {
+    Ok(parse_optional_trimmed(matches, name)?
         .map(|s| Mailbox::parse_list(&s))
-        .filter(|v| !v.is_empty())
+        .filter(|v| !v.is_empty()))
 }
 
 /// Collect a repeatable, comma-separable list argument (`--x a,b --x c`).
-pub(super) fn list_values(matches: &ArgMatches, name: &str) -> Vec<String> {
-    matches
-        .get_many::<String>(name)
-        .map(|vals| {
-            vals.flat_map(|v| v.split(','))
-                .map(str::trim)
-                .filter(|v| !v.is_empty())
-                .map(str::to_string)
-                .collect()
-        })
-        .unwrap_or_default()
+pub(super) fn list_values(matches: &ArgMatches, name: &str) -> Result<Vec<String>, GwsError> {
+    Ok(crate::args::many(matches, name)?
+        .iter()
+        .flat_map(|v| v.split(','))
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(str::to_string)
+        .collect())
 }
 
 fn message_id_arg(help: &'static str) -> Arg {
@@ -969,7 +964,7 @@ mod tests {
     #[test]
     fn test_list_values_splits_and_trims() {
         let m = helper_matches(&["+archive", "--message-id", "a, b", "--message-id", "c,"]);
-        assert_eq!(list_values(&m, "message-id"), vec!["a", "b", "c"]);
+        assert_eq!(list_values(&m, "message-id").unwrap(), vec!["a", "b", "c"]);
     }
 
     #[test]
@@ -999,23 +994,23 @@ mod tests {
             .try_get_matches_from(["test", "--flag", "value"])
             .unwrap();
         assert_eq!(
-            parse_optional_trimmed(&matches, "flag"),
+            parse_optional_trimmed(&matches, "flag").unwrap(),
             Some("value".to_string())
         );
 
         // Absent argument
         let matches = cmd.clone().try_get_matches_from(["test"]).unwrap();
-        assert!(parse_optional_trimmed(&matches, "flag").is_none());
+        assert!(parse_optional_trimmed(&matches, "flag").unwrap().is_none());
 
         // Whitespace-only becomes None
         let matches = cmd
             .clone()
             .try_get_matches_from(["test", "--ws", "  "])
             .unwrap();
-        assert!(parse_optional_trimmed(&matches, "ws").is_none());
+        assert!(parse_optional_trimmed(&matches, "ws").unwrap().is_none());
 
         // Empty string becomes None
         let matches = cmd.try_get_matches_from(["test", "--empty", ""]).unwrap();
-        assert!(parse_optional_trimmed(&matches, "empty").is_none());
+        assert!(parse_optional_trimmed(&matches, "empty").unwrap().is_none());
     }
 }

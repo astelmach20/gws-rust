@@ -41,12 +41,11 @@ pub(super) async fn handle(m: &clap::ArgMatches) -> Result<(), GwsError> {
         .await
         .map_err(|e| auth_err(format!("export task failed: {e}")))??;
 
-    if m.get_flag("unmasked") {
-        let output = m
-            .get_one::<String>("output")
+    if crate::args::flag(m, "unmasked")? {
+        let output = crate::args::value::<String>(m, "output")?
             .map(PathBuf::from)
             .ok_or_else(|| GwsError::Validation("--unmasked requires --output FILE".into()))?;
-        let confirmed = m.get_flag("confirm");
+        let confirmed = crate::args::flag(m, "confirm")?;
         let stdin_tty = std::io::stdin().is_terminal();
         confirm(confirmed, stdin_tty, &output, prompt_yes)?;
         write_new_private_file(&output, plaintext.as_bytes())?;

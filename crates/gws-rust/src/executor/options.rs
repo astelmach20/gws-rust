@@ -25,6 +25,7 @@ use super::{
     Credentials, ExecOptions, Invocation, ItemsMode, OutputTarget, PaginationConfig, UploadMode,
     UploadSource, WaitConfig, execute, input,
 };
+use crate::args;
 use crate::discovery::{RestDescription, RestMethod};
 use crate::error::GwsError;
 use crate::formatter::OutputFormat;
@@ -56,33 +57,8 @@ fn parse_flag_value(name: &str, v: &str) -> Result<bool, GwsError> {
     }
 }
 
-/// A typed flag value. Flags that a given method does not define read as
-/// absent; a type mismatch is a programming error and is reported.
-fn get<'a, T: std::any::Any + Clone + Send + Sync + 'static>(
-    m: &'a clap::ArgMatches,
-    id: &str,
-) -> Result<Option<&'a T>, GwsError> {
-    match m.try_get_one::<T>(id) {
-        Ok(v) => Ok(v),
-        Err(clap::parser::MatchesError::UnknownArgument { .. }) => Ok(None),
-        Err(e) => Err(GwsError::other(anyhow::anyhow!(
-            "internal error reading flag --{id}: {e}"
-        ))),
-    }
-}
-
-fn get_string<'a>(m: &'a clap::ArgMatches, id: &str) -> Result<Option<&'a str>, GwsError> {
-    Ok(get::<String>(m, id)?.map(String::as_str))
-}
-
-fn get_flag(m: &clap::ArgMatches, id: &str) -> Result<bool, GwsError> {
-    Ok(get::<bool>(m, id)?.copied().unwrap_or(false))
-}
-
-fn present(m: &clap::ArgMatches, id: &str) -> bool {
-    // `Err` only means this method has no such flag.
-    m.try_contains_id(id).unwrap_or(false)
-}
+// Generated methods do not all define the same request flags (`--upload`,
+// `--page-all`, ...), so an undefined flag reads as absent here.
 
 /// Defaults for request flags taken from the environment or `config.toml`
 /// (already resolved as env > config by the CLI's settings). A flag given on
@@ -105,12 +81,13 @@ pub fn parse_pagination_config(
     defaults: &ConfigDefaults,
 ) -> Result<PaginationConfig, GwsError> {
     Ok(PaginationConfig {
-        page_all: get_flag(m, "page-all")? || present(m, "page-items"),
-        page_limit: get::<u32>(m, "page-limit")?
+        page_all: args::flag_if_defined(m, "page-all")?
+            || args::present_if_defined(m, "page-items")?,
+        page_limit: args::value_if_defined::<u32>(m, "page-limit")?
             .copied()
             .or(defaults.page_limit)
             .unwrap_or(0),
-        page_delay_ms: get::<u64>(m, "page-delay")?
+        page_delay_ms: args::value_if_defined::<u64>(m, "page-delay")?
             .copied()
             .or(defaults.page_delay_ms)
             .unwrap_or(DEFAULT_PAGE_DELAY_MS),
@@ -120,34 +97,34 @@ pub fn parse_pagination_config(
 /// Build [`ExecOptions`] from flags on top of the environment defaults.
 pub fn parse_exec_options(m: &clap::ArgMatches) -> Result<ExecOptions, GwsError> {
     let mut opts = ExecOptions::from_env()?;
-    opts.dry_run = get_flag(m, "dry-run")?;
-    opts.fields = get_string(m, "fields")?.map(str::to_string);
-    if present(m, "page-items") {
-        opts.page_items = Some(match get_string(m, "page-items")? {
+    opts.dry_run = args::flag_if_defined(m, "dry-run")?;
+    opts.fields = args::optional_if_defined(m, "fields")?.map(str::to_string);
+    if args::present_if_defined(m, "page-items")? {
+        opts.page_items = Some(match args::optional_if_defined(m, "page-items")? {
             Some(f) if !f.is_empty() => ItemsMode::Field(f.to_string()),
             _ => ItemsMode::Auto,
         });
     }
-    if get_flag(m, "wait")? {
+    if args::flag_if_defined(m, "wait")? {
         let mut cfg = WaitConfig::default();
-        if let Some(secs) = get::<u64>(m, "wait-timeout")?.copied() {
+        if let Some(secs) = args::value_if_defined::<u64>(m, "wait-timeout")?.copied() {
             cfg.timeout = Duration::from_secs(secs);
         }
         opts.wait = Some(cfg);
     }
-    if let Some(raw) = get_string(m, "timeout")? {
+    if let Some(raw) = args::optional_if_defined(m, "timeout")? {
         opts.retry.response_timeout = gws_rust_core::client::parse_timeout_secs(raw, "--timeout")?;
     }
-    if get_flag(m, "no-quota-project")? {
+    if args::flag_if_defined(m, "no-quota-project")? {
         opts.quota_project = false;
     }
-    if get_flag(m, "upload-resumable")? {
+    if args::flag_if_defined(m, "upload-resumable")? {
         opts.upload_mode = UploadMode::Resumable;
     }
-    opts.decode_field = get_string(m, "decode-field")?.map(str::to_string);
-    opts.allow_unknown_params = get_flag(m, "allow-unknown-params")?;
-    opts.allow_unknown_fields = get_flag(m, "allow-unknown-fields")?;
-    opts.assume_yes = get_flag(m, "yes")?;
+    opts.decode_field = args::optional_if_defined(m, "decode-field")?.map(str::to_string);
+    opts.allow_unknown_params = args::flag_if_defined(m, "allow-unknown-params")?;
+    opts.allow_unknown_fields = args::flag_if_defined(m, "allow-unknown-fields")?;
+    opts.assume_yes = args::flag_if_defined(m, "yes")?;
     Ok(opts)
 }
 
@@ -168,17 +145,20 @@ pub async fn run_from_matches(
     format: &OutputFormat,
     defaults: &ConfigDefaults,
 ) -> Result<(), GwsError> {
-    let (params_text, body_text) =
-        input::read_json_args(get_string(m, "params")?, get_string(m, "json")?).await?;
+    let (params_text, body_text) = input::read_json_args(
+        args::optional_if_defined(m, "params")?,
+        args::optional_if_defined(m, "json")?,
+    )
+    .await?;
     let params = input::parse_params(params_text.as_deref())?;
     let body: Option<Value> = input::parse_body(body_text.as_deref())?;
 
     // Validate file paths before any I/O; use the canonical paths for I/O.
-    let upload_path = get_string(m, "upload")?
+    let upload_path = args::optional_if_defined(m, "upload")?
         .map(|p| crate::validate::validate_safe_file_path(p, "--upload"))
         .transpose()?;
     // `-o -` streams the raw payload to stdout; anything else is a file.
-    let output: Option<OutputTarget> = match get_string(m, "output")? {
+    let output: Option<OutputTarget> = match args::optional_if_defined(m, "output")? {
         Some("-") => Some(OutputTarget::Stdout),
         Some(p) => Some(OutputTarget::File(
             crate::validate::validate_safe_file_path(p, "--output")?,
@@ -193,7 +173,7 @@ pub async fn run_from_matches(
             })
         })
         .transpose()?;
-    let upload_content_type = get_string(m, "upload-content-type")?;
+    let upload_content_type = args::optional_if_defined(m, "upload-content-type")?;
     let upload = upload_path_str.map(|path| UploadSource {
         path,
         content_type: upload_content_type,

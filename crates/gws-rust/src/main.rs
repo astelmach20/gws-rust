@@ -21,6 +21,7 @@
 
 #![cfg_attr(not(test), forbid(unsafe_code))]
 
+mod args;
 mod auth;
 mod cli_args;
 mod client;
@@ -261,7 +262,7 @@ fn install_output(global: &GlobalArgs, settings: &Settings) -> Result<(), CliErr
         .transpose()?;
     formatter::install_settings(OutputSettings {
         json_style,
-        default_format: effective_format(global, settings),
+        default_format: effective_format(global, settings)?,
         columns: global.columns.clone(),
         jq,
         terminal,
@@ -270,12 +271,11 @@ fn install_output(global: &GlobalArgs, settings: &Settings) -> Result<(), CliErr
 }
 
 /// The effective format for static commands (flag > env/config).
-fn effective_format(global: &GlobalArgs, settings: &Settings) -> OutputFormat {
-    global
-        .format
-        .as_deref()
-        .map(OutputFormat::from_str)
-        .unwrap_or(settings.format)
+fn effective_format(global: &GlobalArgs, settings: &Settings) -> Result<OutputFormat, GwsError> {
+    match global.format.as_deref() {
+        Some(f) => OutputFormat::from_str(f),
+        None => Ok(settings.format),
+    }
 }
 
 fn emit_value(value: &serde_json::Value, format: OutputFormat) -> Result<(), CliError> {
@@ -300,7 +300,7 @@ async fn dispatch(
     }
 
     install_output(&cli.global, settings)?;
-    let format = effective_format(&cli.global, settings);
+    let format = effective_format(&cli.global, settings)?;
     tracing::debug!(?command, ?format, "dispatching static command");
     // `auth` also accepts --profile/--impersonate after its own name and
     // records the overrides itself.
@@ -417,7 +417,7 @@ async fn run_service(
         ..Default::default()
     });
 
-    let output_format = OutputFormat::from_matches(&matches);
+    let output_format = OutputFormat::from_matches(&matches)?;
     let sanitize_template = global
         .sanitize
         .clone()

@@ -379,31 +379,22 @@ fn format_quoted_original_html(original: &OriginalMessage) -> String {
 use super::cli::{parse_optional_mailboxes, required_str};
 
 fn parse_reply_args(matches: &ArgMatches) -> Result<ReplyConfig, GwsError> {
-    // try_get_one because +reply doesn't define --remove (only +reply-all does).
-    // Explicit match distinguishes "arg not defined" from unexpected errors.
-    let remove = match matches.try_get_one::<String>("remove") {
-        Ok(val) => val
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .map(|s| Mailbox::parse_list(&s))
-            .filter(|v| !v.is_empty()),
-        Err(clap::parser::MatchesError::UnknownArgument { .. }) => None,
-        Err(e) => {
-            return Err(GwsError::other(format!(
-                "Unexpected error reading --remove argument: {e}"
-            )));
-        }
-    };
+    // +reply does not define --remove (only +reply-all does).
+    let remove = crate::args::optional_if_defined(matches, "remove")?
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(Mailbox::parse_list)
+        .filter(|v| !v.is_empty());
 
     Ok(ReplyConfig {
         message_id: required_str(matches, "message-id")?,
         body: required_str(matches, "body")?,
-        from: parse_optional_mailboxes(matches, "from"),
-        extra_to: parse_optional_mailboxes(matches, "to"),
-        cc: parse_optional_mailboxes(matches, "cc"),
-        bcc: parse_optional_mailboxes(matches, "bcc"),
+        from: parse_optional_mailboxes(matches, "from")?,
+        extra_to: parse_optional_mailboxes(matches, "to")?,
+        cc: parse_optional_mailboxes(matches, "cc")?,
+        bcc: parse_optional_mailboxes(matches, "bcc")?,
         remove,
-        html: matches.get_flag("html"),
+        html: crate::args::flag(matches, "html")?,
         attachments: parse_attachments(matches)?,
     })
 }

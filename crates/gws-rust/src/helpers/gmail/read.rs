@@ -34,11 +34,11 @@ pub(super) async fn handle_read(
     let message_id = required_str(matches, "message-id")?;
     let opts = ReadOptions {
         json: required_str(matches, "body-format")? == "json",
-        headers: matches.get_flag("headers"),
-        html: matches.get_flag("html"),
+        headers: crate::args::flag(matches, "headers")?,
+        html: crate::args::flag(matches, "html")?,
     };
 
-    if crate::helpers::http::dry_run(matches) {
+    if crate::args::dry_run(matches)? {
         let url = format!(
             "{}/users/me/messages/{}",
             super::api::GMAIL_API_BASE,

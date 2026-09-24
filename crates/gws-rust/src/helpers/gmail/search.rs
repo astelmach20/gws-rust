@@ -145,10 +145,10 @@ pub(super) fn summarize(msg: &Value) -> Value {
 
 fn parse_search_args(matches: &ArgMatches) -> Result<SearchParams, GwsError> {
     Ok(SearchParams {
-        query: parse_optional_trimmed(matches, "query"),
+        query: parse_optional_trimmed(matches, "query")?,
         max: value_or_default::<u32>(matches, "max")?,
-        page_token: parse_optional_trimmed(matches, "page-token"),
-        include_spam_trash: matches.get_flag("include-spam-trash"),
+        page_token: parse_optional_trimmed(matches, "page-token")?,
+        include_spam_trash: crate::args::flag(matches, "include-spam-trash")?,
     })
 }
 
@@ -190,8 +190,8 @@ pub(super) async fn handle_search(
     sanitize_config: &SanitizeConfig,
 ) -> Result<(), GwsError> {
     let params = parse_search_args(matches)?;
-    let format = crate::helpers::http::output_format(matches);
-    if crate::helpers::http::dry_run(matches) {
+    let format = crate::helpers::http::output_format(matches)?;
+    if crate::args::dry_run(matches)? {
         return dry_run_list(matches, &params);
     }
     let api = super::api::authenticated(&[GMAIL_READONLY_SCOPE]).await?;

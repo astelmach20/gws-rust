@@ -20,9 +20,10 @@
 //! `--dry-run`, and non-idempotent writes are sent exactly once.
 
 use super::Helper;
+use crate::args::dry_run;
 use crate::confirm::{self, Impact, with_yes};
 use crate::error::GwsError;
-use crate::helpers::http::{dry_run, dry_run_request, output_format};
+use crate::helpers::http::{dry_run_request, output_format};
 use crate::transport::Transport;
 use clap::{Arg, ArgMatches, Command};
 use gws_rust_core::client::Idempotency;
@@ -218,10 +219,7 @@ TIPS:
 // ---------------------------------------------------------------------------
 
 fn required(matches: &ArgMatches, name: &str) -> Result<String, GwsError> {
-    matches
-        .get_one::<String>(name)
-        .cloned()
-        .ok_or_else(|| GwsError::Validation(format!("--{name} is required")))
+    Ok(crate::args::required(matches, name)?.to_string())
 }
 
 async fn authenticated(scopes: &[&str]) -> Result<Transport, GwsError> {
@@ -229,7 +227,7 @@ async fn authenticated(scopes: &[&str]) -> Result<Transport, GwsError> {
 }
 
 fn print(value: &Value, matches: &ArgMatches) -> Result<(), GwsError> {
-    let fmt = output_format(matches);
+    let fmt = output_format(matches)?;
     crate::output::emit(&crate::formatter::format_value(value, &fmt)?)?;
     Ok(())
 }
@@ -351,7 +349,7 @@ async fn standup_report(
 
 async fn handle_standup_report(matches: &ArgMatches) -> Result<(), GwsError> {
     let bases = Bases::default();
-    if dry_run(matches) {
+    if dry_run(matches)? {
         return crate::helpers::http::print_dry_run(
             matches,
             vec![
@@ -434,7 +432,7 @@ async fn meeting_prep(
 async fn handle_meeting_prep(matches: &ArgMatches) -> Result<(), GwsError> {
     let bases = Bases::default();
     let calendar_id = required(matches, "calendar-id")?;
-    if dry_run(matches) {
+    if dry_run(matches)? {
         return crate::helpers::http::print_dry_run(
             matches,
             vec![dry_run_request(
@@ -533,7 +531,7 @@ async fn handle_email_to_task(matches: &ArgMatches) -> Result<(), GwsError> {
     let bases = Bases::default();
     let message_id = required(matches, "message-id")?;
     let tasklist = required(matches, "tasklist-id")?;
-    if dry_run(matches) {
+    if dry_run(matches)? {
         return crate::helpers::http::print_dry_run(
             matches,
             vec![
@@ -599,7 +597,7 @@ async fn weekly_digest(
 
 async fn handle_weekly_digest(matches: &ArgMatches) -> Result<(), GwsError> {
     let bases = Bases::default();
-    if dry_run(matches) {
+    if dry_run(matches)? {
         return crate::helpers::http::print_dry_run(
             matches,
             vec![
@@ -700,13 +698,13 @@ async fn handle_file_announce(matches: &ArgMatches) -> Result<(), GwsError> {
     let bases = Bases::default();
     let file_id = required(matches, "file-id")?;
     let space = normalize_space(&required(matches, "space-id")?)?;
-    let custom = matches.get_one::<String>("message").map(String::as_str);
+    let custom = crate::args::value::<String>(matches, "message")?.map(String::as_str);
     confirm::confirm(
         matches,
         Impact::Outbound,
         &format!("post a Chat message to {space}"),
     )?;
-    if dry_run(matches) {
+    if dry_run(matches)? {
         return crate::helpers::http::print_dry_run(
             matches,
             vec![

@@ -83,10 +83,10 @@ pub fn parse_setup_args(args: &[String]) -> Result<Option<SetupOptions>, GwsErro
         return Ok(None);
     };
     Ok(Some(SetupOptions {
-        project: m.get_one::<String>("project").cloned(),
-        dry_run: m.get_flag("dry-run"),
-        login: m.get_flag("login"),
-        non_interactive: m.get_flag("non-interactive"),
+        project: crate::args::value::<String>(&m, "project")?.cloned(),
+        dry_run: crate::args::flag(&m, "dry-run")?,
+        login: crate::args::flag(&m, "login")?,
+        non_interactive: crate::args::flag(&m, "non-interactive")?,
     }))
 }
 

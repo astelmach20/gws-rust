@@ -188,7 +188,10 @@ mod tests {
             let helper = get_helper(name).expect("helper registered");
             let d = doc(name, version);
             let cmd = helper
-                .inject_commands(Command::new("gwsr"), &d)
+                .inject_commands(
+                    Command::new("gwsr").args(crate::cli_args::global_args()),
+                    &d,
+                )
                 .subcommand(Command::new("files").subcommand(Command::new("list")));
             let m = cmd.try_get_matches_from(["gwsr", "files", "list"]).unwrap();
             let handled = helper

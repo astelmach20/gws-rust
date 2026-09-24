@@ -17,7 +17,8 @@
 //! Every call sets `supportsAllDrives=true` so Shared Drive items work.
 
 use super::Helper;
-use super::http::{self, Api, ApiRequest, OutputTarget, flag, optional, required, safe_filename};
+use super::http::{self, Api, ApiRequest, OutputTarget, safe_filename};
+use crate::args::{flag, optional, required};
 use crate::confirm::{self, Impact, with_yes};
 use crate::error::GwsError;
 use crate::validate::encode_path_segment;
@@ -290,7 +291,7 @@ TIPS:
             let Some((name, m)) = matches.subcommand() else {
                 return Ok(false);
             };
-            let dry = http::dry_run(m);
+            let dry = crate::args::dry_run(m)?;
             let result = match name {
                 "+upload" => {
                     let args = UploadArgs::parse(m)?;
@@ -303,8 +304,8 @@ TIPS:
                     let v = download(
                         &api,
                         required(m, "file-id")?,
-                        optional(m, "output"),
-                        flag(m, "overwrite"),
+                        optional(m, "output")?,
+                        flag(m, "overwrite")?,
                     )
                     .await?;
                     (api, v)
@@ -315,8 +316,8 @@ TIPS:
                         &api,
                         required(m, "file-id")?,
                         required(m, "to")?,
-                        optional(m, "output"),
-                        flag(m, "overwrite"),
+                        optional(m, "output")?,
+                        flag(m, "overwrite")?,
                     )
                     .await?;
                     (api, v)
@@ -369,11 +370,11 @@ impl UploadArgs {
                 "--file '{raw}' is not a readable file"
             )));
         }
-        let name = match optional(m, "name") {
+        let name = match optional(m, "name")? {
             Some(n) => n.to_string(),
             None => determine_filename(raw)?,
         };
-        let content_type = match optional(m, "mime-type") {
+        let content_type = match optional(m, "mime-type")? {
             Some(t) => t.to_string(),
             None => mime_guess2::from_path(&path)
                 .first()
@@ -383,9 +384,9 @@ impl UploadArgs {
         Ok(Self {
             path,
             name,
-            folder_id: optional(m, "folder-id").map(str::to_string),
+            folder_id: optional(m, "folder-id")?.map(str::to_string),
             content_type,
-            convert: flag(m, "convert"),
+            convert: flag(m, "convert")?,
         })
     }
 }
@@ -763,15 +764,15 @@ enum Grantee {
 
 impl ShareArgs {
     fn parse(m: &ArgMatches) -> Result<Self, GwsError> {
-        let grantee = if let Some(email) = optional(m, "email") {
-            if flag(m, "group") {
+        let grantee = if let Some(email) = optional(m, "email")? {
+            if flag(m, "group")? {
                 Grantee::Group(email.to_string())
             } else {
                 Grantee::User(email.to_string())
             }
-        } else if let Some(domain) = optional(m, "domain") {
+        } else if let Some(domain) = optional(m, "domain")? {
             Grantee::Domain(domain.to_string())
-        } else if flag(m, "anyone") {
+        } else if flag(m, "anyone")? {
             Grantee::Anyone
         } else {
             return Err(GwsError::Validation(
@@ -782,8 +783,8 @@ impl ShareArgs {
             file_id: required(m, "file-id")?.to_string(),
             role: required(m, "role")?.to_string(),
             grantee,
-            notify: !flag(m, "no-notify"),
-            message: optional(m, "message").map(str::to_string),
+            notify: !flag(m, "no-notify")?,
+            message: optional(m, "message")?.map(str::to_string),
         })
     }
 

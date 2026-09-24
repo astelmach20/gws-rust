@@ -20,7 +20,8 @@
 //! on the document version.
 
 use super::Helper;
-use super::http::{self, Api, ApiRequest, flag, optional, required};
+use super::http::{self, Api, ApiRequest};
+use crate::args::{flag, optional, required};
 use crate::confirm::{self, Impact, with_yes};
 use crate::error::GwsError;
 use crate::validate::encode_path_segment;
@@ -87,7 +88,7 @@ impl Helper for AdminHelper {
             let Some((name, m)) = matches.subcommand() else {
                 return Ok(false);
             };
-            let dry = http::dry_run(m);
+            let dry = crate::args::dry_run(m)?;
             let (api, value) = match name {
                 "+user-create" => {
                     let args = UserCreate::parse(m)?;
@@ -97,7 +98,7 @@ impl Helper for AdminHelper {
                 }
                 "+user-suspend" => {
                     let user = required(m, "user")?;
-                    let suspend = !flag(m, "unsuspend");
+                    let suspend = !flag(m, "unsuspend")?;
                     let (impact, action) = if suspend {
                         (
                             Impact::Destructive,
@@ -108,7 +109,7 @@ impl Helper for AdminHelper {
                     };
                     confirm::confirm(m, impact, &action)?;
                     let api = Api::new(doc, &[SCOPE_USER], dry, sanitize).await?;
-                    let v = user_suspend(&api, user, suspend, optional(m, "reason")).await?;
+                    let v = user_suspend(&api, user, suspend, optional(m, "reason")?).await?;
                     (api, v)
                 }
                 "+group-add-member" => {
@@ -315,7 +316,7 @@ fn generate_password() -> Zeroizing<String> {
 
 impl UserCreate {
     fn parse(m: &ArgMatches) -> Result<Self, GwsError> {
-        let (password, generated) = match optional(m, "password-file") {
+        let (password, generated) = match optional(m, "password-file")? {
             Some(path) => {
                 let raw = Zeroizing::new(http::read_text_input(path, "--password-file")?);
                 let pw = Zeroizing::new(raw.trim_end_matches(['\r', '\n']).to_string());
@@ -332,10 +333,10 @@ impl UserCreate {
             email: required(m, "email")?.to_string(),
             given: required(m, "given-name")?.to_string(),
             family: required(m, "family-name")?.to_string(),
-            org_unit: optional(m, "org-unit").map(str::to_string),
+            org_unit: optional(m, "org-unit")?.map(str::to_string),
             password,
             generated,
-            change_at_next_login: !flag(m, "no-password-change"),
+            change_at_next_login: !flag(m, "no-password-change")?,
         })
     }
 }
@@ -460,7 +461,7 @@ fn parse_since(s: &str, now: chrono::DateTime<chrono::Utc>) -> Result<String, Gw
 
 impl Audit {
     fn parse(m: &ArgMatches) -> Result<Self, GwsError> {
-        let end = optional(m, "until")
+        let end = optional(m, "until")?
             .map(|u| {
                 chrono::DateTime::parse_from_rfc3339(u)
                     .map(|t| {
@@ -474,11 +475,11 @@ impl Audit {
             .transpose()?;
         Ok(Self {
             application: required(m, "application")?.to_string(),
-            user: optional(m, "user").unwrap_or("all").to_string(),
-            event: optional(m, "event").map(str::to_string),
+            user: optional(m, "user")?.unwrap_or("all").to_string(),
+            event: optional(m, "event")?.map(str::to_string),
             start: parse_since(required(m, "since")?, chrono::Utc::now())?,
             end,
-            filter: optional(m, "filter").map(str::to_string),
+            filter: optional(m, "filter")?.map(str::to_string),
             limit: http::limit(m, "limit")?,
         })
     }
