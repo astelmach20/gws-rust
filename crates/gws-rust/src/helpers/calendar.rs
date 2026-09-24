@@ -413,10 +413,7 @@ async fn handle_agenda(matches: &ArgMatches) -> Result<(), GwsError> {
         "timeMax": time_max,
     });
 
-    println!(
-        "{}",
-        crate::formatter::format_value(&output, &output_format)
-    );
+    crate::output::emit(&crate::formatter::format_value(&output, &output_format)?)?;
     Ok(())
 }
 

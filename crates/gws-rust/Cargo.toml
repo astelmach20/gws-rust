@@ -69,8 +69,22 @@ oauth2 = { version = "5", default-features = false }
 secrecy = { version = "0.10", features = ["serde"] }
 webbrowser = "1"
 aws-lc-rs = "1"
+clap_complete = { version = "4.6", features = ["unstable-dynamic"] }
+clap_mangen = "0.3"
+jaq-core = "3"
+jaq-std = "3"
+jaq-json = "2"
+serde-saphyr = "1"
+csv = "1"
+toml_edit = "0.25.15"
+
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "1.1", features = ["process", "fs"] }
 
 [dev-dependencies]
+assert_cmd = "2"
+insta = "1"
+predicates = "3"
 serial_test.workspace = true
 wiremock = "0.6.5"
 

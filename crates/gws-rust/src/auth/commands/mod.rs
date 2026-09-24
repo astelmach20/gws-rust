@@ -25,11 +25,45 @@ use crate::error::GwsError;
 
 pub use login::run_login;
 
-const GLOBAL_FLAGS_HELP: &str = "\
-Global flags (accepted anywhere on the command line):
-  --profile <name>        Use this profile (env: GWSR_PROFILE; default: `gwsr auth use`, then 'default')
-  --impersonate <email>   Service accounts only: act as this user via domain-wide delegation
-                          (env: GWSR_IMPERSONATE)";
+use super::profiles::GlobalOverrides;
+
+/// `--profile` / `--impersonate`, accepted after `auth` too (they are
+/// global options of the top-level command).
+fn global_auth_args() -> [clap::Arg; 2] {
+    [
+        clap::Arg::new("profile")
+            .long("profile")
+            .global(true)
+            .value_name("NAME")
+            .help(
+                "Credential profile (env: GWSR_PROFILE; default: `profile` in config.toml, \
+                 set by `gwsr auth use`, then 'default')",
+            ),
+        clap::Arg::new("impersonate")
+            .long("impersonate")
+            .global(true)
+            .value_name("EMAIL")
+            .help(
+                "Service accounts only: act as this user via domain-wide delegation \
+                 (env: GWSR_IMPERSONATE)",
+            ),
+    ]
+}
+
+/// Merge a flag given before `auth` with the same flag given after it.
+fn merge_flag(
+    name: &str,
+    before: Option<String>,
+    after: Option<&String>,
+) -> Result<Option<String>, GwsError> {
+    match (before, after) {
+        (Some(_), Some(_)) => Err(GwsError::Validation(format!(
+            "--{name} was given more than once"
+        ))),
+        (Some(v), None) => Ok(Some(v)),
+        (None, after) => Ok(after.cloned()),
+    }
+}
 
 /// The `login` subcommand definition (shared with `auth setup --login`).
 pub(crate) fn login_subcommand() -> clap::Command {
@@ -108,7 +142,7 @@ pub(crate) fn auth_command() -> clap::Command {
     clap::Command::new("auth")
         .bin_name("gwsr auth")
         .about("Manage authentication, profiles and credentials")
-        .after_help(GLOBAL_FLAGS_HELP)
+        .args(global_auth_args())
         .subcommand(login_subcommand())
         .subcommand(
             clap::Command::new("setup")
@@ -208,10 +242,19 @@ pub(crate) fn parse_or_help(
 /// # Errors
 ///
 /// Argument errors and the subcommand's own failures.
-pub async fn handle_auth_command(args: &[String]) -> Result<(), GwsError> {
+pub async fn handle_auth_command(args: &[String], before: GlobalOverrides) -> Result<(), GwsError> {
     let Some(matches) = parse_or_help(auth_command(), "auth", args)? else {
         return Ok(());
     };
+    let leaf = leaf_matches(&matches);
+    super::profiles::set_global_overrides(GlobalOverrides {
+        profile: merge_flag("profile", before.profile, leaf.get_one::<String>("profile"))?,
+        impersonate: merge_flag(
+            "impersonate",
+            before.impersonate,
+            leaf.get_one::<String>("impersonate"),
+        )?,
+    })?;
     match matches.subcommand() {
         Some(("login", m)) => login::handle(m).await,
         Some(("setup", m)) => {
@@ -235,6 +278,14 @@ pub async fn handle_auth_command(args: &[String]) -> Result<(), GwsError> {
                 .map_err(|e| GwsError::Validation(format!("failed to print help: {e}")))?;
             Ok(())
         }
+    }
+}
+
+/// The matches of the deepest subcommand (global args propagate there).
+fn leaf_matches(m: &clap::ArgMatches) -> &clap::ArgMatches {
+    match m.subcommand() {
+        Some((_, sub)) => leaf_matches(sub),
+        None => m,
     }
 }
 
@@ -262,19 +313,51 @@ mod tests {
 
     #[tokio::test]
     async fn help_and_empty_args_succeed() {
-        handle_auth_command(&[]).await.unwrap();
-        handle_auth_command(&["--help".into()]).await.unwrap();
-        handle_auth_command(&["login".into(), "--help".into()])
+        handle_auth_command(&[], GlobalOverrides::default())
             .await
             .unwrap();
+        handle_auth_command(&["--help".into()], GlobalOverrides::default())
+            .await
+            .unwrap();
+        handle_auth_command(
+            &["login".into(), "--help".into()],
+            GlobalOverrides::default(),
+        )
+        .await
+        .unwrap();
     }
 
     #[tokio::test]
     async fn unknown_subcommand_is_validation_error() {
-        let err = handle_auth_command(&["frobnicate".into()])
+        let err = handle_auth_command(&["frobnicate".into()], GlobalOverrides::default())
             .await
             .unwrap_err();
         assert!(matches!(err, GwsError::Validation(_)));
+    }
+
+    #[test]
+    fn profile_flag_is_accepted_after_auth_and_merged_once() {
+        let m = auth_command()
+            .try_get_matches_from(["auth", "status", "--profile", "work"])
+            .unwrap();
+        assert_eq!(
+            leaf_matches(&m)
+                .get_one::<String>("profile")
+                .map(String::as_str),
+            Some("work")
+        );
+        let work = "work".to_string();
+        assert_eq!(
+            merge_flag("profile", None, Some(&work)).unwrap().as_deref(),
+            Some("work")
+        );
+        assert_eq!(
+            merge_flag("profile", Some("home".into()), None)
+                .unwrap()
+                .as_deref(),
+            Some("home")
+        );
+        assert!(merge_flag("profile", Some("home".into()), Some(&work)).is_err());
     }
 
     #[test]

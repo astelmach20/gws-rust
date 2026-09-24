@@ -18,7 +18,6 @@
 //! [`Emitter`]. Tests construct a capturing emitter to assert on output
 //! without touching the process's stdout.
 
-use std::io::Write;
 use std::sync::Mutex;
 
 use serde_json::Value;
@@ -71,9 +70,8 @@ impl Emitter {
         }
     }
 
-    /// Write one line (a trailing newline is added).
-    ///
-    /// Merge point with the cli workstream: this becomes `crate::output::emit`.
+    /// Write one line (a trailing newline is added) through
+    /// [`crate::output::emit`].
     pub(crate) fn line(&self, text: &str) -> Result<(), GwsError> {
         let mut data = Vec::with_capacity(text.len() + 1);
         data.extend_from_slice(text.as_bytes());
@@ -81,17 +79,12 @@ impl Emitter {
         if self.write_captured(&data)? {
             return Ok(());
         }
-        let mut out = std::io::stdout().lock();
-        out.write_all(&data)
-            .and_then(|()| out.flush())
-            .map_err(|e| other(anyhow::Error::new(e).context("failed to write to stdout")))
+        crate::output::emit(text)
     }
 
     /// Write a complete value in `format`.
-    ///
-    /// Merge point with the cli workstream: `format_value` becomes fallible.
     pub(crate) fn value(&self, value: &Value, format: &OutputFormat) -> Result<(), GwsError> {
-        self.line(&crate::formatter::format_value(value, format))
+        self.line(&crate::formatter::format_value(value, format)?)
     }
 
     /// Write one page (or item) of a paginated stream in `format`.
@@ -103,7 +96,7 @@ impl Emitter {
     ) -> Result<(), GwsError> {
         self.line(&crate::formatter::format_value_paginated(
             value, format, first,
-        ))
+        )?)
     }
 
     /// Write raw bytes (binary downloads streamed to stdout).
@@ -114,7 +107,7 @@ impl Emitter {
         let mut out = tokio::io::stdout();
         out.write_all(data)
             .await
-            .map_err(|e| other(anyhow::Error::new(e).context("failed to write to stdout")))
+            .map_err(crate::output::stdout_error)
     }
 
     pub(crate) async fn flush(&self) -> Result<(), GwsError> {
@@ -124,6 +117,6 @@ impl Emitter {
         tokio::io::stdout()
             .flush()
             .await
-            .map_err(|e| other(anyhow::Error::new(e).context("failed to flush stdout")))
+            .map_err(crate::output::stdout_error)
     }
 }

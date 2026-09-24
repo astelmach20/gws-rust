@@ -14,12 +14,11 @@
 
 //! Generates SKILL.md files from the CLI's own clap metadata.
 //!
-//! Usage: `gwsr generate-skills [--output-dir skills/]`
+//! Usage: `gwsr dev generate-skills --output-dir <DIR> [--filter NAME]... [--index PATH]`
 
 use crate::commands;
 use crate::discovery;
 use crate::error::GwsError;
-use crate::output::sanitize_for_terminal;
 use crate::services;
 use clap::Command;
 use std::path::Path;
@@ -77,20 +76,62 @@ struct SkillIndexEntry {
     category: String,
 }
 
-/// Entry point for `gwsr generate-skills`.
-pub async fn handle_generate_skills(args: &[String]) -> Result<(), GwsError> {
-    let output_dir = parse_output_dir(args);
-    // Validate output_dir to prevent path traversal
-    let output_path_buf = crate::validate::validate_safe_output_dir(&output_dir)?;
-    let output_path = output_path_buf.as_path();
-    let filter = parse_filter(args);
-    let mut index: Vec<SkillIndexEntry> = Vec::new();
+/// Options for `gwsr dev generate-skills`.
+#[derive(Debug, Clone, clap::Args)]
+pub struct GenerateSkillsArgs {
+    /// Directory the skill folders are written into (relative to the current directory).
+    #[arg(long, value_name = "DIR", required = true)]
+    pub output_dir: String,
 
-    // Generate gwsr-shared skill if no filter or "shared" is in the filter
-    if filter
-        .as_ref()
-        .is_none_or(|f| "shared".contains(f.as_str()))
-    {
+    /// Only generate the named skills. Repeatable. Each value must match exactly:
+    /// a service alias (`drive`, also emits its helpers), a helper key
+    /// (`gmail-send`), `shared`, `personas`, `recipes`, `persona-<name>` or
+    /// `recipe-<name>`.
+    #[arg(long = "filter", value_name = "NAME")]
+    pub filters: Vec<String>,
+
+    /// Also write a Markdown skills index to this path (relative to the current directory).
+    #[arg(long, value_name = "PATH")]
+    pub index: Option<String>,
+}
+
+/// Exact-match skill filter built from repeated `--filter` values.
+struct SkillFilter(Vec<String>);
+
+impl SkillFilter {
+    fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    fn has(&self, name: &str) -> bool {
+        self.0.is_empty() || self.0.iter().any(|f| f == name)
+    }
+}
+
+fn io_err(context: String, e: std::io::Error) -> GwsError {
+    GwsError::from(anyhow::Error::new(e).context(context))
+}
+
+/// Entry point for `gwsr dev generate-skills`.
+///
+/// Returns a JSON summary of what was written (printed by `main`):
+/// `{"output_dir": .., "index": ..|null, "count": N, "skills": [{"name", "category", "path"}]}`.
+pub async fn handle_generate_skills(
+    args: &GenerateSkillsArgs,
+) -> Result<serde_json::Value, GwsError> {
+    // Validate output_dir to prevent path traversal
+    let output_path_buf = crate::validate::validate_safe_output_dir(&args.output_dir)?;
+    let output_path = output_path_buf.as_path();
+    let index_path = match &args.index {
+        Some(p) => Some(crate::validate::validate_safe_file_path(p, "--index")?),
+        None => None,
+    };
+    let filter = SkillFilter(args.filters.iter().map(|f| f.trim().to_string()).collect());
+    let mut index: Vec<SkillIndexEntry> = Vec::new();
+    let mut matched: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    if filter.has("shared") {
+        matched.insert("shared".to_string());
         generate_shared_skill(output_path)?;
         index.push(SkillIndexEntry {
             name: "gwsr-shared".to_string(),
@@ -103,12 +144,24 @@ pub async fn handle_generate_skills(args: &[String]) -> Result<(), GwsError> {
 
     for entry in services::SERVICES {
         let alias = entry.aliases[0];
-
         let skill_name = format!("gwsr-{alias}");
+        let emit_service = filter.has(alias);
 
-        eprintln!(
-            "Generating skills for {alias} ({}/{})...",
-            entry.api_name, entry.version
+        // Skip the (network) discovery fetch entirely when nothing from this
+        // service can be selected.
+        let helper_prefix = format!("{alias}-");
+        let wants_any_helper = filter.is_empty()
+            || emit_service
+            || filter.0.iter().any(|f| f.starts_with(&helper_prefix));
+        if !wants_any_helper {
+            continue;
+        }
+
+        tracing::info!(
+            service = alias,
+            api = entry.api_name,
+            version = entry.version,
+            "generating skills"
         );
 
         // Synthetic services (no Discovery doc) use an empty RestDescription
@@ -120,17 +173,13 @@ pub async fn handle_generate_skills(args: &[String]) -> Result<(), GwsError> {
                 ..Default::default()
             }
         } else {
-            // Fetch discovery doc
-            match discovery::fetch_discovery_document(entry.api_name, entry.version).await {
-                Ok(d) => d,
-                Err(e) => {
-                    eprintln!(
-                        "  WARNING: Failed to fetch discovery doc for {alias}: {}",
-                        sanitize_for_terminal(&e.to_string())
-                    );
-                    continue;
-                }
-            }
+            discovery::fetch_discovery_document(entry.api_name, entry.version)
+                .await
+                .map_err(|e| {
+                    GwsError::Discovery(format!(
+                        "failed to fetch the Discovery document for {alias}: {e:#}"
+                    ))
+                })?
         };
 
         // Derive product name from Discovery title (e.g. "Google Drive API" -> "Google Drive")
@@ -140,24 +189,12 @@ pub async fn handle_generate_skills(args: &[String]) -> Result<(), GwsError> {
         let cli = commands::build_cli(&doc);
 
         // Collect helper commands (start with '+') and resource commands
-        let mut helpers = Vec::new();
-        let mut resources = Vec::new();
+        let (helpers, resources): (Vec<&Command>, Vec<&Command>) = cli
+            .get_subcommands()
+            .partition(|sub| sub.get_name().starts_with('+'));
 
-        for sub in cli.get_subcommands() {
-            let name = sub.get_name();
-            if name.starts_with('+') {
-                helpers.push(sub);
-            } else {
-                resources.push(sub);
-            }
-        }
-
-        // Generate service-level skill (only if service itself is in the filter, or no filter)
-        let emit_service = match filter {
-            Some(ref f) => alias.contains(f.as_str()),
-            None => true,
-        };
         if emit_service {
+            matched.insert(alias.to_string());
             let service_md =
                 render_service_skill(alias, entry, &helpers, &resources, &product_name, &doc);
             write_skill(output_path, &skill_name, &service_md)?;
@@ -175,17 +212,12 @@ pub async fn handle_generate_skills(args: &[String]) -> Result<(), GwsError> {
             let short = helper_name.trim_start_matches('+');
             let helper_key = format!("{alias}-{short}");
 
-            let emit_helper = match filter {
-                Some(ref f) => helper_key.contains(f.as_str()),
-                None => true,
-            };
-            if emit_helper {
+            if emit_service || filter.has(&helper_key) {
+                matched.insert(helper_key.clone());
                 let helper_skill_name = format!("gwsr-{helper_key}");
-                let about_raw = helper
-                    .get_about()
-                    .map(|s| s.to_string())
-                    .unwrap_or_default();
-                let about_clean = about_raw.strip_prefix("[Helper] ").unwrap_or(&about_raw);
+                let about_raw = helper.get_about().map(|s| s.to_string());
+                let about_raw = about_raw.as_deref().unwrap_or("");
+                let about_clean = about_raw.strip_prefix("[Helper] ").unwrap_or(about_raw);
                 let helper_md =
                     render_helper_skill(alias, helper_name, helper, entry, &product_name);
                 write_skill(output_path, &helper_skill_name, &helper_md)?;
@@ -202,114 +234,107 @@ pub async fn handle_generate_skills(args: &[String]) -> Result<(), GwsError> {
         }
     }
 
-    if filter
-        .as_ref()
-        .is_none_or(|f| "persona".contains(f.as_str()) || "personas".contains(f.as_str()))
-    {
-        if let Ok(registry) = toml::from_str::<PersonaRegistry>(PERSONAS_TOML) {
-            eprintln!(
-                "Generating skills for {} personas...",
-                registry.personas.len()
-            );
-            for persona in registry.personas {
-                let name = format!("persona-{}", persona.name);
-                let emit = match &filter {
-                    Some(f) => name.contains(f.as_str()),
-                    None => true,
-                };
-                if emit {
-                    let md = render_persona_skill(&persona);
-                    write_skill(output_path, &name, &md)?;
-                    index.push(SkillIndexEntry {
-                        name: name.clone(),
-                        description: truncate_desc(&persona.description),
-                        category: "persona".to_string(),
-                    });
-                }
-            }
-        } else {
-            eprintln!("WARNING: Failed to parse personas.toml");
+    let all_personas = filter.has("personas");
+    let registry = toml::from_str::<PersonaRegistry>(PERSONAS_TOML).map_err(|e| {
+        GwsError::from(anyhow::Error::new(e).context("embedded registry/personas.toml is invalid"))
+    })?;
+    if all_personas {
+        matched.insert("personas".to_string());
+    }
+    for persona in registry.personas {
+        let name = format!("persona-{}", persona.name);
+        if all_personas || filter.0.contains(&name) {
+            matched.insert(name.clone());
+            let md = render_persona_skill(&persona);
+            write_skill(output_path, &name, &md)?;
+            index.push(SkillIndexEntry {
+                name: name.clone(),
+                description: truncate_desc(&persona.description),
+                category: "persona".to_string(),
+            });
         }
     }
 
-    // Generate Recipes
-    if filter
-        .as_ref()
-        .is_none_or(|f| "recipe".contains(f.as_str()) || "recipes".contains(f.as_str()))
-    {
-        if let Ok(registry) = toml::from_str::<RecipeRegistry>(RECIPES_TOML) {
-            eprintln!(
-                "Generating skills for {} recipes...",
-                registry.recipes.len()
-            );
-            for recipe in registry.recipes {
-                let name = format!("recipe-{}", recipe.name);
-                let emit = match &filter {
-                    Some(f) => name.contains(f.as_str()),
-                    None => true,
-                };
-                if emit {
-                    let md = render_recipe_skill(&recipe);
-                    write_skill(output_path, &name, &md)?;
-                    index.push(SkillIndexEntry {
-                        name: name.clone(),
-                        description: truncate_desc(&recipe.description),
-                        category: "recipe".to_string(),
-                    });
-                }
-            }
-        } else {
-            eprintln!("WARNING: Failed to parse recipes.toml");
+    let all_recipes = filter.has("recipes");
+    let registry = toml::from_str::<RecipeRegistry>(RECIPES_TOML).map_err(|e| {
+        GwsError::from(anyhow::Error::new(e).context("embedded registry/recipes.toml is invalid"))
+    })?;
+    if all_recipes {
+        matched.insert("recipes".to_string());
+    }
+    for recipe in registry.recipes {
+        let name = format!("recipe-{}", recipe.name);
+        if all_recipes || filter.0.contains(&name) {
+            matched.insert(name.clone());
+            let md = render_recipe_skill(&recipe);
+            write_skill(output_path, &name, &md)?;
+            index.push(SkillIndexEntry {
+                name: name.clone(),
+                description: truncate_desc(&recipe.description),
+                category: "recipe".to_string(),
+            });
         }
     }
 
-    // Write skills index
-    if filter.is_none() {
-        write_skills_index(&index)?;
+    // Every filter value must have selected something: a typo must not
+    // silently produce an empty run.
+    let unmatched: Vec<&String> = filter.0.iter().filter(|f| !matched.contains(*f)).collect();
+    if !unmatched.is_empty() {
+        return Err(GwsError::Validation(format!(
+            "--filter matched no skill: {}",
+            unmatched
+                .iter()
+                .map(|s| s.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )));
     }
 
-    eprintln!("\nDone. Skills written to {output_dir}/");
-    Ok(())
+    if let Some(path) = &index_path {
+        write_skills_index(&index, path)?;
+    }
+
+    tracing::info!(count = index.len(), dir = %output_path.display(), "skills written");
+    Ok(skills_summary(output_path, index_path.as_deref(), &index))
 }
 
-fn parse_output_dir(args: &[String]) -> String {
-    for (i, arg) in args.iter().enumerate() {
-        if arg == "--output-dir"
-            && let Some(val) = args.get(i + 1)
-        {
-            return val.clone();
-        }
-    }
-    "skills".to_string()
-}
-
-/// Parse `--filter <match>` into a substring filter.
-fn parse_filter(args: &[String]) -> Option<String> {
-    for (i, arg) in args.iter().enumerate() {
-        if arg == "--filter"
-            && let Some(val) = args.get(i + 1)
-        {
-            return Some(val.trim().to_string());
-        }
-    }
-    None
+fn skills_summary(
+    output_path: &Path,
+    index_path: Option<&Path>,
+    index: &[SkillIndexEntry],
+) -> serde_json::Value {
+    let skills: Vec<serde_json::Value> = index
+        .iter()
+        .map(|e| {
+            serde_json::json!({
+                "name": e.name,
+                "category": e.category,
+                "path": output_path.join(&e.name).join("SKILL.md").display().to_string(),
+            })
+        })
+        .collect();
+    serde_json::json!({
+        "output_dir": output_path.display().to_string(),
+        "index": index_path.map(|p| p.display().to_string()),
+        "count": skills.len(),
+        "skills": skills,
+    })
 }
 
 fn write_skill(base: &Path, name: &str, content: &str) -> Result<(), GwsError> {
     let dir = base.join(name);
-    std::fs::create_dir_all(&dir).map_err(|e| {
-        GwsError::Validation(format!("Failed to create dir {}: {e}", dir.display()))
-    })?;
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| io_err(format!("failed to create directory {}", dir.display()), e))?;
     let path = dir.join("SKILL.md");
     std::fs::write(&path, content)
-        .map_err(|e| GwsError::Validation(format!("Failed to write {}: {e}", path.display())))?;
+        .map_err(|e| io_err(format!("failed to write {}", path.display()), e))?;
     Ok(())
 }
 
-fn write_skills_index(entries: &[SkillIndexEntry]) -> Result<(), GwsError> {
+fn write_skills_index(entries: &[SkillIndexEntry], path: &Path) -> Result<(), GwsError> {
     let mut out = String::new();
     out.push_str("# Skills Index\n\n");
-    out.push_str("> Auto-generated by `gwsr generate-skills`. Do not edit manually.\n\n");
+    out.push_str("> Auto-generated by `gwsr dev generate-skills`. Do not edit manually.\n\n");
 
     let sections = [
         (
@@ -346,14 +371,22 @@ fn write_skills_index(entries: &[SkillIndexEntry]) -> Result<(), GwsError> {
         out.push('\n');
     }
 
-    let path = Path::new("docs/skills.md");
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| GwsError::Validation(format!("Failed to create docs dir: {e}")))?;
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent).map_err(|e| {
+            io_err(
+                format!("failed to create directory {}", parent.display()),
+                e,
+            )
+        })?;
     }
-    std::fs::write(path, &out)
-        .map_err(|e| GwsError::Validation(format!("Failed to write skills index: {e}")))?;
-    eprintln!("Skills index written to docs/skills.md");
+    std::fs::write(path, &out).map_err(|e| {
+        io_err(
+            format!("failed to write skills index {}", path.display()),
+            e,
+        )
+    })?;
     Ok(())
 }
 
@@ -404,7 +437,7 @@ metadata:
     out.push_str(&format!("# {alias} ({api_version})\n\n"));
 
     out.push_str(
-        "> **PREREQUISITE:** Read `../gwsr-shared/SKILL.md` for auth, global flags, and security rules. If missing, run `gwsr generate-skills` to create it.\n\n",
+        "> **PREREQUISITE:** Read `../gwsr-shared/SKILL.md` for auth, global flags, and security rules.\n\n",
     );
 
     out.push_str(&format!(
@@ -541,7 +574,7 @@ metadata:
     out.push_str(&format!("# {alias} {cmd_name}\n\n"));
 
     out.push_str(
-        "> **PREREQUISITE:** Read `../gwsr-shared/SKILL.md` for auth, global flags, and security rules. If missing, run `gwsr generate-skills` to create it.\n\n",
+        "> **PREREQUISITE:** Read `../gwsr-shared/SKILL.md` for auth, global flags, and security rules.\n\n",
     );
 
     out.push_str(&format!("{about}\n\n"));
@@ -693,8 +726,8 @@ The `gwsr` binary must be on `$PATH`. See the project README for install options
 # Browser-based OAuth (interactive)
 gwsr auth login
 
-# Service Account
-export GOOGLE_APPLICATION_CREDENTIALS=/path/to/key.json
+# Service account or exported credentials
+export GWSR_CREDENTIALS_FILE=/path/to/key.json
 ```
 
 ## Global Flags
@@ -702,8 +735,18 @@ export GOOGLE_APPLICATION_CREDENTIALS=/path/to/key.json
 | Flag | Description |
 |------|-------------|
 | `--format <FORMAT>` | Output format: `json` (default), `table`, `yaml`, `csv` |
+| `--jq <EXPR>` | Filter the response with a jq expression; string results print raw |
+| `--columns <A,B>` | Columns to show for `table` / `csv` output (dot paths for nested fields) |
+| `--compact` / `--pretty` | Force compact or pretty JSON (default: compact when piped, pretty on a terminal) |
 | `--dry-run` | Validate locally without calling the API |
 | `--sanitize <TEMPLATE>` | Screen responses through Model Armor |
+| `-v` / `-q` | More / less diagnostic logging on stderr |
+
+Run `gwsr commands --json` for a machine-readable inventory of every service, resource, method and helper with its flags.
+
+## Errors and Exit Codes
+
+When stdout is piped, errors are printed to stdout as a single-line JSON object `{"error":{"code","message","reason","retryable","hint"?}}`; a human-readable message always goes to stderr. Exit codes: `0` success, `1` API error (permanent), `2` auth, `3` validation, `4` discovery, `5` internal, `6` API error that is safe to retry (429 / 5xx / rate limit).
 
 ## CLI Syntax
 
@@ -732,25 +775,18 @@ gwsr <service> <resource> [sub-resource] <method> [flags]
 
 ## Shell Tips
 
-- **zsh `!` expansion:** Sheet ranges like `Sheet1!A1` contain `!` which zsh interprets as history expansion. Use double quotes with escaped inner quotes instead of single quotes:
+- **Quote arguments containing `!` with single quotes.** Sheet ranges like `Sheet1!A1` contain `!`, which interactive bash (and zsh with `BANG_HIST`) history-expands inside double quotes. Single quotes are never expanded:
   ```bash
-  # WRONG (zsh will mangle the !)
+  # CORRECT: single quotes are safe in bash and zsh
   gwsr sheets +read --spreadsheet ID --range 'Sheet1!A1:D10'
 
-  # CORRECT
+  # WRONG: interactive bash expands `!A1` inside double quotes
   gwsr sheets +read --spreadsheet ID --range "Sheet1!A1:D10"
   ```
 - **JSON with double quotes:** Wrap `--params` and `--json` values in single quotes so the shell does not interpret the inner double quotes:
   ```bash
   gwsr drive files list --params '{"pageSize": 5}'
   ```
-
-## Community & Feedback Etiquette
-
-- Encourage agents/users to star the repository when they find the project useful: `https://github.com/astelmach20/gws-rust`
-- For bugs or feature requests, direct users to open issues in the repository: `https://github.com/astelmach20/gws-rust/issues`
-- Before creating a new issue, **always** search existing issues and feature requests first
-- If a matching issue already exists, add context by commenting on the existing thread instead of creating a duplicate
 "#
     .replace("__VERSION__", env!("CARGO_PKG_VERSION"));
 
@@ -1038,6 +1074,20 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn skills_summary_lists_written_files() {
+        let index = vec![SkillIndexEntry {
+            name: "gwsr-shared".into(),
+            description: "d".into(),
+            category: "service".into(),
+        }];
+        let v = skills_summary(Path::new("/out"), Some(Path::new("/idx.md")), &index);
+        assert_eq!(v["count"], 1);
+        assert_eq!(v["output_dir"], "/out");
+        assert_eq!(v["index"], "/idx.md");
+        assert_eq!(v["skills"][0]["path"], "/out/gwsr-shared/SKILL.md");
     }
 
     #[test]

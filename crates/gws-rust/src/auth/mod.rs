@@ -38,7 +38,7 @@ pub mod token_cache;
 use secrecy::{ExposeSecret, SecretString};
 
 use credentials::{AuthEnv, Credential, CredentialSource, Resolved};
-pub use profiles::{apply_global_flags, config_dir, try_config_dir};
+pub use profiles::try_config_dir;
 
 /// Authentication failures, classified so callers can print precise hints.
 #[derive(Debug, thiserror::Error)]
@@ -535,7 +535,7 @@ mod tests {
             "gwsr auth login"
         );
         assert_eq!(
-            login_command(&mk("work", ProfileSource::ActiveProfileFile)),
+            login_command(&mk("work", ProfileSource::ConfigFile)),
             "gwsr auth login --profile work"
         );
     }

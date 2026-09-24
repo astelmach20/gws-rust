@@ -29,7 +29,6 @@
 
 use std::io::IsTerminal;
 
-use clap::{Arg, ArgAction, Command};
 use reqwest::Method;
 use serde_json::{Map, Value, json};
 use tokio::io::AsyncReadExt;
@@ -58,91 +57,48 @@ pub(crate) struct BatchCall<'a> {
     pub body: Option<Value>,
 }
 
-fn command() -> Command {
-    Command::new("batch")
-        .bin_name("gwsr batch")
-        .about("Send many API calls in multipart/mixed batch requests (NDJSON in, NDJSON out)")
-        .arg(
-            Arg::new("service")
-                .required(true)
-                .value_name("SERVICE[:VERSION]")
-                .help("API to call, e.g. drive or gmail:v1"),
-        )
-        .arg(
-            Arg::new("input")
-                .long("input")
-                .short('i')
-                .value_name("FILE")
-                .help("NDJSON file with one call per line (default: stdin)"),
-        )
-        .arg(
-            Arg::new("api-version")
-                .long("api-version")
-                .value_name("VERSION")
-                .help("Override the API version"),
-        )
-        .arg(
-            Arg::new("dry-run")
-                .long("dry-run")
-                .action(ArgAction::SetTrue)
-                .help("Print the batch parts without sending them"),
-        )
-        .arg(
-            Arg::new("yes")
-                .long("yes")
-                .short('y')
-                .action(ArgAction::SetTrue)
-                .help("Confirm destructive calls in the batch without prompting"),
-        )
-        .arg(
-            Arg::new("allow-unknown-params")
-                .long("allow-unknown-params")
-                .action(ArgAction::SetTrue)
-                .help("Send parameters that are not in the Discovery document"),
-        )
-        .arg(
-            Arg::new("allow-unknown-fields")
-                .long("allow-unknown-fields")
-                .action(ArgAction::SetTrue)
-                .help("Send body fields that are not in the Discovery schema"),
-        )
-        .after_help(
-            "Input line format:\n  {\"id\": \"optional\", \"method\": \"files.get\", \"params\": {...}, \"json\": {...}}\n\
-             Output line format:\n  {\"id\": \"...\", \"status\": 200, \"body\": {...}}",
-        )
+/// `gwsr batch` arguments. `--dry-run` and `--api-version` are global
+/// options and arrive through [`BatchContext`].
+#[derive(Debug, Clone, clap::Args)]
+#[command(
+    after_help = "Input line format:\n  {\"id\": \"optional\", \"method\": \"files.get\", \"params\": {...}, \"json\": {...}}\n\
+Output line format:\n  {\"id\": \"...\", \"status\": 200, \"body\": {...}}"
+)]
+pub struct BatchArgs {
+    /// API to call, e.g. drive or gmail:v1
+    #[arg(value_name = "SERVICE[:VERSION]")]
+    pub service: String,
+    /// NDJSON file with one call per line (default: stdin)
+    #[arg(long, short = 'i', value_name = "FILE")]
+    pub input: Option<String>,
+    /// Confirm destructive calls in the batch without prompting
+    #[arg(long, short = 'y')]
+    pub yes: bool,
+    /// Send parameters that are not in the Discovery document
+    #[arg(long)]
+    pub allow_unknown_params: bool,
+    /// Send body fields that are not in the Discovery schema
+    #[arg(long)]
+    pub allow_unknown_fields: bool,
 }
 
-/// Entry point for `gwsr batch ...` (`args` excludes `gwsr batch`).
-pub async fn handle_batch_command(args: &[String]) -> Result<(), GwsError> {
-    let matches = match command()
-        .try_get_matches_from(std::iter::once("batch".to_string()).chain(args.iter().cloned()))
-    {
-        Ok(m) => m,
-        Err(e)
-            if matches!(
-                e.kind(),
-                clap::error::ErrorKind::DisplayHelp | clap::error::ErrorKind::DisplayVersion
-            ) =>
-        {
-            print!("{e}");
-            return Ok(());
-        }
-        Err(e) => return Err(GwsError::Validation(e.to_string())),
-    };
-    let service = matches
-        .get_one::<String>("service")
-        .ok_or_else(|| GwsError::Validation("missing SERVICE argument".to_string()))?;
-    let mut argv = vec!["gwsr".to_string(), service.clone()];
-    if let Some(v) = matches.get_one::<String>("api-version") {
-        argv.push("--api-version".to_string());
-        argv.push(v.clone());
-    }
-    let (api, version) = crate::parse_service_and_version(&argv, service)?;
-    let doc = crate::discovery::fetch_discovery_document(&api, &version)
-        .await
-        .map_err(|e| GwsError::Discovery(format!("{e:#}")))?;
+/// Global options that apply to `gwsr batch`.
+#[derive(Debug, Clone, Default)]
+pub struct BatchContext {
+    /// `--dry-run`: print the batch parts without sending them.
+    pub dry_run: bool,
+    /// `--api-version`: overrides the `:VERSION` suffix.
+    pub api_version: Option<String>,
+}
 
-    let text = match matches.get_one::<String>("input") {
+/// Entry point for `gwsr batch ...`.
+pub async fn handle_batch_command(args: &BatchArgs, ctx: &BatchContext) -> Result<(), GwsError> {
+    let resolved =
+        crate::services::resolve_service_spec(&args.service, ctx.api_version.as_deref())?;
+    let doc =
+        crate::discovery::fetch_discovery_document(&resolved.api_name, &resolved.version).await?;
+
+    let text = match args.input.as_deref() {
         Some(path) => {
             let safe = crate::validate::validate_safe_file_path(path, "--input")?;
             tokio::fs::read_to_string(&safe).await.map_err(|e| {
@@ -165,10 +121,10 @@ pub async fn handle_batch_command(args: &[String]) -> Result<(), GwsError> {
     };
 
     let mut options = ExecOptions::from_env()?;
-    options.dry_run = matches.get_flag("dry-run");
-    options.assume_yes = matches.get_flag("yes");
-    options.allow_unknown_params = matches.get_flag("allow-unknown-params");
-    options.allow_unknown_fields = matches.get_flag("allow-unknown-fields");
+    options.dry_run = ctx.dry_run;
+    options.assume_yes = args.yes;
+    options.allow_unknown_params = args.allow_unknown_params;
+    options.allow_unknown_fields = args.allow_unknown_fields;
 
     let calls = parse_calls(&doc, &text, &options)?;
     let credentials = if options.dry_run {

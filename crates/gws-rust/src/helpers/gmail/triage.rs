@@ -170,10 +170,7 @@ pub async fn handle_triage(matches: &ArgMatches) -> Result<(), GwsError> {
         "query": query,
     });
 
-    println!(
-        "{}",
-        crate::formatter::format_value(&output, &output_format)
-    );
+    crate::output::emit(&crate::formatter::format_value(&output, &output_format)?)?;
 
     Ok(())
 }

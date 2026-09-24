@@ -14,193 +14,419 @@
 
 //! Google Workspace CLI (gwsr)
 //!
-//! A dynamic, schema-driven CLI for Google Workspace APIs.
-//! This tool dynamically parses Google API Discovery Documents to construct CLI commands.
-//! It supports deep schema validation, OAuth / Service Account authentication,
-//! interactive prompts, and integration with Model Armor.
+//! A dynamic, schema-driven CLI for Google Workspace APIs. Static commands
+//! (`auth`, `schema`, `commands`, `completions`, `cache`, `dev`) are defined
+//! with clap derive in [`cli_args`]; every other first word is a service
+//! whose command tree is built at runtime from its Discovery document.
+
+#![cfg_attr(not(test), forbid(unsafe_code))]
 
 mod auth;
+mod cli_args;
 mod client;
 mod commands;
+mod completions;
+mod config;
 mod discovery;
 mod error;
 mod executor;
 mod formatter;
 mod fs_util;
 mod generate_skills;
+mod hardening;
 mod helpers;
+mod inventory;
+mod jq;
 mod logging;
 mod output;
 mod schema;
+mod service;
 mod services;
 mod text;
 mod timezone;
 pub(crate) mod validate;
 
-use error::{GwsError, print_error_json};
+use std::ffi::OsString;
+use std::process::ExitCode;
 
-#[tokio::main]
-async fn main() {
-    // Initialize structured logging (no-op if env vars are unset)
-    logging::init_logging();
+use clap::{FromArgMatches, Parser};
 
-    if let Err(err) = run().await {
-        print_error_json(&err);
-        std::process::exit(err.exit_code());
+use cli_args::{CacheCommand, Cli, DevCommand, GlobalArgs, PreScan, TopCommand};
+use config::{JsonStylePref, SanitizeModePref, Settings};
+use error::{CliError, ErrorContext, GwsError};
+use formatter::{JsonStyle, OutputFormat, OutputSettings};
+
+fn main() -> ExitCode {
+    // Shell completion callbacks must run before anything writes to stdout.
+    match completions::complete_if_requested() {
+        Ok(true) => return ExitCode::SUCCESS,
+        Ok(false) => {}
+        Err(e) => return finish(Err(CliError::from(e)), false),
+    }
+
+    install_broken_pipe_hook();
+    let hardening_warnings = hardening::apply();
+
+    let args: Vec<OsString> = std::env::args_os().collect();
+    let prescan = cli_args::prescan(args.get(1..).unwrap_or_default());
+    // Before the config file is read, the error format comes from the flag or env.
+    let early_human = human_output(prescan.format.as_deref(), None);
+
+    let cli = match parse_top_level(&args) {
+        Ok(Some(cli)) => cli,
+        Ok(None) => return finish(Ok(()), early_human),
+        Err(e) => return finish(Err(e), early_human),
+    };
+
+    let settings = match config::load() {
+        Ok(s) => s,
+        Err(e) => return finish(Err(e.into()), early_human),
+    };
+    let human = human_output(prescan.format.as_deref(), Some(settings.format));
+    if let Some(secs) = settings.timeout_secs
+        && let Err(e) = gws_rust_core::client::set_configured_timeout(secs)
+    {
+        return finish(Err(e.into()), human);
+    }
+
+    let mut log_opts = logging::LogOptions::from_env(prescan.verbosity);
+    log_opts.config_log = settings.log.clone();
+    log_opts.human = human || prescan.verbosity > 0;
+    if log_opts.file_dir.is_none() {
+        log_opts.file_dir = settings.log_file.clone();
+    }
+    let log_guard = match logging::init(&log_opts) {
+        Ok(guard) => guard,
+        Err(e) => return finish(Err(e.into()), human),
+    };
+    for warning in hardening_warnings {
+        tracing::warn!("{warning}");
+    }
+
+    let runtime = match tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(rt) => rt,
+        Err(e) => {
+            return finish(
+                Err(GwsError::from(
+                    anyhow::Error::new(e).context("failed to start the async runtime"),
+                )
+                .into()),
+                human,
+            );
+        }
+    };
+
+    tracing::debug!(?settings, "resolved settings");
+    let result = runtime.block_on(dispatch(cli, &args, &settings, &prescan));
+    // Stop background tasks, then flush file logs before exiting.
+    drop(runtime);
+    let code = finish(result, human);
+    drop(log_guard);
+    code
+}
+
+/// True when the effective output format is a human one (not JSON):
+/// `--format` flag > `GWSR_FORMAT` > config file > JSON.
+fn human_output(flag: Option<&str>, config: Option<OutputFormat>) -> bool {
+    let from_flag = flag.and_then(|f| OutputFormat::parse(f).ok());
+    let from_env = std::env::var("GWSR_FORMAT")
+        .ok()
+        .and_then(|f| OutputFormat::parse(&f).ok());
+    let format = from_flag.or(from_env).or(config).unwrap_or_default();
+    format != OutputFormat::Json
+}
+
+/// Map the outcome to an exit code, reporting errors per the output contract
+/// in [`error`]. A closed stdout (`gwsr ... | head`) is a clean exit.
+fn finish(result: Result<(), CliError>, human: bool) -> ExitCode {
+    match result {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(_) if output::stdout_closed() => ExitCode::SUCCESS,
+        Err(e) => {
+            tracing::debug!(error = ?e, "command failed");
+            error::report(&e, human);
+            ExitCode::from(u8::try_from(e.exit_code()).unwrap_or(u8::MAX))
+        }
     }
 }
 
-async fn run() -> Result<(), GwsError> {
-    let mut args: Vec<String> = std::env::args().collect();
-    // Global auth flags (--profile, --impersonate) may appear anywhere.
-    auth::apply_global_flags(&mut args)?;
-
-    if args.len() < 2 {
-        print_usage();
-        return Err(GwsError::Validation(
-            "No service specified. Usage: gwsr <service> <resource> [sub-resource] <method> [flags]"
-                .to_string(),
-        ));
-    }
-
-    // Find the first non-flag arg (skip --api-version and its value)
-    let mut first_arg: Option<String> = None;
-    {
-        let mut skip_next = false;
-        for a in args.iter().skip(1) {
-            if skip_next {
-                skip_next = false;
-                continue;
-            }
-            if a == "--api-version" {
-                skip_next = true;
-                continue;
-            }
-            if a.starts_with("--api-version=") {
-                continue;
-            }
-            if !a.starts_with("--") || a.as_str() == "--help" || a.as_str() == "--version" {
-                first_arg = Some(a.clone());
-                break;
-            }
-        }
-    }
-    let first_arg = first_arg.ok_or_else(|| {
-        GwsError::Validation(
-            "No service specified. Usage: gwsr <service> <resource> [sub-resource] <method> [flags]"
-                .to_string(),
-        )
-    })?;
-
-    // Handle --help and --version at top level
-    if is_help_flag(&first_arg) {
-        print_usage();
-        return Ok(());
-    }
-
-    if is_version_flag(&first_arg) {
-        println!("gwsr {}", env!("CARGO_PKG_VERSION"));
-        println!("This is not an officially supported Google product.");
-        return Ok(());
-    }
-
-    // Handle the `schema` command
-    if first_arg == "schema" {
-        if args.len() < 3 {
-            return Err(GwsError::Validation(
-                "Usage: gwsr schema <service.resource.method> (e.g., gwsr schema drive.files.list) [--resolve-refs]"
-                    .to_string(),
-            ));
-        }
-        let resolve_refs = args.iter().any(|arg| arg == "--resolve-refs");
-        // Remove the flag if it exists so it doesn't mess up path parsing, or just pass the path
-        // The path is args[2], flags might follow.
-        let path = &args[2];
-        let schema = schema::handle_schema_command(path, resolve_refs).await?;
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&schema).map_err(GwsError::other)?
-        );
-        return Ok(());
-    }
-
-    // Handle the `batch` command
-    if first_arg == "batch" {
-        let batch_args: Vec<String> = args.iter().skip(2).cloned().collect();
-        return executor::batch::handle_batch_command(&batch_args).await;
-    }
-
-    // Handle the `generate-skills` command
-    if first_arg == "generate-skills" {
-        let gen_args: Vec<String> = args.iter().skip(2).cloned().collect();
-        return generate_skills::handle_generate_skills(&gen_args).await;
-    }
-
-    // Handle the `auth` command
-    if first_arg == "auth" {
-        let auth_args: Vec<String> = args.iter().skip(2).cloned().collect();
-        return auth::commands::handle_auth_command(&auth_args).await;
-    }
-
-    // Parse service name and optional version override
-    let (api_name, version) = parse_service_and_version(&args, &first_arg)?;
-
-    // For synthetic services (no Discovery doc), use an empty RestDescription
-    let doc = if api_name == "workflow" {
-        discovery::RestDescription {
-            name: "workflow".to_string(),
-            description: Some("Cross-service productivity workflows".to_string()),
-            ..Default::default()
-        }
-    } else {
-        // Fetch the Discovery Document
-        discovery::fetch_discovery_document(&api_name, &version).await?
-    };
-
-    // Build the dynamic command tree (all commands shown regardless of auth state)
-    let cli = commands::build_cli(&doc);
-
-    // Re-parse args (skip argv[0] which is the binary, and argv[1] which is the service name)
-    // Filter out --api-version and its value
-    // Prepend "gwsr" as the program name since try_get_matches_from expects argv[0]
-    let sub_args = filter_args_for_subcommand(&args, &first_arg);
-
-    let matches = cli.try_get_matches_from(&sub_args).map_err(|e| {
-        // If it's a help or version display, print it and exit cleanly
-        if e.kind() == clap::error::ErrorKind::DisplayHelp
-            || e.kind() == clap::error::ErrorKind::DisplayVersion
-        {
-            print!("{e}");
+/// Safety net for code that still prints with `println!`, which panics when
+/// the reader closes the pipe (`gwsr ... | head`). All output written through
+/// [`output::emit`] handles EPIPE without panicking; any remaining
+/// `println!` site exits quietly with status 0 here instead of reporting a
+/// panic. Every other panic goes to the default hook.
+fn install_broken_pipe_hook() {
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let payload = info.payload();
+        let message = payload
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .or_else(|| payload.downcast_ref::<&str>().copied())
+            .unwrap_or("");
+        if is_stdout_broken_pipe_panic(message) {
             std::process::exit(0);
         }
-        GwsError::Validation(e.to_string())
-    })?;
+        default_hook(info);
+    }));
+}
 
-    // Resolve --format flag
-    let output_format = match matches.get_one::<String>("format") {
-        Some(s) => match formatter::OutputFormat::parse(s) {
-            Ok(fmt) => fmt,
-            Err(unknown) => {
-                eprintln!(
-                    "warning: unknown output format '{unknown}'; falling back to json (valid options: json, table, yaml, csv)"
-                );
-                formatter::OutputFormat::Json
+fn is_stdout_broken_pipe_panic(message: &str) -> bool {
+    message.starts_with("failed printing to stdout")
+        && (message.contains("Broken pipe")
+            || message.contains("os error 32)")
+            || message.contains("os error 232)"))
+}
+
+/// True for clap "errors" that are really requests to print help/version.
+fn is_display_request(e: &clap::Error) -> bool {
+    use clap::error::ErrorKind;
+    matches!(
+        e.kind(),
+        ErrorKind::DisplayHelp
+            | ErrorKind::DisplayVersion
+            | ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand
+    )
+}
+
+/// Print help/version text to stdout (exit status 0).
+fn print_display(e: &clap::Error) -> Result<(), CliError> {
+    let styled = e.render();
+    let text = if output::stdout_is_terminal() && std::env::var_os("NO_COLOR").is_none() {
+        styled.ansi().to_string()
+    } else {
+        styled.to_string()
+    };
+    output::emit(text.trim_end()).map_err(CliError::from)
+}
+
+/// Parse the static top-level command line. `Ok(None)` means help or version
+/// was printed. `gwsr help <path>` is rewritten to `gwsr <path> --help`.
+fn parse_top_level(args: &[OsString]) -> Result<Option<Cli>, CliError> {
+    let cli = match Cli::try_parse_from(args) {
+        Ok(cli) => cli,
+        Err(e) if is_display_request(&e) => {
+            print_display(&e)?;
+            return Ok(None);
+        }
+        Err(e) => return Err(e.into()),
+    };
+    let Some(TopCommand::Help { path }) = &cli.command else {
+        return Ok(Some(cli));
+    };
+    let bin = args
+        .first()
+        .cloned()
+        .unwrap_or_else(|| OsString::from("gwsr"));
+    let mut rewritten: Vec<OsString> = vec![bin];
+    if path.first().is_some_and(|p| p != "help") {
+        rewritten.extend(path.iter().map(OsString::from));
+    }
+    rewritten.push(OsString::from("--help"));
+    match Cli::try_parse_from(&rewritten) {
+        Err(e) if is_display_request(&e) => {
+            print_display(&e)?;
+            Ok(None)
+        }
+        Err(e) => Err(e.into()),
+        // `auth` and services handle `--help` themselves.
+        Ok(cli) => Ok(Some(cli)),
+    }
+}
+
+/// Install output settings from global flags, falling back to env/config.
+fn install_output(global: &GlobalArgs, settings: &Settings) -> Result<(), CliError> {
+    let terminal = output::stdout_is_terminal();
+    let json_style = if global.compact {
+        JsonStyle::Compact
+    } else if global.pretty {
+        JsonStyle::Pretty
+    } else {
+        match settings.json_style {
+            JsonStylePref::Compact => JsonStyle::Compact,
+            JsonStylePref::Pretty => JsonStyle::Pretty,
+            JsonStylePref::Auto if terminal => JsonStyle::Pretty,
+            JsonStylePref::Auto => JsonStyle::Compact,
+        }
+    };
+    let jq = global
+        .jq
+        .as_deref()
+        .map(jq::JqFilter::compile)
+        .transpose()?;
+    formatter::install_settings(OutputSettings {
+        json_style,
+        default_format: settings.format,
+        columns: global.columns.clone(),
+        jq,
+        terminal,
+    })?;
+    Ok(())
+}
+
+/// The effective format for static commands (flag > env/config).
+fn effective_format(global: &GlobalArgs, settings: &Settings) -> OutputFormat {
+    global
+        .format
+        .as_deref()
+        .map(OutputFormat::from_str)
+        .unwrap_or(settings.format)
+}
+
+fn emit_value(value: &serde_json::Value, format: OutputFormat) -> Result<(), CliError> {
+    let text = formatter::format_value(value, &format)?;
+    output::emit(&text)?;
+    Ok(())
+}
+
+#[tracing::instrument(level = "debug", skip_all)]
+async fn dispatch(
+    cli: Cli,
+    args: &[OsString],
+    settings: &Settings,
+    prescan: &PreScan,
+) -> Result<(), CliError> {
+    let Some(command) = cli.command else {
+        // `arg_required_else_help` makes this unreachable from the CLI.
+        return Err(GwsError::Validation("no command given; run `gwsr --help`".into()).into());
+    };
+    if let TopCommand::Service(service_args) = command {
+        return run_service(args, &service_args, settings, prescan).await;
+    }
+
+    install_output(&cli.global, settings)?;
+    let format = effective_format(&cli.global, settings);
+    tracing::debug!(?command, ?format, "dispatching static command");
+    // `auth` also accepts --profile/--impersonate after its own name and
+    // records the overrides itself.
+    if !matches!(command, TopCommand::Auth { .. }) {
+        auth::profiles::set_global_overrides(cli.global.auth_overrides())?;
+    }
+    match command {
+        TopCommand::Auth { args } => {
+            auth::commands::handle_auth_command(&args, cli.global.auth_overrides()).await?
+        }
+        TopCommand::Batch(batch_args) => {
+            let ctx = executor::batch::BatchContext {
+                dry_run: cli.global.dry_run,
+                api_version: cli.global.api_version.clone(),
+            };
+            executor::batch::handle_batch_command(&batch_args, &ctx).await?;
+        }
+        TopCommand::Schema { path, resolve_refs } => {
+            let value = schema::handle_schema_command(&path, resolve_refs).await?;
+            emit_value(&value, format)?;
+        }
+        TopCommand::Commands { services } => {
+            let inventory = inventory::build(&services).await?;
+            match format {
+                // Tabular formats get one row per command.
+                OutputFormat::Table | OutputFormat::Csv => {
+                    emit_value(&inventory::rows(&inventory), format)?;
+                }
+                OutputFormat::Json | OutputFormat::Yaml => emit_value(&inventory, format)?,
             }
-        },
-        None => formatter::OutputFormat::default(),
+        }
+        TopCommand::Completions { shell } => {
+            let script = completions::registration_script(shell, "gwsr")?;
+            output::emit(script.trim_end())?;
+        }
+        TopCommand::Cache {
+            action: CacheCommand::Clear,
+        } => {
+            let removed = discovery::loader()?.clear_cache().map_err(GwsError::from)?;
+            emit_value(&serde_json::json!({ "removed": removed }), format)?;
+        }
+        TopCommand::Dev {
+            command: DevCommand::GenerateSkills(opts),
+        } => {
+            let summary = generate_skills::handle_generate_skills(&opts).await?;
+            emit_value(&summary, format)?;
+        }
+        TopCommand::Dev {
+            command: DevCommand::Man { output_dir },
+        } => {
+            let files = completions::write_man_pages(&output_dir)?;
+            let names: Vec<String> = files.iter().map(|p| p.display().to_string()).collect();
+            emit_value(&serde_json::json!({ "written": names }), format)?;
+        }
+        TopCommand::Help { .. } | TopCommand::Service(_) => {
+            // Handled by `parse_top_level` / above.
+        }
+    }
+    Ok(())
+}
+
+/// Split `service[:version]`, resolve the alias (or any `<api>:<version>`),
+/// and apply `--api-version` (which wins over the `:version` suffix).
+/// Returns `(alias, api_name, version)`.
+pub fn parse_service_and_version(
+    service_token: &str,
+    api_version_flag: Option<&str>,
+) -> Result<(String, String, String), GwsError> {
+    let alias = service_token
+        .split_once(':')
+        .map_or(service_token, |(name, _)| name);
+    let resolved = services::resolve_service_spec(service_token, api_version_flag)?;
+    Ok((alias.to_string(), resolved.api_name, resolved.version))
+}
+
+/// argv for the dynamic service command: the top-level global flags that
+/// preceded the service name, then everything after it.
+fn service_argv(args: &[OsString], service_args: &[OsString], alias: &str) -> Vec<OsString> {
+    let service_index = args.len().saturating_sub(service_args.len());
+    let mut argv = vec![OsString::from(format!("gwsr {alias}"))];
+    argv.extend(args.iter().take(service_index).skip(1).cloned());
+    argv.extend(service_args.iter().skip(1).cloned());
+    argv
+}
+
+#[tracing::instrument(level = "debug", skip_all)]
+async fn run_service(
+    args: &[OsString],
+    service_args: &[OsString],
+    settings: &Settings,
+    prescan: &PreScan,
+) -> Result<(), CliError> {
+    let service_token = service_args
+        .first()
+        .and_then(|s| s.to_str())
+        .ok_or_else(|| GwsError::Validation("the service name must be valid UTF-8".into()))?;
+    let (alias, api_name, version) =
+        parse_service_and_version(service_token, prescan.api_version.as_deref())?;
+    tracing::debug!(service = %alias, api = %api_name, version = %version, "resolving service");
+
+    let doc = service::load_document(&api_name, &version).await?;
+    let cmd = service::build_command(&alias, &doc);
+    let matches = match cmd.try_get_matches_from(service_argv(args, service_args, &alias)) {
+        Ok(m) => m,
+        Err(e) if is_display_request(&e) => return print_display(&e),
+        Err(e) => return Err(e.into()),
     };
 
-    // Resolve --sanitize template (flag or env var)
-    let sanitize_template = matches
-        .get_one::<String>("sanitize")
-        .cloned()
-        .or_else(|| std::env::var("GWSR_SANITIZE_TEMPLATE").ok());
+    let global = GlobalArgs::from_arg_matches(&matches)?;
+    install_output(&global, settings)?;
+    auth::profiles::set_global_overrides(global.auth_overrides())?;
+    error::set_context(ErrorContext {
+        service: Some(alias.clone()),
+        ..Default::default()
+    });
 
-    let sanitize_mode = std::env::var("GWSR_SANITIZE_MODE")
-        .map(|v| helpers::modelarmor::SanitizeMode::from_str(&v))
-        .unwrap_or(helpers::modelarmor::SanitizeMode::Warn);
-
-    let sanitize_config = parse_sanitize_config(sanitize_template, &sanitize_mode)?;
+    let output_format = OutputFormat::from_matches(&matches);
+    let sanitize_config = helpers::modelarmor::SanitizeConfig {
+        template: global
+            .sanitize
+            .clone()
+            .or_else(|| settings.sanitize_template.clone()),
+        // The mode string is already validated by `config::resolve`.
+        mode: helpers::modelarmor::SanitizeMode::from_str(match settings.sanitize_mode {
+            SanitizeModePref::Warn => "warn",
+            SanitizeModePref::Block => "block",
+        }),
+    };
 
     // Check if a helper wants to handle this command
     if let Some(helper) = helpers::get_helper(&doc.name)
@@ -211,6 +437,16 @@ async fn run() -> Result<(), GwsError> {
 
     // Walk the subcommand tree to find the target method
     let (method, matched_args) = resolve_method_from_matches(&doc, &matches)?;
+    tracing::info!(
+        method = method.id.as_deref().unwrap_or("?"),
+        http_method = %method.http_method,
+        "resolved API method"
+    );
+    error::set_context(ErrorContext {
+        service: Some(alias.clone()),
+        required_scopes: method.scopes.clone(),
+        granted_scopes: None,
+    });
 
     executor::options::run_from_matches(
         &doc,
@@ -218,61 +454,13 @@ async fn run() -> Result<(), GwsError> {
         matched_args,
         &sanitize_config,
         &output_format,
+        &executor::options::ConfigDefaults {
+            page_limit: settings.page_limit,
+            page_delay_ms: settings.page_delay_ms,
+        },
     )
-    .await
-}
-
-pub fn parse_service_and_version(
-    args: &[String],
-    first_arg: &str,
-) -> Result<(String, String), GwsError> {
-    // --api-version (or --api-version=V) anywhere in args overrides the
-    // version; the last occurrence wins.
-    let mut version_override = None;
-    for (i, arg) in args.iter().enumerate() {
-        if arg == "--api-version" {
-            version_override = args.get(i + 1).map(String::as_str);
-        } else if let Some(v) = arg.strip_prefix("--api-version=") {
-            version_override = Some(v);
-        }
-    }
-    let resolved = services::resolve_service_spec(first_arg, version_override)?;
-    Ok((resolved.api_name, resolved.version))
-}
-
-pub fn filter_args_for_subcommand(args: &[String], service_name: &str) -> Vec<String> {
-    let mut sub_args: Vec<String> = vec!["gwsr".to_string()];
-    let mut skip_next = false;
-    let mut service_skipped = false;
-    for arg in args.iter().skip(1) {
-        if skip_next {
-            skip_next = false;
-            continue;
-        }
-        if arg == "--api-version" {
-            skip_next = true;
-            continue;
-        }
-        if arg.starts_with("--api-version=") {
-            continue;
-        }
-        if !service_skipped && arg == service_name {
-            service_skipped = true;
-            continue;
-        }
-        sub_args.push(arg.clone());
-    }
-    sub_args
-}
-
-fn parse_sanitize_config(
-    template: Option<String>,
-    mode: &helpers::modelarmor::SanitizeMode,
-) -> Result<helpers::modelarmor::SanitizeConfig, GwsError> {
-    Ok(helpers::modelarmor::SanitizeConfig {
-        template,
-        mode: mode.clone(),
-    })
+    .await?;
+    Ok(())
 }
 
 /// Recursively walks clap ArgMatches to find the leaf method and its matches.
@@ -332,139 +520,9 @@ fn resolve_method_from_matches<'a>(
     )))
 }
 
-fn print_usage() {
-    println!("gwsr — Google Workspace CLI");
-    println!();
-    println!("USAGE:");
-    println!("    gwsr <service> <resource> [sub-resource] <method> [flags]");
-    println!("    gwsr schema <service.resource.method> [--resolve-refs]");
-    println!("    gwsr batch <service> [--input FILE]   (NDJSON calls in, NDJSON results out)");
-    println!();
-    println!("EXAMPLES:");
-    println!("    gwsr drive files list --params '{{\"pageSize\": 10}}'");
-    println!("    gwsr drive files get --params '{{\"fileId\": \"abc123\"}}'");
-    println!("    gwsr sheets spreadsheets get --params '{{\"spreadsheetId\": \"...\"}}'");
-    println!("    gwsr gmail users messages list --params '{{\"userId\": \"me\"}}'");
-    println!("    gwsr schema drive.files.list");
-    println!();
-    println!("FLAGS (per method; see `gwsr <service> <resource> <method> --help`):");
-    println!("    --params <JSON>       URL/query parameters as JSON (@FILE or - for stdin)");
-    println!("    --json <JSON>         Request body as JSON (@FILE or - for stdin)");
-    println!("    --fields <MASK>       Partial-response field mask");
-    println!(
-        "    --upload <PATH>       Local file to upload (resumable above 5 MiB when supported)"
-    );
-    println!(
-        "    --upload-content-type <MIME>  MIME type of the uploaded file (auto-detected from extension if omitted)"
-    );
-    println!(
-        "    -o, --output <PATH>   Save the response to a file (- streams raw bytes to stdout)"
-    );
-    println!("    --format <FMT>        Output format: json (default), table, yaml, csv");
-    println!("    --api-version <VER>   Override the API version (e.g., v2, v3)");
-    println!("    --page-all            Fetch every page, one JSON line per page (NDJSON)");
-    println!("    --page-items[=FIELD]  Fetch every page, one JSON line per item");
-    println!("    --page-limit <N>      Stop after N pages (default: 0 = unlimited)");
-    println!("    --page-delay <MS>     Delay between pages in ms (default: 100)");
-    println!("    --wait                Poll a returned long-running operation until done");
-    println!("    --timeout <SECS>      Response/read timeout (default: 60, 0 disables)");
-    println!("    --yes                 Confirm destructive operations without prompting");
-    println!();
-    println!("SERVICES:");
-    for entry in services::SERVICES {
-        let name = entry.aliases[0];
-        let aliases = if entry.aliases.len() > 1 {
-            format!(" (also: {})", entry.aliases[1..].join(", "))
-        } else {
-            String::new()
-        };
-        println!("    {:<20} {}{}", name, entry.description, aliases);
-    }
-    println!();
-    println!("ENVIRONMENT:");
-    println!("    GWSR_TOKEN               Pre-obtained OAuth2 access token (highest priority)");
-    println!("    GWSR_CREDENTIALS_FILE    Path to OAuth credentials JSON file");
-    println!("    GWSR_CLIENT_ID           OAuth client ID (for gwsr auth login)");
-    println!("    GWSR_CLIENT_SECRET       OAuth client secret (for gwsr auth login)");
-    println!("    GWSR_CONFIG_DIR          Override config directory (default: ~/.config/gwsr)");
-    println!("    GWSR_KEYRING_BACKEND     Keyring backend: keyring (default) or file");
-    println!("    GWSR_SANITIZE_TEMPLATE   Default Model Armor template");
-    println!("    GWSR_SANITIZE_MODE       Sanitization mode: warn (default) or block");
-    println!("    GWSR_PROJECT_ID              Override the GCP project ID for quota and billing");
-    println!(
-        "    GWSR_TIMEOUT             Response/read timeout in seconds (default: 60, 0 disables)"
-    );
-    println!(
-        "    GWSR_API_BASE_URL        Send API requests to this base URL instead of Discovery rootUrl"
-    );
-    println!("    GWSR_NO_QUOTA_PROJECT    Set to 1 to never send x-goog-user-project");
-    println!(
-        "    GWSR_CONFIRM_DESTRUCTIVE 1: require --yes for destructive calls even when unattended; 0: never ask"
-    );
-    println!("    GWSR_LOG                 Log level for stderr (e.g., gwsr=debug)");
-    println!("    GWSR_LOG_FILE            Directory for JSON log files (daily rotation)");
-    println!();
-    println!("EXIT CODES:");
-    for (code, description) in crate::error::EXIT_CODE_DOCUMENTATION {
-        println!("    {:<5}{}", code, description);
-    }
-    println!();
-    println!("COMMUNITY:");
-    println!("    Star the repo: https://github.com/astelmach20/gws-rust");
-    println!("    Report bugs / request features: https://github.com/astelmach20/gws-rust/issues");
-    println!("    Please search existing issues first; if one already exists, comment there.");
-    println!();
-    println!("DISCLAIMER:");
-    println!("    This is not an officially supported Google product.");
-}
-
-fn is_help_flag(arg: &str) -> bool {
-    matches!(arg, "--help" | "-h")
-}
-
-fn is_version_flag(arg: &str) -> bool {
-    matches!(arg, "--version" | "-V" | "version")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_parse_sanitize_config_valid() {
-        let config = parse_sanitize_config(
-            Some("tpl".to_string()),
-            &helpers::modelarmor::SanitizeMode::Warn,
-        )
-        .unwrap();
-        assert_eq!(config.template.as_deref(), Some("tpl"));
-    }
-
-    #[test]
-    fn test_parse_sanitize_config_no_template() {
-        let config =
-            parse_sanitize_config(None, &helpers::modelarmor::SanitizeMode::Block).unwrap();
-        assert!(config.template.is_none());
-        assert_eq!(config.mode, helpers::modelarmor::SanitizeMode::Block);
-    }
-
-    #[test]
-    fn test_is_version_flag() {
-        assert!(is_version_flag("--version"));
-        assert!(is_version_flag("-V"));
-        assert!(is_version_flag("version"));
-        assert!(!is_version_flag("--ver"));
-        assert!(!is_version_flag("v"));
-        assert!(!is_version_flag("drive"));
-    }
-
-    #[test]
-    fn test_is_help_flag() {
-        assert!(is_help_flag("--help"));
-        assert!(is_help_flag("-h"));
-        assert!(!is_help_flag("help"));
-        assert!(!is_help_flag("--h"));
-    }
 
     #[test]
     fn test_resolve_method_from_matches_basic() {
@@ -528,31 +586,73 @@ mod tests {
         assert_eq!(method.id.as_deref(), Some("drive.files.permissions.get"));
     }
 
-    #[test]
-    fn test_filter_args_strips_api_version() {
-        let args: Vec<String> = vec![
-            "gwsr".into(),
-            "drive".into(),
-            "--api-version".into(),
-            "v3".into(),
-            "files".into(),
-            "list".into(),
-        ];
-        let filtered = filter_args_for_subcommand(&args, "drive");
-        assert_eq!(filtered, vec!["gwsr", "files", "list"]);
+    fn os(args: &[&str]) -> Vec<OsString> {
+        args.iter().map(OsString::from).collect()
     }
 
     #[test]
-    fn test_filter_args_no_special_flags() {
-        let args: Vec<String> = vec![
-            "gwsr".into(),
-            "drive".into(),
-            "files".into(),
-            "list".into(),
-            "--format".into(),
-            "table".into(),
-        ];
-        let filtered = filter_args_for_subcommand(&args, "drive");
-        assert_eq!(filtered, vec!["gwsr", "files", "list", "--format", "table"]);
+    fn service_argv_moves_leading_globals_after_the_service() {
+        let args = os(&["gwsr", "--format", "table", "drive", "files", "list"]);
+        let service_args = os(&["drive", "files", "list"]);
+        assert_eq!(
+            service_argv(&args, &service_args, "drive"),
+            os(&["gwsr drive", "--format", "table", "files", "list"])
+        );
+        // A flag value equal to the service name is not mistaken for it.
+        let args = os(&["gwsr", "--jq", "drive", "drive", "files"]);
+        let service_args = os(&["drive", "files"]);
+        assert_eq!(
+            service_argv(&args, &service_args, "drive"),
+            os(&["gwsr drive", "--jq", "drive", "files"])
+        );
+    }
+
+    #[test]
+    fn parse_service_and_version_variants() {
+        assert_eq!(
+            parse_service_and_version("drive", None).unwrap(),
+            ("drive".into(), "drive".into(), "v3".into())
+        );
+        assert_eq!(parse_service_and_version("drive:v2", None).unwrap().2, "v2");
+        // --api-version wins over the suffix.
+        assert_eq!(
+            parse_service_and_version("drive:v2", Some("v1")).unwrap().2,
+            "v1"
+        );
+        assert!(parse_service_and_version("nope", None).is_err());
+    }
+
+    #[test]
+    fn broken_pipe_panic_detection() {
+        assert!(is_stdout_broken_pipe_panic(
+            "failed printing to stdout: Broken pipe (os error 32)"
+        ));
+        assert!(is_stdout_broken_pipe_panic(
+            "failed printing to stdout: The pipe is being closed. (os error 232)"
+        ));
+        assert!(!is_stdout_broken_pipe_panic(
+            "failed printing to stdout: No space left on device (os error 28)"
+        ));
+        assert!(!is_stdout_broken_pipe_panic("index out of bounds"));
+    }
+
+    #[test]
+    fn help_rewrites_to_help_flag() {
+        // `gwsr help schema` prints schema help and yields no command.
+        assert!(
+            parse_top_level(&os(&["gwsr", "help", "schema"]))
+                .unwrap()
+                .is_none()
+        );
+        // `gwsr help drive files` becomes `gwsr drive files --help`.
+        let cli = parse_top_level(&os(&["gwsr", "help", "drive", "files"]))
+            .unwrap()
+            .unwrap();
+        match cli.command {
+            Some(TopCommand::Service(args)) => {
+                assert_eq!(args, os(&["drive", "files", "--help"]));
+            }
+            other => panic!("unexpected {other:?}"),
+        }
     }
 }

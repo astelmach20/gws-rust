@@ -55,13 +55,19 @@ fn cache_root(
     }
 }
 
+/// Root of every gwsr cache: `GWSR_CACHE_DIR`, or the platform cache
+/// directory joined with `gwsr`.
+pub fn gwsr_cache_root() -> Result<PathBuf, GwsError> {
+    cache_root(std::env::var_os(CACHE_DIR_ENV), dirs::cache_dir())
+}
+
 /// The CLI's Discovery loader: cache under `GWSR_CACHE_DIR` (or the platform
 /// cache dir) and endpoint trust extended by `GWSR_API_BASE_URL`.
 ///
 /// Use `loader()?.clear_cache()` for `gwsr cache clear` and
 /// `loader()?.load_cached(api, version)` for offline (completion) lookups.
 pub fn loader() -> Result<DiscoveryLoader, GwsError> {
-    let root = cache_root(std::env::var_os(CACHE_DIR_ENV), dirs::cache_dir())?;
+    let root = gwsr_cache_root()?;
     Ok(DiscoveryLoader::new()
         .with_cache(DiscoveryCache::new(root))
         .with_api_base_override(crate::validate::api_base_override()?))
@@ -75,7 +81,7 @@ pub async fn fetch_discovery_document(
 ) -> Result<RestDescription, GwsError> {
     let loaded = loader()?.load(service, version).await?;
     for notice in &loaded.notices {
-        eprintln!("warning: {notice}");
+        tracing::warn!("{notice}");
     }
     Ok(loaded.doc)
 }

@@ -85,12 +85,36 @@ fn present(m: &clap::ArgMatches, id: &str) -> bool {
     m.try_contains_id(id).unwrap_or(false)
 }
 
-/// Pagination flags. `--page-limit` defaults to 0 (unlimited).
-pub fn parse_pagination_config(m: &clap::ArgMatches) -> Result<PaginationConfig, GwsError> {
+/// Defaults for request flags taken from the environment or `config.toml`
+/// (already resolved as env > config by the CLI's settings). A flag given on
+/// the command line always wins.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ConfigDefaults {
+    /// `page_limit` / `GWSR_PAGE_LIMIT`.
+    pub page_limit: Option<u32>,
+    /// `page_delay_ms` / `GWSR_PAGE_DELAY_MS`.
+    pub page_delay_ms: Option<u64>,
+}
+
+/// Default delay between pages when neither flag nor config sets one.
+const DEFAULT_PAGE_DELAY_MS: u64 = 100;
+
+/// Pagination flags: flag > env/config > default. `--page-limit` defaults
+/// to 0 (unlimited).
+pub fn parse_pagination_config(
+    m: &clap::ArgMatches,
+    defaults: &ConfigDefaults,
+) -> Result<PaginationConfig, GwsError> {
     Ok(PaginationConfig {
         page_all: get_flag(m, "page-all")? || present(m, "page-items"),
-        page_limit: get::<u32>(m, "page-limit")?.copied().unwrap_or(0),
-        page_delay_ms: get::<u64>(m, "page-delay")?.copied().unwrap_or(100),
+        page_limit: get::<u32>(m, "page-limit")?
+            .copied()
+            .or(defaults.page_limit)
+            .unwrap_or(0),
+        page_delay_ms: get::<u64>(m, "page-delay")?
+            .copied()
+            .or(defaults.page_delay_ms)
+            .unwrap_or(DEFAULT_PAGE_DELAY_MS),
     })
 }
 
@@ -165,6 +189,7 @@ pub async fn run_from_matches(
     m: &clap::ArgMatches,
     sanitize: &SanitizeConfig,
     format: &OutputFormat,
+    defaults: &ConfigDefaults,
 ) -> Result<(), GwsError> {
     let (params_text, body_text) =
         input::read_json_args(get_string(m, "params")?, get_string(m, "json")?).await?;
@@ -218,7 +243,7 @@ pub async fn run_from_matches(
         credentials,
         upload,
         output,
-        pagination: parse_pagination_config(m)?,
+        pagination: parse_pagination_config(m, defaults)?,
         sanitize: sanitize.clone(),
         format: format.clone(),
         capture_output: false,
@@ -258,7 +283,7 @@ mod tests {
     #[test]
     fn pagination_defaults_to_unlimited() {
         let m = cmd().get_matches_from(["t", "--page-all"]);
-        let p = parse_pagination_config(&m).unwrap();
+        let p = parse_pagination_config(&m, &ConfigDefaults::default()).unwrap();
         assert!(p.page_all);
         assert_eq!(p.page_limit, 0);
         assert_eq!(p.page_delay_ms, 100);
@@ -268,15 +293,33 @@ mod tests {
     fn pagination_custom() {
         let m =
             cmd().get_matches_from(["t", "--page-all", "--page-limit", "20", "--page-delay", "5"]);
-        let p = parse_pagination_config(&m).unwrap();
+        let p = parse_pagination_config(&m, &ConfigDefaults::default()).unwrap();
         assert_eq!((p.page_all, p.page_limit, p.page_delay_ms), (true, 20, 5));
+    }
+
+    #[test]
+    fn pagination_flag_beats_config_beats_default() {
+        let config = ConfigDefaults {
+            page_limit: Some(7),
+            page_delay_ms: Some(9),
+        };
+        let m = cmd().get_matches_from(["t", "--page-all"]);
+        let p = parse_pagination_config(&m, &config).unwrap();
+        assert_eq!((p.page_limit, p.page_delay_ms), (7, 9));
+        let m = cmd().get_matches_from(["t", "--page-limit", "2", "--page-delay", "3"]);
+        let p = parse_pagination_config(&m, &config).unwrap();
+        assert_eq!((p.page_limit, p.page_delay_ms), (2, 3));
     }
 
     #[test]
     #[serial_test::serial]
     fn page_items_implies_page_all() {
         let m = cmd().get_matches_from(["t", "--page-items"]);
-        assert!(parse_pagination_config(&m).unwrap().page_all);
+        assert!(
+            parse_pagination_config(&m, &ConfigDefaults::default())
+                .unwrap()
+                .page_all
+        );
         let opts = parse_exec_options(&m).unwrap();
         assert_eq!(opts.page_items, Some(ItemsMode::Auto));
         let m = cmd().get_matches_from(["t", "--page-items=files"]);

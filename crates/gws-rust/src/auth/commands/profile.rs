@@ -109,7 +109,7 @@ mod tests {
         use_profile(base, "work").unwrap();
         let active = profiles::active_profile(base).unwrap();
         assert_eq!(active.name, "work");
-        assert_eq!(active.source, ProfileSource::ActiveProfileFile);
+        assert_eq!(active.source, ProfileSource::ConfigFile);
 
         let r = list_report(base, &active).unwrap();
         assert_eq!(r["active_profile"], "work");
