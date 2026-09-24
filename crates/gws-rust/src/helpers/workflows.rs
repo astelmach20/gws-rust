@@ -241,7 +241,7 @@ async fn get_json(
         .bearer_auth(token)
         .send()
         .await
-        .map_err(|e| GwsError::Other(anyhow::anyhow!("HTTP request failed: {e}")))?;
+        .map_err(|e| GwsError::other(anyhow::anyhow!("HTTP request failed: {e}")))?;
 
     if !resp.status().is_success() {
         let status = resp.status();
@@ -256,7 +256,7 @@ async fn get_json(
 
     resp.json::<Value>()
         .await
-        .map_err(|e| GwsError::Other(anyhow::anyhow!("JSON parse failed: {e}")))
+        .map_err(|e| GwsError::other(anyhow::anyhow!("JSON parse failed: {e}")))
 }
 
 fn format_and_print(value: &Value, matches: &ArgMatches) {
@@ -507,7 +507,7 @@ async fn handle_email_to_task(matches: &ArgMatches) -> Result<(), GwsError> {
         .json(&task_body)
         .send()
         .await
-        .map_err(|e| GwsError::Other(anyhow::anyhow!("Failed to create task: {e}")))?;
+        .map_err(|e| GwsError::other(anyhow::anyhow!("Failed to create task: {e}")))?;
 
     if !resp.status().is_success() {
         let status = resp.status();
@@ -666,7 +666,7 @@ async fn handle_file_announce(matches: &ArgMatches) -> Result<(), GwsError> {
         .json(&chat_body)
         .send()
         .await
-        .map_err(|e| GwsError::Other(anyhow::anyhow!("Chat send failed: {e}")))?;
+        .map_err(|e| GwsError::other(anyhow::anyhow!("Chat send failed: {e}")))?;
 
     if !chat_resp.status().is_success() {
         let status = chat_resp.status();

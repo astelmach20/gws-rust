@@ -53,7 +53,7 @@ fn error_label(err: &GwsError) -> String {
         GwsError::Auth(_) => colorize("error[auth]:", "31"),   // red
         GwsError::Validation(_) => colorize("error[validation]:", "33"), // yellow
         GwsError::Discovery(_) => colorize("error[discovery]:", "31"), // red
-        GwsError::Other(_) => colorize("error:", "31"),        // red
+        _ => colorize("error:", "31"),                         // red
     }
 }
 
@@ -137,7 +137,7 @@ mod tests {
         let disc_err = GwsError::Discovery("missing".to_string());
         assert!(error_label(&disc_err).contains("error[discovery]:"));
 
-        let other_err = GwsError::Other(anyhow::anyhow!("oops"));
+        let other_err = GwsError::other(anyhow::anyhow!("oops"));
         assert!(error_label(&other_err).contains("error:"));
     }
 

@@ -305,14 +305,14 @@ fn parse_original_message(msg: &Value) -> Result<OriginalMessage, GwsError> {
         .unwrap_or_default();
 
     if parsed_headers.from.is_empty() {
-        return Err(GwsError::Other(anyhow::anyhow!(
+        return Err(GwsError::other(anyhow::anyhow!(
             "Message is missing From header"
         )));
     }
 
     let message_id = strip_angle_brackets(&parsed_headers.message_id);
     if message_id.is_empty() {
-        return Err(GwsError::Other(anyhow::anyhow!(
+        return Err(GwsError::other(anyhow::anyhow!(
             "Message is missing Message-ID header"
         )));
     }
@@ -373,7 +373,7 @@ pub(super) async fn fetch_message_metadata(
             .query(&[("format", "full")])
     })
     .await
-    .map_err(|e| GwsError::Other(anyhow::anyhow!("Failed to fetch message: {e}")))?;
+    .map_err(|e| GwsError::other(anyhow::anyhow!("Failed to fetch message: {e}")))?;
 
     if !resp.status().is_success() {
         let status = resp.status().as_u16();
@@ -391,7 +391,7 @@ pub(super) async fn fetch_message_metadata(
     let msg: Value = resp
         .json()
         .await
-        .map_err(|e| GwsError::Other(anyhow::anyhow!("Failed to parse message: {e}")))?;
+        .map_err(|e| GwsError::other(anyhow::anyhow!("Failed to parse message: {e}")))?;
 
     parse_original_message(&msg)
 }
@@ -450,7 +450,7 @@ async fn fetch_send_as_identities(
             .bearer_auth(token)
     })
     .await
-    .map_err(|e| GwsError::Other(anyhow::anyhow!("Failed to fetch sendAs settings: {e}")))?;
+    .map_err(|e| GwsError::other(anyhow::anyhow!("Failed to fetch sendAs settings: {e}")))?;
 
     if !resp.status().is_success() {
         let status = resp.status().as_u16();
@@ -468,7 +468,7 @@ async fn fetch_send_as_identities(
     let body: Value = resp
         .json()
         .await
-        .map_err(|e| GwsError::Other(anyhow::anyhow!("Failed to parse sendAs response: {e}")))?;
+        .map_err(|e| GwsError::other(anyhow::anyhow!("Failed to parse sendAs response: {e}")))?;
 
     Ok(parse_send_as_response(&body))
 }
@@ -644,7 +644,7 @@ async fn fetch_profile_display_name(
             .bearer_auth(token)
     })
     .await
-    .map_err(|e| GwsError::Other(anyhow::anyhow!("People API request failed: {e}")))?;
+    .map_err(|e| GwsError::other(anyhow::anyhow!("People API request failed: {e}")))?;
 
     if !resp.status().is_success() {
         let status = resp.status().as_u16();
@@ -656,7 +656,7 @@ async fn fetch_profile_display_name(
     }
 
     let body: Value = resp.json().await.map_err(|e| {
-        GwsError::Other(anyhow::anyhow!("Failed to parse People API response: {e}"))
+        GwsError::other(anyhow::anyhow!("Failed to parse People API response: {e}"))
     })?;
 
     Ok(parse_profile_display_name(&body))
@@ -691,7 +691,7 @@ async fn fetch_attachment_data(
 
     let resp = crate::client::send_with_retry(|| client.get(&url).bearer_auth(token))
         .await
-        .map_err(|e| GwsError::Other(anyhow::anyhow!("Failed to fetch attachment: {e}")))?;
+        .map_err(|e| GwsError::other(anyhow::anyhow!("Failed to fetch attachment: {e}")))?;
 
     if !resp.status().is_success() {
         let status = resp.status().as_u16();
@@ -709,17 +709,17 @@ async fn fetch_attachment_data(
     let body: Value = resp
         .json()
         .await
-        .map_err(|e| GwsError::Other(anyhow::anyhow!("Failed to parse attachment JSON: {e}")))?;
+        .map_err(|e| GwsError::other(anyhow::anyhow!("Failed to parse attachment JSON: {e}")))?;
 
     let data_str = body.get("data").and_then(|v| v.as_str()).ok_or_else(|| {
-        GwsError::Other(anyhow::anyhow!(
+        GwsError::other(anyhow::anyhow!(
             "Attachment response missing 'data' field for {attachment_id}"
         ))
     })?;
 
     URL_SAFE
         .decode(data_str)
-        .map_err(|e| GwsError::Other(anyhow::anyhow!("Failed to decode attachment data: {e}")))
+        .map_err(|e| GwsError::other(anyhow::anyhow!("Failed to decode attachment data: {e}")))
 }
 
 /// Fetch binary data for selected original parts, converting them to `Attachment`s.
@@ -1240,7 +1240,7 @@ pub(super) fn finalize_message(
     };
 
     mb.write_to_string()
-        .map_err(|e| GwsError::Other(anyhow::anyhow!("Failed to serialize email: {e}")))
+        .map_err(|e| GwsError::other(anyhow::anyhow!("Failed to serialize email: {e}")))
 }
 
 /// Parse an optional clap argument, trimming whitespace and treating

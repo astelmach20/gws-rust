@@ -43,7 +43,7 @@ fn build_client_inner() -> Result<reqwest::Client, String> {
 }
 
 pub fn build_client() -> Result<reqwest::Client, crate::error::GwsError> {
-    build_client_inner().map_err(|message| crate::error::GwsError::Other(anyhow::anyhow!(message)))
+    build_client_inner().map_err(crate::error::GwsError::other)
 }
 
 /// Returns a shared reqwest client clone backed by a single global connection pool.
@@ -55,9 +55,7 @@ pub fn shared_client() -> Result<reqwest::Client, crate::error::GwsError> {
 
     match CLIENT.get_or_init(build_client_inner) {
         Ok(client) => Ok(client.clone()),
-        Err(message) => Err(crate::error::GwsError::Other(anyhow::anyhow!(
-            message.clone()
-        ))),
+        Err(message) => Err(crate::error::GwsError::other(message.clone())),
     }
 }
 

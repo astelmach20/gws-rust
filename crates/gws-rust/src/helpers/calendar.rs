@@ -265,7 +265,7 @@ async fn handle_agenda(matches: &ArgMatches) -> Result<(), GwsError> {
         .bearer_auth(&token)
         .send()
         .await
-        .map_err(|e| GwsError::Other(anyhow::anyhow!("Failed to list calendars: {e}")))?;
+        .map_err(|e| GwsError::other(anyhow::anyhow!("Failed to list calendars: {e}")))?;
 
     if !list_resp.status().is_success() {
         let err = list_resp.text().await.unwrap_or_default();
@@ -280,7 +280,7 @@ async fn handle_agenda(matches: &ArgMatches) -> Result<(), GwsError> {
     let list_json: Value = list_resp
         .json()
         .await
-        .map_err(|e| GwsError::Other(anyhow::anyhow!("Failed to parse calendar list: {e}")))?;
+        .map_err(|e| GwsError::other(anyhow::anyhow!("Failed to parse calendar list: {e}")))?;
 
     let calendars = list_json
         .get("items")
@@ -497,7 +497,7 @@ fn build_insert_request(
         };
 
         let seed_data = serde_json::to_vec(&seed_payload).map_err(|e| {
-            GwsError::Other(anyhow::anyhow!(
+            GwsError::other(anyhow::anyhow!(
                 "Failed to serialize seed payload for idempotency key: {e}"
             ))
         })?;

@@ -56,7 +56,7 @@ pub async fn handle_triage(matches: &ArgMatches) -> Result<(), GwsError> {
         .bearer_auth(&token)
         .send()
         .await
-        .map_err(|e| GwsError::Other(anyhow::anyhow!("Failed to list messages: {e}")))?;
+        .map_err(|e| GwsError::other(anyhow::anyhow!("Failed to list messages: {e}")))?;
 
     if !list_resp.status().is_success() {
         let err = list_resp.text().await.unwrap_or_default();
@@ -71,7 +71,7 @@ pub async fn handle_triage(matches: &ArgMatches) -> Result<(), GwsError> {
     let list_json: Value = list_resp
         .json()
         .await
-        .map_err(|e| GwsError::Other(anyhow::anyhow!("Failed to parse list response: {e}")))?;
+        .map_err(|e| GwsError::other(anyhow::anyhow!("Failed to parse list response: {e}")))?;
 
     let messages = match list_json.get("messages").and_then(|m| m.as_array()) {
         Some(m) => m,

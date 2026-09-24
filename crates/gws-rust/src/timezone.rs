@@ -82,7 +82,7 @@ async fn fetch_account_timezone(client: &reqwest::Client, token: &str) -> Result
         .bearer_auth(token)
         .send()
         .await
-        .map_err(|e| GwsError::Other(anyhow::anyhow!("Failed to fetch account timezone: {e}")))?;
+        .map_err(|e| GwsError::other(anyhow::anyhow!("Failed to fetch account timezone: {e}")))?;
 
     if !resp.status().is_success() {
         let status = resp.status();
@@ -98,20 +98,20 @@ async fn fetch_account_timezone(client: &reqwest::Client, token: &str) -> Result
     let json: serde_json::Value = resp
         .json()
         .await
-        .map_err(|e| GwsError::Other(anyhow::anyhow!("Failed to parse timezone response: {e}")))?;
+        .map_err(|e| GwsError::other(anyhow::anyhow!("Failed to parse timezone response: {e}")))?;
 
     let tz_name = json
         .get("value")
         .and_then(|v| v.as_str())
         .filter(|s| !s.is_empty())
         .ok_or_else(|| {
-            GwsError::Other(anyhow::anyhow!(
+            GwsError::other(anyhow::anyhow!(
                 "Timezone setting missing or empty 'value' field"
             ))
         })?;
 
     let tz: Tz = tz_name.parse().map_err(|_| {
-        GwsError::Other(anyhow::anyhow!(
+        GwsError::other(anyhow::anyhow!(
             "Google returned unrecognized timezone: {tz_name}"
         ))
     })?;
@@ -195,7 +195,7 @@ pub fn start_of_today(tz: Tz) -> Result<chrono::DateTime<Tz>, crate::error::GwsE
     tz.from_local_datetime(&today_start)
         .earliest()
         .ok_or_else(|| {
-            crate::error::GwsError::Other(anyhow::anyhow!(
+            crate::error::GwsError::other(anyhow::anyhow!(
                 "Could not determine start of day in timezone '{}'",
                 tz
             ))
