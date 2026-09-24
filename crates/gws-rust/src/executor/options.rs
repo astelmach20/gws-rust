@@ -17,7 +17,6 @@
 //!
 //! The flag definitions live in `commands.rs`; the ids used here must match.
 
-use std::sync::Arc;
 use std::time::Duration;
 
 use serde_json::Value;
@@ -157,29 +156,7 @@ pub fn parse_exec_options(m: &clap::ArgMatches) -> Result<ExecOptions, GwsError>
 async fn resolve_credentials(method: &RestMethod) -> Result<Credentials, GwsError> {
     let scopes = crate::auth::scopes_for_method(&method.scopes, &method.http_method)
         .map_err(|e| GwsError::Auth(format!("{e:#}")))?;
-    credentials_for_scopes(&scopes).await
-}
-
-/// Obtain a refreshable token for `scopes`. Only a complete absence of
-/// credentials ([`crate::auth::AuthError::NoCredentials`]) falls back to an
-/// unauthenticated request; every other failure is reported.
-pub(crate) async fn credentials_for_scopes(scopes: &[String]) -> Result<Credentials, GwsError> {
-    let scopes: Vec<&str> = scopes.iter().map(String::as_str).collect();
-    match crate::auth::get_token(&scopes).await {
-        Ok(token) => Ok(Credentials::Refreshable {
-            token,
-            provider: Arc::new(crate::auth::token_provider(&scopes)),
-        }),
-        Err(e)
-            if matches!(
-                e.downcast_ref::<crate::auth::AuthError>(),
-                Some(crate::auth::AuthError::NoCredentials)
-            ) =>
-        {
-            Ok(Credentials::None)
-        }
-        Err(e) => Err(GwsError::Auth(format!("Authentication failed: {e:#}"))),
-    }
+    Credentials::for_scopes(&scopes).await
 }
 
 /// Run a generated method command from its clap matches.
@@ -245,7 +222,7 @@ pub async fn run_from_matches(
         output,
         pagination: parse_pagination_config(m, defaults)?,
         sanitize: sanitize.clone(),
-        format: format.clone(),
+        format: *format,
         capture_output: false,
         options,
     })

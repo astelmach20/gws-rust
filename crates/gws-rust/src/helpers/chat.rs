@@ -15,8 +15,8 @@
 //! Chat helpers: `+send`, `+spaces`, `+read`.
 
 use super::Helper;
-use super::confirm::{self, Impact, with_yes};
 use super::http::{self, Api, ApiRequest, optional, required};
+use crate::confirm::{self, Impact, with_yes};
 use crate::error::GwsError;
 use clap::{Arg, ArgMatches, Command};
 use serde_json::{Value, json};
@@ -162,7 +162,7 @@ TIPS:
                     let thread = optional(m, "thread")
                         .map(|t| thread_name(t, &space))
                         .transpose()?;
-                    confirm::gate(m, Impact::Outbound, &format!("post a message to {space}"))?;
+                    confirm::confirm(m, Impact::Outbound, &format!("post a message to {space}"))?;
                     let api = Api::new(doc, &[SCOPE_MESSAGES_CREATE], dry, sanitize).await?;
                     let v = send(&api, &space, required(m, "text")?, thread.as_deref()).await?;
                     (api, v)
@@ -291,7 +291,7 @@ mod tests {
             .unwrap();
         let plan = api.planned();
         assert_eq!(
-            plan[0]["query"]["messageReplyOption"],
+            plan[0]["query_params"]["messageReplyOption"],
             "REPLY_MESSAGE_FALLBACK_TO_NEW_THREAD"
         );
         assert_eq!(plan[0]["body"]["thread"]["name"], "spaces/A/threads/T");
@@ -319,7 +319,7 @@ mod tests {
         let api = dry_api("");
         spaces(&api, Some("group-chat")).await.unwrap();
         assert_eq!(
-            api.planned()[0]["query"]["filter"],
+            api.planned()[0]["query_params"]["filter"],
             "spaceType = \"GROUP_CHAT\""
         );
     }

@@ -125,6 +125,9 @@ mod tests {
     async fn list_plans_request() {
         let api = dry_api("");
         list(&api, "trashed = false", Some(5)).await.unwrap();
-        assert_eq!(api.planned()[0]["query"]["filter"], "trashed = false");
+        assert_eq!(
+            api.planned()[0]["query_params"]["filter"],
+            "trashed = false"
+        );
     }
 }

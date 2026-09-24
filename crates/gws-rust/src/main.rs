@@ -27,6 +27,7 @@ mod client;
 mod commands;
 mod completions;
 mod config;
+mod confirm;
 mod discovery;
 mod error;
 mod executor;
@@ -44,6 +45,7 @@ mod service;
 mod services;
 mod text;
 mod timezone;
+mod transport;
 pub(crate) mod validate;
 
 use std::ffi::OsString;

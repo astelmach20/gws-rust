@@ -20,7 +20,6 @@ pub mod admin;
 pub mod calendar;
 pub mod chat;
 pub mod classroom;
-pub(crate) mod confirm;
 pub mod docs;
 pub mod drive;
 pub mod events;
@@ -33,7 +32,6 @@ pub mod modelarmor;
 pub mod people;
 #[cfg(test)]
 mod registry_tests;
-pub(crate) mod rest;
 pub mod script;
 pub mod sheets;
 pub mod slides;

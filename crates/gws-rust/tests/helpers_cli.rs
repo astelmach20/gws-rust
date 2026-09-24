@@ -102,7 +102,10 @@ fn drive_export_dry_run_prints_json_plan() {
         v["requests"][0]["url"],
         "https://www.googleapis.com/drive/v3/files/DOC-1_a/export"
     );
-    assert_eq!(v["requests"][0]["query"]["mimeType"], "application/pdf");
+    assert_eq!(
+        v["requests"][0]["query_params"]["mimeType"],
+        "application/pdf"
+    );
 }
 
 #[test]
@@ -169,19 +172,21 @@ fn sheets_append_dry_run_is_json() {
 fn destructive_helper_without_yes_fails_before_any_request() {
     // No credentials exist in the isolated config dir, so reaching the auth
     // step would produce an auth error (exit 2). The confirmation gate must
-    // refuse first with a validation error (exit 3) naming --yes.
+    // refuse first with "confirmation required" (exit 7) naming --yes, and
+    // report it as one JSON error on stderr with stdout empty.
     let dir = setup();
     let out = gwsr(dir.path())
         .args(["calendar", "+delete", "--event-id", "E1"])
         .output()
         .unwrap();
-    assert_eq!(out.status.code(), Some(3));
-    let all = format!(
-        "{}{}",
-        String::from_utf8_lossy(&out.stdout),
-        String::from_utf8_lossy(&out.stderr)
+    assert_eq!(out.status.code(), Some(7));
+    assert!(out.stdout.is_empty());
+    let err: serde_json::Value = serde_json::from_slice(&out.stderr).unwrap();
+    assert_eq!(err["error"]["reason"], "confirmationRequired");
+    assert!(
+        err["error"]["message"].as_str().unwrap().contains("--yes"),
+        "{err}"
     );
-    assert!(all.contains("--yes"), "{all}");
 }
 
 #[test]
@@ -203,7 +208,7 @@ fn outbound_helper_is_gated_only_under_policy() {
         ])
         .output()
         .unwrap();
-    assert_eq!(out.status.code(), Some(3));
+    assert_eq!(out.status.code(), Some(7));
 
     let out = gwsr(dir.path())
         .env("GWSR_REQUIRE_CONFIRM", "maybe")

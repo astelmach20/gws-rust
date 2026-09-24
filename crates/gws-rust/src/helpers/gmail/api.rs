@@ -18,7 +18,8 @@
 //! injectable so the helpers can be exercised against a mock server.
 
 use super::prelude::*;
-use crate::helpers::rest::{RestClient, Retry, expect_json};
+use crate::transport::Transport;
+use gws_rust_core::client::Idempotency;
 use reqwest::Method;
 
 pub(super) const GMAIL_API_BASE: &str = "https://gmail.googleapis.com/gmail/v1";
@@ -27,7 +28,7 @@ pub(super) const GMAIL_UPLOAD_BASE: &str = "https://gmail.googleapis.com/upload/
 /// Gmail API client bound to the authenticated user (`users/me`).
 #[derive(Clone)]
 pub(super) struct GmailApi {
-    rest: RestClient,
+    rest: Transport,
     base: String,
     upload_base: String,
 }
@@ -40,11 +41,11 @@ pub(super) struct Label {
 }
 
 impl GmailApi {
-    pub(super) fn new(rest: RestClient) -> Self {
+    pub(super) fn new(rest: Transport) -> Self {
         Self::with_bases(rest, GMAIL_API_BASE, GMAIL_UPLOAD_BASE)
     }
 
-    pub(super) fn with_bases(rest: RestClient, base: &str, upload_base: &str) -> Self {
+    pub(super) fn with_bases(rest: Transport, base: &str, upload_base: &str) -> Self {
         Self {
             rest,
             base: base.trim_end_matches('/').to_string(),
@@ -84,7 +85,7 @@ impl GmailApi {
                 .map(|h| ("metadataHeaders", (*h).to_string())),
         );
         self.rest
-            .get(
+            .get_json(
                 &self.message_url(id),
                 &query,
                 &format!("Failed to fetch message {id}"),
@@ -117,7 +118,7 @@ impl GmailApi {
             params.push(("includeSpamTrash", "true".to_string()));
         }
         self.rest
-            .get(&self.url("messages"), &params, "Failed to list messages")
+            .get_json(&self.url("messages"), &params, "Failed to list messages")
             .await
     }
 
@@ -134,24 +135,25 @@ impl GmailApi {
         );
         let body = self
             .rest
-            .get(
+            .get_json(
                 &url,
                 &[],
                 &format!("Failed to fetch attachment {attachment_id} from message {message_id}"),
             )
             .await?;
         let data = body.get("data").and_then(Value::as_str).ok_or_else(|| {
-            other_error(format!(
+            GwsError::other(format!(
                 "Attachment response missing 'data' field for {attachment_id}"
             ))
         })?;
-        decode_base64url(data)
-            .map_err(|e| other_error(format!("Failed to decode attachment {attachment_id}: {e}")))
+        decode_base64url(data).map_err(|e| {
+            GwsError::other(format!("Failed to decode attachment {attachment_id}: {e}"))
+        })
     }
 
     pub(super) async fn send_as_list(&self) -> Result<Value, GwsError> {
         self.rest
-            .get(
+            .get_json(
                 &self.url("settings/sendAs"),
                 &[],
                 "Failed to fetch sendAs settings",
@@ -161,7 +163,7 @@ impl GmailApi {
 
     pub(super) async fn profile(&self) -> Result<Value, GwsError> {
         self.rest
-            .get(&self.url("profile"), &[], "Failed to fetch Gmail profile")
+            .get_json(&self.url("profile"), &[], "Failed to fetch Gmail profile")
             .await
     }
 
@@ -179,7 +181,7 @@ impl GmailApi {
                 &url,
                 &[],
                 Some(&body),
-                Retry::Idempotent,
+                Idempotency::Idempotent,
                 "Failed to modify message labels",
             )
             .await
@@ -221,7 +223,7 @@ impl GmailApi {
                 &self.modify_thread_url(id),
                 &[],
                 Some(&body),
-                Retry::Idempotent,
+                Idempotency::Idempotent,
                 &format!("Failed to modify thread {id}"),
             )
             .await
@@ -241,7 +243,7 @@ impl GmailApi {
                 &self.trash_url(kind, id),
                 &[],
                 None,
-                Retry::Idempotent,
+                Idempotency::Idempotent,
                 &format!("Failed to trash {} {id}", kind.noun()),
             )
             .await
@@ -250,14 +252,14 @@ impl GmailApi {
     pub(super) async fn list_labels(&self) -> Result<Vec<Label>, GwsError> {
         let body = self
             .rest
-            .get(&self.url("labels"), &[], "Failed to list labels")
+            .get_json(&self.url("labels"), &[], "Failed to list labels")
             .await?;
         parse_labels(&body)
     }
 
     pub(super) async fn list_filters(&self) -> Result<Value, GwsError> {
         self.rest
-            .get(&self.url("settings/filters"), &[], "Failed to list filters")
+            .get_json(&self.url("settings/filters"), &[], "Failed to list filters")
             .await
     }
 
@@ -268,7 +270,7 @@ impl GmailApi {
                 &self.url("settings/filters"),
                 &[],
                 Some(filter),
-                Retry::Never,
+                Idempotency::NonIdempotent,
                 "Failed to create filter",
             )
             .await
@@ -288,7 +290,7 @@ impl GmailApi {
                 &self.filter_url(id),
                 &[],
                 None,
-                Retry::Idempotent,
+                Idempotency::Idempotent,
                 &format!("Failed to delete filter {id}"),
             )
             .await
@@ -308,13 +310,13 @@ impl GmailApi {
             query.push(("pageToken", t.to_string()));
         }
         self.rest
-            .get(&self.url("history"), &query, "Failed to list history")
+            .get_json(&self.url("history"), &query, "Failed to list history")
             .await
     }
 
     pub(super) async fn get_thread_minimal(&self, id: &str) -> Result<Value, GwsError> {
         self.rest
-            .get(
+            .get_json(
                 &self.thread_url(id),
                 &[("format", "minimal".to_string())],
                 &format!("Failed to fetch thread {id}"),
@@ -329,7 +331,7 @@ impl GmailApi {
                 &self.url("watch"),
                 &[],
                 Some(body),
-                Retry::Idempotent,
+                Idempotency::Idempotent,
                 "gmail.users.watch failed",
             )
             .await
@@ -361,11 +363,12 @@ impl GmailApi {
         };
         let resp = self
             .rest
-            .send(
+            .send_ok(
                 Method::POST,
                 &self.upload_url(draft),
-                Retry::Never,
+                Idempotency::NonIdempotent,
                 context,
+                None,
                 |rb| {
                     rb.query(&[("uploadType", "multipart")])
                         .header(
@@ -376,7 +379,7 @@ impl GmailApi {
                 },
             )
             .await?;
-        expect_json(resp, context).await
+        crate::transport::json_body(resp, self.rest.retry.response_timeout, context).await
     }
 }
 
@@ -403,7 +406,7 @@ pub(super) fn build_related_upload(
     raw: &[u8],
 ) -> Result<Vec<u8>, GwsError> {
     let meta = serde_json::to_string(metadata)
-        .map_err(|e| other_error(format!("Failed to serialize upload metadata: {e}")))?;
+        .map_err(|e| GwsError::other(format!("Failed to serialize upload metadata: {e}")))?;
     let mut body = Vec::with_capacity(raw.len() + meta.len() + 256);
     body.extend_from_slice(
         format!(
@@ -424,7 +427,7 @@ pub(super) fn parse_labels(body: &Value) -> Result<Vec<Label>, GwsError> {
     };
     let labels = labels
         .as_array()
-        .ok_or_else(|| other_error("labels.list response: 'labels' is not an array"))?;
+        .ok_or_else(|| GwsError::other("labels.list response: 'labels' is not an array"))?;
     labels
         .iter()
         .map(|l| {
@@ -435,7 +438,7 @@ pub(super) fn parse_labels(body: &Value) -> Result<Vec<Label>, GwsError> {
                     id: id.to_string(),
                     name: name.to_string(),
                 }),
-                _ => Err(other_error(format!(
+                _ => Err(GwsError::other(format!(
                     "labels.list response contains a label without id/name: {l}"
                 ))),
             }
@@ -474,11 +477,7 @@ pub(super) fn resolve_label_ids(
 
 /// Obtain an authenticated Gmail client for `scopes`.
 pub(super) async fn authenticated(scopes: &[&str]) -> Result<GmailApi, GwsError> {
-    let token = auth::get_token(scopes)
-        .await
-        .map_err(|e| GwsError::Auth(format!("Gmail auth failed: {e}")))?;
-    let http = crate::client::shared_client()?;
-    Ok(GmailApi::new(RestClient::new(http, token)))
+    Ok(GmailApi::new(Transport::for_scopes(scopes).await?))
 }
 
 #[cfg(test)]
@@ -526,17 +525,14 @@ mod tests {
 
     #[test]
     fn modify_request_uses_batch_for_many() {
-        let api = GmailApi::with_bases(
-            RestClient::new(reqwest::Client::new(), "t"),
-            "http://h",
-            "http://u",
-        );
+        let h = "http://127.0.0.1:9";
+        let api = GmailApi::with_bases(Transport::for_test(h), h, "http://127.0.0.1:9/u");
         let (url, body) = api.modify_messages_request(&["a".into()], &["L".into()], &[]);
-        assert_eq!(url, "http://h/users/me/messages/a/modify");
+        assert_eq!(url, "http://127.0.0.1:9/users/me/messages/a/modify");
         assert_eq!(body["addLabelIds"][0], "L");
         let (url, body) =
             api.modify_messages_request(&["a".into(), "b".into()], &[], &["INBOX".into()]);
-        assert_eq!(url, "http://h/users/me/messages/batchModify");
+        assert_eq!(url, "http://127.0.0.1:9/users/me/messages/batchModify");
         assert_eq!(body["ids"][1], "b");
     }
 

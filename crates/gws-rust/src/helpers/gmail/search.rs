@@ -76,14 +76,13 @@ pub(super) async fn search(
             result_size_estimate = page.get("resultSizeEstimate").and_then(Value::as_u64);
         }
         if let Some(messages) = page.get("messages") {
-            let messages = messages
-                .as_array()
-                .ok_or_else(|| other_error("messages.list response: 'messages' is not an array"))?;
+            let messages = messages.as_array().ok_or_else(|| {
+                GwsError::other("messages.list response: 'messages' is not an array")
+            })?;
             for m in messages {
-                let id = m
-                    .get("id")
-                    .and_then(Value::as_str)
-                    .ok_or_else(|| other_error(format!("messages.list entry without id: {m}")))?;
+                let id = m.get("id").and_then(Value::as_str).ok_or_else(|| {
+                    GwsError::other(format!("messages.list entry without id: {m}"))
+                })?;
                 ids.push(id.to_string());
             }
         }
@@ -154,7 +153,7 @@ fn parse_search_args(matches: &ArgMatches) -> Result<SearchParams, GwsError> {
 }
 
 /// Dry-run description of the first list request.
-pub(super) fn dry_run_list(params: &SearchParams) -> Result<(), GwsError> {
+pub(super) fn dry_run_list(matches: &ArgMatches, params: &SearchParams) -> Result<(), GwsError> {
     let mut query: Vec<(&str, String)> =
         vec![("maxResults", params.max.min(MAX_PAGE_SIZE).to_string())];
     if let Some(q) = &params.query {
@@ -164,9 +163,12 @@ pub(super) fn dry_run_list(params: &SearchParams) -> Result<(), GwsError> {
         query.push(("pageToken", t.clone()));
     }
     let url = format!("{}/users/me/messages", super::api::GMAIL_API_BASE);
-    crate::helpers::rest::print_dry_run(vec![crate::helpers::rest::dry_run_request(
-        "GET", &url, &query, None,
-    )])
+    crate::helpers::http::print_dry_run(
+        matches,
+        vec![crate::helpers::http::dry_run_request(
+            "GET", &url, &query, None,
+        )],
+    )
 }
 
 /// Build the `+search` output document.
@@ -188,10 +190,9 @@ pub(super) async fn handle_search(
     sanitize_config: &SanitizeConfig,
 ) -> Result<(), GwsError> {
     let params = parse_search_args(matches)?;
-    let format =
-        crate::helpers::rest::output_format(matches, crate::formatter::OutputFormat::Json)?;
-    if crate::helpers::rest::dry_run(matches)? {
-        return dry_run_list(&params);
+    let format = crate::helpers::http::output_format(matches);
+    if crate::helpers::http::dry_run(matches) {
+        return dry_run_list(matches, &params);
     }
     let api = super::api::authenticated(&[GMAIL_READONLY_SCOPE]).await?;
     let results = search(&api, &params).await?;

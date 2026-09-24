@@ -21,10 +21,10 @@
 //! any subscription could not be renewed.
 
 use super::{WORKSPACE_EVENTS_API_BASE, parse_event_types, scopes_for_event_types};
-use crate::auth;
 use crate::error::GwsError;
-use crate::helpers::rest::{RestClient, Retry, other_error};
+use crate::transport::Transport;
 use clap::ArgMatches;
+use gws_rust_core::client::Idempotency;
 use serde_json::{Value, json};
 
 /// Read scopes for every event service the Workspace Events API supports,
@@ -81,7 +81,7 @@ fn parse_renew_args(matches: &ArgMatches) -> Result<RenewConfig, GwsError> {
     }
     let within = matches
         .get_one::<String>("within")
-        .ok_or_else(|| other_error("--within has no value"))?;
+        .ok_or_else(|| GwsError::other("--within has no value"))?;
     Ok(RenewConfig {
         subscription,
         all,
@@ -128,15 +128,14 @@ fn filter_subscriptions_to_renew(
 ) -> Result<Vec<String>, GwsError> {
     let mut result = Vec::new();
     for sub in subs {
-        let name = sub
-            .get("name")
-            .and_then(Value::as_str)
-            .ok_or_else(|| other_error(format!("subscriptions.list entry without name: {sub}")))?;
+        let name = sub.get("name").and_then(Value::as_str).ok_or_else(|| {
+            GwsError::other(format!("subscriptions.list entry without name: {sub}"))
+        })?;
         let Some(expire) = sub.get("expireTime").and_then(Value::as_str) else {
             continue; // no expiry: nothing to renew
         };
         let expire = chrono::DateTime::parse_from_rfc3339(expire)
-            .map_err(|e| other_error(format!("{name}: invalid expireTime '{expire}': {e}")))?
+            .map_err(|e| GwsError::other(format!("{name}: invalid expireTime '{expire}': {e}")))?
             .timestamp();
         let remaining = expire.saturating_sub(now);
         if remaining < i64::try_from(within_secs).unwrap_or(i64::MAX) {
@@ -148,7 +147,7 @@ fn filter_subscriptions_to_renew(
 
 /// Workspace Events client (base URL injectable for tests).
 struct EventsApi {
-    rest: RestClient,
+    rest: Transport,
     base: String,
 }
 
@@ -162,7 +161,7 @@ impl EventsApi {
                     &format!("{url}:reactivate"),
                     &[],
                     Some(&json!({})),
-                    Retry::Idempotent,
+                    Idempotency::Idempotent,
                     &format!("Failed to reactivate {name}"),
                 )
                 .await
@@ -173,7 +172,7 @@ impl EventsApi {
                     &url,
                     &[("updateMask", "ttl".to_string())],
                     Some(&json!({ "ttl": "0s" })),
-                    Retry::Idempotent,
+                    Idempotency::Idempotent,
                     &format!("Failed to renew {name}"),
                 )
                 .await
@@ -191,7 +190,7 @@ impl EventsApi {
             }
             let page = self
                 .rest
-                .get(
+                .get_json(
                     &format!("{}/subscriptions", self.base),
                     &query,
                     "Failed to list subscriptions",
@@ -199,7 +198,7 @@ impl EventsApi {
                 .await?;
             if let Some(subs) = page.get("subscriptions") {
                 let subs = subs.as_array().ok_or_else(|| {
-                    other_error("subscriptions.list: 'subscriptions' is not an array")
+                    GwsError::other("subscriptions.list: 'subscriptions' is not an array")
                 })?;
                 out.extend(subs.iter().cloned());
             }
@@ -232,7 +231,7 @@ async fn run(api: &EventsApi, config: &RenewConfig, now: i64) -> Result<Value, G
     if failed.is_empty() {
         Ok(out)
     } else {
-        Err(other_error(format!(
+        Err(GwsError::other(format!(
             "{} of {} subscription(s) could not be renewed: {out}",
             failed.len(),
             names.len()
@@ -243,7 +242,7 @@ async fn run(api: &EventsApi, config: &RenewConfig, now: i64) -> Result<Value, G
 /// Handles the `+renew` command.
 pub(super) async fn handle_renew(matches: &ArgMatches) -> Result<(), GwsError> {
     let config = parse_renew_args(matches)?;
-    if crate::helpers::rest::dry_run(matches)? {
+    if crate::helpers::http::dry_run(matches) {
         let plan = json!({
             "dry_run": true,
             "action": if config.reactivate { "reactivate" } else { "renew (ttl=0s: maximum lifetime)" },
@@ -251,28 +250,19 @@ pub(super) async fn handle_renew(matches: &ArgMatches) -> Result<(), GwsError> {
             "filter": (!config.event_types.is_empty()).then(|| list_filter(&config.event_types)),
             "withinSeconds": config.all.then_some(config.within_secs),
         });
-        let text = serde_json::to_string_pretty(&plan)
-            .map_err(|e| other_error(format!("Failed to serialize plan: {e}")))?;
-        println!("{text}");
-        return Ok(());
+        return crate::helpers::http::print_value(matches, &plan);
     }
     let scopes = if config.event_types.is_empty() {
         ALL_EVENT_SCOPES.to_vec()
     } else {
         scopes_for_event_types(&config.event_types)?
     };
-    let token = auth::get_token(&scopes)
-        .await
-        .map_err(|e| GwsError::Auth(format!("Failed to get Workspace Events token: {e}")))?;
     let api = EventsApi {
-        rest: RestClient::new(crate::client::shared_client()?, token),
+        rest: Transport::for_scopes(&scopes).await?,
         base: WORKSPACE_EVENTS_API_BASE.to_string(),
     };
     let out = run(&api, &config, chrono::Utc::now().timestamp()).await?;
-    let text = serde_json::to_string_pretty(&out)
-        .map_err(|e| other_error(format!("Failed to serialize result: {e}")))?;
-    println!("{text}");
-    Ok(())
+    crate::helpers::http::print_value(matches, &out)
 }
 
 #[cfg(test)]
@@ -390,7 +380,7 @@ mod tests {
 
     fn api(server: &MockServer) -> EventsApi {
         EventsApi {
-            rest: RestClient::new(reqwest::Client::new(), "t"),
+            rest: Transport::for_test(&server.uri()),
             base: format!("{}/v1", server.uri()),
         }
     }

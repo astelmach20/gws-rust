@@ -18,14 +18,11 @@
 //! Helpers talk to Google REST endpoints directly (URLs derived from the
 //! service's Discovery `rootUrl` + `servicePath`, so endpoint overrides applied
 //! to the Discovery document carry over). Every request goes through
-//! [`Api::execute`], which is the single place that:
-//!
-//! - honours `--dry-run` (requests are recorded and printed, never sent),
-//! - attaches the bearer token,
-//! - delegates retry policy to [`crate::client::send_with_retry`] (the one
-//!   function to switch when the executor retry policy changes),
-//! - converts non-2xx responses into [`GwsError::Api`] with Google's error
-//!   message and reason.
+//! [`Api::execute`], which honours `--dry-run` (requests are recorded and
+//! printed, never sent) and otherwise hands the request to the shared
+//! [`crate::transport::Transport`]: endpoint validation, the bearer token and
+//! its refresh on 401, core retries (non-idempotent requests are sent once),
+//! and Google error mapping all happen there.
 
 use crate::error::GwsError;
 use clap::ArgMatches;
@@ -33,6 +30,10 @@ use serde_json::{Map, Value, json};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+
+use gws_rust_core::client::Idempotency;
+
+use crate::transport::Transport;
 
 /// Build a [`GwsError`] for unexpected internal failures.
 ///
@@ -95,6 +96,7 @@ impl ApiRequest {
             body: Body::None,
         }
     }
+
     pub fn get(url: impl Into<String>) -> Self {
         Self::new(reqwest::Method::GET, url)
     }
@@ -148,7 +150,7 @@ impl ApiRequest {
                 .iter()
                 .map(|(k, v)| (k.clone(), Value::String(v.clone())))
                 .collect();
-            out["query"] = Value::Object(q);
+            out["query_params"] = Value::Object(q);
         }
         match &self.body {
             Body::None => {}
@@ -160,16 +162,13 @@ impl ApiRequest {
         out
     }
 
-    fn builder(&self, client: &reqwest::Client, token: Option<&str>) -> reqwest::RequestBuilder {
-        let mut rb = client.request(self.method.clone(), &self.url);
+    /// Apply query, headers and body to a request builder from the transport.
+    fn apply(&self, mut rb: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
         if !self.query.is_empty() {
             rb = rb.query(&self.query);
         }
         for (k, v) in &self.headers {
             rb = rb.header(k.as_str(), v.as_str());
-        }
-        if let Some(t) = token {
-            rb = rb.bearer_auth(t);
         }
         match &self.body {
             Body::None => {
@@ -247,9 +246,8 @@ impl OutputTarget {
 
 /// Direct REST client for a single helper invocation.
 pub(crate) struct Api {
-    client: reqwest::Client,
-    token: Option<String>,
-    dry_run: bool,
+    /// `None` in dry-run mode: nothing is sent, so no credentials are loaded.
+    transport: Option<Transport>,
     /// Service base URL (`rootUrl + servicePath`), always ending in `/`.
     base: String,
     /// `rootUrl`, always ending in `/`.
@@ -267,73 +265,59 @@ fn with_slash(s: &str) -> String {
 }
 
 impl Api {
-    /// Build a client for `doc`, acquiring a token for `scopes` unless this is
-    /// a dry run (dry runs never need credentials and never send requests).
+    /// Build a client for `doc`, acquiring credentials for `scopes` unless
+    /// this is a dry run (dry runs never need credentials and never send
+    /// requests).
     pub async fn new(
         doc: &crate::discovery::RestDescription,
         scopes: &[&str],
         dry_run: bool,
         sanitize: &crate::helpers::modelarmor::SanitizeConfig,
     ) -> Result<Self, GwsError> {
-        let token = if dry_run {
+        let transport = if dry_run {
             None
         } else {
-            Some(crate::auth::get_token(scopes).await.map_err(|e| {
-                GwsError::Auth(format!(
-                    "Failed to obtain credentials for {} (scopes: {}): {e:#}",
-                    doc.name,
-                    scopes.join(" ")
-                ))
-            })?)
+            Some(Transport::for_scopes(scopes).await?)
         };
-        let mut api = Self::with_token(doc, token, dry_run)?;
+        let mut api = Self::with_transport(doc, transport)?;
         api.sanitize = sanitize.clone();
         Ok(api)
     }
 
-    /// Build a client with an explicit token (used by tests and callers that
-    /// already hold one).
-    pub fn with_token(
+    /// Build a client from an existing transport (`None` = dry run).
+    pub fn with_transport(
         doc: &crate::discovery::RestDescription,
-        token: Option<String>,
-        dry_run: bool,
+        transport: Option<Transport>,
     ) -> Result<Self, GwsError> {
-        if doc.root_url.is_empty() {
-            return Err(GwsError::Discovery(format!(
-                "Discovery document for '{}' has no rootUrl",
-                doc.name
-            )));
-        }
-        let root = with_slash(&doc.root_url);
-        let service_path = doc.service_path.trim_start_matches('/');
-        let base = if service_path.is_empty() {
-            root.clone()
-        } else {
-            format!("{root}{}", with_slash(service_path))
+        // Dry runs show the URLs a real run would use, including the
+        // GWSR_API_BASE_URL override.
+        let env_endpoints;
+        let endpoints = match &transport {
+            Some(t) => t.endpoints(),
+            None => {
+                env_endpoints = gws_rust_core::validate::EndpointPolicy::from_env()?;
+                &env_endpoints
+            }
         };
+        let override_base = endpoints.override_base();
+        let root = doc.api_root(override_base)?.to_string();
+        let base = doc.service_base(override_base)?;
         Ok(Self {
-            client: crate::client::shared_client()?,
-            token,
-            dry_run,
-            base,
-            root,
+            transport,
+            base: with_slash(&base),
+            root: with_slash(&root),
             planned: Mutex::new(Vec::new()),
             sanitize: crate::helpers::modelarmor::SanitizeConfig::default(),
         })
     }
 
     pub fn is_dry_run(&self) -> bool {
-        self.dry_run
+        self.transport.is_none()
     }
 
-    /// The bearer token (absent in dry-run mode).
-    pub fn token(&self) -> Option<&str> {
-        self.token.as_deref()
-    }
-
-    /// The shared HTTP client.
-    pub fn client(&self) -> &reqwest::Client {
-        &self.client
+    /// The transport (absent in dry-run mode).
+    pub fn transport(&self) -> Option<&Transport> {
+        self.transport.as_ref()
     }
 
     /// `rootUrl + servicePath + path` (path given without leading slash).
@@ -356,59 +340,59 @@ impl Api {
 
     /// Record an informational step in the dry-run plan (e.g. a file write).
     pub fn plan_note(&self, value: Value) -> Result<(), GwsError> {
-        if self.dry_run {
+        if self.is_dry_run() {
             self.record(value)?;
         }
         Ok(())
     }
 
-    /// Send a request and return the successful response.
-    ///
-    /// This is the single choke point for all helper HTTP traffic. It must not
-    /// be called in dry-run mode (callers use [`Api::send`] / [`Api::send_raw`]).
+    /// Send a request and return the successful response (2xx, or 308 for
+    /// resumable-upload progress). Must not be called in dry-run mode.
     async fn execute(&self, req: &ApiRequest) -> Result<reqwest::Response, GwsError> {
-        let token = self.token.as_deref();
-        let resp = crate::client::send_with_retry(|| req.builder(&self.client, token))
-            .await
-            .map_err(|e| {
-                other_err(anyhow::anyhow!(
-                    "{} {} failed: {e}",
-                    req.method,
-                    redact_url(&req.url)
-                ))
-            })?;
-        let status = resp.status();
-        if status.is_success() || status == reqwest::StatusCode::PERMANENT_REDIRECT {
-            return Ok(resp);
-        }
-        let body = resp.text().await.map_err(|e| {
-            other_err(anyhow::anyhow!(
-                "HTTP {status} from {} and the error body could not be read: {e}",
-                redact_url(&req.url)
-            ))
+        let transport = self.transport.as_ref().ok_or_else(|| {
+            GwsError::other("internal error: a dry-run request reached the transport")
         })?;
-        Err(api_error(status.as_u16(), &body))
+        let context = format!("{} {}", req.method, redact_url(&req.url));
+        transport
+            .send_ok(
+                req.method.clone(),
+                &req.url,
+                // GET/PUT/DELETE may be retried; POST/PATCH are sent once.
+                Idempotency::FromMethod,
+                &context,
+                Some(reqwest::StatusCode::PERMANENT_REDIRECT),
+                |rb| req.apply(rb),
+            )
+            .await
+    }
+
+    fn idle_timeout(&self) -> Option<std::time::Duration> {
+        self.transport
+            .as_ref()
+            .and_then(|t| t.retry.response_timeout)
     }
 
     /// Send a request and parse the JSON response. An empty 2xx body yields
     /// `Value::Null`. In dry-run mode the request is recorded and `Null` is
     /// returned.
     pub async fn send(&self, req: ApiRequest) -> Result<Value, GwsError> {
-        if self.dry_run {
+        if self.is_dry_run() {
             self.record(req.describe())?;
             return Ok(Value::Null);
         }
         let resp = self.execute(&req).await?;
-        let text = resp.text().await.map_err(|e| {
-            other_err(anyhow::anyhow!(
-                "Failed to read response from {}: {e}",
-                redact_url(&req.url)
-            ))
-        })?;
-        if text.trim().is_empty() {
+        let raw = crate::transport::read_body(resp, self.idle_timeout())
+            .await
+            .map_err(|e| {
+                other_err(anyhow::anyhow!(
+                    "Failed to read response from {}: {e}",
+                    redact_url(&req.url)
+                ))
+            })?;
+        if raw.iter().all(u8::is_ascii_whitespace) {
             return Ok(Value::Null);
         }
-        serde_json::from_str(&text).map_err(|e| {
+        serde_json::from_slice(&raw).map_err(|e| {
             other_err(anyhow::anyhow!(
                 "Response from {} was not valid JSON: {e}",
                 redact_url(&req.url)
@@ -437,7 +421,7 @@ impl Api {
                 this = this.query("pageToken", t.clone());
             }
             let value = self.send(this).await?;
-            if self.dry_run {
+            if self.is_dry_run() {
                 return Ok(page);
             }
             if let Some(items) = value.get(items_key) {
@@ -486,7 +470,7 @@ impl Api {
         req: ApiRequest,
         target: &OutputTarget,
     ) -> Result<Option<u64>, GwsError> {
-        if self.dry_run {
+        if self.is_dry_run() {
             let mut d = req.describe();
             d["output"] = target.describe();
             self.record(d)?;
@@ -500,7 +484,7 @@ impl Api {
     /// `value` in the requested `--format`, after Model Armor screening when
     /// `--sanitize` is configured.
     pub async fn emit(&self, matches: &ArgMatches, value: &Value) -> Result<(), GwsError> {
-        if self.dry_run {
+        if self.is_dry_run() {
             let planned = self
                 .planned
                 .lock()
@@ -508,37 +492,27 @@ impl Api {
                 .clone();
             return print_value(matches, &json!({ "dry_run": true, "requests": planned }));
         }
-        let mut value = value.clone();
-        if let Some(template) = self.sanitize.template.as_deref() {
-            let text = serde_json::to_string(&value).map_err(other_err)?;
-            let verdict = screen(template, &self.sanitize.mode, &text).await?;
-            if let Some(obj) = value.as_object_mut() {
-                obj.insert("_sanitization".into(), verdict);
-            }
-        }
+        use crate::helpers::modelarmor::{require_pass, sanitize_value};
+        let value = require_pass(sanitize_value(&self.sanitize, value.clone()).await?)?;
         print_value(matches, &value)
     }
 
     /// Screen text through Model Armor (when configured) before it is written
-    /// somewhere other than stdout.
+    /// somewhere other than stdout. A block-mode match is an error.
     pub async fn screen_text(&self, text: &str) -> Result<(), GwsError> {
-        if !self.dry_run
-            && let Some(template) = self.sanitize.template.as_deref()
-        {
-            screen(template, &self.sanitize.mode, text).await?;
+        if !self.is_dry_run() {
+            use crate::helpers::modelarmor::{require_pass, sanitize_value};
+            require_pass(sanitize_value(&self.sanitize, Value::String(text.to_string())).await?)?;
         }
         Ok(())
     }
 
     /// Output plain text (e.g. a rendered document), screened like [`Api::emit`].
-    /// Text output cannot carry an annotation, so warn-mode findings go to stderr.
     pub async fn emit_text(&self, matches: &ArgMatches, text: &str) -> Result<(), GwsError> {
-        if self.dry_run {
+        if self.is_dry_run() {
             return self.emit(matches, &Value::Null).await;
         }
-        if let Some(template) = self.sanitize.template.as_deref() {
-            screen(template, &self.sanitize.mode, text).await?;
-        }
+        self.screen_text(text).await?;
         print_text(text)
     }
 
@@ -565,7 +539,7 @@ impl Api {
         let init = init
             .header("X-Upload-Content-Type", content_type)
             .header("X-Upload-Content-Length", size.to_string());
-        if self.dry_run {
+        if self.is_dry_run() {
             let mut d = init.describe();
             d["upload"] = json!({
                 "protocol": "resumable",
@@ -638,43 +612,6 @@ impl Api {
     }
 }
 
-/// Screen `text` through Model Armor. Fails closed in block mode (a match or
-/// a failed screening is an error); in warn mode findings and failures are
-/// reported on stderr and returned as the `_sanitization` annotation.
-async fn screen(
-    template: &str,
-    mode: &crate::helpers::modelarmor::SanitizeMode,
-    text: &str,
-) -> Result<Value, GwsError> {
-    use crate::helpers::modelarmor::{SanitizeMode, sanitize_text};
-    match sanitize_text(template, text).await {
-        Ok(result) => {
-            let matched = result.filter_match_state == "MATCH_FOUND";
-            let verdict = serde_json::to_value(&result).map_err(other_err)?;
-            if matched {
-                if *mode == SanitizeMode::Block {
-                    return Err(other_err(anyhow::anyhow!(
-                        "Content blocked by Model Armor (filterMatchState: MATCH_FOUND)"
-                    )));
-                }
-                eprintln!(
-                    "warning: Model Armor flagged this content (filterMatchState: MATCH_FOUND)"
-                );
-            }
-            Ok(verdict)
-        }
-        Err(e) => {
-            if *mode == SanitizeMode::Block {
-                return Err(other_err(anyhow::anyhow!(
-                    "Model Armor screening failed and --sanitize is in block mode; output suppressed: {e}"
-                )));
-            }
-            eprintln!("warning: Model Armor screening failed; output is unscreened: {e}");
-            Ok(json!({ "error": e.to_string() }))
-        }
-    }
-}
-
 /// Upload chunk size: 8 MiB (must be a multiple of 256 KiB).
 const UPLOAD_CHUNK: u64 = 8 * 1024 * 1024;
 
@@ -707,45 +644,6 @@ fn ensure_same_origin(a: &str, b: &str) -> Result<(), GwsError> {
 /// Strip the query string from a URL for error messages.
 fn redact_url(url: &str) -> &str {
     url.split('?').next().unwrap_or(url)
-}
-
-/// Convert an error response into [`GwsError::Api`], using Google's JSON
-/// error format when present.
-pub(crate) fn api_error(status: u16, body: &str) -> GwsError {
-    let parsed: Option<Value> = serde_json::from_str(body).ok();
-    let err = parsed.as_ref().and_then(|v| v.get("error"));
-    let message = err
-        .and_then(|e| e.get("message"))
-        .and_then(Value::as_str)
-        .map(str::to_string)
-        .unwrap_or_else(|| {
-            let trimmed = body.trim();
-            if trimmed.is_empty() {
-                format!("HTTP {status} with an empty response body")
-            } else {
-                trimmed.chars().take(2000).collect()
-            }
-        });
-    let reason = err
-        .and_then(|e| e.get("errors"))
-        .and_then(Value::as_array)
-        .and_then(|a| a.first())
-        .and_then(|e| e.get("reason"))
-        .and_then(Value::as_str)
-        .or_else(|| err.and_then(|e| e.get("status")).and_then(Value::as_str))
-        .unwrap_or("unknown")
-        .to_string();
-    let enable_url = if reason == "accessNotConfigured" || reason == "SERVICE_DISABLED" {
-        crate::executor::extract_enable_url(&message)
-    } else {
-        None
-    };
-    GwsError::Api {
-        code: status,
-        message,
-        reason,
-        enable_url,
-    }
 }
 
 async fn write_stream(resp: reqwest::Response, target: &OutputTarget) -> Result<u64, GwsError> {
@@ -881,29 +779,49 @@ pub(crate) fn safe_filename(raw: &str, fallback: &str) -> String {
     }
 }
 
-/// Resolve the global `--format` flag. Unknown formats are an error.
-pub(crate) fn output_format(
-    matches: &ArgMatches,
-) -> Result<crate::formatter::OutputFormat, GwsError> {
-    match matches.try_get_one::<String>("format").ok().flatten() {
-        None => Ok(crate::formatter::OutputFormat::default()),
-        Some(s) => crate::formatter::OutputFormat::parse(s).map_err(|bad| {
-            GwsError::Validation(format!(
-                "Unknown --format '{bad}' (valid: json, table, yaml, csv)"
-            ))
-        }),
-    }
+/// The output format: `--format` > `GWSR_FORMAT` > config file > JSON
+/// (clap has already rejected unknown `--format` values).
+pub(crate) fn output_format(matches: &ArgMatches) -> crate::formatter::OutputFormat {
+    crate::formatter::OutputFormat::from_matches(matches)
 }
 
 /// Print `value` in the requested output format.
 pub(crate) fn print_value(matches: &ArgMatches, value: &Value) -> Result<(), GwsError> {
-    let format = output_format(matches)?;
+    let format = output_format(matches);
     print_text(&crate::formatter::format_value(value, &format)?)
 }
 
 /// Print text to stdout through the shared writer (broken pipes end quietly).
 pub(crate) fn print_text(text: &str) -> Result<(), GwsError> {
     crate::output::emit(text)
+}
+
+/// A request description for a `--dry-run` plan, in the same shape as
+/// [`ApiRequest::describe`].
+pub(crate) fn dry_run_request(
+    method: &str,
+    url: &str,
+    query: &[(&str, String)],
+    body: Option<&Value>,
+) -> Value {
+    let mut out = json!({ "method": method, "url": url });
+    if !query.is_empty() {
+        let q: Map<String, Value> = query
+            .iter()
+            .map(|(k, v)| ((*k).to_string(), Value::String(v.clone())))
+            .collect();
+        out["query_params"] = Value::Object(q);
+    }
+    if let Some(b) = body {
+        out["body"] = b.clone();
+    }
+    out
+}
+
+/// Print a dry-run plan (`{"dry_run": true, "requests": [...]}`) in the
+/// requested output format.
+pub(crate) fn print_dry_run(matches: &ArgMatches, requests: Vec<Value>) -> Result<(), GwsError> {
+    print_value(matches, &json!({ "dry_run": true, "requests": requests }))
 }
 
 /// Whether the global `--dry-run` flag is set.
@@ -994,19 +912,17 @@ pub(crate) mod test_support {
     }
 
     pub fn api(root: &str, service_path: &str) -> Api {
-        Api::with_token(
+        Api::with_transport(
             &doc("test", root, service_path),
-            Some("test-token".into()),
-            false,
+            Some(Transport::for_test(root)),
         )
         .expect("api")
     }
 
     pub fn dry_api(service_path: &str) -> Api {
-        Api::with_token(
+        Api::with_transport(
             &doc("test", "https://example.googleapis.com", service_path),
             None,
-            true,
         )
         .expect("api")
     }
@@ -1030,42 +946,18 @@ mod tests {
     }
 
     #[test]
-    fn api_error_parses_google_format() {
-        let body = r#"{"error":{"code":404,"message":"File not found: x","errors":[{"reason":"notFound"}]}}"#;
-        match api_error(404, body) {
-            GwsError::Api {
-                code,
-                message,
-                reason,
-                ..
-            } => {
-                assert_eq!(code, 404);
-                assert_eq!(message, "File not found: x");
-                assert_eq!(reason, "notFound");
-            }
-            other => panic!("unexpected {other:?}"),
-        }
-    }
-
-    #[test]
-    fn api_error_non_json_and_empty() {
-        match api_error(502, "") {
-            GwsError::Api { message, .. } => assert!(message.contains("empty response body")),
-            other => panic!("unexpected {other:?}"),
-        }
-        match api_error(500, "<html>boom</html>") {
-            GwsError::Api { message, .. } => assert_eq!(message, "<html>boom</html>"),
-            other => panic!("unexpected {other:?}"),
-        }
-    }
-
-    #[test]
-    fn api_error_uses_status_for_v2_style_errors() {
-        let body = r#"{"error":{"code":403,"message":"denied","status":"PERMISSION_DENIED"}}"#;
-        match api_error(403, body) {
-            GwsError::Api { reason, .. } => assert_eq!(reason, "PERMISSION_DENIED"),
-            other => panic!("unexpected {other:?}"),
-        }
+    fn dry_run_request_matches_describe() {
+        let req = ApiRequest::post("https://x/y")
+            .query("a", "b")
+            .json(json!({"k": 1}));
+        let v = dry_run_request(
+            "POST",
+            "https://x/y",
+            &[("a", "b".to_string())],
+            Some(&json!({"k": 1})),
+        );
+        assert_eq!(v, req.describe());
+        assert_eq!(v["query_params"]["a"], "b");
     }
 
     #[test]

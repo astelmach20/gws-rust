@@ -223,14 +223,7 @@ pub fn method_args(doc: &RestDescription, method: &RestMethod) -> Vec<Arg> {
     }
 
     if crate::executor::is_destructive(method) {
-        args.push(
-            Arg::new("yes")
-                .long("yes")
-                .short('y')
-                .help("Confirm this destructive operation without prompting [env: GWSR_CONFIRM_DESTRUCTIVE]")
-                .action(ArgAction::SetTrue)
-                .help_heading(HEADING_REQUEST),
-        );
+        args.push(crate::confirm::yes_arg().help_heading(HEADING_REQUEST));
     }
 
     args

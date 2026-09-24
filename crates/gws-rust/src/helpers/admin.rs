@@ -20,8 +20,8 @@
 //! on the document version.
 
 use super::Helper;
-use super::confirm::{self, Impact, with_yes};
 use super::http::{self, Api, ApiRequest, encode_segment, flag, optional, required};
+use crate::confirm::{self, Impact, with_yes};
 use crate::error::GwsError;
 use clap::{Arg, ArgAction, ArgMatches, Command};
 use serde_json::{Value, json};
@@ -105,7 +105,7 @@ impl Helper for AdminHelper {
                     } else {
                         (Impact::Outbound, format!("restore access for {user}"))
                     };
-                    confirm::gate(m, impact, &action)?;
+                    confirm::confirm(m, impact, &action)?;
                     let api = Api::new(doc, &[SCOPE_USER], dry, sanitize).await?;
                     let v = user_suspend(&api, user, suspend, optional(m, "reason")).await?;
                     (api, v)
@@ -114,7 +114,7 @@ impl Helper for AdminHelper {
                     let group = required(m, "group")?;
                     let member = required(m, "member")?;
                     let role = required(m, "role")?;
-                    confirm::gate(
+                    confirm::confirm(
                         m,
                         Impact::Outbound,
                         &format!("add {member} to {group} as {role}"),

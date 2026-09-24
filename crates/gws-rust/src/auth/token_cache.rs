@@ -70,6 +70,16 @@ impl Default for CacheFile {
 }
 
 /// A profile's token cache.
+/// Whether a cached token may be reused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Freshness {
+    /// Reuse an unexpired cached token.
+    Cached,
+    /// Skip the cache and mint a new token (after the server rejected the
+    /// cached one with HTTP 401); the new token replaces the cached entry.
+    ForceRefresh,
+}
+
 pub struct TokenCache {
     path: PathBuf,
     lock_path: PathBuf,
@@ -91,7 +101,12 @@ impl TokenCache {
     /// # Errors
     ///
     /// Lock timeouts, key/IO errors, and errors from `fetch`.
-    pub async fn get_or_fetch<F, Fut>(&self, key: &str, fetch: F) -> Result<SecretString, AuthError>
+    pub async fn get_or_fetch<F, Fut>(
+        &self,
+        key: &str,
+        freshness: Freshness,
+        fetch: F,
+    ) -> Result<SecretString, AuthError>
     where
         F: FnOnce() -> Fut,
         Fut: Future<Output = Result<AccessToken, AuthError>>,
@@ -107,7 +122,8 @@ impl TokenCache {
 
         let mut cache = self.read_blocking().await?;
         let now = chrono::Utc::now().timestamp();
-        if let Some(entry) = cache.entries.get(key)
+        if freshness == Freshness::Cached
+            && let Some(entry) = cache.entries.get(key)
             && entry.expires_at - EXPIRY_MARGIN_SECS > now
         {
             tracing::debug!(key, "using cached access token");
@@ -248,7 +264,7 @@ mod tests {
         let calls = AtomicUsize::new(0);
         for _ in 0..3 {
             let t = cache
-                .get_or_fetch("k", || async {
+                .get_or_fetch("k", Freshness::Cached, || async {
                     calls.fetch_add(1, Ordering::SeqCst);
                     Ok(token("ya29.a", 3600))
                 })
@@ -260,15 +276,45 @@ mod tests {
 
         // Nearly-expired tokens are refreshed.
         let t = cache
-            .get_or_fetch("short", || async { Ok(token("ya29.s", 30)) })
+            .get_or_fetch("short", Freshness::Cached, || async {
+                Ok(token("ya29.s", 30))
+            })
             .await
             .unwrap();
         assert_eq!(t.expose_secret(), "ya29.s");
         let t = cache
-            .get_or_fetch("short", || async { Ok(token("ya29.s2", 3600)) })
+            .get_or_fetch("short", Freshness::Cached, || async {
+                Ok(token("ya29.s2", 3600))
+            })
             .await
             .unwrap();
         assert_eq!(t.expose_secret(), "ya29.s2");
+    }
+
+    #[tokio::test]
+    async fn force_refresh_bypasses_and_replaces_the_cached_token() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = cache_in(dir.path());
+        cache
+            .get_or_fetch("k", Freshness::Cached, || async {
+                Ok(token("ya29.old", 3600))
+            })
+            .await
+            .unwrap();
+        let t = cache
+            .get_or_fetch("k", Freshness::ForceRefresh, || async {
+                Ok(token("ya29.new", 3600))
+            })
+            .await
+            .unwrap();
+        assert_eq!(t.expose_secret(), "ya29.new");
+        let t = cache
+            .get_or_fetch("k", Freshness::Cached, || async {
+                Err(AuthError::Network("must not be called".into()))
+            })
+            .await
+            .unwrap();
+        assert_eq!(t.expose_secret(), "ya29.new");
     }
 
     #[tokio::test]
@@ -276,7 +322,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let cache = cache_in(dir.path());
         cache
-            .get_or_fetch("k", || async { Ok(token("ya29.secret-token", 3600)) })
+            .get_or_fetch("k", Freshness::Cached, || async {
+                Ok(token("ya29.secret-token", 3600))
+            })
             .await
             .unwrap();
         let raw = std::fs::read(dir.path().join("token_cache.enc")).unwrap();
@@ -289,12 +337,16 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let cache = cache_in(dir.path());
         cache
-            .get_or_fetch("a", || async { Ok(token("ya29.a", 3600)) })
+            .get_or_fetch("a", Freshness::Cached, || async {
+                Ok(token("ya29.a", 3600))
+            })
             .await
             .unwrap();
         let before = std::fs::read(dir.path().join("token_cache.enc")).unwrap();
         let err = cache
-            .get_or_fetch("b", || async { Err(AuthError::Network("down".into())) })
+            .get_or_fetch("b", Freshness::Cached, || async {
+                Err(AuthError::Network("down".into()))
+            })
             .await
             .unwrap_err();
         assert!(matches!(err, AuthError::Network(_)));
@@ -310,7 +362,9 @@ mod tests {
         let cache = cache_in(dir.path());
         std::fs::write(dir.path().join("token_cache.enc"), b"garbage").unwrap();
         let t = cache
-            .get_or_fetch("k", || async { Ok(token("ya29.new", 3600)) })
+            .get_or_fetch("k", Freshness::Cached, || async {
+                Ok(token("ya29.new", 3600))
+            })
             .await
             .unwrap();
         assert_eq!(t.expose_secret(), "ya29.new");
@@ -340,7 +394,7 @@ mod tests {
             );
             handles.push(tokio::spawn(async move {
                 cache
-                    .get_or_fetch(&format!("k{i}"), || async move {
+                    .get_or_fetch(&format!("k{i}"), Freshness::Cached, || async move {
                         Ok(token(&format!("t{i}"), 3600))
                     })
                     .await

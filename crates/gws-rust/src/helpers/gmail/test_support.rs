@@ -15,7 +15,7 @@
 //! Shared test helpers for the Gmail helper modules.
 
 use super::api::GmailApi;
-use crate::helpers::rest::RestClient;
+use crate::transport::Transport;
 use base64::Engine as _;
 
 /// Extract a header value from raw RFC 5322 output, handling folded lines.
@@ -56,7 +56,7 @@ pub(crate) fn base64url(s: &str) -> String {
 /// A `GmailApi` pointed at a wiremock server (paths `/gmail/v1` and `/upload/gmail/v1`).
 pub(crate) fn mock_api(server: &wiremock::MockServer) -> GmailApi {
     GmailApi::with_bases(
-        RestClient::new(reqwest::Client::new(), "test-token"),
+        Transport::for_test(&server.uri()),
         &format!("{}/gmail/v1", server.uri()),
         &format!("{}/upload/gmail/v1", server.uri()),
     )

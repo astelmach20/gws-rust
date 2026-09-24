@@ -119,22 +119,23 @@ fn plan_paths(
 fn write_atomically(path: &Path, data: &[u8], overwrite: bool) -> Result<(), GwsError> {
     let dir = path
         .parent()
-        .ok_or_else(|| other_error(format!("{} has no parent directory", path.display())))?;
+        .ok_or_else(|| GwsError::other(format!("{} has no parent directory", path.display())))?;
     let mut tmp = tempfile::NamedTempFile::new_in(dir).map_err(|e| {
-        other_error(format!(
+        GwsError::other(format!(
             "Failed to create temp file in {}: {e}",
             dir.display()
         ))
     })?;
     tmp.write_all(data)
         .and_then(|()| tmp.as_file().sync_all())
-        .map_err(|e| other_error(format!("Failed to write {}: {e}", path.display())))?;
+        .map_err(|e| GwsError::other(format!("Failed to write {}: {e}", path.display())))?;
     let persisted = if overwrite {
         tmp.persist(path).map(|_| ())
     } else {
         tmp.persist_noclobber(path).map(|_| ())
     };
-    persisted.map_err(|e| other_error(format!("Failed to save {}: {}", path.display(), e.error)))
+    persisted
+        .map_err(|e| GwsError::other(format!("Failed to save {}: {}", path.display(), e.error)))
 }
 
 /// Select which parts to download.
@@ -155,14 +156,14 @@ async fn download(
     overwrite: bool,
 ) -> Result<Vec<Value>, GwsError> {
     std::fs::create_dir_all(dir)
-        .map_err(|e| other_error(format!("Failed to create {}: {e}", dir.display())))?;
+        .map_err(|e| GwsError::other(format!("Failed to create {}: {e}", dir.display())))?;
     let paths = plan_paths(dir, parts, overwrite)?;
     let mut saved = Vec::with_capacity(parts.len());
     for (part, path) in parts.iter().zip(paths) {
         let data = match &part.data {
             PartData::AttachmentId(id) => api.get_attachment(message_id, id).await?,
             PartData::Inline(b64) => decode_base64url(b64).map_err(|e| {
-                other_error(format!(
+                GwsError::other(format!(
                     "Invalid inline data for part '{}': {e}",
                     part.filename
                 ))
@@ -195,18 +196,21 @@ pub(super) async fn handle_attachments(
     let include_inline = matches.get_flag("include-inline");
     let overwrite = matches.get_flag("overwrite");
 
-    if crate::helpers::rest::dry_run(matches)? {
+    if crate::helpers::http::dry_run(matches) {
         let url = format!(
             "{}/users/me/messages/{}",
             super::api::GMAIL_API_BASE,
             crate::validate::encode_path_segment(&message_id)
         );
-        return crate::helpers::rest::print_dry_run(vec![crate::helpers::rest::dry_run_request(
-            "GET",
-            &url,
-            &[("format", "full".to_string())],
-            None,
-        )]);
+        return crate::helpers::http::print_dry_run(
+            matches,
+            vec![crate::helpers::http::dry_run_request(
+                "GET",
+                &url,
+                &[("format", "full".to_string())],
+                None,
+            )],
+        );
     }
 
     let api = super::api::authenticated(&[GMAIL_READONLY_SCOPE]).await?;
@@ -220,8 +224,7 @@ pub(super) async fn handle_attachments(
         );
     }
     let out = json!({ "messageId": message_id, "files": saved });
-    let format =
-        crate::helpers::rest::output_format(matches, crate::formatter::OutputFormat::Json)?;
+    let format = crate::helpers::http::output_format(matches);
     crate::output::emit(&crate::formatter::format_value(&out, &format)?)?;
     Ok(())
 }

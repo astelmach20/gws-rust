@@ -27,9 +27,9 @@ use serde_json::{Value, json};
 use tokio::io::AsyncWriteExt;
 
 use super::output::Emitter;
-use super::transport::next_chunk;
 use crate::discovery::{JsonSchemaProperty, RestDescription, RestMethod};
 use crate::error::GwsError;
+use crate::transport::next_chunk;
 
 /// Where `-o/--output` sends a response payload.
 #[derive(Debug, Clone, PartialEq, Eq)]

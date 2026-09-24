@@ -31,7 +31,7 @@ fn parse_send_as_response(body: &Value) -> Result<Vec<SendAsIdentity>, GwsError>
     };
     let entries = entries
         .as_array()
-        .ok_or_else(|| other_error("sendAs.list response: 'sendAs' is not an array"))?;
+        .ok_or_else(|| GwsError::other("sendAs.list response: 'sendAs' is not an array"))?;
 
     Ok(entries
         .iter()

@@ -51,7 +51,7 @@ pub(super) async fn fetch_original_parts(
         let data = match &part.data {
             PartData::AttachmentId(id) => api.get_attachment(message_id, id).await?,
             PartData::Inline(b64) => decode_base64url(b64).map_err(|e| {
-                other_error(format!(
+                GwsError::other(format!(
                     "Invalid inline data for part '{}': {e}",
                     part.filename
                 ))

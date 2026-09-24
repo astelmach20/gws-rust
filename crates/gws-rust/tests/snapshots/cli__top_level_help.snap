@@ -97,6 +97,7 @@ Exit codes:
   4    Discovery      — could not fetch or parse the API schema
   5    Internal       — unexpected failure (I/O, serialization, ...)
   6    API retryable  — rate limit (429/403 rateLimitExceeded) or server error (5xx); retry with backoff
+  7    Not confirmed  — destructive or gated action needs --yes (or a terminal to confirm); nothing was sent
 
 Output is JSON by default (compact when piped); --format table|yaml|csv is opt-in.
 Errors: one JSON object {"error":{...}} on stderr (human text with a human --format);

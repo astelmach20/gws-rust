@@ -544,7 +544,7 @@ mod tests {
     fn client() -> ClientConfig {
         ClientConfig {
             client_id: "cid.apps.googleusercontent.com".into(),
-            client_secret: SecretString::from("cs".to_string()),
+            client_secret: SecretString::from("test-client-secret".to_string()),
             project_id: None,
             source: ClientSource::BuiltIn,
         }
@@ -575,8 +575,11 @@ mod tests {
             pairs["scope"],
             "https://www.googleapis.com/auth/drive.readonly"
         );
+        // The secret is long and contains '-', so random PKCE/state values
+        // (base64url) cannot contain it by chance.
+        assert!(!pairs.contains_key("client_secret"));
         assert!(
-            !req.url.as_str().contains("cs"),
+            !req.url.as_str().contains("test-client-secret"),
             "client secret must not be in the URL"
         );
     }

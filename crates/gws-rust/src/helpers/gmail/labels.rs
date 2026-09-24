@@ -75,7 +75,7 @@ fn plan(api: &GmailApi, targets: &Targets, add: &[String], remove: &[String]) ->
     let mut requests = Vec::new();
     if !targets.messages.is_empty() {
         let (url, body) = api.modify_messages_request(&targets.messages, add, remove);
-        requests.push(crate::helpers::rest::dry_run_request(
+        requests.push(crate::helpers::http::dry_run_request(
             "POST",
             &url,
             &[],
@@ -84,7 +84,7 @@ fn plan(api: &GmailApi, targets: &Targets, add: &[String], remove: &[String]) ->
     }
     for thread in &targets.threads {
         let body = json!({ "addLabelIds": add, "removeLabelIds": remove });
-        requests.push(crate::helpers::rest::dry_run_request(
+        requests.push(crate::helpers::http::dry_run_request(
             "POST",
             &api.modify_thread_url(thread),
             &[],
@@ -95,17 +95,15 @@ fn plan(api: &GmailApi, targets: &Targets, add: &[String], remove: &[String]) ->
 }
 
 fn print(value: &Value, matches: &ArgMatches) -> Result<(), GwsError> {
-    let format =
-        crate::helpers::rest::output_format(matches, crate::formatter::OutputFormat::Json)?;
+    let format = crate::helpers::http::output_format(matches);
     crate::output::emit(&crate::formatter::format_value(value, &format)?)?;
     Ok(())
 }
 
 /// An unauthenticated client used only to render dry-run URLs.
-fn offline_api() -> GmailApi {
-    GmailApi::new(crate::helpers::rest::RestClient::new(
-        reqwest::Client::new(),
-        "",
+fn offline_api() -> Result<GmailApi, GwsError> {
+    Ok(GmailApi::new(
+        crate::transport::Transport::unauthenticated()?
     ))
 }
 
@@ -121,14 +119,12 @@ pub(super) async fn handle_label(matches: &ArgMatches) -> Result<(), GwsError> {
             "Provide --add and/or --remove".to_string(),
         ));
     }
-    if crate::helpers::rest::dry_run(matches)? {
+    if crate::helpers::http::dry_run(matches) {
         // Label names are resolved to IDs at run time; the plan shows them as given.
-        return crate::helpers::rest::print_dry_run(plan(
-            &offline_api(),
-            &targets,
-            &change.add,
-            &change.remove,
-        ));
+        return crate::helpers::http::print_dry_run(
+            matches,
+            plan(&offline_api()?, &targets, &change.add, &change.remove),
+        );
     }
     let api = super::api::authenticated(&[GMAIL_SCOPE]).await?;
     let labels = api.list_labels().await?;
@@ -142,8 +138,11 @@ pub(super) async fn handle_label(matches: &ArgMatches) -> Result<(), GwsError> {
 pub(super) async fn handle_archive(matches: &ArgMatches) -> Result<(), GwsError> {
     let targets = Targets::from_matches(matches)?;
     let remove = vec!["INBOX".to_string()];
-    if crate::helpers::rest::dry_run(matches)? {
-        return crate::helpers::rest::print_dry_run(plan(&offline_api(), &targets, &[], &remove));
+    if crate::helpers::http::dry_run(matches) {
+        return crate::helpers::http::print_dry_run(
+            matches,
+            plan(&offline_api()?, &targets, &[], &remove),
+        );
     }
     let api = super::api::authenticated(&[GMAIL_SCOPE]).await?;
     let summary = apply(&api, &targets, &[], &remove).await?;
@@ -159,15 +158,15 @@ pub(super) async fn handle_trash(matches: &ArgMatches) -> Result<(), GwsError> {
         .map(|m| (TargetKind::Message, m))
         .chain(targets.threads.iter().map(|t| (TargetKind::Thread, t)))
         .collect();
-    if crate::helpers::rest::dry_run(matches)? {
-        let api = offline_api();
+    if crate::helpers::http::dry_run(matches) {
+        let api = offline_api()?;
         let requests = items
             .iter()
             .map(|(kind, id)| {
-                crate::helpers::rest::dry_run_request("POST", &api.trash_url(*kind, id), &[], None)
+                crate::helpers::http::dry_run_request("POST", &api.trash_url(*kind, id), &[], None)
             })
             .collect();
-        return crate::helpers::rest::print_dry_run(requests);
+        return crate::helpers::http::print_dry_run(matches, requests);
     }
     let api = super::api::authenticated(&[GMAIL_SCOPE]).await?;
     for (kind, id) in &items {
@@ -265,7 +264,7 @@ mod tests {
             messages: vec!["m1".into()],
             threads: vec!["t1".into(), "t2".into()],
         };
-        let reqs = plan(&offline_api(), &targets, &[], &["INBOX".into()]);
+        let reqs = plan(&offline_api().unwrap(), &targets, &[], &["INBOX".into()]);
         assert_eq!(reqs.len(), 3);
         assert!(
             reqs[0]["url"]
