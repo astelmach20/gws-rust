@@ -108,9 +108,9 @@ pub trait Helper: Send + Sync {
     /// Injects subcommands into the service command.
     fn inject_commands(&self, cmd: Command, doc: &crate::discovery::RestDescription) -> Command;
 
-    /// Attempts to handle a command. Returns Ok(Some(())) if handled,
-    /// Ok(None) if not handled (should fall back to dynamic dispatch),
-    /// or Err if handled but failed.
+    /// Attempts to handle a command. Returns `Ok(true)` if handled,
+    /// `Ok(false)` if not (the caller falls back to dynamic dispatch),
+    /// or `Err` if handled but failed.
     fn handle<'a>(
         &'a self,
         doc: &'a crate::discovery::RestDescription,
