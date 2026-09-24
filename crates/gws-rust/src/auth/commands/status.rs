@@ -20,7 +20,6 @@ use serde_json::{Value, json};
 use super::print_json;
 use crate::auth::client_config;
 use crate::auth::credentials::{AuthEnv, Credential, CredentialSource, Resolved};
-use crate::auth::keystore::BackendKind;
 use crate::auth::profiles;
 use crate::error::GwsError;
 
@@ -42,10 +41,7 @@ pub(super) async fn build_report(env: &AuthEnv, offline: bool) -> Value {
         Err(e) => out["profiles_error"] = json!(format!("{e:#}")),
     }
 
-    match BackendKind::from_env() {
-        Ok(kind) => out["keyring_backend"] = json!(kind.as_str()),
-        Err(e) => out["keyring_backend_error"] = json!(e.to_string()),
-    }
+    out["keyring_backend"] = json!(env.keyring_backend.as_str());
 
     match client_config::client_config_path().and_then(|p| client_config::load_from(&p)) {
         Ok(Some(c)) => {
@@ -85,10 +81,7 @@ pub(super) async fn build_report(env: &AuthEnv, offline: bool) -> Value {
     }
 
     if let CredentialSource::Profile { .. } = source {
-        match env.keystore() {
-            Ok(ks) => out["key_location"] = json!(ks.describe()),
-            Err(e) => out["key_error"] = json!(e.to_string()),
-        }
+        out["key_location"] = json!(env.keystore().describe());
         match profiles::load_metadata(&env.paths.metadata) {
             Ok(Some(m)) => {
                 out["account"] = json!(m.account);

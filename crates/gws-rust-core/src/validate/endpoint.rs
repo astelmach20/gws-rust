@@ -16,7 +16,7 @@
 //!
 //! Discovery Documents carry the `rootUrl` that requests (and bearer tokens)
 //! are sent to. Because documents are cached on disk, a tampered cache could
-//! otherwise redirect credentials. [`validate_api_base`] only accepts:
+//! otherwise redirect credentials. [`validate_api_base_with`] only accepts:
 //!
 //! - `https://` URLs on the default port whose host is `googleapis.com` or a
 //!   subdomain of it (this covers regional/mTLS hosts such as
@@ -99,24 +99,10 @@ pub fn parse_api_base_override(value: Option<&str>) -> Result<Option<Url>, GwsEr
     Ok(Some(url))
 }
 
-/// Read and validate `GWSR_API_BASE_URL`. See [`parse_api_base_override`].
-pub fn api_base_override() -> Result<Option<Url>, GwsError> {
-    match std::env::var(API_BASE_URL_ENV) {
-        Ok(v) => parse_api_base_override(Some(&v)),
-        Err(std::env::VarError::NotPresent) => Ok(None),
-        Err(std::env::VarError::NotUnicode(_)) => Err(GwsError::Validation(format!(
-            "{API_BASE_URL_ENV} is not valid UTF-8"
-        ))),
-    }
-}
-
 /// Validate that `url` is a trusted API base (e.g. a Discovery `rootUrl`)
-/// that credentials may be sent to, honoring `GWSR_API_BASE_URL`.
-pub fn validate_api_base(url: &str) -> Result<Url, GwsError> {
-    validate_api_base_with(url, api_base_override()?.as_ref())
-}
-
-/// Like [`validate_api_base`], with the override passed explicitly.
+/// that credentials may be sent to: `https://*.googleapis.com/`, or the
+/// origin of `override_base` (the operator's validated `GWSR_API_BASE_URL`,
+/// see [`parse_api_base_override`]).
 pub fn validate_api_base_with(url: &str, override_base: Option<&Url>) -> Result<Url, GwsError> {
     let parsed = parse_url(url, "API base URL")?;
     if !is_trusted(&parsed, override_base) {
@@ -146,7 +132,7 @@ fn is_trusted(parsed: &Url, override_base: Option<&Url>) -> bool {
 /// Decides which request URLs may receive credentials.
 ///
 /// Holds the validated `GWSR_API_BASE_URL` override (if any) and applies the
-/// same trust rule as [`validate_api_base`] to full request URLs, which may
+/// same trust rule as [`validate_api_base_with`] to full request URLs, which may
 /// carry a query string.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct EndpointPolicy {
@@ -170,11 +156,11 @@ impl EndpointPolicy {
         })
     }
 
-    /// Read `GWSR_API_BASE_URL`; unset or empty means [`Self::google_only`].
-    pub fn from_env() -> Result<Self, GwsError> {
-        Ok(Self {
-            override_base: api_base_override()?,
-        })
+    /// Trust Google API hosts plus the origin of an already validated
+    /// override (see [`parse_api_base_override`]); `None` is
+    /// [`Self::google_only`].
+    pub fn new(override_base: Option<Url>) -> Self {
+        Self { override_base }
     }
 
     /// The operator-supplied base URL (always ends in `/`).

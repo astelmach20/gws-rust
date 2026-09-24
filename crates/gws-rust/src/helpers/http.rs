@@ -254,7 +254,7 @@ impl Api {
         let endpoints = match &transport {
             Some(t) => t.endpoints(),
             None => {
-                env_endpoints = gws_rust_core::validate::EndpointPolicy::from_env()?;
+                env_endpoints = crate::env::get()?.endpoint_policy();
                 &env_endpoints
             }
         };

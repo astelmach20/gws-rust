@@ -30,6 +30,7 @@ mod completions;
 mod config;
 mod confirm;
 mod discovery;
+mod env;
 mod error;
 mod executor;
 mod formatter;
@@ -73,8 +74,16 @@ fn main() -> ExitCode {
 
     let args: Vec<OsString> = std::env::args_os().collect();
     let prescan = cli_args::prescan(args.get(1..).unwrap_or_default());
+
+    // Every environment variable is validated here, before anything uses
+    // one and whether or not the command needs it. An invalid value or an
+    // unknown GWSR_* name is a configuration error (exit 8).
+    let env = match env::get() {
+        Ok(env) => env,
+        Err(e) => return finish(Err(e.into()), human_output(prescan.format.as_deref(), None)),
+    };
     // Before the config file is read, the error format comes from the flag or env.
-    let early_human = human_output(prescan.format.as_deref(), None);
+    let early_human = human_output(prescan.format.as_deref(), env.format);
 
     let cli = match parse_top_level(&args) {
         Ok(Some(cli)) => cli,
@@ -87,21 +96,14 @@ fn main() -> ExitCode {
         Err(e) => return finish(Err(e.into()), early_human),
     };
     let human = human_output(prescan.format.as_deref(), Some(settings.format));
-    if let Some(secs) = settings.timeout_secs
-        && let Err(e) = gws_rust_core::client::set_configured_timeout(secs)
-    {
+    if let Err(e) = gws_rust_core::client::install_request_timeout(settings.request_timeout) {
         return finish(Err(e.into()), human);
     }
 
-    let mut log_opts = match logging::LogOptions::from_env(prescan.verbosity) {
-        Ok(opts) => opts,
-        Err(e) => return finish(Err(e.into()), human),
-    };
+    let mut log_opts = logging::LogOptions::from_env(prescan.verbosity, env);
     log_opts.config_log = settings.log.clone();
     log_opts.human = human || prescan.verbosity > 0;
-    if log_opts.file_dir.is_none() {
-        log_opts.file_dir = settings.log_file.clone();
-    }
+    log_opts.file_dir = settings.log_file.clone();
     let log_guard = match logging::init(&log_opts) {
         Ok(guard) => guard,
         Err(e) => return finish(Err(e.into()), human),
@@ -136,18 +138,15 @@ fn main() -> ExitCode {
 }
 
 /// True when the effective output format is a human one (not JSON):
-/// `--format` flag > `GWSR_FORMAT` > config file > JSON.
+/// `--format` flag > `fallback` (the validated `GWSR_FORMAT`, or the resolved
+/// settings once the config file is loaded) > JSON.
 ///
-/// This only picks the form of an error report, possibly before the flag and
-/// config are validated, so unparseable values are skipped here on purpose:
-/// clap rejects a bad `--format` and `config::load` a bad `GWSR_FORMAT`, and
-/// those errors are then reported (as JSON, the default).
-fn human_output(flag: Option<&str>, config: Option<OutputFormat>) -> bool {
+/// This only picks the form of an error report, possibly before the flag is
+/// validated, so an unparseable flag is skipped here on purpose: clap rejects
+/// it and that error is then reported (as JSON, the default).
+fn human_output(flag: Option<&str>, fallback: Option<OutputFormat>) -> bool {
     let from_flag = flag.and_then(|f| OutputFormat::parse(f).ok());
-    let from_env = std::env::var("GWSR_FORMAT")
-        .ok()
-        .and_then(|f| OutputFormat::parse(&f).ok());
-    let format = from_flag.or(from_env).or(config).unwrap_or_default();
+    let format = from_flag.or(fallback).unwrap_or_default();
     format != OutputFormat::Json
 }
 

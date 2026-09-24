@@ -36,7 +36,7 @@ use serde::Deserialize;
 use zeroize::Zeroizing;
 
 use super::AuthError;
-use super::keystore::{Keystore, KeystoreError, Purpose};
+use super::keystore::{BackendKind, Keystore, Purpose};
 use super::profiles::{ActiveProfile, ProfilePaths, ProfileSource};
 
 /// An OAuth user credential (refresh token).
@@ -189,6 +189,8 @@ pub struct AuthEnv {
     pub adc_well_known: Option<PathBuf>,
     pub impersonate: Option<String>,
     pub endpoints: super::http::Endpoints,
+    /// `GWSR_KEYRING_BACKEND`.
+    pub keyring_backend: BackendKind,
     keystore: Arc<OnceLock<Arc<Keystore>>>,
 }
 
@@ -207,12 +209,6 @@ impl std::fmt::Debug for AuthEnv {
     }
 }
 
-fn env_path(name: &str) -> Option<PathBuf> {
-    std::env::var_os(name)
-        .filter(|v| !v.is_empty())
-        .map(PathBuf::from)
-}
-
 impl AuthEnv {
     /// Read the process environment and global flags.
     ///
@@ -220,12 +216,16 @@ impl AuthEnv {
     ///
     /// Config-dir or profile resolution failures.
     pub fn from_process() -> anyhow::Result<Self> {
+        let vars = crate::env::get()?;
         let (base, profile, paths) = super::profiles::active_profile_paths()?;
         let mut env = Self::new(base, profile, paths);
-        env.token = super::profiles::env_string("GWSR_TOKEN")?.map(SecretString::from);
-        env.token_file = env_path("GWSR_TOKEN_FILE");
-        env.credentials_file = env_path("GWSR_CREDENTIALS_FILE");
-        env.adc_env = env_path("GOOGLE_APPLICATION_CREDENTIALS");
+        env.token = vars.token.clone();
+        env.token_file = vars.token_file.clone();
+        env.credentials_file = vars.credentials_file.clone();
+        env.keyring_backend = vars.keyring_backend.unwrap_or_default();
+        env.adc_env = std::env::var_os("GOOGLE_APPLICATION_CREDENTIALS")
+            .filter(|v| !v.is_empty())
+            .map(PathBuf::from);
         // gcloud always uses ~/.config/gcloud, even on macOS and Windows.
         env.adc_well_known = dirs::home_dir().map(|h| {
             h.join(".config")
@@ -249,6 +249,7 @@ impl AuthEnv {
             adc_well_known: None,
             impersonate: None,
             endpoints: super::http::Endpoints::default(),
+            keyring_backend: BackendKind::default(),
             keystore: Arc::new(OnceLock::new()),
         }
     }
@@ -261,17 +262,12 @@ impl AuthEnv {
     }
 
     /// The keystore for this config directory (backend from
-    /// `GWSR_KEYRING_BACKEND`), created on first use.
-    ///
-    /// # Errors
-    ///
-    /// Invalid `GWSR_KEYRING_BACKEND`.
-    pub fn keystore(&self) -> Result<Arc<Keystore>, KeystoreError> {
-        if let Some(ks) = self.keystore.get() {
-            return Ok(Arc::clone(ks));
-        }
-        let ks = Arc::new(Keystore::from_env(&self.base)?);
-        Ok(Arc::clone(self.keystore.get_or_init(|| ks)))
+    /// [`Self::keyring_backend`]), created on first use.
+    pub fn keystore(&self) -> Arc<Keystore> {
+        Arc::clone(
+            self.keystore
+                .get_or_init(|| Arc::new(Keystore::for_kind(&self.base, self.keyring_backend))),
+        )
     }
 
     /// Whether the profile was chosen explicitly (not the implicit default).
@@ -400,7 +396,7 @@ impl AuthEnv {
             .map_err(|e| AuthError::Storage(format!("cannot read '{}': {e}", path.display())))?;
         let what = format!("the credentials of profile '{name}' ('{}')", path.display());
         let plaintext = self
-            .keystore()?
+            .keystore()
             .decrypt(Purpose::Credentials, &data, &what)?;
         let json = std::str::from_utf8(&plaintext)
             .map_err(|_| AuthError::Storage(format!("{what} decrypted to invalid UTF-8")))?;
@@ -438,7 +434,7 @@ fn read_plaintext_credential(path: &Path) -> Result<Credential, AuthError> {
 
 #[cfg(test)]
 mod tests {
-    use super::super::keystore::BackendKind;
+    use super::super::keystore::KeystoreError;
     use super::super::keystore::testing::{FailingBackend, memory_keystore};
     use super::super::profiles::DEFAULT_PROFILE;
     use super::*;

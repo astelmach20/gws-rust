@@ -192,7 +192,8 @@ pub(crate) async fn handle(m: &clap::ArgMatches) -> Result<(), GwsError> {
         profiles::active_profile_paths().map_err(crate::auth::to_gws_error)?;
 
     // Fail before the browser opens if the encryption key is unusable.
-    let keystore = std::sync::Arc::new(Keystore::from_env(&base)?);
+    let backend = crate::env::get()?.keyring_backend.unwrap_or_default();
+    let keystore = std::sync::Arc::new(Keystore::for_kind(&base, backend));
     {
         let ks = std::sync::Arc::clone(&keystore);
         tokio::task::spawn_blocking(move || -> Result<(), GwsError> {

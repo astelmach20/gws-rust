@@ -72,17 +72,14 @@ pub enum SanitizeMode {
     Block,
 }
 
-impl std::str::FromStr for SanitizeMode {
-    type Err = GwsError;
-
-    /// Parse `warn` or `block` (case-insensitive). Anything else is an error.
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s.trim().to_ascii_lowercase().as_str() {
-            "warn" => Ok(SanitizeMode::Warn),
-            "block" => Ok(SanitizeMode::Block),
-            other => Err(GwsError::Validation(format!(
-                "Invalid sanitize mode '{other}' (GWSR_SANITIZE_MODE must be 'warn' or 'block')"
-            ))),
+impl SanitizeMode {
+    /// Parse `warn` or `block`. Anything else is `None`, never a silent
+    /// `warn`; callers report it with the source that set it.
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "warn" => Some(SanitizeMode::Warn),
+            "block" => Some(SanitizeMode::Block),
+            _ => None,
         }
     }
 }
@@ -104,7 +101,7 @@ pub struct ModelArmorTemplate {
     template: String,
 }
 
-fn is_project_id(s: &str) -> bool {
+pub(crate) fn is_project_id(s: &str) -> bool {
     // Project ID: 6-30 chars, lowercase letter first, then [a-z0-9-], not ending in '-'.
     // Project number: all digits.
     let bytes = s.as_bytes();
@@ -702,22 +699,15 @@ mod tests {
 
     #[test]
     fn test_sanitize_mode_parsing() {
-        assert_eq!("warn".parse::<SanitizeMode>().unwrap(), SanitizeMode::Warn);
-        assert_eq!("WARN".parse::<SanitizeMode>().unwrap(), SanitizeMode::Warn);
-        assert_eq!(
-            "Block".parse::<SanitizeMode>().unwrap(),
-            SanitizeMode::Block
-        );
+        assert_eq!(SanitizeMode::parse("warn"), Some(SanitizeMode::Warn));
+        assert_eq!(SanitizeMode::parse("block"), Some(SanitizeMode::Block));
     }
 
     /// SEC-14: unknown modes are an error, never a silent `warn`.
     #[test]
     fn test_sanitize_mode_unknown_is_error() {
-        for bad in ["blok", "", "stop", "invalid"] {
-            assert!(
-                bad.parse::<SanitizeMode>().is_err(),
-                "{bad:?} must be rejected"
-            );
+        for bad in ["blok", "", "stop", "invalid", "Block"] {
+            assert_eq!(SanitizeMode::parse(bad), None, "{bad:?} must be rejected");
         }
     }
 

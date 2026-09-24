@@ -119,8 +119,7 @@ impl Credentials {
 
 /// The quota project to bill requests to, unless `GWSR_NO_QUOTA_PROJECT` is set.
 pub(crate) fn quota_project_from_env() -> Result<Option<String>, GwsError> {
-    use crate::executor::options::{NO_QUOTA_PROJECT_ENV, env_flag};
-    if env_flag(NO_QUOTA_PROJECT_ENV)? {
+    if crate::env::get()?.no_quota_project {
         return Ok(None);
     }
     crate::auth::get_quota_project()
@@ -176,8 +175,8 @@ impl Transport {
     pub(crate) fn from_env(credentials: &Credentials) -> Result<Self, GwsError> {
         Self::new(
             credentials,
-            RetryPolicy::from_env()?,
-            EndpointPolicy::from_env()?,
+            RetryPolicy::configured(),
+            crate::env::get()?.endpoint_policy(),
             quota_project_from_env()?,
         )
     }
@@ -187,8 +186,8 @@ impl Transport {
     pub(crate) fn unauthenticated() -> Result<Self, GwsError> {
         Self::new(
             &Credentials::None,
-            RetryPolicy::from_env()?,
-            EndpointPolicy::from_env()?,
+            RetryPolicy::configured(),
+            crate::env::get()?.endpoint_policy(),
             None,
         )
     }

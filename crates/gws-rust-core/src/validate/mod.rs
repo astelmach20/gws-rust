@@ -18,9 +18,13 @@
 //! malformed values — especially important when the CLI is invoked by an
 //! LLM agent rather than a human operator.
 //!
+//! Nothing here reads the process environment: policies such as
+//! [`PathPolicy`] and [`EndpointPolicy`] are passed in by the caller, which
+//! owns (and validates) its environment variables.
+//!
 //! - Character and identifier validation, URL path encoding (this module)
 //! - File-system path validation with an optional CWD sandbox (`paths`)
-//! - API endpoint (rootUrl) trust checks: [`validate_api_base`]
+//! - API endpoint (rootUrl) trust checks: [`validate_api_base_with`]
 //! - Model Armor template names: [`ModelArmorTemplate`]
 
 mod endpoint;
@@ -28,13 +32,12 @@ mod modelarmor;
 mod paths;
 
 pub use endpoint::{
-    API_BASE_URL_ENV, EndpointPolicy, api_base_override, is_google_api_host,
-    parse_api_base_override, validate_api_base, validate_api_base_with,
+    API_BASE_URL_ENV, EndpointPolicy, is_google_api_host, parse_api_base_override,
+    validate_api_base_with,
 };
 pub use modelarmor::ModelArmorTemplate;
 pub use paths::{
     PathPolicy, RESTRICT_PATHS_ENV, resolve_dir_path, resolve_file_path, resolve_output_dir,
-    validate_safe_dir_path, validate_safe_file_path, validate_safe_output_dir,
 };
 
 use crate::error::GwsError;

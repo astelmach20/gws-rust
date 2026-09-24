@@ -17,8 +17,8 @@
 //!
 //! Precedence for every setting: command-line flag > environment variable >
 //! config file > built-in default. Flags are applied by `main`; this module
-//! resolves the environment and the file. Unknown keys and invalid values are
-//! errors, never ignored.
+//! combines the validated environment ([`crate::env::Env`]) with the file.
+//! Unknown keys and invalid values are errors, never ignored.
 //!
 //! ```toml
 //! format = "table"          # json | table | yaml | csv          (GWSR_FORMAT)
@@ -29,20 +29,21 @@
 //! sanitize_mode = "warn"    # warn | block                       (GWSR_SANITIZE_MODE)
 //! profile = "work"          # default credential profile, written by `gwsr auth use`;
 //!                           # --profile and GWSR_PROFILE take precedence (read by auth)
-//! timeout_secs = 60         # HTTP request timeout; the executor's --timeout flag and
-//!                           # GWSR_TIMEOUT take precedence (read by the executor)
+//! timeout_secs = 60         # HTTP request timeout; 0 disables   (GWSR_TIMEOUT; the
+//!                           # executor's --timeout flag wins over both)
 //! log = "gwsr=info"         # stderr log filter                  (GWSR_LOG, RUST_LOG)
 //! log_file = "/var/log/gwsr" # JSON log directory                (GWSR_LOG_FILE)
 //! ```
 
 use std::path::{Path, PathBuf};
-
-use crate::helpers::modelarmor::SanitizeMode;
+use std::time::Duration;
 
 use serde::Deserialize;
 
+use crate::env::Env;
 use crate::error::GwsError;
 use crate::formatter::{FORMAT_NAMES, OutputFormat};
+use crate::helpers::modelarmor::SanitizeMode;
 
 /// File name inside the config directory.
 pub const CONFIG_FILE_NAME: &str = "config.toml";
@@ -57,6 +58,18 @@ pub enum JsonStylePref {
     Compact,
     /// Always pretty.
     Pretty,
+}
+
+impl JsonStylePref {
+    /// Parse `auto`, `compact` or `pretty`; anything else is `None`.
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "auto" => Some(JsonStylePref::Auto),
+            "compact" => Some(JsonStylePref::Compact),
+            "pretty" => Some(JsonStylePref::Pretty),
+            _ => None,
+        }
+    }
 }
 
 /// Raw contents of `config.toml`.
@@ -90,9 +103,10 @@ pub struct Settings {
     pub sanitize_template: Option<String>,
     /// Model Armor mode.
     pub sanitize_mode: SanitizeMode,
-    /// HTTP request timeout in seconds (config only; `--timeout` and
-    /// `GWSR_TIMEOUT` are resolved by the executor and take precedence).
-    pub timeout_secs: Option<u64>,
+    /// HTTP request timeout (`GWSR_TIMEOUT` > `timeout_secs` > 60 s; `None`
+    /// disables it). The executor's `--timeout` flag overrides it per
+    /// command.
+    pub request_timeout: Option<Duration>,
     /// stderr log filter from the config file (env handled by logging).
     pub log: Option<String>,
     /// Log file directory (`GWSR_LOG_FILE` or config).
@@ -111,32 +125,13 @@ fn parse_format(value: &str, source: &str) -> Result<OutputFormat, GwsError> {
 }
 
 fn parse_json_style(value: &str, source: &str) -> Result<JsonStylePref, GwsError> {
-    match value {
-        "auto" => Ok(JsonStylePref::Auto),
-        "compact" => Ok(JsonStylePref::Compact),
-        "pretty" => Ok(JsonStylePref::Pretty),
-        other => Err(invalid(
-            source,
-            "json_style",
-            other,
-            "auto | compact | pretty",
-        )),
-    }
+    JsonStylePref::parse(value)
+        .ok_or_else(|| invalid(source, "json_style", value, "auto | compact | pretty"))
 }
 
 fn parse_sanitize_mode(value: &str, source: &str) -> Result<SanitizeMode, GwsError> {
-    match value {
-        "warn" => Ok(SanitizeMode::Warn),
-        "block" => Ok(SanitizeMode::Block),
-        other => Err(invalid(source, "sanitize_mode", other, "warn | block")),
-    }
-}
-
-fn parse_number<T: std::str::FromStr>(value: &str, key: &str, source: &str) -> Result<T, GwsError> {
-    value
-        .trim()
-        .parse::<T>()
-        .map_err(|_| invalid(source, key, value, "a non-negative integer"))
+    SanitizeMode::parse(value)
+        .ok_or_else(|| invalid(source, "sanitize_mode", value, "warn | block"))
 }
 
 /// Parse the text of a config file. `origin` names it in error messages.
@@ -163,46 +158,37 @@ pub fn load_config_file(path: &Path) -> Result<Option<ConfigFile>, GwsError> {
     }
 }
 
-/// Resolve settings from an environment lookup and an optional config file.
-///
-/// `env` returns the value of an environment variable (empty values count as
-/// unset). Taking it as a function keeps this pure and testable.
-pub fn resolve(
-    file: Option<&ConfigFile>,
-    origin: &Path,
-    env: &dyn Fn(&str) -> Option<String>,
-) -> Result<Settings, GwsError> {
-    let env = |name: &str| env(name).filter(|v| !v.trim().is_empty());
+/// Resolve settings: the validated environment `env` > the config `file`
+/// (named `origin` in errors) > built-in defaults. Pure, so tests pass an
+/// [`Env`] built with [`Env::from_vars`].
+pub fn resolve(file: Option<&ConfigFile>, origin: &Path, env: &Env) -> Result<Settings, GwsError> {
     let default_file = ConfigFile::default();
     let file = file.unwrap_or(&default_file);
     let origin = origin.display().to_string();
 
-    let format = match (env("GWSR_FORMAT"), &file.format) {
-        (Some(v), _) => parse_format(&v, "GWSR_FORMAT")?,
+    let format = match (env.format, &file.format) {
+        (Some(v), _) => v,
         (None, Some(v)) => parse_format(v, &origin)?,
         (None, None) => OutputFormat::default(),
     };
-    let json_style = match (env("GWSR_JSON_STYLE"), &file.json_style) {
-        (Some(v), _) => parse_json_style(&v, "GWSR_JSON_STYLE")?,
+    let json_style = match (env.json_style, &file.json_style) {
+        (Some(v), _) => v,
         (None, Some(v)) => parse_json_style(v, &origin)?,
         (None, None) => JsonStylePref::default(),
     };
-    let page_limit = match env("GWSR_PAGE_LIMIT") {
-        Some(v) => Some(parse_number(&v, "page_limit", "GWSR_PAGE_LIMIT")?),
-        None => file.page_limit,
-    };
-    let page_delay_ms = match env("GWSR_PAGE_DELAY_MS") {
-        Some(v) => Some(parse_number(&v, "page_delay_ms", "GWSR_PAGE_DELAY_MS")?),
-        None => file.page_delay_ms,
-    };
-    let sanitize_mode = match (env("GWSR_SANITIZE_MODE"), &file.sanitize_mode) {
-        (Some(v), _) => parse_sanitize_mode(&v, "GWSR_SANITIZE_MODE")?,
+    let sanitize_mode = match (&env.sanitize_mode, &file.sanitize_mode) {
+        (Some(v), _) => v.clone(),
         (None, Some(v)) => parse_sanitize_mode(v, &origin)?,
         (None, None) => SanitizeMode::default(),
     };
+    let request_timeout = match (env.timeout, file.timeout_secs) {
+        (Some(v), _) => v,
+        (None, Some(secs)) => (secs > 0).then(|| Duration::from_secs(secs)),
+        (None, None) => Some(gws_rust_core::client::DEFAULT_TIMEOUT),
+    };
     let log = file.log.clone();
     if let Some(directive) = &log {
-        tracing_subscriber::EnvFilter::try_new(directive).map_err(|e| {
+        crate::env::check_log_filter(directive).map_err(|e| {
             invalid(
                 &origin,
                 "log",
@@ -215,16 +201,16 @@ pub fn resolve(
     Ok(Settings {
         format,
         json_style,
-        page_limit,
-        page_delay_ms,
-        sanitize_template: env("GWSR_SANITIZE_TEMPLATE").or_else(|| file.sanitize_template.clone()),
+        page_limit: env.page_limit.or(file.page_limit),
+        page_delay_ms: env.page_delay_ms.or(file.page_delay_ms),
+        sanitize_template: env
+            .sanitize_template
+            .clone()
+            .or_else(|| file.sanitize_template.clone()),
         sanitize_mode,
-        // GWSR_TIMEOUT is owned and read by the executor; config is the fallback.
-        timeout_secs: file.timeout_secs,
+        request_timeout,
         log,
-        log_file: env("GWSR_LOG_FILE")
-            .map(PathBuf::from)
-            .or_else(|| file.log_file.clone()),
+        log_file: env.log_file.clone().or_else(|| file.log_file.clone()),
     })
 }
 
@@ -272,72 +258,20 @@ pub fn set_profile_in(path: &Path, name: &str) -> Result<(), GwsError> {
     })
 }
 
-/// Environment variables [`resolve`] reads.
-const SETTINGS_ENV_VARS: &[&str] = &[
-    "GWSR_FORMAT",
-    "GWSR_JSON_STYLE",
-    "GWSR_PAGE_LIMIT",
-    "GWSR_PAGE_DELAY_MS",
-    "GWSR_SANITIZE_MODE",
-    "GWSR_SANITIZE_TEMPLATE",
-    "GWSR_LOG_FILE",
-];
-
-/// Read an environment variable. Unset and blank are `None`; a value that is
-/// not valid UTF-8 is a configuration error rather than silently unset.
-pub(crate) fn env_var(name: &str) -> Result<Option<String>, GwsError> {
-    match std::env::var(name) {
-        Ok(v) if v.trim().is_empty() => Ok(None),
-        Ok(v) => Ok(Some(v)),
-        Err(std::env::VarError::NotPresent) => Ok(None),
-        Err(std::env::VarError::NotUnicode(_)) => Err(GwsError::Config(format!(
-            "environment variable {name} is not valid UTF-8"
-        ))),
-    }
-}
-
-/// Load and resolve settings from the real environment and config file.
+/// Load and resolve settings from the validated environment and the config
+/// file.
 pub fn load() -> Result<Settings, GwsError> {
     let path = config_path()?;
     let file = load_config_file(&path)?;
-    let mut vars = std::collections::HashMap::new();
-    for name in SETTINGS_ENV_VARS {
-        if let Some(value) = env_var(name)? {
-            vars.insert(*name, value);
-        }
-    }
-    resolve(file.as_ref(), &path, &|name| vars.get(name).cloned())
+    resolve(file.as_ref(), &path, crate::env::get()?)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn resolve_reads_only_the_env_vars_load_snapshots() {
-        let asked = std::cell::RefCell::new(Vec::new());
-        let file = ConfigFile::default();
-        resolve(Some(&file), &origin(), &|name| {
-            asked.borrow_mut().push(name.to_string());
-            None
-        })
-        .unwrap();
-        for name in asked.borrow().iter() {
-            assert!(
-                SETTINGS_ENV_VARS.contains(&name.as_str()),
-                "resolve reads {name}, which load() does not snapshot"
-            );
-        }
-        assert!(!asked.borrow().is_empty());
-    }
-    use std::collections::HashMap;
-
-    fn env_of(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
-        let map: HashMap<String, String> = pairs
-            .iter()
-            .map(|(k, v)| (k.to_string(), v.to_string()))
-            .collect();
-        move |k| map.get(k).cloned()
+    fn env_of(pairs: &[(&str, &str)]) -> Env {
+        Env::from_vars(pairs.iter().copied()).unwrap()
     }
 
     fn origin() -> PathBuf {
@@ -347,7 +281,13 @@ mod tests {
     #[test]
     fn defaults_without_file_or_env() {
         let s = resolve(None, &origin(), &env_of(&[])).unwrap();
-        assert_eq!(s, Settings::default());
+        assert_eq!(
+            s,
+            Settings {
+                request_timeout: Some(gws_rust_core::client::DEFAULT_TIMEOUT),
+                ..Settings::default()
+            }
+        );
     }
 
     #[test]
@@ -395,12 +335,22 @@ log_file = "/tmp/logs"
     }
 
     #[test]
-    fn timeout_is_config_only() {
-        // GWSR_TIMEOUT belongs to the executor and outranks config there, so
-        // config must not read it itself.
+    fn timeout_precedence_env_then_config_then_default() {
         let file = parse_config("timeout_secs = 30\n", &origin()).unwrap();
         let s = resolve(Some(&file), &origin(), &env_of(&[("GWSR_TIMEOUT", "5")])).unwrap();
-        assert_eq!(s.timeout_secs, Some(30));
+        assert_eq!(s.request_timeout, Some(Duration::from_secs(5)));
+        let s = resolve(Some(&file), &origin(), &env_of(&[("GWSR_TIMEOUT", "0")])).unwrap();
+        assert_eq!(s.request_timeout, None);
+        let s = resolve(Some(&file), &origin(), &env_of(&[])).unwrap();
+        assert_eq!(s.request_timeout, Some(Duration::from_secs(30)));
+        let file = parse_config("timeout_secs = 0\n", &origin()).unwrap();
+        let s = resolve(Some(&file), &origin(), &env_of(&[])).unwrap();
+        assert_eq!(s.request_timeout, None);
+        let s = resolve(None, &origin(), &env_of(&[])).unwrap();
+        assert_eq!(
+            s.request_timeout,
+            Some(gws_rust_core::client::DEFAULT_TIMEOUT)
+        );
     }
 
     #[test]
@@ -441,17 +391,18 @@ log_file = "/tmp/logs"
             "{err}"
         );
 
-        let err = resolve(None, &origin(), &env_of(&[("GWSR_PAGE_LIMIT", "lots")])).unwrap_err();
-        assert!(err.to_string().contains("GWSR_PAGE_LIMIT"), "{err}");
-
-        let err = resolve(None, &origin(), &env_of(&[("GWSR_SANITIZE_MODE", "loud")])).unwrap_err();
+        let file = parse_config("sanitize_mode = \"loud\"\n", &origin()).unwrap();
+        let err = resolve(Some(&file), &origin(), &env_of(&[])).unwrap_err();
         assert!(err.to_string().contains("warn | block"), "{err}");
 
         let file = parse_config("page_limit = -1\n", &origin());
         assert!(file.is_err());
 
-        let file = parse_config("log = \"gwsr=nope\"\n", &origin()).unwrap();
-        assert!(resolve(Some(&file), &origin(), &env_of(&[])).is_err());
+        for bad in ["gwsr=nope", "bogus!!"] {
+            let file = parse_config(&format!("log = \"{bad}\"\n"), &origin()).unwrap();
+            let err = resolve(Some(&file), &origin(), &env_of(&[])).unwrap_err();
+            assert!(matches!(err, GwsError::Config(_)), "{bad}: {err:?}");
+        }
     }
 
     #[test]

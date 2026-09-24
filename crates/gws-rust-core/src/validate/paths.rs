@@ -64,45 +64,6 @@ impl PathPolicy {
             ))),
         }
     }
-
-    /// Read the policy from `GWSR_RESTRICT_PATHS`.
-    pub fn from_env() -> Result<Self, GwsError> {
-        match std::env::var(RESTRICT_PATHS_ENV) {
-            Ok(v) => Self::parse(Some(&v)),
-            Err(std::env::VarError::NotPresent) => Ok(PathPolicy::Unrestricted),
-            Err(std::env::VarError::NotUnicode(_)) => Err(GwsError::Validation(format!(
-                "{RESTRICT_PATHS_ENV} is not valid UTF-8"
-            ))),
-        }
-    }
-}
-
-fn current_dir() -> Result<PathBuf, GwsError> {
-    std::env::current_dir()
-        .map_err(|e| GwsError::Validation(format!("Failed to determine current directory: {e}")))
-}
-
-/// Validates a file path such as `--upload` or `--output` using the policy
-/// from `GWSR_RESTRICT_PATHS`. See [`resolve_file_path`].
-pub fn validate_safe_file_path(path_str: &str, flag_name: &str) -> Result<PathBuf, GwsError> {
-    resolve_file_path(
-        path_str,
-        flag_name,
-        PathPolicy::from_env()?,
-        &current_dir()?,
-    )
-}
-
-/// Validates an output directory (e.g. `--output-dir`) using the policy from
-/// `GWSR_RESTRICT_PATHS`. See [`resolve_output_dir`].
-pub fn validate_safe_output_dir(dir: &str) -> Result<PathBuf, GwsError> {
-    resolve_output_dir(dir, PathPolicy::from_env()?, &current_dir()?)
-}
-
-/// Validates an existing directory to read from (e.g. `--dir`) using the
-/// policy from `GWSR_RESTRICT_PATHS`. See [`resolve_dir_path`].
-pub fn validate_safe_dir_path(dir: &str) -> Result<PathBuf, GwsError> {
-    resolve_dir_path(dir, PathPolicy::from_env()?, &current_dir()?)
 }
 
 /// Resolves a file path (which may not exist yet) relative to `cwd`.
@@ -415,14 +376,5 @@ mod tests {
             resolve_output_dir("new/nested/dir", PathPolicy::Cwd, &cwd).unwrap(),
             cwd.join("new/nested/dir")
         );
-    }
-
-    #[test]
-    fn env_wrappers_use_current_dir() {
-        // Only meaningful when the test environment does not set the policy.
-        if std::env::var_os(RESTRICT_PATHS_ENV).is_none() {
-            assert!(validate_safe_file_path("/definitely/absolute/out.txt", "--output").is_ok());
-            assert!(validate_safe_dir_path(".").is_ok());
-        }
     }
 }

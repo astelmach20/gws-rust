@@ -72,32 +72,14 @@ fn overrides() -> Option<&'static GlobalOverrides> {
     OVERRIDES.get()
 }
 
-/// Read a string environment variable; unset or empty is `None`.
-///
-/// # Errors
-///
-/// The variable is set but not valid UTF-8 (never silently ignored).
-pub fn env_string(name: &str) -> anyhow::Result<Option<String>> {
-    match std::env::var(name) {
-        Ok(v) if v.is_empty() => Ok(None),
-        Ok(v) => Ok(Some(v)),
-        Err(std::env::VarError::NotPresent) => Ok(None),
-        Err(std::env::VarError::NotUnicode(_)) => {
-            anyhow::bail!("environment variable {name} is not valid UTF-8")
-        }
-    }
-}
-
 /// Base configuration directory: `GWSR_CONFIG_DIR` or `~/.config/gwsr`.
 ///
 /// # Errors
 ///
 /// Fails if `GWSR_CONFIG_DIR` is unset and the home directory is unknown.
 pub fn try_config_dir() -> anyhow::Result<PathBuf> {
-    if let Some(dir) = std::env::var_os("GWSR_CONFIG_DIR")
-        && !dir.is_empty()
-    {
-        return Ok(PathBuf::from(dir));
+    if let Some(dir) = &crate::env::get()?.config_dir {
+        return Ok(dir.clone());
     }
     let home = dirs::home_dir().context(
         "cannot determine the home directory; set GWSR_CONFIG_DIR to choose a config directory",
@@ -161,7 +143,7 @@ pub struct ActiveProfile {
 /// Fails on an invalid name or an unreadable/invalid `config.toml`.
 pub fn active_profile(base: &Path) -> anyhow::Result<ActiveProfile> {
     let flag = overrides().and_then(|o| o.profile.clone());
-    let env = env_string("GWSR_PROFILE")?;
+    let env = crate::env::get()?.profile.clone();
     resolve_active_profile(base, flag, env)
 }
 
@@ -330,12 +312,12 @@ pub fn save_metadata(path: &Path, meta: &ProfileMetadata) -> anyhow::Result<()> 
 ///
 /// # Errors
 ///
-/// `GWSR_IMPERSONATE` is not valid UTF-8.
+/// The environment failed validation (see [`crate::env::get`]).
 pub fn impersonation_subject() -> anyhow::Result<Option<String>> {
     if let Some(s) = overrides().and_then(|o| o.impersonate.clone()) {
         return Ok(Some(s));
     }
-    env_string("GWSR_IMPERSONATE")
+    Ok(crate::env::get()?.impersonate.clone())
 }
 
 #[cfg(test)]

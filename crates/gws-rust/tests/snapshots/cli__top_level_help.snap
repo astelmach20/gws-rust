@@ -79,7 +79,7 @@ Environment:
   GWSR_IMPERSONATE         Service accounts: user to act as (same as --impersonate)
   GWSR_CLIENT_ID           OAuth client ID (for gwsr auth login)
   GWSR_CLIENT_SECRET       OAuth client secret (for gwsr auth login)
-  GWSR_CONFIG_DIR          Config directory (default: ~/.config/gwsr)
+  GWSR_CONFIG_DIR          Config directory, absolute (default: ~/.config/gwsr)
   GWSR_CACHE_DIR           Cache directory, absolute (default: platform cache dir + /gwsr)
   GWSR_KEYRING_BACKEND     Keyring backend: keyring (default) or file
   GWSR_PROJECT_ID          GCP project for quota and billing
@@ -94,8 +94,9 @@ Environment:
   GWSR_PAGE_DELAY_MS       Default --page-delay
   GWSR_SANITIZE_TEMPLATE   Default Model Armor template (--sanitize)
   GWSR_SANITIZE_MODE       Sanitization mode: warn (default) or block
-  GWSR_LOG                 stderr log filter, e.g. gwsr=debug (RUST_LOG is also honored)
-  GWSR_LOG_FILE            Directory for JSON log files (daily rotation, mode 0600)
+  GWSR_LOG                 stderr log filter, e.g. gwsr=debug (overrides RUST_LOG)
+  RUST_LOG                 stderr log filter when GWSR_LOG is unset
+  GWSR_LOG_FILE            Directory for JSON log files, absolute (daily rotation, mode 0600)
   GWSR_COMPLETE            Set by the shell completion script; do not set manually
 
 Exit codes:
