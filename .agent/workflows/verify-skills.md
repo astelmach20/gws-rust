@@ -52,11 +52,11 @@ done
    - [ ] **No OAuth scopes section** — scopes should not be listed in skill files
    - [ ] **Tips section** contains accurate, actionable advice
 
-5. **Cross-check `shared/SKILL.md`** covers:
+5. **Cross-check `skills/gwsr-shared/SKILL.md`** covers:
 
    - [ ] `--fields` / field mask syntax
    - [ ] CLI syntax (`--params`, `--json`, `--output`, `--upload`, `--page-all`, `--page-limit`, `--page-delay`)
-   - [ ] Authentication (`GWSR_CREDENTIALS`, `GOOGLE_WORKSPACE_API_KEY`)
+   - [ ] Authentication (`GWSR_CREDENTIALS_FILE`, `GWSR_TOKEN`, `GOOGLE_APPLICATION_CREDENTIALS`)
    - [ ] Auto-pagination (`--page-all`) with NDJSON output
    - [ ] `gwsr schema <method>` introspection
    - [ ] Error handling JSON structure
