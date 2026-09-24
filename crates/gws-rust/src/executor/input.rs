@@ -164,8 +164,8 @@ pub(crate) fn validate_params(
     for (name, value) in params {
         let Some(def) = lookup(doc, method, name) else {
             if allow_unknown {
-                eprintln!(
-                    "warning: sending unknown parameter '{name}' as a query parameter (--allow-unknown-params)"
+                tracing::warn!(
+                    "sending unknown parameter '{name}' as a query parameter (--allow-unknown-params)"
                 );
                 continue;
             }
@@ -181,7 +181,7 @@ pub(crate) fn validate_params(
             continue;
         };
         if def.deprecated {
-            eprintln!("warning: parameter '{name}' is deprecated");
+            tracing::warn!("parameter '{name}' is deprecated");
         }
         check_param_value(name, def, value, &mut errors);
     }

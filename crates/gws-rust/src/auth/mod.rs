@@ -307,8 +307,8 @@ pub fn scopes_for_method(
         required_any_of, ..
     } = &choice
     {
-        eprintln!(
-            "warning: this method needs one of [{}], but the active profile was granted none of \
+        tracing::warn!(
+            "this method needs one of [{}], but the active profile was granted none of \
              them. Add one with `{}`",
             required_any_of.join(", "),
             scopes::login_command_hint(&required_any_of[..1])
@@ -325,7 +325,7 @@ pub fn get_quota_project() -> Option<String> {
     match profiles::env_string("GWSR_PROJECT_ID") {
         Ok(Some(project_id)) => return Some(project_id),
         Ok(None) => {}
-        Err(e) => eprintln!("warning: ignoring GWSR_PROJECT_ID: {e:#}"),
+        Err(e) => tracing::warn!("ignoring GWSR_PROJECT_ID: {e:#}"),
     }
     match client_config::load_saved() {
         Ok(Some(config)) => {
@@ -335,7 +335,7 @@ pub fn get_quota_project() -> Option<String> {
         }
         Ok(None) => {}
         Err(e) => {
-            eprintln!("warning: ignoring the OAuth client config for the quota project: {e:#}")
+            tracing::warn!("ignoring the OAuth client config for the quota project: {e:#}")
         }
     }
     let path = std::env::var_os("GOOGLE_APPLICATION_CREDENTIALS")
@@ -352,8 +352,8 @@ pub fn get_quota_project() -> Option<String> {
         Ok(c) => c,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
         Err(e) => {
-            eprintln!(
-                "warning: cannot read '{}' for the quota project: {e}",
+            tracing::warn!(
+                "cannot read '{}' for the quota project: {e}",
                 path.display()
             );
             return None;
@@ -365,8 +365,8 @@ pub fn get_quota_project() -> Option<String> {
             .and_then(|v| v.as_str())
             .map(str::to_string),
         Err(e) => {
-            eprintln!(
-                "warning: '{}' is not valid JSON; ignoring it for the quota project: {e}",
+            tracing::warn!(
+                "'{}' is not valid JSON; ignoring it for the quota project: {e}",
                 path.display()
             );
             None

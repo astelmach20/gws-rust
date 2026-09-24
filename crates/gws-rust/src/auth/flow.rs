@@ -277,8 +277,8 @@ pub async fn serve_callback(
                 respond(&mut stream, "404 Not Found", "Not found", "Not found.").await;
             }
             Callback::BadState | Callback::Malformed => {
-                eprintln!(
-                    "warning: ignored an OAuth callback from {peer} with a missing or wrong \
+                tracing::warn!(
+                    "ignored an OAuth callback from {peer} with a missing or wrong \
                      state parameter"
                 );
                 respond(
@@ -377,9 +377,7 @@ pub async fn exchange_code(
     let granted_scopes = match response.scopes() {
         Some(s) => s.iter().map(|x| x.as_str().to_string()).collect(),
         None => {
-            eprintln!(
-                "warning: Google did not report the granted scopes; assuming the requested ones"
-            );
+            tracing::warn!("Google did not report the granted scopes; assuming the requested ones");
             requested.to_vec()
         }
     };
@@ -392,8 +390,8 @@ pub async fn exchange_code(
 
 fn try_open_browser(url: &str) {
     match webbrowser::open(url) {
-        Ok(()) => eprintln!("Opened your browser to sign in."),
-        Err(e) => eprintln!("warning: could not open a browser ({e}); open the URL above manually"),
+        Ok(()) => crate::output::eprint_line("Opened your browser to sign in."),
+        Err(e) => tracing::warn!("could not open a browser ({e}); open the URL above manually"),
     }
 }
 
@@ -446,15 +444,18 @@ pub async fn run(
                 &opts.scopes,
                 opts.login_hint.as_deref(),
             )?;
-            eprintln!("Open this URL in a browser to sign in:\n\n  {}\n", req.url);
+            crate::output::eprint_line(&format!(
+                "Open this URL in a browser to sign in:\n\n  {}\n",
+                req.url
+            ));
             on_url(req.url.as_str())?;
             if opts.open_browser {
                 try_open_browser(req.url.as_str());
             }
-            eprintln!(
+            crate::output::eprint_line(&format!(
                 "Waiting for the sign-in to complete (timeout {}s)...",
                 opts.timeout.as_secs()
-            );
+            ));
             let code =
                 tokio::time::timeout(opts.timeout, serve_callback(listener, req.state.secret()))
                     .await
@@ -481,15 +482,15 @@ pub async fn run(
                 &opts.scopes,
                 opts.login_hint.as_deref(),
             )?;
-            eprintln!(
+            crate::output::eprint_line(&format!(
                 "Open this URL in a browser on any machine and sign in:\n\n  {}\n\n\
                  After approving, the browser is redirected to http://127.0.0.1:{port}/... and \
                  shows a connection error. That is expected: copy the full URL from the address \
                  bar and paste it here.",
                 req.url
-            );
+            ));
             on_url(req.url.as_str())?;
-            eprint!("Redirected URL: ");
+            crate::output::eprint_text("Redirected URL: ");
             let line = tokio::time::timeout(opts.timeout, read_line_from_stdin())
                 .await
                 .map_err(|_| timeout_err())??;

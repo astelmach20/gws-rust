@@ -244,17 +244,17 @@ impl Progress {
             return;
         }
         let mib = |b: u64| b as f64 / (1024.0 * 1024.0);
-        eprint!(
+        crate::output::eprint_text(&format!(
             "\rUploading: {:.1} / {:.1} MiB ({:.0}%)",
             mib(done),
             mib(self.total),
             done as f64 * 100.0 / self.total as f64
-        );
+        ));
     }
 
     fn finish(&self) {
         if self.enabled && self.total > 0 {
-            eprintln!();
+            crate::output::eprint_line("");
         }
     }
 }

@@ -489,6 +489,27 @@ fn schema_honors_format() {
         .stdout(predicate::str::contains("httpMethod: GET"));
 }
 
+#[test]
+fn auth_output_honors_format_and_is_compact_json_by_default() {
+    let env = Env::new();
+    env.cmd()
+        .args(["--format", "yaml", "auth", "list"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("active_profile: default"));
+    let out = env
+        .cmd()
+        .args(["auth", "list"])
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+    let stdout = stdout_of(&out);
+    assert_eq!(stdout.trim_end().lines().count(), 1, "{stdout}");
+    let parsed: Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(parsed["active_profile"], "default");
+}
+
 // ── JSON by default ──
 
 #[test]

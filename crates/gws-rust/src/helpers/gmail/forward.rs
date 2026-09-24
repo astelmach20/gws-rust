@@ -66,7 +66,7 @@ pub(super) async fn handle_forward(matches: &ArgMatches) -> Result<(), GwsError>
             )
             .await?;
         }
-        None => eprintln!("Note: original attachments are not included in the dry-run preview"),
+        None => tracing::warn!("original attachments are not included in the dry-run preview"),
     }
 
     let subject = build_forward_subject(&original.subject);

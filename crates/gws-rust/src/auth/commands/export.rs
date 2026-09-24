@@ -143,11 +143,11 @@ pub(super) fn confirm(
 }
 
 fn prompt_yes(output: &Path) -> Result<bool, GwsError> {
-    eprint!(
+    crate::output::eprint_text(&format!(
         "This writes your refresh token and client secret in plain text to '{}'.\n\
          Type 'yes' to continue: ",
         output.display()
-    );
+    ));
     std::io::stderr()
         .flush()
         .map_err(|e| GwsError::Validation(format!("cannot write prompt: {e}")))?;

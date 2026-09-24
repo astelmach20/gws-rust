@@ -17,12 +17,14 @@
 use super::api::GMAIL_UPLOAD_BASE;
 use super::prelude::*;
 use crate::confirm::{self, Impact};
+use crate::formatter::{OutputFormat, format_value};
 
 /// Whether the message is sent or saved as a draft, and whether this is a dry run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct Delivery {
     pub draft: bool,
     pub dry_run: bool,
+    pub format: OutputFormat,
 }
 
 impl Delivery {
@@ -30,6 +32,7 @@ impl Delivery {
         Ok(Self {
             draft: matches.get_flag("draft"),
             dry_run: crate::helpers::http::dry_run(matches),
+            format: crate::helpers::http::output_format(matches),
         })
     }
 
@@ -83,10 +86,7 @@ pub(super) async fn deliver(
 ) -> Result<(), GwsError> {
     if delivery.dry_run {
         let plan = dry_run_plan(raw_message, thread_id, delivery.draft);
-        let text = serde_json::to_string_pretty(&plan)
-            .map_err(|e| GwsError::other(format!("Failed to serialize dry-run plan: {e}")))?;
-        println!("{text}");
-        return Ok(());
+        return crate::output::emit(&format_value(&plan, &delivery.format)?);
     }
     let api =
         api.ok_or_else(|| GwsError::other("internal error: no Gmail client for a real send"))?;
@@ -94,18 +94,15 @@ pub(super) async fn deliver(
     let response = api
         .upload_raw(raw_message.as_bytes(), &metadata, delivery.draft)
         .await?;
-    let text = serde_json::to_string_pretty(&response)
-        .map_err(|e| GwsError::other(format!("Failed to serialize response: {e}")))?;
-    println!("{text}");
+    crate::output::emit(&format_value(&response, &delivery.format)?)?;
 
     if delivery.draft {
         let id = response
             .get("id")
             .and_then(Value::as_str)
             .ok_or_else(|| GwsError::other("drafts.create response has no draft \"id\""))?;
-        eprintln!("Draft saved. Send it with:");
-        eprintln!(
-            "  gwsr gmail users drafts send --params '{{\"userId\":\"me\"}}' --json '{{\"id\":\"{}\"}}'",
+        tracing::info!(
+            "Draft saved. Send it with: gwsr gmail users drafts send --params '{{\"userId\":\"me\"}}' --json '{{\"id\":\"{}\"}}'",
             sanitize_for_terminal(id)
         );
     }
@@ -158,6 +155,7 @@ mod tests {
         let delivery = Delivery {
             draft: false,
             dry_run: false,
+            format: OutputFormat::Json,
         };
         assert!(deliver(Some(&api), delivery, "raw", None).await.is_err());
     }
@@ -174,6 +172,7 @@ mod tests {
         let delivery = Delivery {
             draft: true,
             dry_run: false,
+            format: OutputFormat::Json,
         };
         let err = deliver(Some(&api), delivery, "raw", None)
             .await

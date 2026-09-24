@@ -203,8 +203,8 @@ fn read_cache(path: &Path, keystore: &Keystore) -> Result<CacheFile, AuthError> 
                     path.display()
                 ))
             })?;
-            eprintln!(
-                "warning: the token cache '{}' was unreadable ({reason}); moved it to '{}' and \
+            tracing::warn!(
+                "the token cache '{}' was unreadable ({reason}); moved it to '{}' and \
                  starting a new cache (it only holds short-lived access tokens)",
                 path.display(),
                 quarantine.display()

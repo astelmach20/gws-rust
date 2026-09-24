@@ -72,19 +72,19 @@ pub(crate) async fn shutdown_signal() {
                         tokio::select! {
                             res = tokio::signal::ctrl_c() => {
                                 if let Err(e) = res {
-                                    eprintln!("error: could not listen for Ctrl+C: {e}; shutting down");
+                                    tracing::error!("could not listen for Ctrl+C: {e}; shutting down");
                                 }
                             }
                             Some(_) = sigterm.recv() => {}
                         }
                     }
                     Err(e) => {
-                        eprintln!(
-                            "warning: could not register SIGTERM handler: {e}. \
+                        tracing::warn!(
+                            "could not register SIGTERM handler: {e}. \
                              Listening for Ctrl+C only."
                         );
                         if let Err(e) = tokio::signal::ctrl_c().await {
-                            eprintln!("error: could not listen for Ctrl+C: {e}; shutting down");
+                            tracing::error!("could not listen for Ctrl+C: {e}; shutting down");
                         }
                     }
                 }
@@ -92,7 +92,7 @@ pub(crate) async fn shutdown_signal() {
             #[cfg(not(unix))]
             {
                 if let Err(e) = tokio::signal::ctrl_c().await {
-                    eprintln!("error: could not listen for Ctrl+C: {e}; shutting down");
+                    tracing::error!("could not listen for Ctrl+C: {e}; shutting down");
                 }
             }
             n2.notify_waiters();

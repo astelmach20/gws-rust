@@ -38,7 +38,7 @@ pub(super) async fn fetch_original_parts(
         )));
     }
 
-    eprintln!(
+    tracing::info!(
         "Fetching {} original attachment(s) ({:.1} MB)...",
         parts.len(),
         total_metadata_size as f64 / (1024.0 * 1024.0),

@@ -218,7 +218,7 @@ impl Ctx {
 
     fn cancelled(&mut self) -> GwsError {
         if let Err(e) = self.finish_wizard() {
-            eprintln!("warning: {e}");
+            tracing::warn!("{e}");
         }
         GwsError::Validation("setup cancelled".into())
     }
@@ -235,7 +235,7 @@ async fn stage_check_gcloud(ctx: &mut Ctx) -> Result<Stage, GwsError> {
     }
     ctx.step(0, StepStatus::Done("found".into()))?;
     if !ctx.interactive {
-        eprintln!("Step 1/5: gcloud CLI found");
+        crate::output::eprint_line("Step 1/5: gcloud CLI found");
     }
     Ok(Stage::Account)
 }
@@ -251,7 +251,9 @@ async fn stage_account(ctx: &mut Ctx) -> Result<Stage, GwsError> {
                 ));
             }
             None => {
-                eprintln!("Step 2/5: not logged in to gcloud; running `gcloud auth login`...");
+                crate::output::eprint_line(
+                    "Step 2/5: not logged in to gcloud; running `gcloud auth login`...",
+                );
                 ctx.gcloud.auth_login().await.map_err(gcloud_err)?;
                 ctx.gcloud
                     .account()
@@ -262,7 +264,7 @@ async fn stage_account(ctx: &mut Ctx) -> Result<Stage, GwsError> {
                     })?
             }
         };
-        eprintln!("Step 2/5: authenticated as {account}");
+        crate::output::eprint_line(&format!("Step 2/5: authenticated as {account}"));
         ctx.account = account;
         return Ok(Stage::Project);
     }
@@ -298,7 +300,7 @@ async fn stage_account(ctx: &mut Ctx) -> Result<Stage, GwsError> {
     let account = match account_choice(&items) {
         AccountChoice::LoginNew => {
             ctx.wizard()?.suspend().map_err(tui_err)?;
-            eprintln!("Opening a browser for `gcloud auth login`...");
+            crate::output::eprint_line("Opening a browser for `gcloud auth login`...");
             let login = ctx.gcloud.auth_login().await;
             ctx.wizard()?.resume().map_err(tui_err)?;
             login.map_err(gcloud_err)?;
@@ -371,7 +373,7 @@ async fn stage_project(ctx: &mut Ctx) -> Result<Stage, GwsError> {
         }
         ctx.step(2, StepStatus::Done(p.clone()))?;
         if !ctx.interactive {
-            eprintln!("Step 3/5: project {p}");
+            crate::output::eprint_line(&format!("Step 3/5: project {p}"));
         }
         ctx.project_id = p;
         return Ok(Stage::EnableApis);
@@ -383,7 +385,7 @@ async fn stage_project(ctx: &mut Ctx) -> Result<Stage, GwsError> {
                     .into(),
             )
         })?;
-        eprintln!("Step 3/5: using the current project {p}");
+        crate::output::eprint_line(&format!("Step 3/5: using the current project {p}"));
         ctx.project_id = p;
         return Ok(Stage::EnableApis);
     }
@@ -499,11 +501,14 @@ async fn stage_enable_apis(ctx: &mut Ctx) -> Result<Stage, GwsError> {
     }
 
     if ctx.opts.dry_run {
-        eprintln!("Step 4/5: would enable {} APIs:", ctx.api_ids.len());
+        crate::output::eprint_line(&format!(
+            "Step 4/5: would enable {} APIs:",
+            ctx.api_ids.len()
+        ));
         for id in &ctx.api_ids {
-            eprintln!("  - {id}");
+            crate::output::eprint_line(&format!("  - {id}"));
         }
-        eprintln!("Step 5/5: would configure the OAuth consent screen and client");
+        crate::output::eprint_line("Step 5/5: would configure the OAuth consent screen and client");
         return Ok(Stage::Finish);
     }
 
@@ -533,7 +538,7 @@ async fn stage_enable_apis(ctx: &mut Ctx) -> Result<Stage, GwsError> {
             .join("\n");
         ctx.message(&format!("Some APIs could not be enabled:\n{details}"))?;
         if !ctx.interactive {
-            eprintln!("warning: some APIs could not be enabled:\n{details}");
+            tracing::warn!("some APIs could not be enabled:\n{details}");
         }
     }
     ctx.step(3, StepStatus::Done(summary))?;
@@ -605,7 +610,7 @@ async fn stage_configure_oauth(ctx: &mut Ctx) -> Result<Stage, GwsError> {
         Consent::Exists | Consent::Created => {}
         Consent::Manual(note) => {
             if !ctx.interactive {
-                eprintln!("warning: {note}");
+                tracing::warn!("{note}");
             }
             ctx.consent_note = Some(note);
         }
@@ -714,7 +719,7 @@ fn prompt_login_after_setup() -> Result<bool, GwsError> {
     use std::io::Write;
     let mut input = String::new();
     loop {
-        eprint!("Run `gwsr auth login` now? [Y/n]: ");
+        crate::output::eprint_text("Run `gwsr auth login` now? [Y/n]: ");
         std::io::stderr()
             .flush()
             .map_err(|e| GwsError::Validation(format!("cannot write prompt: {e}")))?;
@@ -725,7 +730,7 @@ fn prompt_login_after_setup() -> Result<bool, GwsError> {
         match input.trim().to_ascii_lowercase().as_str() {
             "" | "y" | "yes" => return Ok(true),
             "n" | "no" => return Ok(false),
-            _ => eprintln!("Please answer 'y' or 'n'."),
+            _ => crate::output::eprint_line("Please answer 'y' or 'n'."),
         }
     }
 }
@@ -745,7 +750,7 @@ pub async fn run_setup(args: &[String]) -> Result<(), GwsError> {
         && std::io::stdin().is_terminal()
         && std::io::stdout().is_terminal();
     if opts.dry_run {
-        eprintln!("DRY RUN: no changes will be made\n");
+        crate::output::eprint_line("DRY RUN: no changes will be made\n");
     }
     let client_path = crate::auth::client_config::client_config_path()
         .map_err(|e| GwsError::Validation(format!("{e:#}")))?;
@@ -798,7 +803,7 @@ pub async fn run_setup(args: &[String]) -> Result<(), GwsError> {
     }
 
     if let Some(steps) = &ctx.manual_steps {
-        eprintln!("\n{steps}");
+        crate::output::eprint_line(&format!("\n{steps}"));
         return crate::auth::commands::print_json(&setup_summary(
             &ctx,
             "action_required",

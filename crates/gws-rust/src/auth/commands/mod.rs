@@ -294,12 +294,9 @@ pub(crate) fn auth_err(e: impl std::fmt::Display) -> GwsError {
     GwsError::Auth(e.to_string())
 }
 
-/// Print a JSON value to stdout.
+/// Print a command's JSON result to stdout in the configured format.
 pub(crate) fn print_json(value: &serde_json::Value) -> Result<(), GwsError> {
-    let text = serde_json::to_string_pretty(value)
-        .map_err(|e| GwsError::Validation(format!("cannot serialize output: {e}")))?;
-    println!("{text}");
-    Ok(())
+    crate::formatter::emit_default(value)
 }
 
 #[cfg(test)]

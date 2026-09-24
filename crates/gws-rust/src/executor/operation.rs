@@ -173,7 +173,7 @@ pub(crate) async fn wait(
                 op.get("metadata").cloned().unwrap_or(json!(null))
             )));
         }
-        eprintln!("Waiting for operation {name}...");
+        tracing::info!("Waiting for operation {name}...");
         tokio::time::sleep(interval).await;
         interval = interval.mul_f64(1.5).min(cfg.max_interval);
 

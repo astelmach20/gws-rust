@@ -270,7 +270,7 @@ fn collect_files(root: &Path) -> Result<Vec<Value>, GwsError> {
                 GwsError::Validation(format!("Failed to stat '{}': {e}", path.display()))
             })?;
             if ft.is_symlink() {
-                eprintln!("note: skipping symlink '{}'", path.display());
+                tracing::warn!("skipping symlink '{}'", path.display());
                 continue;
             }
             if ft.is_dir() {

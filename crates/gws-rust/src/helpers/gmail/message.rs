@@ -282,8 +282,8 @@ fn decode_text_body(data: &str, mime_label: &str) -> Result<String, GwsError> {
     match String::from_utf8(decoded) {
         Ok(s) => Ok(s),
         Err(e) => {
-            eprintln!(
-                "warning: {mime_label} body is not valid UTF-8; invalid bytes were replaced with U+FFFD"
+            tracing::warn!(
+                "{mime_label} body is not valid UTF-8; invalid bytes were replaced with U+FFFD"
             );
             Ok(String::from_utf8_lossy(e.as_bytes()).into_owned())
         }

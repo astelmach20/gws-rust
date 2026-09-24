@@ -452,7 +452,7 @@ async fn replace(
         .and_then(Value::as_u64)
         .unwrap_or(0);
     if changed == 0 {
-        eprintln!("note: no occurrences of the --find text were found");
+        tracing::warn!("no occurrences of the --find text were found");
     }
     Ok(json!({ "documentId": document_id, "occurrencesChanged": changed }))
 }

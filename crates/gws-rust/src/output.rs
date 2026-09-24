@@ -141,6 +141,19 @@ pub(crate) fn eprint_line(text: &str) {
     }
 }
 
+/// Print `text` to stderr without a newline and flush (prompts, progress
+/// bars). Failures are dropped for the same reason as [`eprint_line`].
+pub(crate) fn eprint_text(text: &str) {
+    let mut err = std::io::stderr().lock();
+    if err
+        .write_all(text.as_bytes())
+        .and_then(|()| err.flush())
+        .is_err()
+    {
+        // stderr is gone; nothing more can be reported.
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

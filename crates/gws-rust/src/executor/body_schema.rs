@@ -61,8 +61,8 @@ pub(crate) fn validate_body(
     checker.value(body, schema_name, "$");
 
     if !checker.unknown.is_empty() {
-        eprintln!(
-            "warning: sending fields not in the Discovery schema (--allow-unknown-fields): {}",
+        tracing::warn!(
+            "sending fields not in the Discovery schema (--allow-unknown-fields): {}",
             checker.unknown.join(", ")
         );
     }
