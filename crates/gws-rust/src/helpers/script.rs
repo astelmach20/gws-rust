@@ -148,7 +148,7 @@ TIPS:
                 .arg(
                     Arg::new("limit")
                         .long("limit")
-                        .help("Maximum executions to list (default: 50)")
+                        .help("Maximum executions to list")
                         .default_value("50")
                         .value_name("N"),
                 )

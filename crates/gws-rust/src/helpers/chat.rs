@@ -129,7 +129,7 @@ TIPS:
                 .arg(
                     Arg::new("limit")
                         .long("limit")
-                        .help("Number of messages (default: 25)")
+                        .help("Number of messages")
                         .default_value("25")
                         .value_name("N"),
                 )
