@@ -13,33 +13,36 @@ metadata:
 
 # chat +send
 
-> **PREREQUISITE:** Read `../gwsr-shared/SKILL.md` for auth, global flags, and security rules. If missing, run `gwsr generate-skills` to create it.
+> **PREREQUISITE:** Read `../gwsr-shared/SKILL.md` for auth, global flags, and security rules.
 
 Send a message to a space
 
 ## Usage
 
 ```bash
-gwsr chat +send --space <NAME> --text <TEXT>
+gwsr chat +send --space-id <ID> --text <TEXT>
 ```
 
 ## Flags
 
 | Flag | Required | Default | Description |
 |------|----------|---------|-------------|
-| `--space` | ✓ | — | Space name (e.g. spaces/AAAA...) |
-| `--text` | ✓ | — | Message text (plain text) |
+| `--space-id` | ✓ | — | Space ID, as 'AAAA...' or 'spaces/AAAA...' |
+| `--text` | ✓ | — | Message text (Chat formatting such as *bold* is supported) |
+| `--thread` | — | — | Reply in this thread (spaces/SPACE/threads/THREAD); falls back to a new thread if it no longer exists |
+| `--yes` | — | — | Confirm this action without prompting (required when not on a terminal) |
 
 ## Examples
 
 ```bash
-gwsr chat +send --space spaces/AAAAxxxx --text 'Hello team!'
+gwsr chat +send --space-id spaces/AAAAxxxx --text 'Hello team!'
+gwsr chat +send --space-id AAAAxxxx --thread spaces/AAAAxxxx/threads/TTTT --text 'Done.'
 ```
 
 ## Tips
 
-- Use 'gwsr chat spaces list' to find space names.
-- For cards or threaded replies, use the raw API instead.
+- Use 'gwsr chat +spaces' to find space IDs.
+- Requires confirmation when GWSR_REQUIRE_CONFIRM=1.
 
 > [!CAUTION]
 > This is a **write** command — confirm with the user before executing.

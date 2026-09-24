@@ -1,6 +1,6 @@
 ---
 name: gwsr-sheets-read
-description: "Google Sheets: Read values from a spreadsheet."
+description: "Google Sheets: Read values from a range, optionally exporting CSV."
 metadata:
   version: 0.22.5
   openclaw:
@@ -13,34 +13,36 @@ metadata:
 
 # sheets +read
 
-> **PREREQUISITE:** Read `../gwsr-shared/SKILL.md` for auth, global flags, and security rules. If missing, run `gwsr generate-skills` to create it.
+> **PREREQUISITE:** Read `../gwsr-shared/SKILL.md` for auth, global flags, and security rules.
 
-Read values from a spreadsheet
+Read values from a range, optionally exporting CSV
 
 ## Usage
 
 ```bash
-gwsr sheets +read --spreadsheet <ID> --range <RANGE>
+gwsr sheets +read --spreadsheet-id <ID> --range <RANGE>
 ```
 
 ## Flags
 
 | Flag | Required | Default | Description |
 |------|----------|---------|-------------|
-| `--spreadsheet` | ✓ | — | Spreadsheet ID |
-| `--range` | ✓ | — | Range to read (e.g. 'Sheet1!A1:B2') |
+| `--spreadsheet-id` | ✓ | — | Spreadsheet ID |
+| `--range` | ✓ | — | Range to read, e.g. 'Sheet1!A1:D10' or 'Sheet1' |
+| `--output` | — | — | Write the values as CSV to this path, or '-' for stdout |
+| `--overwrite` | — | — | Replace an existing --output file |
 
 ## Examples
 
 ```bash
-gwsr sheets +read --spreadsheet ID --range "Sheet1!A1:D10"
-gwsr sheets +read --spreadsheet ID --range Sheet1
+gwsr sheets +read --spreadsheet-id ID --range 'Sheet1!A1:D10'
+gwsr sheets +read --spreadsheet-id ID --range Sheet1 --output sheet1.csv
+gwsr sheets +read --spreadsheet-id ID --range Sheet1 --output -
 ```
 
 ## Tips
 
-- Read-only — never modifies the spreadsheet.
-- For advanced options, use the raw values.get API.
+- Read-only. Values are the formatted strings shown in the UI.
 
 ## See Also
 

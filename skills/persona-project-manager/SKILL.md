@@ -35,7 +35,7 @@ Coordinate projects — track tasks, schedule meetings, and share docs.
 - Send status update emails to stakeholders with `gwsr gmail +send`.
 
 ## Tips
-- Use `gwsr drive files list --params '{"q": "name contains \'Project\'"}'` to find project folders.
+- Use `gwsr drive files list --params '{"q": "name contains '\''Project'\''"}'` to find project folders.
 - Pipe triage output through `jq` for filtering by sender or subject.
 - Use `--dry-run` before any write operations to preview what will happen.
 

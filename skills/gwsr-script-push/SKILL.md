@@ -1,6 +1,6 @@
 ---
 name: gwsr-script-push
-description: "Google Apps Script: Upload local files to an Apps Script project."
+description: "Google Apps Script: Replace a project's files with local files."
 metadata:
   version: 0.22.5
   openclaw:
@@ -13,35 +13,38 @@ metadata:
 
 # script +push
 
-> **PREREQUISITE:** Read `../gwsr-shared/SKILL.md` for auth, global flags, and security rules. If missing, run `gwsr generate-skills` to create it.
+> **PREREQUISITE:** Read `../gwsr-shared/SKILL.md` for auth, global flags, and security rules.
 
-Upload local files to an Apps Script project
+Replace a project's files with local files
 
 ## Usage
 
 ```bash
-gwsr script +push --script <ID>
+gwsr script +push --script-id <ID>
 ```
 
 ## Flags
 
 | Flag | Required | Default | Description |
 |------|----------|---------|-------------|
-| `--script` | ✓ | — | Script Project ID |
-| `--dir` | — | — | Directory containing script files (defaults to current dir) |
+| `--script-id` | ✓ | — | Apps Script project ID |
+| `--dir` | — | . | Directory with the script files |
+| `--yes` | — | — | Confirm this action without prompting (required when not on a terminal) |
 
 ## Examples
 
 ```bash
-gwsr script +push --script SCRIPT_ID
-gwsr script +push --script SCRIPT_ID --dir ./src
+gwsr script +push --script-id SCRIPT_ID --yes
+gwsr script +push --script-id SCRIPT_ID --dir ./src --yes
 ```
 
 ## Tips
 
-- Supports .gs, .js, .html, and appsscript.json files.
-- Skips hidden files and node_modules automatically.
-- This replaces ALL files in the project.
+- Uploads .gs/.js (server code), .html and appsscript.json (required).
+- Files in sub-directories keep their path (e.g. lib/util.gs -> lib/util).
+- Hidden files/directories, node_modules and symlinks are skipped.
+- Destructive: this REPLACES ALL files in the project, so it requires --yes
+- (or a confirmation prompt on a terminal).
 
 > [!CAUTION]
 > This is a **write** command — confirm with the user before executing.

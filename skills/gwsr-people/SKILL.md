@@ -13,11 +13,17 @@ metadata:
 
 # people (v1)
 
-> **PREREQUISITE:** Read `../gwsr-shared/SKILL.md` for auth, global flags, and security rules. If missing, run `gwsr generate-skills` to create it.
+> **PREREQUISITE:** Read `../gwsr-shared/SKILL.md` for auth, global flags, and security rules.
 
 ```bash
 gwsr people <resource> <method> [flags]
 ```
+
+## Helper Commands
+
+| Command | Description |
+|---------|-------------|
+| [`+find`](../gwsr-people-find/SKILL.md) | Find people in your contacts or your organization's directory |
 
 ## API Resources
 

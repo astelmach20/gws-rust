@@ -13,7 +13,7 @@ metadata:
 
 # gmail +send
 
-> **PREREQUISITE:** Read `../gwsr-shared/SKILL.md` for auth, global flags, and security rules. If missing, run `gwsr generate-skills` to create it.
+> **PREREQUISITE:** Read `../gwsr-shared/SKILL.md` for auth, global flags, and security rules.
 
 Send an email
 
@@ -30,13 +30,13 @@ gwsr gmail +send --to <EMAILS> --subject <SUBJECT> --body <TEXT>
 | `--to` | ✓ | — | Recipient email address(es), comma-separated |
 | `--subject` | ✓ | — | Email subject |
 | `--body` | ✓ | — | Email body (plain text, or HTML with --html) |
-| `--from` | — | — | Sender address (for send-as/alias; omit to use account default) |
-| `--attach` | — | — | Attach a file (can be specified multiple times) |
+| `--from` | — | — | Send-as address to send from (must be configured in Gmail; omit for the default) |
+| `--attach` | — | — | Attach a file (repeatable) |
 | `--cc` | — | — | CC email address(es), comma-separated |
 | `--bcc` | — | — | BCC email address(es), comma-separated |
-| `--html` | — | — | Treat --body as HTML content (default is plain text) |
-| `--dry-run` | — | — | Show the request that would be sent without executing it |
-| `--draft` | — | — | Save as draft instead of sending |
+| `--html` | — | — | Treat --body as HTML (a plain-text alternative is generated) |
+| `--draft` | — | — | Save as a draft instead of sending |
+| `--yes` | — | — | Confirm this action without prompting (required when not on a terminal) |
 
 ## Examples
 
@@ -46,17 +46,16 @@ gwsr gmail +send --to alice@example.com --subject 'Hello' --body 'Hi!' --cc bob@
 gwsr gmail +send --to alice@example.com --subject 'Hello' --body '<b>Bold</b> text' --html
 gwsr gmail +send --to alice@example.com --subject 'Hello' --body 'Hi!' --from alias@example.com
 gwsr gmail +send --to alice@example.com --subject 'Report' --body 'See attached' -a report.pdf
-gwsr gmail +send --to alice@example.com --subject 'Files' --body 'Two files' -a a.pdf -a b.csv
 gwsr gmail +send --to alice@example.com --subject 'Hello' --body 'Hi!' --draft
 ```
 
 ## Tips
 
 - Handles RFC 5322 formatting, MIME encoding, and base64 automatically.
-- Use --from to send from a configured send-as alias instead of your primary address.
-- Use -a/--attach to add file attachments. Can be specified multiple times. Total size limit: 25MB.
-- With --html, use fragment tags (<p>, <b>, <a>, <br>, etc.) — no <html>/<body> wrapper needed.
-- Use --draft to save the message as a draft instead of sending it immediately.
+- --html sends multipart/alternative with a generated plain-text part.
+- Total attachment size limit: 25MB.
+- Sends are never retried automatically: a timeout may still have delivered the message.
+- With GWSR_REQUIRE_CONFIRM=1, sending requires --yes (drafts do not).
 
 > [!CAUTION]
 > This is a **write** command — confirm with the user before executing.

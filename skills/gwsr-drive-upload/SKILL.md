@@ -1,6 +1,6 @@
 ---
 name: gwsr-drive-upload
-description: "Google Drive: Upload a file with automatic metadata."
+description: "Google Drive: Upload a local file (resumable, Shared Drive aware)."
 metadata:
   version: 0.22.5
   openclaw:
@@ -13,36 +13,39 @@ metadata:
 
 # drive +upload
 
-> **PREREQUISITE:** Read `../gwsr-shared/SKILL.md` for auth, global flags, and security rules. If missing, run `gwsr generate-skills` to create it.
+> **PREREQUISITE:** Read `../gwsr-shared/SKILL.md` for auth, global flags, and security rules.
 
-Upload a file with automatic metadata
+Upload a local file (resumable, Shared Drive aware)
 
 ## Usage
 
 ```bash
-gwsr drive +upload <file>
+gwsr drive +upload --file <PATH>
 ```
 
 ## Flags
 
 | Flag | Required | Default | Description |
 |------|----------|---------|-------------|
-| `<file>` | ✓ | — | Path to file to upload |
-| `--parent` | — | — | Parent folder ID |
-| `--name` | — | — | Target filename (defaults to source filename) |
+| `--file` | ✓ | — | Local file to upload |
+| `--folder-id` | — | — | Destination folder ID (My Drive or Shared Drive). Defaults to My Drive root |
+| `--name` | — | — | Name in Drive (defaults to the local file name) |
+| `--mime-type` | — | — | Content type of the local file (default: detected from the extension) |
+| `--convert` | — | — | Convert to the matching Google format (Docs/Sheets/Slides) on import |
 
 ## Examples
 
 ```bash
-gwsr drive +upload ./report.pdf
-gwsr drive +upload ./report.pdf --parent FOLDER_ID
-gwsr drive +upload ./data.csv --name 'Sales Data.csv'
+gwsr drive +upload --file ./report.pdf
+gwsr drive +upload --file ./report.pdf --folder-id FOLDER_ID
+gwsr drive +upload --file ./data.csv --name 'Sales Data' --convert
 ```
 
 ## Tips
 
-- MIME type is detected automatically.
-- Filename is inferred from the local path unless --name is given.
+- Uses the resumable upload protocol in 8 MiB chunks, so large files work.
+- Works with Shared Drive folders (supportsAllDrives is always set).
+- --convert turns .docx/.csv/.xlsx/.pptx/... into native Google files.
 
 > [!CAUTION]
 > This is a **write** command — confirm with the user before executing.

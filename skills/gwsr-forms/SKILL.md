@@ -13,11 +13,17 @@ metadata:
 
 # forms (v1)
 
-> **PREREQUISITE:** Read `../gwsr-shared/SKILL.md` for auth, global flags, and security rules. If missing, run `gwsr generate-skills` to create it.
+> **PREREQUISITE:** Read `../gwsr-shared/SKILL.md` for auth, global flags, and security rules.
 
 ```bash
 gwsr forms <resource> <method> [flags]
 ```
+
+## Helper Commands
+
+| Command | Description |
+|---------|-------------|
+| [`+responses`](../gwsr-forms-responses/SKILL.md) | Export all responses of a form as rows (JSON or CSV) |
 
 ## API Resources
 

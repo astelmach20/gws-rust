@@ -1,6 +1,6 @@
 ---
 name: gwsr-sheets-append
-description: "Google Sheets: Append a row to a spreadsheet."
+description: "Google Sheets: Append rows after the last row of a table."
 metadata:
   version: 0.22.5
   openclaw:
@@ -13,38 +13,39 @@ metadata:
 
 # sheets +append
 
-> **PREREQUISITE:** Read `../gwsr-shared/SKILL.md` for auth, global flags, and security rules. If missing, run `gwsr generate-skills` to create it.
+> **PREREQUISITE:** Read `../gwsr-shared/SKILL.md` for auth, global flags, and security rules.
 
-Append a row to a spreadsheet
+Append rows after the last row of a table
 
 ## Usage
 
 ```bash
-gwsr sheets +append --spreadsheet <ID>
+gwsr sheets +append --spreadsheet-id <ID>
 ```
 
 ## Flags
 
 | Flag | Required | Default | Description |
 |------|----------|---------|-------------|
-| `--spreadsheet` | ✓ | — | Spreadsheet ID |
-| `--values` | — | — | Comma-separated values (simple strings) |
-| `--json-values` | — | — | JSON array of rows, e.g. '[["a","b"],["c","d"]]' |
-| `--range` | — | — | Target range in A1 notation (e.g. 'Sheet2!A1'). Defaults to 'A1' (first sheet) |
+| `--spreadsheet-id` | ✓ | — | Spreadsheet ID |
+| `--range` | — | — | Table to append to in A1 notation, e.g. 'Sheet2!A1' (default: A1 of the first sheet) |
+| `--values` | — | — | One row as CSV (quote cells containing commas: 'a,"b,c",d') |
+| `--json-values` | — | — | JSON array of rows, e.g. '[["a",1],["b",2]]' (a flat array is one row) |
+| `--csv-file` | — | — | Import rows from a CSV file, or '-' for stdin |
+| `--raw` | — | — | Store input as-is (RAW) instead of parsing it like typed input (USER_ENTERED: formulas, numbers, dates) |
 
 ## Examples
 
 ```bash
-gwsr sheets +append --spreadsheet ID --values 'Alice,100,true'
-gwsr sheets +append --spreadsheet ID --json-values '[["a","b"],["c","d"]]'
-gwsr sheets +append --spreadsheet ID --range "Sheet2!A1" --values 'Alice,100'
+gwsr sheets +append --spreadsheet-id ID --values 'Alice,100,true'
+gwsr sheets +append --spreadsheet-id ID --json-values '[["a","b"],["c","d"]]'
+gwsr sheets +append --spreadsheet-id ID --range 'Sheet2!A1' --csv-file ./rows.csv
 ```
 
 ## Tips
 
-- Use --values for simple single-row appends.
-- Use --json-values for bulk multi-row inserts.
-- Use --range to target a specific sheet tab (default: A1, i.e. first sheet).
+- Rows are inserted (INSERT_ROWS), never overwriting existing data.
+- Input is parsed like typed input unless --raw is given.
 
 > [!CAUTION]
 > This is a **write** command — confirm with the user before executing.

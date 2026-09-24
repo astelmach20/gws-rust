@@ -13,7 +13,7 @@ metadata:
 
 # workflow (v1)
 
-> **PREREQUISITE:** Read `../gwsr-shared/SKILL.md` for auth, global flags, and security rules. If missing, run `gwsr generate-skills` to create it.
+> **PREREQUISITE:** Read `../gwsr-shared/SKILL.md` for auth, global flags, and security rules.
 
 ```bash
 gwsr workflow <resource> <method> [flags]
@@ -23,10 +23,10 @@ gwsr workflow <resource> <method> [flags]
 
 | Command | Description |
 |---------|-------------|
-| [`+standup-report`](../gwsr-workflow-standup-report/SKILL.md) | Today's meetings + open tasks as a standup summary |
-| [`+meeting-prep`](../gwsr-workflow-meeting-prep/SKILL.md) | Prepare for your next meeting: agenda, attendees, and linked docs |
+| [`+standup-report`](../gwsr-workflow-standup-report/SKILL.md) | Today's meetings and open tasks as a standup summary |
+| [`+meeting-prep`](../gwsr-workflow-meeting-prep/SKILL.md) | Prepare for your next meeting: agenda, attendees, and links |
 | [`+email-to-task`](../gwsr-workflow-email-to-task/SKILL.md) | Convert a Gmail message into a Google Tasks entry |
-| [`+weekly-digest`](../gwsr-workflow-weekly-digest/SKILL.md) | Weekly summary: this week's meetings + unread email count |
+| [`+weekly-digest`](../gwsr-workflow-weekly-digest/SKILL.md) | Weekly summary: the next 7 days of meetings and your unread email count |
 | [`+file-announce`](../gwsr-workflow-file-announce/SKILL.md) | Announce a Drive file in a Chat space |
 
 ## Discovering Commands

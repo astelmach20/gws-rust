@@ -13,7 +13,7 @@ metadata:
 
 # script (v1)
 
-> **PREREQUISITE:** Read `../gwsr-shared/SKILL.md` for auth, global flags, and security rules. If missing, run `gwsr generate-skills` to create it.
+> **PREREQUISITE:** Read `../gwsr-shared/SKILL.md` for auth, global flags, and security rules.
 
 ```bash
 gwsr script <resource> <method> [flags]
@@ -23,7 +23,10 @@ gwsr script <resource> <method> [flags]
 
 | Command | Description |
 |---------|-------------|
-| [`+push`](../gwsr-script-push/SKILL.md) | Upload local files to an Apps Script project |
+| [`+push`](../gwsr-script-push/SKILL.md) | Replace a project's files with local files |
+| [`+pull`](../gwsr-script-pull/SKILL.md) | Download a project's files into a local directory |
+| [`+run`](../gwsr-script-run/SKILL.md) | Run a function in a deployed Apps Script project |
+| [`+logs`](../gwsr-script-logs/SKILL.md) | List recent executions of a project |
 
 ## API Resources
 

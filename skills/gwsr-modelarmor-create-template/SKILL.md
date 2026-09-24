@@ -13,7 +13,7 @@ metadata:
 
 # modelarmor +create-template
 
-> **PREREQUISITE:** Read `../gwsr-shared/SKILL.md` for auth, global flags, and security rules. If missing, run `gwsr generate-skills` to create it.
+> **PREREQUISITE:** Read `../gwsr-shared/SKILL.md` for auth, global flags, and security rules.
 
 Create a new Model Armor template
 
@@ -31,7 +31,7 @@ gwsr modelarmor +create-template --project <PROJECT> --location <LOCATION> --tem
 | `--location` | ✓ | — | GCP location (e.g. us-central1) |
 | `--template-id` | ✓ | — | Template ID to create |
 | `--preset` | — | — | Use a preset template: jailbreak |
-| `--json` | — | — | JSON body for the template configuration (overrides --preset) |
+| `--json` | — | — | JSON body for the template configuration (instead of --preset) |
 
 ## Examples
 
@@ -42,7 +42,7 @@ gwsr modelarmor +create-template --project P --location us-central1 --template-i
 
 ## Tips
 
-- Defaults to the jailbreak preset if neither --preset nor --json is given.
+- Defaults to the built-in jailbreak preset if neither --preset nor --json is given.
 - Use the resulting template name with +sanitize-prompt and +sanitize-response.
 
 > [!CAUTION]

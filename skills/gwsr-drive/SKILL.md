@@ -13,7 +13,7 @@ metadata:
 
 # drive (v3)
 
-> **PREREQUISITE:** Read `../gwsr-shared/SKILL.md` for auth, global flags, and security rules. If missing, run `gwsr generate-skills` to create it.
+> **PREREQUISITE:** Read `../gwsr-shared/SKILL.md` for auth, global flags, and security rules.
 
 ```bash
 gwsr drive <resource> <method> [flags]
@@ -23,7 +23,12 @@ gwsr drive <resource> <method> [flags]
 
 | Command | Description |
 |---------|-------------|
-| [`+upload`](../gwsr-drive-upload/SKILL.md) | Upload a file with automatic metadata |
+| [`+upload`](../gwsr-drive-upload/SKILL.md) | Upload a local file (resumable, Shared Drive aware) |
+| [`+download`](../gwsr-drive-download/SKILL.md) | Download a (non-Google-native) file's content |
+| [`+export`](../gwsr-drive-export/SKILL.md) | Export a Google Doc/Sheet/Slides/Drawing to another format |
+| [`+move`](../gwsr-drive-move/SKILL.md) | Move a file or folder to another folder |
+| [`+share`](../gwsr-drive-share/SKILL.md) | Grant access to a file or folder |
+| [`+sync`](../gwsr-drive-sync/SKILL.md) | Mirror a Drive folder into a local directory (one-way, download only) |
 
 ## API Resources
 

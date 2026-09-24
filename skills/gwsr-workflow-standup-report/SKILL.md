@@ -1,6 +1,6 @@
 ---
 name: gwsr-workflow-standup-report
-description: "Google Workflow: Today's meetings + open tasks as a standup summary."
+description: "Google Workflow: Today's meetings and open tasks as a standup summary."
 metadata:
   version: 0.22.5
   openclaw:
@@ -13,21 +13,15 @@ metadata:
 
 # workflow +standup-report
 
-> **PREREQUISITE:** Read `../gwsr-shared/SKILL.md` for auth, global flags, and security rules. If missing, run `gwsr generate-skills` to create it.
+> **PREREQUISITE:** Read `../gwsr-shared/SKILL.md` for auth, global flags, and security rules.
 
-Today's meetings + open tasks as a standup summary
+Today's meetings and open tasks as a standup summary
 
 ## Usage
 
 ```bash
 gwsr workflow +standup-report
 ```
-
-## Flags
-
-| Flag | Required | Default | Description |
-|------|----------|---------|-------------|
-| `--format` | — | — | Output format: json (default), table, yaml, csv |
 
 ## Examples
 
@@ -38,8 +32,7 @@ gwsr workflow +standup-report --format table
 
 ## Tips
 
-- Read-only — never modifies data.
-- Combines calendar agenda (today) with tasks list.
+- Read-only. Combines today's calendar agenda (account time zone) with open tasks.
 
 ## See Also
 

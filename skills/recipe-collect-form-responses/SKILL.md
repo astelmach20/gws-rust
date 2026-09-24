@@ -21,7 +21,7 @@ Retrieve and review responses from a Google Form.
 
 ## Steps
 
-1. List forms: `gwsr forms forms list` (if you don't have the form ID)
+1. Find the form (the Forms API has no list method): `gwsr drive files list --params '{"q": "mimeType = '\''application/vnd.google-apps.form'\''", "fields": "files(id,name)"}'`
 2. Get form details: `gwsr forms forms get --params '{"formId": "FORM_ID"}'`
 3. Get responses: `gwsr forms forms responses list --params '{"formId": "FORM_ID"}' --format table`
 

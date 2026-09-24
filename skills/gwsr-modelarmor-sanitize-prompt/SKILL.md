@@ -13,7 +13,7 @@ metadata:
 
 # modelarmor +sanitize-prompt
 
-> **PREREQUISITE:** Read `../gwsr-shared/SKILL.md` for auth, global flags, and security rules. If missing, run `gwsr generate-skills` to create it.
+> **PREREQUISITE:** Read `../gwsr-shared/SKILL.md` for auth, global flags, and security rules.
 
 Sanitize a user prompt through a Model Armor template
 
@@ -29,7 +29,7 @@ gwsr modelarmor +sanitize-prompt --template <NAME>
 |------|----------|---------|-------------|
 | `--template` | ✓ | — | Full template resource name (projects/PROJECT/locations/LOCATION/templates/TEMPLATE) |
 | `--text` | — | — | Text content to sanitize |
-| `--json` | — | — | Full JSON request body (overrides --text) |
+| `--json` | — | — | Full JSON request body (instead of --text) |
 
 ## Examples
 

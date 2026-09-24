@@ -13,41 +13,47 @@ metadata:
 
 # calendar +insert
 
-> **PREREQUISITE:** Read `../gwsr-shared/SKILL.md` for auth, global flags, and security rules. If missing, run `gwsr generate-skills` to create it.
+> **PREREQUISITE:** Read `../gwsr-shared/SKILL.md` for auth, global flags, and security rules.
 
-create a new event
+Create a new event
 
 ## Usage
 
 ```bash
-gwsr calendar +insert --summary <TEXT> --start <TIME> --end <TIME>
+gwsr calendar +insert --summary <TEXT> --start <TIME>
 ```
 
 ## Flags
 
 | Flag | Required | Default | Description |
 |------|----------|---------|-------------|
-| `--calendar` | — | primary | Calendar ID (default: primary) |
-| `--summary` | ✓ | — | Event summary/title |
-| `--start` | ✓ | — | Start time (ISO 8601, e.g., 2024-01-01T10:00:00Z) |
-| `--end` | ✓ | — | End time (ISO 8601) |
+| `--calendar-id` | — | primary | Calendar ID |
+| `--summary` | ✓ | — | Event title |
 | `--location` | — | — | Event location |
-| `--description` | — | — | Event description/body |
-| `--attendee` | — | — | Attendee email (can be used multiple times) |
-| `--meet` | — | — | Add a Google Meet video conference link |
+| `--description` | — | — | Event description |
+| `--attendee` | — | — | Attendee email (repeatable) |
+| `--meet` | — | — | Add a Google Meet link |
+| `--timezone` | — | — | IANA time zone for times without a UTC offset (default: your Google account time zone) |
+| `--send-updates` | — | all | Who gets email notifications |
+| `--start` | ✓ | — | Start: 2026-06-17 (all-day), 2026-06-17T09:00 (in --timezone) or RFC 3339 with offset |
+| `--end` | — | — | End, same forms as --start (all-day end dates are exclusive) |
+| `--duration` | — | — | Length instead of --end, e.g. 30m, 1h, 1h30m |
+| `--yes` | — | — | Confirm this action without prompting (required when not on a terminal) |
 
 ## Examples
 
 ```bash
-gwsr calendar +insert --summary 'Standup' --start '2026-06-17T09:00:00-07:00' --end '2026-06-17T09:30:00-07:00'
-gwsr calendar +insert --summary 'Review' --start ... --end ... --attendee alice@example.com
-gwsr calendar +insert --summary 'Meet' --start ... --end ... --meet
+gwsr calendar +insert --summary 'Standup' --start '2026-06-17T09:00' --duration 30m
+gwsr calendar +insert --summary 'Review' --start '2026-06-17T09:00:00-07:00' --end '2026-06-17T10:00:00-07:00' --attendee alice@example.com --meet
+gwsr calendar +insert --summary 'Offsite' --start 2026-06-17 --end 2026-06-19
 ```
 
 ## Tips
 
-- Use RFC3339 format for times (e.g. 2026-06-17T09:00:00-07:00).
-- The --meet flag automatically adds a Google Meet link to the event.
+- Times without an offset use --timezone, else your account time zone.
+- A date-only --start creates an all-day event (--end defaults to the next day).
+- Timed events need --end or --duration.
+- Invitations are emailed to attendees unless --send-updates none.
 
 > [!CAUTION]
 > This is a **write** command — confirm with the user before executing.

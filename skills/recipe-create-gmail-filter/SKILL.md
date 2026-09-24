@@ -23,6 +23,6 @@ Create a Gmail filter to automatically label, star, or categorize incoming messa
 
 1. List existing labels: `gwsr gmail users labels list --params '{"userId": "me"}' --format table`
 2. Create a new label: `gwsr gmail users labels create --params '{"userId": "me"}' --json '{"name": "Receipts"}'`
-3. Create a filter: `gwsr gmail users settings filters create --params '{"userId": "me"}' --json '{"criteria": {"from": "receipts@example.com"}, "action": {"addLabelIds": ["LABEL_ID"], "removeLabelIds": ["INBOX"]}}'`
-4. Verify filter: `gwsr gmail users settings filters list --params '{"userId": "me"}' --format table`
+3. Create a filter: `gwsr gmail +filter create --from receipts@example.com --add-label Receipts --archive`
+4. Verify filter: `gwsr gmail +filter list`
 
