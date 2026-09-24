@@ -12,36 +12,40 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use super::*;
+//! `gmail +send`: compose and send (or draft) a new message.
+
+use super::dispatch::{Delivery, deliver};
+use super::prelude::*;
+use super::sender::resolve_sender;
 
 /// Handle the `+send` subcommand.
-pub(super) async fn handle_send(
-    doc: &crate::discovery::RestDescription,
-    matches: &ArgMatches,
-) -> Result<(), GwsError> {
+pub(super) async fn handle_send(matches: &ArgMatches) -> Result<(), GwsError> {
     let mut config = parse_send_args(matches)?;
-    let dry_run = matches.get_flag("dry-run");
+    let delivery = Delivery::from_matches(matches)?;
+    delivery.confirm(
+        matches,
+        &format!("send an email to {}", describe(&config.to)),
+    )?;
 
-    let token = if dry_run {
+    let api = if delivery.dry_run {
         None
     } else {
-        // Resolve the target method (send or draft) and use its discovery
-        // doc scopes, so the token matches the operation. resolve_sender
-        // gracefully degrades if the token doesn't cover the sendAs.list
-        // endpoint.
-        let method = super::resolve_mail_method(doc, matches.get_flag("draft"))?;
-        let scopes: Vec<&str> = method.scopes.iter().map(|s| s.as_str()).collect();
-        let t = auth::get_token(&scopes)
-            .await
-            .map_err(|e| GwsError::Auth(format!("Gmail auth failed: {e}")))?;
-        let client = crate::client::build_client()?;
-        config.from = resolve_sender(&client, &t, config.from.as_deref()).await?;
-        Some(t)
+        let api = super::api::authenticated(&[GMAIL_SCOPE]).await?;
+        config.from = resolve_sender(&api, config.from.as_deref()).await?;
+        Some(api)
     };
 
     let raw = create_send_raw_message(&config)?;
+    deliver(api.as_ref(), delivery, &raw, None).await
+}
 
-    super::dispatch_raw_email(doc, matches, &raw, None, token.as_deref()).await
+/// Comma-separated recipient list for confirmation prompts.
+pub(super) fn describe(mailboxes: &[Mailbox]) -> String {
+    mailboxes
+        .iter()
+        .map(|m| m.email.as_str())
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 pub(super) struct SendConfig {
@@ -71,7 +75,7 @@ fn create_send_raw_message(config: &SendConfig) -> Result<String, GwsError> {
 }
 
 fn parse_send_args(matches: &ArgMatches) -> Result<SendConfig, GwsError> {
-    let to = Mailbox::parse_list(matches.get_one::<String>("to").unwrap());
+    let to = Mailbox::parse_list(&super::cli::required_str(matches, "to")?);
     if to.is_empty() {
         return Err(GwsError::Validation(
             "--to must specify at least one recipient".to_string(),
@@ -79,11 +83,11 @@ fn parse_send_args(matches: &ArgMatches) -> Result<SendConfig, GwsError> {
     }
     Ok(SendConfig {
         to,
-        subject: matches.get_one::<String>("subject").unwrap().to_string(),
-        body: matches.get_one::<String>("body").unwrap().to_string(),
-        from: parse_optional_mailboxes(matches, "from"),
-        cc: parse_optional_mailboxes(matches, "cc"),
-        bcc: parse_optional_mailboxes(matches, "bcc"),
+        subject: super::cli::required_str(matches, "subject")?,
+        body: super::cli::required_str(matches, "body")?,
+        from: super::cli::parse_optional_mailboxes(matches, "from"),
+        cc: super::cli::parse_optional_mailboxes(matches, "cc"),
+        bcc: super::cli::parse_optional_mailboxes(matches, "bcc"),
         html: matches.get_flag("html"),
         attachments: parse_attachments(matches)?,
     })
@@ -91,26 +95,15 @@ fn parse_send_args(matches: &ArgMatches) -> Result<SendConfig, GwsError> {
 
 #[cfg(test)]
 mod tests {
-    use super::super::tests::{extract_header, strip_qp_soft_breaks};
     use super::*;
+    use crate::helpers::gmail::test_support::{
+        extract_header, helper_matches, strip_qp_soft_breaks,
+    };
 
     fn make_matches_send(args: &[&str]) -> ArgMatches {
-        let cmd = Command::new("test")
-            .arg(Arg::new("to").long("to"))
-            .arg(Arg::new("subject").long("subject"))
-            .arg(Arg::new("body").long("body"))
-            .arg(Arg::new("from").long("from"))
-            .arg(Arg::new("cc").long("cc"))
-            .arg(Arg::new("bcc").long("bcc"))
-            .arg(Arg::new("html").long("html").action(ArgAction::SetTrue))
-            .arg(
-                Arg::new("attach")
-                    .long("attach")
-                    .short('a')
-                    .action(ArgAction::Append),
-            )
-            .arg(Arg::new("draft").long("draft").action(ArgAction::SetTrue));
-        cmd.try_get_matches_from(args).unwrap()
+        let mut full = vec!["+send"];
+        full.extend_from_slice(&args[1..]);
+        helper_matches(&full)
     }
 
     #[test]
