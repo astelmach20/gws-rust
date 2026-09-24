@@ -103,6 +103,7 @@ pub struct MediaUpload {
 #[derive(Debug, Deserialize, Default)]
 pub struct MediaUploadProtocols {
     pub simple: Option<MediaUploadProtocol>,
+    pub resumable: Option<MediaUploadProtocol>,
 }
 
 /// A single upload protocol entry.
