@@ -206,9 +206,11 @@ pub async fn resolve_account_timezone(
              ({local_err}); pass --timezone <IANA name>"
         ))
     })?;
-    crate::output::warn(&format!(
-        "could not read the account timezone ({api_error}); using the local timezone {tz}"
-    ));
+    tracing::warn!(
+        error = %api_error,
+        timezone = %tz,
+        "could not read the account timezone; using the local timezone"
+    );
     Ok(tz)
 }
 

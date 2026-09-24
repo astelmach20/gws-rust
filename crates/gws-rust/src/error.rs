@@ -18,14 +18,14 @@
 //!
 //! # Error output contract
 //!
-//! * **stderr** always receives a human-readable error (`error[kind]: …`),
-//!   followed by `hint:` lines when the failure has a known remedy. Colour is
-//!   used only when stderr is a terminal and `NO_COLOR` is unset.
-//! * **stdout** receives a single-line JSON envelope only when stdout is *not*
-//!   a terminal (piped or redirected), so scripts and agents can parse it:
+//! * Every failure writes exactly one error to **stderr**; **stdout** stays
+//!   clean. The TTY state never changes what is written.
+//! * By default (output format `json`) the error is a single-line JSON object:
 //!   `{"error":{"code":403,"message":"…","reason":"…","retryable":false,"hint":"…"}}`.
-//!   `hint` and `enable_url` are present only when known. On a terminal
-//!   nothing is written to stdout, so the error is never shown twice.
+//!   `hint` and `enable_url` are present only when known.
+//! * With a human output format (`--format table|yaml|csv`, `GWSR_FORMAT` or
+//!   `format` in config.toml) the error is human-readable instead
+//!   (`error[kind]: …` plus a `hint:` line; colour only on a terminal).
 //! * The process exit code identifies the error class (see
 //!   [`EXIT_CODE_DOCUMENTATION`]).
 
@@ -367,23 +367,32 @@ pub fn human_report(err: &CliError, ctx: &ErrorContext, color: bool) -> String {
     }
 }
 
-/// Report `err` following the module-level output contract.
-pub fn report(err: &CliError) {
-    let ctx = current_context();
-    let stdout_tty = crate::output::stdout_is_terminal();
-    if !stdout_tty {
-        let line = match serde_json::to_string(&error_envelope(err, &ctx)) {
-            Ok(line) => line,
-            Err(e) => format!(
-                "{{\"error\":{{\"code\":500,\"message\":\"failed to serialize error: {e}\",\"reason\":\"internalError\",\"retryable\":false}}}}"
-            ),
-        };
-        if crate::output::emit(&line).is_err() {
-            // stdout is closed; stderr below still carries the error.
-        }
+/// Render `err` as it is written to stderr: one JSON line, or the human
+/// report when `human` is set.
+pub fn render(err: &CliError, ctx: &ErrorContext, human: bool, color: bool) -> String {
+    if human {
+        return human_report(err, ctx, color);
     }
+    match serde_json::to_string(&error_envelope(err, ctx)) {
+        Ok(line) => line,
+        Err(e) => json!({
+            "error": {
+                "code": 500,
+                "message": format!("failed to serialize error: {e}"),
+                "reason": "internalError",
+                "retryable": false,
+            }
+        })
+        .to_string(),
+    }
+}
+
+/// Report `err` on stderr following the module-level output contract.
+/// `human` selects the human-readable form (a non-JSON output format).
+pub fn report(err: &CliError, human: bool) {
+    let ctx = current_context();
     let color = crate::output::stderr_supports_color();
-    crate::output::eprint_line(&human_report(err, &ctx, color));
+    crate::output::eprint_line(&render(err, &ctx, human, color));
 }
 
 #[cfg(test)]
@@ -520,6 +529,18 @@ mod tests {
         );
         assert!(hint_for(&api(404, "notFound"), &ctx).is_none());
         assert!(hint_for(&GwsError::Validation("x".into()), &ctx).is_none());
+    }
+
+    #[test]
+    fn render_defaults_to_one_json_line() {
+        let err = CliError::from(api(403, "insufficientPermissions"));
+        let line = render(&err, &ErrorContext::default(), false, false);
+        assert!(!line.contains('\n'));
+        let v: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(v["error"]["code"], 403);
+        assert!(v["error"]["hint"].as_str().unwrap().contains("gwsr auth"));
+        let human = render(&err, &ErrorContext::default(), true, false);
+        assert!(human.starts_with("error[api]:"), "{human}");
     }
 
     #[test]

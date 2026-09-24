@@ -25,6 +25,9 @@
 //! 4. `log` in `config.toml`
 //! 5. default: warnings and errors
 //!
+//! stderr lines are JSON objects unless `-v` is given or the output format is
+//! a human one (table/yaml/csv).
+//!
 //! ## File logging
 //!
 //! `GWSR_LOG_FILE` (or `log_file` in `config.toml`) names a directory that
@@ -69,6 +72,9 @@ pub struct LogOptions {
     pub config_log: Option<String>,
     /// Log file directory (`GWSR_LOG_FILE` or config `log_file`).
     pub file_dir: Option<PathBuf>,
+    /// Human-readable stderr lines instead of JSON lines (set for `-v` or a
+    /// human output format).
+    pub human: bool,
 }
 
 impl LogOptions {
@@ -80,6 +86,7 @@ impl LogOptions {
             rust_log: non_empty_env("RUST_LOG"),
             config_log: None,
             file_dir: non_empty_env(ENV_LOG_FILE).map(PathBuf::from),
+            human: false,
         }
     }
 }
@@ -135,12 +142,25 @@ fn create_private_dir(dir: &Path) -> Result<(), GwsError> {
 /// Install the global tracing subscriber.
 pub fn init(opts: &LogOptions) -> Result<LogGuard, GwsError> {
     let stderr_filter = parse_filter(&stderr_directive(opts))?;
-    let stderr_layer = tracing_subscriber::fmt::layer()
-        .with_writer(std::io::stderr)
-        .with_target(opts.verbosity >= 2)
-        .with_ansi(crate::output::stderr_supports_color())
-        .compact()
-        .with_filter(stderr_filter);
+    // Machine-readable by default: one JSON object per stderr line. `-v` or a
+    // human output format switches to compact human lines.
+    let (stderr_human, stderr_json) = if opts.human {
+        let layer = tracing_subscriber::fmt::layer()
+            .with_writer(std::io::stderr)
+            .with_target(opts.verbosity >= 2)
+            .with_ansi(crate::output::stderr_supports_color())
+            .compact()
+            .with_filter(stderr_filter);
+        (Some(layer), None)
+    } else {
+        let layer = tracing_subscriber::fmt::layer()
+            .json()
+            .with_writer(std::io::stderr)
+            .with_target(true)
+            .with_ansi(false)
+            .with_filter(stderr_filter);
+        (None, Some(layer))
+    };
 
     let (file_layer, guard) = match &opts.file_dir {
         Some(dir) => {
@@ -167,7 +187,8 @@ pub fn init(opts: &LogOptions) -> Result<LogGuard, GwsError> {
     };
 
     tracing_subscriber::registry()
-        .with(stderr_layer)
+        .with(stderr_human)
+        .with(stderr_json)
         .with(file_layer)
         .try_init()
         .map_err(|e| {
@@ -201,6 +222,7 @@ mod tests {
             rust_log: Some("info".into()),
             config_log: Some("error".into()),
             file_dir: None,
+            human: false,
         };
         assert_eq!(stderr_directive(&o), "warn,gwsr=debug,gws_rust_core=debug");
         assert_eq!(

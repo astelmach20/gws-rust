@@ -19,7 +19,6 @@
 use crate::commands;
 use crate::discovery;
 use crate::error::GwsError;
-use crate::output::sanitize_for_terminal;
 use crate::services;
 use clap::Command;
 use std::path::Path;
@@ -114,7 +113,12 @@ fn io_err(context: String, e: std::io::Error) -> GwsError {
 }
 
 /// Entry point for `gwsr dev generate-skills`.
-pub async fn handle_generate_skills(args: &GenerateSkillsArgs) -> Result<(), GwsError> {
+///
+/// Returns a JSON summary of what was written (printed by `main`):
+/// `{"output_dir": .., "index": ..|null, "count": N, "skills": [{"name", "category", "path"}]}`.
+pub async fn handle_generate_skills(
+    args: &GenerateSkillsArgs,
+) -> Result<serde_json::Value, GwsError> {
     // Validate output_dir to prevent path traversal
     let output_path_buf = crate::validate::validate_safe_output_dir(&args.output_dir)?;
     let output_path = output_path_buf.as_path();
@@ -286,17 +290,35 @@ pub async fn handle_generate_skills(args: &GenerateSkillsArgs) -> Result<(), Gws
         )));
     }
 
-    if let Some(path) = index_path {
-        write_skills_index(&index, &path)?;
+    if let Some(path) = &index_path {
+        write_skills_index(&index, path)?;
     }
 
     tracing::info!(count = index.len(), dir = %output_path.display(), "skills written");
-    eprintln!(
-        "Wrote {} skills to {}",
-        index.len(),
-        sanitize_for_terminal(&output_path.display().to_string())
-    );
-    Ok(())
+    Ok(skills_summary(output_path, index_path.as_deref(), &index))
+}
+
+fn skills_summary(
+    output_path: &Path,
+    index_path: Option<&Path>,
+    index: &[SkillIndexEntry],
+) -> serde_json::Value {
+    let skills: Vec<serde_json::Value> = index
+        .iter()
+        .map(|e| {
+            serde_json::json!({
+                "name": e.name,
+                "category": e.category,
+                "path": output_path.join(&e.name).join("SKILL.md").display().to_string(),
+            })
+        })
+        .collect();
+    serde_json::json!({
+        "output_dir": output_path.display().to_string(),
+        "index": index_path.map(|p| p.display().to_string()),
+        "count": skills.len(),
+        "skills": skills,
+    })
 }
 
 fn write_skill(base: &Path, name: &str, content: &str) -> Result<(), GwsError> {
@@ -1052,6 +1074,20 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn skills_summary_lists_written_files() {
+        let index = vec![SkillIndexEntry {
+            name: "gwsr-shared".into(),
+            description: "d".into(),
+            category: "service".into(),
+        }];
+        let v = skills_summary(Path::new("/out"), Some(Path::new("/idx.md")), &index);
+        assert_eq!(v["count"], 1);
+        assert_eq!(v["output_dir"], "/out");
+        assert_eq!(v["index"], "/idx.md");
+        assert_eq!(v["skills"][0]["path"], "/out/gwsr-shared/SKILL.md");
     }
 
     #[test]

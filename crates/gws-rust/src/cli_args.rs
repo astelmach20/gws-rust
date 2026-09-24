@@ -159,11 +159,9 @@ pub enum TopCommand {
         resolve_refs: bool,
     },
 
-    /// List services, resources, methods and helpers with their flags
+    /// Inventory of services, resources, methods and helpers with their flags
+    /// (JSON; `--format table|csv` gives one row per command)
     Commands {
-        /// Emit the full machine-readable inventory as JSON
-        #[arg(long)]
-        json: bool,
         /// Limit the listing to these services (default: all)
         #[arg(value_name = "SERVICE")]
         services: Vec<String>,
@@ -251,8 +249,9 @@ pub fn after_help() -> String {
         out.push_str(&format!("  {code:<4} {desc}\n"));
     }
     out.push_str(
-        "\nErrors: a human-readable message goes to stderr; when stdout is not a terminal a\n\
-         single-line JSON envelope {\"error\":{...}} is also written to stdout.\n\
+        "\nOutput is JSON by default (compact when piped); --format table|yaml|csv is opt-in.\n\
+         Errors: one JSON object {\"error\":{...}} on stderr (human text with a human --format);\n\
+         stdout stays empty on failure.\n\
          Config: ~/.config/gwsr/config.toml (flag > env > config > default).\n\
          This is not an officially supported Google product.",
     );
@@ -324,6 +323,8 @@ pub struct PreScan {
     pub verbosity: i8,
     /// `--api-version` value.
     pub api_version: Option<String>,
+    /// `--format` value (used to pick the error format before full parsing).
+    pub format: Option<String>,
 }
 
 /// Scan `args` (without argv\[0\]) up to a `--` terminator.
@@ -347,6 +348,10 @@ pub fn prescan(args: &[OsString]) -> PreScan {
             }
             a if a.starts_with("--api-version=") => {
                 out.api_version = a.strip_prefix("--api-version=").map(String::from);
+            }
+            "--format" => out.format = iter.next().and_then(|v| v.to_str()).map(String::from),
+            a if a.starts_with("--format=") => {
+                out.format = a.strip_prefix("--format=").map(String::from);
             }
             a if a.len() > 1
                 && a.starts_with('-')
@@ -447,7 +452,8 @@ mod tests {
             ])),
             PreScan {
                 verbosity: 3,
-                api_version: Some("v2".into())
+                api_version: Some("v2".into()),
+                format: None,
             }
         );
         assert_eq!(prescan(&os(&["-q", "drive"])).verbosity, -1);
@@ -456,6 +462,16 @@ mod tests {
                 .api_version
                 .as_deref(),
             Some("v2")
+        );
+        assert_eq!(
+            prescan(&os(&["drive", "--format", "table"]))
+                .format
+                .as_deref(),
+            Some("table")
+        );
+        assert_eq!(
+            prescan(&os(&["--format=csv"])).format.as_deref(),
+            Some("csv")
         );
         // Stops at `--` and ignores look-alikes.
         assert_eq!(prescan(&os(&["x", "--", "-v"])).verbosity, 0);
