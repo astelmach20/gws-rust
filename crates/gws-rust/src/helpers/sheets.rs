@@ -231,7 +231,8 @@ TIPS:
                             }
                             OutputTarget::File { path, overwrite } => {
                                 api.screen_text(&csv).await?;
-                                http::write_file_atomic(path, csv.as_bytes(), *overwrite)?;
+                                crate::output_file::write_atomic(path, csv.as_bytes(), *overwrite)
+                                    .await?;
                                 let rows = v
                                     .get("values")
                                     .and_then(Value::as_array)

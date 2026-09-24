@@ -245,7 +245,8 @@ TIPS:
                             let mut data = body.to_string();
                             data.push('\n');
                             api.screen_text(&data).await?;
-                            http::write_file_atomic(&path, data.as_bytes(), overwrite)?;
+                            crate::output_file::write_atomic(&path, data.as_bytes(), overwrite)
+                                .await?;
                             let v = json!({"documentId": id, "output": path.display().to_string(), "bytes": data.len()});
                             api.emit(m, &v).await?;
                         }

@@ -110,7 +110,7 @@ TIPS:
                 Some(OutputTarget::File { path, overwrite }) => {
                     let csv = table.to_csv()?;
                     api.screen_text(&csv).await?;
-                    http::write_file_atomic(&path, csv.as_bytes(), overwrite)?;
+                    crate::output_file::write_atomic(&path, csv.as_bytes(), overwrite).await?;
                     api.emit(
                         m,
                         &json!({"output": path.display().to_string(), "rows": table.rows.len()}),

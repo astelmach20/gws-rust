@@ -405,7 +405,7 @@ async fn pull(api: &Api, script_id: &str, dir: &Path, overwrite: bool) -> Result
     }
     let mut written = Vec::new();
     for (path, source) in planned {
-        http::write_file_atomic(&path, source.as_bytes(), overwrite)?;
+        crate::output_file::write_atomic(&path, source.as_bytes(), overwrite).await?;
         written.push(path.display().to_string());
     }
     Ok(json!({ "scriptId": script_id, "files": written }))

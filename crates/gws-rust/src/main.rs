@@ -41,6 +41,7 @@ mod inventory;
 mod jq;
 mod logging;
 mod output;
+mod output_file;
 mod schema;
 mod service;
 mod services;
