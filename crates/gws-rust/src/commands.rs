@@ -129,7 +129,7 @@ pub fn method_args(doc: &RestDescription, method: &RestMethod) -> Vec<Arg> {
         Arg::new("output")
             .long("output")
             .short('o')
-            .help("Write the response to PATH (binary media, decoded base64 fields, or the JSON document)")
+            .help("Write the response payload to PATH (binary media, decoded base64 field, or the JSON) and print a JSON summary; - streams the raw payload to stdout")
             .value_name("PATH")
             .help_heading(HEADING_OUTPUT),
         Arg::new("decode-field")

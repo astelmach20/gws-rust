@@ -379,7 +379,7 @@ fn print_usage() {
         "    --upload-content-type <MIME>  MIME type of the uploaded file (auto-detected from extension if omitted)"
     );
     println!(
-        "    -o, --output <PATH>   Write the response to a file (binary to stdout when piped)"
+        "    -o, --output <PATH>   Save the response to a file (- streams raw bytes to stdout)"
     );
     println!("    --format <FMT>        Output format: json (default), table, yaml, csv");
     println!("    --api-version <VER>   Override the API version (e.g., v2, v3)");
