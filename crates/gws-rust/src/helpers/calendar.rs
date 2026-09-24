@@ -18,7 +18,8 @@
 mod time;
 
 use super::Helper;
-use super::http::{self, Api, ApiRequest, flag, many, optional, required};
+use super::http::{self, Api, ApiRequest};
+use crate::args::{flag, many, optional, required};
 use crate::confirm::{self, Impact, with_yes};
 use crate::error::GwsError;
 use crate::validate::encode_path_segment;
@@ -330,10 +331,10 @@ TIPS:
             let Some((name, m)) = matches.subcommand() else {
                 return Ok(false);
             };
-            let dry = http::dry_run(m);
+            let dry = crate::args::dry_run(m)?;
             let (api, value) = match name {
                 "+insert" => {
-                    let attendees = many(m, "attendee");
+                    let attendees = many(m, "attendee")?;
                     let send_updates = required(m, "send-updates")?;
                     if !attendees.is_empty() && send_updates != "none" {
                         confirm::confirm(
@@ -343,19 +344,19 @@ TIPS:
                         )?;
                     }
                     let api = Api::new(doc, &[SCOPE_CALENDAR], dry, sanitize).await?;
-                    let tz = TzInfo::resolve(&api, optional(m, "timezone")).await?;
+                    let tz = TzInfo::resolve(&api, optional(m, "timezone")?).await?;
                     let v = insert(&api, &InsertArgs::parse(m, &tz)?).await?;
                     (api, v)
                 }
                 "+agenda" => {
                     let api = Api::new(doc, &[SCOPE_CALENDAR_READONLY], dry, sanitize).await?;
-                    let tz = TzInfo::resolve(&api, optional(m, "timezone")).await?;
+                    let tz = TzInfo::resolve(&api, optional(m, "timezone")?).await?;
                     let v = agenda(&api, &AgendaArgs::parse(m)?, &tz).await?;
                     (api, v)
                 }
                 "+freebusy" => {
                     let api = Api::new(doc, &[SCOPE_FREEBUSY], dry, sanitize).await?;
-                    let tz = TzInfo::resolve(&api, optional(m, "timezone")).await?;
+                    let tz = TzInfo::resolve(&api, optional(m, "timezone")?).await?;
                     let v = freebusy(&api, m, &tz).await?;
                     (api, v)
                 }
@@ -366,7 +367,7 @@ TIPS:
                         &format!("update event {}", required(m, "event-id")?),
                     )?;
                     let api = Api::new(doc, &[SCOPE_CALENDAR], dry, sanitize).await?;
-                    let tz = TzInfo::resolve(&api, optional(m, "timezone")).await?;
+                    let tz = TzInfo::resolve(&api, optional(m, "timezone")?).await?;
                     let v = update(&api, m, &tz).await?;
                     (api, v)
                 }
@@ -397,7 +398,7 @@ TIPS:
                         required(m, "calendar-id")?,
                         event,
                         response,
-                        optional(m, "comment"),
+                        optional(m, "comment")?,
                         required(m, "send-updates")?,
                     )
                     .await?;
@@ -509,27 +510,27 @@ impl InsertArgs {
     fn parse(m: &ArgMatches, tz: &TzInfo) -> Result<Self, GwsError> {
         let (start, end) = resolve_range(
             required(m, "start")?,
-            optional(m, "end"),
-            optional(m, "duration"),
+            optional(m, "end")?,
+            optional(m, "duration")?,
             tz.tz,
         )?;
         let summary = required(m, "summary")?;
-        let mut attendees = many(m, "attendee");
+        let mut attendees = many(m, "attendee")?;
         let mut body = json!({
             "summary": summary,
             "start": start.to_event_time(tz.for_event(&start)),
             "end": end.to_event_time(tz.for_event(&start)),
         });
-        if let Some(loc) = optional(m, "location") {
+        if let Some(loc) = optional(m, "location")? {
             body["location"] = json!(loc);
         }
-        if let Some(desc) = optional(m, "description") {
+        if let Some(desc) = optional(m, "description")? {
             body["description"] = json!(desc);
         }
         if !attendees.is_empty() {
             body["attendees"] = attendees.iter().map(|e| json!({ "email": e })).collect();
         }
-        let meet = flag(m, "meet");
+        let meet = flag(m, "meet")?;
         if meet {
             // Deterministic request ID so a retried insert reuses the conference.
             attendees.sort();
@@ -587,11 +588,11 @@ struct AgendaArgs {
 
 impl AgendaArgs {
     fn parse(m: &ArgMatches) -> Result<Self, GwsError> {
-        let window = if flag(m, "today") {
+        let window = if flag(m, "today")? {
             Window::Today
-        } else if flag(m, "tomorrow") {
+        } else if flag(m, "tomorrow")? {
             Window::Tomorrow
-        } else if flag(m, "week") {
+        } else if flag(m, "week")? {
             Window::Days(7)
         } else {
             Window::Days(
@@ -603,8 +604,8 @@ impl AgendaArgs {
         };
         Ok(Self {
             window,
-            calendar_ids: many(m, "calendar-id"),
-            calendar_name: optional(m, "calendar-name").map(str::to_string),
+            calendar_ids: many(m, "calendar-id")?,
+            calendar_name: optional(m, "calendar-name")?.map(str::to_string),
         })
     }
 }
@@ -646,7 +647,9 @@ fn summarize_event(event: &Value, calendar_id: &str, calendar: &str) -> Value {
     })
 }
 
-/// Sort key: all-day dates sort at local midnight of their day.
+/// Sort key: all-day dates sort at local midnight of their day. An event
+/// whose start cannot be parsed still appears (its raw `start` is in the
+/// output); it only sorts last, so ordering never hides an event.
 fn start_key(event: &Value, tz: Tz) -> i64 {
     let s = event.get("start").and_then(Value::as_str).unwrap_or("");
     time::parse_when(s, "start")
@@ -754,18 +757,18 @@ async fn agenda(api: &Api, args: &AgendaArgs, tz: &TzInfo) -> Result<Value, GwsE
 async fn freebusy(api: &Api, m: &ArgMatches, tz: &TzInfo) -> Result<Value, GwsError> {
     let (start, end) = resolve_range(
         required(m, "start")?,
-        optional(m, "end"),
-        optional(m, "duration"),
+        optional(m, "end")?,
+        optional(m, "duration")?,
         tz.tz,
     )?;
     let from = start.to_utc(tz.tz)?;
     let to = end.to_utc(tz.tz)?;
-    let mut ids = many(m, "calendar-id");
+    let mut ids = many(m, "calendar-id")?;
     if ids.is_empty() {
         ids.push("primary".into());
     }
-    let slot = optional(m, "slot").map(time::parse_duration).transpose()?;
-    let working = optional(m, "working-hours")
+    let slot = optional(m, "slot")?.map(time::parse_duration).transpose()?;
+    let working = optional(m, "working-hours")?
         .map(time::parse_working_hours)
         .transpose()?;
     let resp = api
@@ -846,25 +849,25 @@ async fn freebusy(api: &Api, m: &ArgMatches, tz: &TzInfo) -> Result<Value, GwsEr
 async fn update(api: &Api, m: &ArgMatches, tz: &TzInfo) -> Result<Value, GwsError> {
     let calendar_id = required(m, "calendar-id")?;
     let event_id = required(m, "event-id")?;
-    let add = many(m, "add-attendee");
-    let remove = many(m, "remove-attendee");
+    let add = many(m, "add-attendee")?;
+    let remove = many(m, "remove-attendee")?;
     let mut patch = serde_json::Map::new();
     for (flag_name, field) in [
         ("summary", "summary"),
         ("location", "location"),
         ("description", "description"),
     ] {
-        if let Some(v) = optional(m, flag_name) {
+        if let Some(v) = optional(m, flag_name)? {
             patch.insert(field.into(), json!(v));
         }
     }
     let needs_current = !add.is_empty()
         || !remove.is_empty()
-        || (optional(m, "start").is_some()
-            && optional(m, "end").is_none()
-            && optional(m, "duration").is_none())
-        || (optional(m, "start").is_none()
-            && (optional(m, "end").is_some() || optional(m, "duration").is_some()));
+        || (optional(m, "start")?.is_some()
+            && optional(m, "end")?.is_none()
+            && optional(m, "duration")?.is_none())
+        || (optional(m, "start")?.is_none()
+            && (optional(m, "end")?.is_some() || optional(m, "duration")?.is_some()));
     let current = if needs_current && !api.is_dry_run() {
         Some(
             api.send(ApiRequest::get(event_url(api, calendar_id, event_id)))
@@ -874,9 +877,9 @@ async fn update(api: &Api, m: &ArgMatches, tz: &TzInfo) -> Result<Value, GwsErro
         None
     };
 
-    if optional(m, "start").is_some()
-        || optional(m, "end").is_some()
-        || optional(m, "duration").is_some()
+    if optional(m, "start")?.is_some()
+        || optional(m, "end")?.is_some()
+        || optional(m, "duration")?.is_some()
     {
         let current_start = current
             .as_ref()
@@ -892,7 +895,7 @@ async fn update(api: &Api, m: &ArgMatches, tz: &TzInfo) -> Result<Value, GwsErro
                     .or_else(|| c.pointer("/end/date"))
             })
             .and_then(Value::as_str);
-        let start_s = match (optional(m, "start"), current_start) {
+        let start_s = match (optional(m, "start")?, current_start) {
             (Some(s), _) => s.to_string(),
             (None, Some(s)) => s.to_string(),
             (None, None) => {
@@ -901,7 +904,7 @@ async fn update(api: &Api, m: &ArgMatches, tz: &TzInfo) -> Result<Value, GwsErro
                 ));
             }
         };
-        let (end_opt, dur_opt) = (optional(m, "end"), optional(m, "duration"));
+        let (end_opt, dur_opt) = (optional(m, "end")?, optional(m, "duration")?);
         let (start, end) = if end_opt.is_none() && dur_opt.is_none() {
             // Keep the current length.
             let (cs, ce) = match (current_start, current_end) {

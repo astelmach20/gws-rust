@@ -134,6 +134,10 @@ pub enum Callback {
 }
 
 /// Parse a request target (`/?state=..&code=..`) or a full pasted URL.
+///
+/// The target is untrusted input from whatever reaches the loopback port, so
+/// every parse failure maps to a defined outcome (`WrongPath`, `BadState`,
+/// `Malformed`) that the caller acts on, rather than to an error.
 pub fn parse_callback(target: &str, expected_state: &str) -> Callback {
     let base = Url::parse("http://127.0.0.1/").ok();
     let parsed = if target.starts_with("http://") || target.starts_with("https://") {
@@ -196,6 +200,11 @@ fn page(title: &str, message: &str) -> String {
 }
 
 /// Read the request line of one HTTP request (bounded size and time).
+///
+/// `None` means this connection is not a usable request (read error, timeout,
+/// not HTTP); the caller drops it and keeps waiting for the real redirect,
+/// since browsers open speculative connections and anything local can
+/// connect. The overall login timeout still bounds the wait.
 async fn read_request_target(stream: &mut tokio::net::TcpStream) -> Option<String> {
     let mut buf = Vec::with_capacity(1024);
     let read = async {
@@ -230,7 +239,7 @@ async fn read_request_target(stream: &mut tokio::net::TcpStream) -> Option<Strin
 ///
 /// # Errors
 ///
-/// [`AuthError::Config`] with the provider's error for denied consent, or an
+/// [`AuthError::Denied`] with the provider's error for denied consent, or an
 /// accept error. Timeouts are applied by the caller.
 pub async fn serve_callback(
     listener: TcpListener,
@@ -312,7 +321,7 @@ fn denied(error: &str, description: Option<&str>) -> AuthError {
         "admin_policy_enforced" => " (your Workspace admin blocks this app or scope)",
         _ => "",
     };
-    AuthError::Config(format!("authorization failed: {error}{detail}{hint}"))
+    AuthError::Denied(format!("authorization failed: {error}{detail}{hint}"))
 }
 
 /// Parse what the user pasted in manual mode (full URL or query string).
@@ -329,12 +338,12 @@ pub fn parse_pasted(input: &str, expected_state: &str) -> Result<String, AuthErr
     match parse_callback(target, expected_state) {
         Callback::Code(code) => Ok(code),
         Callback::Denied { error, description } => Err(denied(&error, description.as_deref())),
-        Callback::BadState => Err(AuthError::Config(
+        Callback::BadState => Err(AuthError::Input(
             "the pasted URL's state does not match this login attempt; paste the URL from the \
              browser tab opened for this run"
                 .to_string(),
         )),
-        Callback::WrongPath | Callback::Malformed => Err(AuthError::Config(
+        Callback::WrongPath | Callback::Malformed => Err(AuthError::Input(
             "could not find an authorization code in the pasted text; paste the full URL from \
              the browser's address bar (it starts with http://127.0.0.1)"
                 .to_string(),
@@ -360,7 +369,8 @@ pub async fn exchange_code(
             RedirectUrl::new(redirect_uri.to_string())
                 .map_err(|e| AuthError::Config(format!("invalid redirect URI: {e}")))?,
         );
-    let http_client = http::client().map_err(|e| AuthError::Network(format!("{e:#}")))?;
+    let http_client = http::client()
+        .map_err(|e| AuthError::Internal(format!("cannot build the HTTP client: {e:#}")))?;
     let response = oauth
         .exchange_code(AuthorizationCode::new(code.to_string()))
         .set_pkce_verifier(verifier)
@@ -401,10 +411,10 @@ async fn read_line_from_stdin() -> Result<String, AuthError> {
         std::io::stdin()
             .read_line(&mut line)
             .map(|_| line)
-            .map_err(|e| AuthError::Config(format!("cannot read from stdin: {e}")))
+            .map_err(|e| AuthError::Input(format!("cannot read from stdin: {e}")))
     })
     .await
-    .map_err(|e| AuthError::Config(format!("stdin task failed: {e}")))?
+    .map_err(|e| AuthError::Internal(format!("stdin task failed: {e}")))?
 }
 
 /// Run the whole interactive login.

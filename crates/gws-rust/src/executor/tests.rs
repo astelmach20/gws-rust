@@ -910,7 +910,10 @@ async fn upload_session_uri_on_foreign_host_is_refused() {
     });
     call.options.upload_mode = UploadMode::Resumable;
     let err = call.run(&Emitter::capturing()).await.unwrap_err();
-    assert!(err.to_string().contains("Refusing to"), "{err}");
+    assert!(
+        err.to_string().contains("does not match request origin"),
+        "{err}"
+    );
 }
 
 // ── Downloads ───────────────────────────────────────────────────────────

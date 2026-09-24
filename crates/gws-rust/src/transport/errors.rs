@@ -39,9 +39,9 @@ pub fn extract_enable_url(message: &str) -> Option<String> {
     Some(url.to_string())
 }
 
-/// Prefix `context` (e.g. "Failed to send message") to an API or internal
-/// error. Validation, auth and discovery errors already say what failed and
-/// are returned unchanged.
+/// Prefix `context` (e.g. "Failed to send message") to an API, network or
+/// internal error. Validation, auth, configuration and discovery errors
+/// already say what failed and are returned unchanged.
 pub(crate) fn with_context(err: GwsError, context: &str) -> GwsError {
     match err {
         GwsError::Api {
@@ -56,6 +56,10 @@ pub(crate) fn with_context(err: GwsError, context: &str) -> GwsError {
             enable_url,
         },
         GwsError::Other(source) => GwsError::Other(Box::new(Context {
+            context: context.to_string(),
+            source,
+        })),
+        GwsError::Network(source) => GwsError::Network(Box::new(Context {
             context: context.to_string(),
             source,
         })),
@@ -106,6 +110,8 @@ pub(crate) fn error_from_response(
         );
     }
 
+    // A body that is not a Google JSON error (an HTML proxy page, plain text)
+    // is not lost: it falls through to the raw-text error below.
     if let Ok(error_json) = serde_json::from_str::<Value>(error_body)
         && let Some(err_obj) = error_json.get("error")
         && err_obj.is_object()
@@ -113,6 +119,7 @@ pub(crate) fn error_from_response(
         let code = err_obj
             .get("code")
             .and_then(Value::as_u64)
+            // An out-of-range body code falls back to the HTTP status.
             .and_then(|c| u16::try_from(c).ok())
             .unwrap_or(status.as_u16());
         let message = err_obj

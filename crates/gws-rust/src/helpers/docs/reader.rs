@@ -100,6 +100,8 @@ fn render_paragraph(p: &Value, document: &Value, markdown: bool, out: &mut Strin
             .and_then(Value::as_u64)
             .unwrap_or(0);
         let list_id = bullet.get("listId").and_then(Value::as_str).unwrap_or("");
+        // `nestingLevel` is 0..=8 per the Docs API; a value beyond usize (only
+        // possible on 32-bit targets) renders unindented rather than failing.
         let indent = "  ".repeat(usize::try_from(level).unwrap_or(0));
         let marker = if is_ordered(document, list_id, level) {
             "1."

@@ -193,10 +193,10 @@ pub(super) async fn handle_attachments(
     }
     let message_id = required_str(matches, "message-id")?;
     let dir = crate::validate::validate_safe_output_dir(&required_str(matches, "output-dir")?)?;
-    let include_inline = matches.get_flag("include-inline");
-    let overwrite = matches.get_flag("overwrite");
+    let include_inline = crate::args::flag(matches, "include-inline")?;
+    let overwrite = crate::args::flag(matches, "overwrite")?;
 
-    if crate::helpers::http::dry_run(matches) {
+    if crate::args::dry_run(matches)? {
         let url = format!(
             "{}/users/me/messages/{}",
             super::api::GMAIL_API_BASE,
@@ -224,7 +224,7 @@ pub(super) async fn handle_attachments(
         );
     }
     let out = json!({ "messageId": message_id, "files": saved });
-    let format = crate::helpers::http::output_format(matches);
+    let format = crate::helpers::http::output_format(matches)?;
     crate::output::emit(&crate::formatter::format_value(&out, &format)?)?;
     Ok(())
 }

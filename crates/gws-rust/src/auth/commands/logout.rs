@@ -22,13 +22,13 @@ use std::path::{Path, PathBuf};
 use secrecy::ExposeSecret;
 use serde_json::json;
 
-use super::{auth_err, print_json};
+use super::print_json;
 use crate::auth::credentials::{AuthEnv, Credential, CredentialSource, Resolved};
 use crate::auth::http::Endpoints;
 use crate::error::GwsError;
 
 pub(super) async fn handle(no_revoke: bool) -> Result<(), GwsError> {
-    let env = AuthEnv::from_process().map_err(|e| auth_err(format!("{e:#}")))?;
+    let env = AuthEnv::from_process().map_err(crate::auth::to_gws_error)?;
     let outcome = logout(&env, no_revoke).await?;
     crate::timezone::invalidate_cache()?;
     match outcome.revoke_error {
@@ -137,7 +137,7 @@ pub(super) async fn logout(env: &AuthEnv, no_revoke: bool) -> Result<Outcome, Gw
         profile_env.impersonate = None;
         let loaded = tokio::task::spawn_blocking(move || profile_env.load())
             .await
-            .map_err(|e| auth_err(format!("credential loading task failed: {e}")))?;
+            .map_err(|e| GwsError::other(format!("credential loading task failed: {e}")))?;
         match loaded {
             Ok((
                 CredentialSource::Profile { .. },
@@ -164,12 +164,14 @@ pub(super) async fn logout(env: &AuthEnv, no_revoke: bool) -> Result<Outcome, Gw
         report["revoke_note"] = json!("skipped (--no-revoke)");
     }
 
-    let files = owned_files(&env.paths.dir)
-        .map_err(|e| auth_err(format!("cannot list '{}': {e}", env.paths.dir.display())))?;
+    let files = owned_files(&env.paths.dir).map_err(|e| {
+        GwsError::CredentialStore(format!("cannot list '{}': {e}", env.paths.dir.display()))
+    })?;
     let mut removed = Vec::new();
     for path in &files {
-        std::fs::remove_file(path)
-            .map_err(|e| auth_err(format!("cannot remove '{}': {e}", path.display())))?;
+        std::fs::remove_file(path).map_err(|e| {
+            GwsError::CredentialStore(format!("cannot remove '{}': {e}", path.display()))
+        })?;
         removed.push(path.display().to_string());
     }
     match std::fs::remove_dir(&env.paths.dir) {
@@ -180,7 +182,7 @@ pub(super) async fn logout(env: &AuthEnv, no_revoke: bool) -> Result<Outcome, Gw
                 std::io::ErrorKind::NotFound | std::io::ErrorKind::DirectoryNotEmpty
             ) => {}
         Err(e) => {
-            return Err(auth_err(format!(
+            return Err(GwsError::CredentialStore(format!(
                 "cannot remove '{}': {e}",
                 env.paths.dir.display()
             )));

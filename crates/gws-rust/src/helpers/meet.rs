@@ -15,7 +15,8 @@
 //! Meet helpers: `+create`.
 
 use super::Helper;
-use super::http::{self, Api, ApiRequest, optional};
+use super::http::{Api, ApiRequest};
+use crate::args::optional;
 use crate::error::GwsError;
 use clap::{Arg, ArgMatches, Command};
 use serde_json::{Value, json};
@@ -63,8 +64,14 @@ TIPS:
             let Some(("+create", m)) = matches.subcommand() else {
                 return Ok(false);
             };
-            let api = Api::new(doc, &[SCOPE_SPACE_CREATED], http::dry_run(m), sanitize).await?;
-            let v = create(&api, optional(m, "access-type")).await?;
+            let api = Api::new(
+                doc,
+                &[SCOPE_SPACE_CREATED],
+                crate::args::dry_run(m)?,
+                sanitize,
+            )
+            .await?;
+            let v = create(&api, optional(m, "access-type")?).await?;
             api.emit(m, &v).await?;
             Ok(true)
         })

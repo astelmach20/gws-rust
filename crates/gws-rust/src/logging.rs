@@ -79,20 +79,20 @@ pub struct LogOptions {
 
 impl LogOptions {
     /// Read the environment-provided parts.
-    pub fn from_env(verbosity: i8) -> Self {
-        Self {
+    ///
+    /// # Errors
+    ///
+    /// A variable that is set but not valid UTF-8.
+    pub fn from_env(verbosity: i8) -> Result<Self, crate::error::GwsError> {
+        Ok(Self {
             verbosity,
-            gwsr_log: non_empty_env(ENV_LOG),
-            rust_log: non_empty_env("RUST_LOG"),
+            gwsr_log: crate::config::env_var(ENV_LOG)?,
+            rust_log: crate::config::env_var("RUST_LOG")?,
             config_log: None,
-            file_dir: non_empty_env(ENV_LOG_FILE).map(PathBuf::from),
+            file_dir: crate::config::env_var(ENV_LOG_FILE)?.map(PathBuf::from),
             human: false,
-        }
+        })
     }
-}
-
-fn non_empty_env(name: &str) -> Option<String> {
-    std::env::var(name).ok().filter(|v| !v.trim().is_empty())
 }
 
 fn own_directive(level: &str) -> String {

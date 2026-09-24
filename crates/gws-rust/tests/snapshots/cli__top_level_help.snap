@@ -101,12 +101,16 @@ Environment:
 Exit codes:
   0    Success
   1    API error      — Google rejected the request (permanent; do not retry unchanged)
-  2    Auth error     — credentials missing, expired or invalid
-  3    Validation     — bad arguments, flags, config or input
+  2    Auth error     — no usable credentials, rejected/expired token, refused scopes or denied consent
+  3    Validation     — bad arguments, flags or input
   4    Discovery      — could not fetch or parse the API schema
   5    Internal       — unexpected failure (I/O, serialization, ...)
   6    API retryable  — rate limit (429/403 rateLimitExceeded) or server error (5xx); retry with backoff
   7    Not confirmed  — destructive or gated action needs --yes (or a terminal to confirm); nothing was sent
+  8    Config         — invalid or missing configuration (env vars, config.toml, profile, OAuth client file)
+  9    Cred. store    — OS keyring / key file or stored credentials unreadable, unwritable or undecryptable
+  10   Network        — no response (connection, DNS, TLS, timeout); a non-idempotent call may have been applied
+  11   Blocked        — --sanitize in block mode: Model Armor matched the output, which was withheld
 
 Output is JSON by default (compact when piped); --format table|yaml|csv is opt-in.
 Errors: one JSON object {"error":{...}} on stderr (human text with a human --format);

@@ -17,7 +17,7 @@
 
 use serde_json::{Value, json};
 
-use super::{auth_err, print_json};
+use super::print_json;
 use crate::auth::client_config;
 use crate::auth::credentials::{AuthEnv, Credential, CredentialSource, Resolved};
 use crate::auth::keystore::BackendKind;
@@ -25,7 +25,7 @@ use crate::auth::profiles;
 use crate::error::GwsError;
 
 pub(super) async fn handle(offline: bool) -> Result<(), GwsError> {
-    let env = AuthEnv::from_process().map_err(|e| auth_err(format!("{e:#}")))?;
+    let env = AuthEnv::from_process().map_err(crate::auth::to_gws_error)?;
     let report = build_report(&env, offline).await;
     print_json(&report)
 }

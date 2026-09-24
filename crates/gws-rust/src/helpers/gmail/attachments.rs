@@ -140,8 +140,7 @@ impl Attachment {
 /// commands). The real mitigation for agent misuse is `--dry-run` and human
 /// review of the command before execution.
 pub(super) fn parse_attachments(matches: &ArgMatches) -> Result<Vec<Attachment>, GwsError> {
-    let paths: Vec<&String> = matches
-        .get_many::<String>("attach")
+    let paths: Vec<&String> = crate::args::values(matches, "attach")?
         .map(|v| v.collect())
         .unwrap_or_default();
 

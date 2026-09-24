@@ -1,4 +1,4 @@
-# Git hooks (https://lefthook.dev). Installed by `pnpm install` via the root `prepare` script.
+# Git hooks (https://lefthook.dev). Opt-in: `pnpm run hooks` (scripts/install-hooks.sh; refuses in a linked worktree).
 # These mirror the CI gates in .github/workflows/ci.yml so a green hook means a green CI lint job.
 min_version: 2.1.14
 

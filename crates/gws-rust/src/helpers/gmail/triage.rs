@@ -30,9 +30,9 @@ pub(super) async fn handle_triage(
         page_token: None,
         include_spam_trash: false,
     };
-    let show_labels = matches.get_flag("labels");
-    let format = crate::helpers::http::output_format(matches);
-    if crate::helpers::http::dry_run(matches) {
+    let show_labels = crate::args::flag(matches, "labels")?;
+    let format = crate::helpers::http::output_format(matches)?;
+    if crate::args::dry_run(matches)? {
         return super::search::dry_run_list(matches, &params);
     }
 

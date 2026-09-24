@@ -17,7 +17,8 @@
 //! Every call sets `supportsAllDrives=true` so Shared Drive items work.
 
 use super::Helper;
-use super::http::{self, Api, ApiRequest, OutputTarget, flag, optional, required, safe_filename};
+use super::http::{self, Api, ApiRequest, OutputTarget, safe_filename};
+use crate::args::{flag, optional, required};
 use crate::confirm::{self, Impact, with_yes};
 use crate::error::GwsError;
 use crate::validate::encode_path_segment;
@@ -290,7 +291,7 @@ TIPS:
             let Some((name, m)) = matches.subcommand() else {
                 return Ok(false);
             };
-            let dry = http::dry_run(m);
+            let dry = crate::args::dry_run(m)?;
             let result = match name {
                 "+upload" => {
                     let args = UploadArgs::parse(m)?;
@@ -303,8 +304,8 @@ TIPS:
                     let v = download(
                         &api,
                         required(m, "file-id")?,
-                        optional(m, "output"),
-                        flag(m, "overwrite"),
+                        optional(m, "output")?,
+                        flag(m, "overwrite")?,
                     )
                     .await?;
                     (api, v)
@@ -315,8 +316,8 @@ TIPS:
                         &api,
                         required(m, "file-id")?,
                         required(m, "to")?,
-                        optional(m, "output"),
-                        flag(m, "overwrite"),
+                        optional(m, "output")?,
+                        flag(m, "overwrite")?,
                     )
                     .await?;
                     (api, v)
@@ -369,11 +370,11 @@ impl UploadArgs {
                 "--file '{raw}' is not a readable file"
             )));
         }
-        let name = match optional(m, "name") {
+        let name = match optional(m, "name")? {
             Some(n) => n.to_string(),
             None => determine_filename(raw)?,
         };
-        let content_type = match optional(m, "mime-type") {
+        let content_type = match optional(m, "mime-type")? {
             Some(t) => t.to_string(),
             None => mime_guess2::from_path(&path)
                 .first()
@@ -383,9 +384,9 @@ impl UploadArgs {
         Ok(Self {
             path,
             name,
-            folder_id: optional(m, "folder-id").map(str::to_string),
+            folder_id: optional(m, "folder-id")?.map(str::to_string),
             content_type,
-            convert: flag(m, "convert"),
+            convert: flag(m, "convert")?,
         })
     }
 }
@@ -763,15 +764,15 @@ enum Grantee {
 
 impl ShareArgs {
     fn parse(m: &ArgMatches) -> Result<Self, GwsError> {
-        let grantee = if let Some(email) = optional(m, "email") {
-            if flag(m, "group") {
+        let grantee = if let Some(email) = optional(m, "email")? {
+            if flag(m, "group")? {
                 Grantee::Group(email.to_string())
             } else {
                 Grantee::User(email.to_string())
             }
-        } else if let Some(domain) = optional(m, "domain") {
+        } else if let Some(domain) = optional(m, "domain")? {
             Grantee::Domain(domain.to_string())
-        } else if flag(m, "anyone") {
+        } else if flag(m, "anyone")? {
             Grantee::Anyone
         } else {
             return Err(GwsError::Validation(
@@ -782,8 +783,8 @@ impl ShareArgs {
             file_id: required(m, "file-id")?.to_string(),
             role: required(m, "role")?.to_string(),
             grantee,
-            notify: !flag(m, "no-notify"),
-            message: optional(m, "message").map(str::to_string),
+            notify: !flag(m, "no-notify")?,
+            message: optional(m, "message")?.map(str::to_string),
         })
     }
 
@@ -916,18 +917,32 @@ async fn list_children(api: &Api, folder_id: &str) -> Result<Vec<Value>, GwsErro
     Ok(page.items)
 }
 
-fn is_up_to_date(local: &Path, remote_modified: Option<&str>) -> bool {
+/// Whether the local copy is at least as new as the Drive item. A missing
+/// local file or a missing/unparseable remote `modifiedTime` means "download
+/// it" (the safe answer); a local file that exists but cannot be inspected is
+/// an error rather than a silent re-download over it.
+fn is_up_to_date(local: &Path, remote_modified: Option<&str>) -> Result<bool, GwsError> {
     let Some(remote) = remote_modified.and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
     else {
-        return false;
+        return Ok(false);
     };
-    let Ok(meta) = std::fs::metadata(local) else {
-        return false;
+    let meta = match std::fs::metadata(local) {
+        Ok(m) => m,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(e) => {
+            return Err(GwsError::other(anyhow::anyhow!(
+                "cannot inspect '{}': {e}",
+                local.display()
+            )));
+        }
     };
-    let Ok(modified) = meta.modified() else {
-        return false;
-    };
-    chrono::DateTime::<chrono::Utc>::from(modified) >= remote.with_timezone(&chrono::Utc)
+    let modified = meta.modified().map_err(|e| {
+        GwsError::other(anyhow::anyhow!(
+            "cannot read the modification time of '{}': {e}",
+            local.display()
+        ))
+    })?;
+    Ok(chrono::DateTime::<chrono::Utc>::from(modified) >= remote.with_timezone(&chrono::Utc))
 }
 
 async fn sync(api: &Api, folder_id: &str, dir: &Path) -> Result<Value, GwsError> {
@@ -981,7 +996,7 @@ async fn sync(api: &Api, folder_id: &str, dir: &Path) -> Result<Value, GwsError>
                 used_names.insert(local_name.clone());
             }
             let path = local_dir.join(&local_name);
-            if is_up_to_date(&path, modified) {
+            if is_up_to_date(&path, modified)? {
                 unchanged.push(path.display().to_string());
                 continue;
             }
@@ -1425,5 +1440,27 @@ mod tests {
         ] {
             assert!(names.contains(&n), "{n}");
         }
+    }
+
+    #[test]
+    fn up_to_date_compares_mtimes_and_treats_missing_as_stale() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("f");
+        assert!(!is_up_to_date(&p, Some("2000-01-01T00:00:00Z")).unwrap());
+        std::fs::write(&p, b"x").unwrap();
+        assert!(is_up_to_date(&p, Some("2000-01-01T00:00:00Z")).unwrap());
+        assert!(!is_up_to_date(&p, Some("2999-01-01T00:00:00Z")).unwrap());
+        assert!(!is_up_to_date(&p, None).unwrap());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn up_to_date_surfaces_an_uninspectable_local_file() {
+        // A path through a regular file fails with NotADirectory, not NotFound.
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("f");
+        std::fs::write(&file, b"x").unwrap();
+        let err = is_up_to_date(&file.join("child"), Some("2000-01-01T00:00:00Z")).unwrap_err();
+        assert!(err.to_string().contains("cannot inspect"), "{err}");
     }
 }

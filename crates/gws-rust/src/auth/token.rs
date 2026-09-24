@@ -138,6 +138,8 @@ pub async fn refresh_user(
         .map_err(|e| map_token_error(e, login_command, &requested))?;
     Ok(AccessToken {
         token: SecretString::from(response.access_token().secret().to_string()),
+        // Saturating: an absurd lifetime clamps far in the future (without
+        // overflowing the addition) instead of being dropped.
         expires_at: response
             .expires_in()
             .map(|d| now_unix() + i64::try_from(d.as_secs()).unwrap_or(i64::MAX / 2)),

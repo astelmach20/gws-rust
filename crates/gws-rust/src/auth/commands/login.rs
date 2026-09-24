@@ -20,7 +20,6 @@ use std::time::Duration;
 
 use serde_json::json;
 
-use super::auth_err;
 use crate::auth::client_config;
 use crate::auth::credentials::authorized_user_json;
 use crate::auth::flow::{self, LoginOptions, RedirectMode};
@@ -77,7 +76,7 @@ pub(crate) struct LoginArgs {
 }
 
 pub(crate) fn parse_args(m: &clap::ArgMatches) -> Result<LoginArgs, GwsError> {
-    let scope_mode = if let Some(list) = m.get_one::<String>("scopes") {
+    let scope_mode = if let Some(list) = crate::args::value::<String>(m, "scopes")? {
         let scopes: Vec<String> = list
             .split(',')
             .map(str::trim)
@@ -90,34 +89,33 @@ pub(crate) fn parse_args(m: &clap::ArgMatches) -> Result<LoginArgs, GwsError> {
             ));
         }
         ScopeMode::Custom(scopes)
-    } else if m.get_flag("full") {
+    } else if crate::args::flag(m, "full")? {
         ScopeMode::Full
-    } else if m.get_flag("write") {
+    } else if crate::args::flag(m, "write")? {
         ScopeMode::Write
     } else {
         ScopeMode::Default
     };
-    let services = m.get_one::<String>("services").map(|v| {
+    let services = crate::args::value::<String>(m, "services")?.map(|v| {
         v.split(',')
             .map(|s| s.trim().to_lowercase())
             .filter(|s| !s.is_empty())
             .collect::<HashSet<String>>()
     });
-    let timeout = m
-        .get_one::<u64>("timeout")
+    let timeout = crate::args::value::<u64>(m, "timeout")?
         .copied()
         .ok_or_else(|| GwsError::Validation("--timeout is required".into()))?;
     Ok(LoginArgs {
         scope_mode,
         services,
-        open_browser: !m.get_flag("no-browser"),
-        mode: if m.get_flag("no-localhost") {
+        open_browser: !crate::args::flag(m, "no-browser")?,
+        mode: if crate::args::flag(m, "no-localhost")? {
             RedirectMode::Manual
         } else {
             RedirectMode::Loopback
         },
         timeout: Duration::from_secs(timeout),
-        login_hint: m.get_one::<String>("login-hint").cloned(),
+        login_hint: crate::args::value::<String>(m, "login-hint")?.cloned(),
     })
 }
 
@@ -189,19 +187,19 @@ pub(crate) fn finalize_scopes(scopes_in: Vec<String>) -> Vec<String> {
 /// opens), flow failures and write errors.
 pub(crate) async fn handle(m: &clap::ArgMatches) -> Result<(), GwsError> {
     let args = parse_args(m)?;
-    let client = client_config::resolve().map_err(|e| GwsError::Auth(format!("{e:#}")))?;
+    let client = client_config::resolve().map_err(crate::auth::to_gws_error)?;
     let (base, active, paths) =
-        profiles::active_profile_paths().map_err(|e| auth_err(format!("{e:#}")))?;
+        profiles::active_profile_paths().map_err(crate::auth::to_gws_error)?;
 
     // Fail before the browser opens if the encryption key is unusable.
-    let keystore = std::sync::Arc::new(Keystore::from_env(&base).map_err(auth_err)?);
+    let keystore = std::sync::Arc::new(Keystore::from_env(&base)?);
     {
         let ks = std::sync::Arc::clone(&keystore);
         tokio::task::spawn_blocking(move || -> Result<(), GwsError> {
-            ks.key_for_encryption().map(|_| ()).map_err(auth_err)
+            ks.key_for_encryption().map(|_| ()).map_err(GwsError::from)
         })
         .await
-        .map_err(|e| auth_err(format!("key setup task failed: {e}")))??;
+        .map_err(|e| GwsError::other(format!("key setup task failed: {e}")))??;
     }
 
     // The scope picker draws on stdout, so it needs a terminal there too.
@@ -232,11 +230,9 @@ pub(crate) async fn handle(m: &clap::ArgMatches) -> Result<(), GwsError> {
     let timeout_secs = opts.timeout.as_secs();
     let on_url = |url: &str| -> Result<(), crate::auth::AuthError> {
         print_json_line(&url_event(url, mode, timeout_secs))
-            .map_err(|e| crate::auth::AuthError::Config(e.to_string()))
+            .map_err(|e| crate::auth::AuthError::Internal(e.to_string()))
     };
-    let tokens = flow::run(&client, &endpoints, &opts, &on_url)
-        .await
-        .map_err(auth_err)?;
+    let tokens = flow::run(&client, &endpoints, &opts, &on_url).await?;
 
     let account = match flow::fetch_email(&tokens.access_token, &endpoints).await {
         Ok(email) => Some(email),
@@ -262,43 +258,37 @@ pub(crate) async fn handle(m: &clap::ArgMatches) -> Result<(), GwsError> {
     let save_base = base.clone();
     let profile_name = active.name.clone();
     let made_active = tokio::task::spawn_blocking(move || -> Result<bool, GwsError> {
-        save_paths
-            .ensure_dir()
-            .map_err(|e| auth_err(format!("{e:#}")))?;
-        let ct = ks
-            .encrypt(Purpose::Credentials, json.as_bytes())
-            .map_err(auth_err)?;
+        save_paths.ensure_dir().map_err(crate::auth::to_gws_error)?;
+        let ct = ks.encrypt(Purpose::Credentials, json.as_bytes())?;
         crate::fs_util::atomic_write(&save_paths.credentials, &ct).map_err(|e| {
-            auth_err(format!(
+            GwsError::CredentialStore(format!(
                 "cannot write '{}': {e}",
                 save_paths.credentials.display()
             ))
         })?;
-        profiles::save_metadata(&save_paths.metadata, &meta)
-            .map_err(|e| auth_err(format!("{e:#}")))?;
+        profiles::save_metadata(&save_paths.metadata, &meta).map_err(crate::auth::to_gws_error)?;
         // Access tokens cached for the previous grant are now stale.
         match std::fs::remove_file(&save_paths.token_cache) {
             Ok(()) => {}
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
             Err(e) => {
-                return Err(auth_err(format!(
+                return Err(GwsError::CredentialStore(format!(
                     "cannot clear the old token cache '{}': {e}",
                     save_paths.token_cache.display()
                 )));
             }
         }
-        let configured = crate::config::profile_in(&crate::config::config_path_in(&save_base))
-            .map_err(|e| auth_err(format!("{e}")))?;
+        let configured = crate::config::profile_in(&crate::config::config_path_in(&save_base))?;
         if configured.is_some() {
             Ok(false)
         } else {
             profiles::set_active_profile(&save_base, &profile_name)
-                .map_err(|e| auth_err(format!("{e:#}")))?;
+                .map_err(crate::auth::to_gws_error)?;
             Ok(true)
         }
     })
     .await
-    .map_err(|e| auth_err(format!("save task failed: {e}")))??;
+    .map_err(|e| GwsError::other(format!("save task failed: {e}")))??;
 
     crate::timezone::invalidate_cache()?;
 
