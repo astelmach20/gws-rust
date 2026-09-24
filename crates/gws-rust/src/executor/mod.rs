@@ -577,7 +577,11 @@ pub(crate) async fn execute_to(
                 note.as_deref(),
             ));
         }
+        // Empty success responses still produce a JSON document on stdout
+        // (and never create an --output file).
+        let empty_success = json!({"status": "success", "httpStatus": status.as_u16()});
         if status == reqwest::StatusCode::NO_CONTENT {
+            out.single(empty_success)?;
             break;
         }
 
@@ -605,6 +609,7 @@ pub(crate) async fn execute_to(
 
         let raw = read_body(sent.response, options.idle_timeout()).await?;
         if raw.iter().all(u8::is_ascii_whitespace) {
+            out.single(empty_success)?;
             break;
         }
         let mut value: Value = match serde_json::from_slice(&raw) {
