@@ -27,7 +27,6 @@
 use crate::error::GwsError;
 use clap::ArgMatches;
 use serde_json::{Map, Value, json};
-use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -48,10 +47,6 @@ pub(crate) fn other_err(e: impl Into<anyhow::Error>) -> GwsError {
 pub(crate) enum Body {
     None,
     Json(Value),
-    Bytes {
-        data: bytes::Bytes,
-        content_type: String,
-    },
 }
 
 /// A fully described HTTP request.
@@ -108,13 +103,6 @@ impl ApiRequest {
         self.body = Body::Json(body);
         self
     }
-    pub fn bytes(mut self, data: bytes::Bytes, content_type: &str) -> Self {
-        self.body = Body::Bytes {
-            data,
-            content_type: content_type.to_string(),
-        };
-        self
-    }
 
     /// JSON description of this request (used for `--dry-run`).
     pub fn describe(&self) -> Value {
@@ -133,9 +121,6 @@ impl ApiRequest {
         match &self.body {
             Body::None => {}
             Body::Json(v) => out["body"] = v.clone(),
-            Body::Bytes { data, content_type } => {
-                out["body"] = json!({ "contentType": content_type, "bytes": data.len() });
-            }
         }
         out
     }
@@ -158,11 +143,6 @@ impl ApiRequest {
                 }
             }
             Body::Json(v) => rb = rb.json(v),
-            Body::Bytes { data, content_type } => {
-                rb = rb
-                    .header(reqwest::header::CONTENT_TYPE, content_type.as_str())
-                    .body(data.clone());
-            }
         }
         rb
     }
@@ -455,7 +435,9 @@ impl Api {
             return Ok(None);
         }
         let resp = self.execute(&req).await?;
-        write_stream(resp, target).await.map(Some)
+        write_stream(resp, target, self.idle_timeout())
+            .await
+            .map(Some)
     }
 
     /// Output the helper's result: the dry-run plan in dry-run mode, else
@@ -502,23 +484,32 @@ impl Api {
 
     /// Resumable upload (`uploadType=resumable`) of a local file.
     ///
-    /// `init` is the session-initiation request (POST/PATCH with JSON
-    /// metadata, `uploadType=resumable` in the query). The file is sent in
-    /// 8 MiB chunks, each retried independently.
+    /// `init` is the session-initiation request (POST/PATCH with optional
+    /// JSON metadata, `uploadType=resumable` in the query, no extra headers).
+    /// The upload itself is [`crate::executor::upload::resumable_upload`], the
+    /// same code the generated API methods use: 8 MiB chunks, resumed from
+    /// what the server persisted after a failed chunk, with the session URL
+    /// required to stay on the request's origin.
     pub async fn upload_resumable(
         &self,
         init: ApiRequest,
         file: &Path,
         content_type: &str,
     ) -> Result<Value, GwsError> {
+        if !init.headers.is_empty() {
+            return Err(GwsError::other(
+                "internal error: a resumable upload session request cannot carry custom headers",
+            ));
+        }
         let size = std::fs::metadata(file)
             .map_err(|e| GwsError::Validation(format!("Cannot read '{}': {e}", file.display())))?
             .len();
-        let init = init
-            .header("X-Upload-Content-Type", content_type)
-            .header("X-Upload-Content-Length", size.to_string());
         if self.is_dry_run() {
-            let mut d = init.describe();
+            let mut d = init
+                .clone()
+                .header("X-Upload-Content-Type", content_type)
+                .header("X-Upload-Content-Length", size.to_string())
+                .describe();
             d["upload"] = json!({
                 "protocol": "resumable",
                 "path": file.display().to_string(),
@@ -528,95 +519,37 @@ impl Api {
             self.record(d)?;
             return Ok(Value::Null);
         }
-        let resp = self.execute(&init).await?;
-        let session = resp
-            .headers()
-            .get(reqwest::header::LOCATION)
-            .and_then(|v| v.to_str().ok())
-            .ok_or_else(|| {
-                other_err(anyhow::anyhow!(
-                    "Upload session response had no Location header"
-                ))
-            })?
-            .to_string();
-        ensure_same_origin(&init.url, &session)?;
-
-        use std::io::{Read, Seek, SeekFrom};
-        let mut f = std::fs::File::open(file)
-            .map_err(|e| GwsError::Validation(format!("Cannot open '{}': {e}", file.display())))?;
-        let mut offset: u64 = 0;
-        loop {
-            let remaining = size - offset;
-            let len = remaining.min(UPLOAD_CHUNK);
-            let mut buf = vec![0u8; usize::try_from(len).map_err(other_err)?];
-            f.seek(SeekFrom::Start(offset)).map_err(other_err)?;
-            f.read_exact(&mut buf).map_err(|e| {
-                other_err(anyhow::anyhow!(
-                    "Failed reading '{}' at offset {offset}: {e}",
-                    file.display()
-                ))
-            })?;
-            let range = if size == 0 {
-                "bytes */0".to_string()
-            } else {
-                format!("bytes {offset}-{}/{size}", offset + len - 1)
-            };
-            let put = ApiRequest::put(session.clone())
-                .header("Content-Range", range)
-                .bytes(bytes::Bytes::from(buf), content_type);
-            let resp = self.execute(&put).await?;
-            if resp.status() == reqwest::StatusCode::PERMANENT_REDIRECT {
-                // 308 Resume Incomplete: `Range: bytes=0-N` says what the server has.
-                let received = resp
-                    .headers()
-                    .get(reqwest::header::RANGE)
-                    .and_then(|v| v.to_str().ok())
-                    .and_then(parse_range_end)
-                    .map(|end| end + 1)
-                    .unwrap_or(0);
-                if received <= offset && len > 0 {
-                    return Err(other_err(anyhow::anyhow!(
-                        "Upload made no progress at byte {offset} of {size}"
-                    )));
-                }
-                offset = received;
-                continue;
-            }
-            let text = resp.text().await.map_err(other_err)?;
-            return serde_json::from_str(&text).map_err(|e| {
-                other_err(anyhow::anyhow!("Upload response was not valid JSON: {e}"))
-            });
+        let transport = self.transport.as_ref().ok_or_else(|| {
+            GwsError::other("internal error: a dry-run request reached the transport")
+        })?;
+        let metadata = match init.body {
+            Body::Json(v) => Some(v),
+            Body::None => None,
+        };
+        let context = format!("upload to {}", redact_url(&init.url));
+        let data = crate::executor::upload::UploadData {
+            path: file.display().to_string(),
+            size,
+        };
+        let sent = crate::executor::upload::resumable_upload(
+            transport,
+            crate::executor::upload::Resumable {
+                method: init.method.clone(),
+                url: &init.url,
+                query: &init.query,
+                metadata: &metadata,
+                data: &data,
+                media_mime: content_type,
+                chunk_size: crate::executor::upload::DEFAULT_CHUNK_SIZE,
+            },
+        )
+        .await
+        .map_err(|e| crate::transport::errors::with_context(e, &context))?;
+        if !sent.response.status().is_success() {
+            return Err(transport.error_for(sent, &context).await);
         }
+        crate::transport::json_body(sent.response, self.idle_timeout(), &context).await
     }
-}
-
-/// Upload chunk size: 8 MiB (must be a multiple of 256 KiB).
-const UPLOAD_CHUNK: u64 = 8 * 1024 * 1024;
-
-fn parse_range_end(v: &str) -> Option<u64> {
-    v.trim()
-        .strip_prefix("bytes=")?
-        .split('-')
-        .nth(1)?
-        .parse()
-        .ok()
-}
-
-/// The upload session URL returned by the server must stay on the same
-/// origin as the initiating request, otherwise the file contents (and on some
-/// servers the credentials) would be sent elsewhere.
-fn ensure_same_origin(a: &str, b: &str) -> Result<(), GwsError> {
-    let pa = reqwest::Url::parse(a).map_err(other_err)?;
-    let pb = reqwest::Url::parse(b)
-        .map_err(|e| other_err(anyhow::anyhow!("Invalid upload session URL: {e}")))?;
-    if pa.origin() != pb.origin() {
-        return Err(other_err(anyhow::anyhow!(
-            "Upload session URL origin {} does not match request origin {}",
-            pb.origin().ascii_serialization(),
-            pa.origin().ascii_serialization()
-        )));
-    }
-    Ok(())
 }
 
 /// Strip the query string from a URL for error messages.
@@ -624,13 +557,17 @@ fn redact_url(url: &str) -> &str {
     url.split('?').next().unwrap_or(url)
 }
 
-async fn write_stream(resp: reqwest::Response, target: &OutputTarget) -> Result<u64, GwsError> {
-    use futures_util::StreamExt;
-    let mut stream = resp.bytes_stream();
-    let mut written: u64 = 0;
+async fn write_stream(
+    resp: reqwest::Response,
+    target: &OutputTarget,
+    idle: Option<std::time::Duration>,
+) -> Result<u64, GwsError> {
     match target {
         OutputTarget::Stdout => {
+            use futures_util::StreamExt;
             use tokio::io::AsyncWriteExt;
+            let mut stream = resp.bytes_stream();
+            let mut written: u64 = 0;
             let mut out = tokio::io::stdout();
             while let Some(chunk) = stream.next().await {
                 let chunk =
@@ -643,92 +580,12 @@ async fn write_stream(resp: reqwest::Response, target: &OutputTarget) -> Result<
             out.flush()
                 .await
                 .map_err(|e| other_err(anyhow::anyhow!("Failed flushing stdout: {e}")))?;
+            Ok(written)
         }
         OutputTarget::File { path, overwrite } => {
-            if !overwrite && path.exists() {
-                return Err(GwsError::Validation(format!(
-                    "'{}' already exists; pass --overwrite to replace it",
-                    path.display()
-                )));
-            }
-            let dir = path
-                .parent()
-                .filter(|p| !p.as_os_str().is_empty())
-                .unwrap_or_else(|| Path::new("."));
-            std::fs::create_dir_all(dir).map_err(|e| {
-                other_err(anyhow::anyhow!(
-                    "Failed to create directory '{}': {e}",
-                    dir.display()
-                ))
-            })?;
-            let mut tmp = tempfile::NamedTempFile::new_in(dir).map_err(|e| {
-                other_err(anyhow::anyhow!(
-                    "Failed to create temporary file in '{}': {e}",
-                    dir.display()
-                ))
-            })?;
-            while let Some(chunk) = stream.next().await {
-                let chunk =
-                    chunk.map_err(|e| other_err(anyhow::anyhow!("Download interrupted: {e}")))?;
-                tmp.write_all(&chunk).map_err(|e| {
-                    other_err(anyhow::anyhow!("Failed writing '{}': {e}", path.display()))
-                })?;
-                written += chunk.len() as u64;
-            }
-            tmp.as_file().sync_all().map_err(|e| {
-                other_err(anyhow::anyhow!("Failed syncing '{}': {e}", path.display()))
-            })?;
-            persist(tmp, path, *overwrite)?;
+            crate::executor::download::save_stream(resp, path, *overwrite, idle).await
         }
     }
-    Ok(written)
-}
-
-/// Move a finished temp file into place.
-fn persist(tmp: tempfile::NamedTempFile, path: &Path, overwrite: bool) -> Result<(), GwsError> {
-    let result = if overwrite {
-        tmp.persist(path).map(|_| ())
-    } else {
-        tmp.persist_noclobber(path).map(|_| ())
-    };
-    result.map_err(|e| {
-        if e.error.kind() == std::io::ErrorKind::AlreadyExists {
-            GwsError::Validation(format!(
-                "'{}' already exists; pass --overwrite to replace it",
-                path.display()
-            ))
-        } else {
-            other_err(anyhow::anyhow!(
-                "Failed to write '{}': {}",
-                path.display(),
-                e.error
-            ))
-        }
-    })
-}
-
-/// Write bytes to a local file atomically (same overwrite rules as downloads).
-pub(crate) fn write_file_atomic(path: &Path, data: &[u8], overwrite: bool) -> Result<(), GwsError> {
-    if !overwrite && path.exists() {
-        return Err(GwsError::Validation(format!(
-            "'{}' already exists; pass --overwrite to replace it",
-            path.display()
-        )));
-    }
-    let dir = path
-        .parent()
-        .filter(|p| !p.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."));
-    std::fs::create_dir_all(dir).map_err(|e| {
-        other_err(anyhow::anyhow!(
-            "Failed to create directory '{}': {e}",
-            dir.display()
-        ))
-    })?;
-    let mut tmp = tempfile::NamedTempFile::new_in(dir).map_err(other_err)?;
-    tmp.write_all(data)
-        .map_err(|e| other_err(anyhow::anyhow!("Failed writing '{}': {e}", path.display())))?;
-    persist(tmp, path, overwrite)
 }
 
 /// Turn a remote (untrusted) file name into a safe single path component.
@@ -1087,6 +944,69 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn resumable_upload_resumes_after_a_failed_chunk() {
+        let server = MockServer::start().await;
+        let session = format!("{}/upload/session/abc", server.uri());
+        Mock::given(method("POST"))
+            .and(path("/upload/files"))
+            .respond_with(ResponseTemplate::new(200).insert_header("location", session.as_str()))
+            .mount(&server)
+            .await;
+        // The first chunk attempt fails with a 503 ...
+        Mock::given(method("PUT"))
+            .and(header("content-range", "bytes 0-4/5"))
+            .respond_with(ResponseTemplate::new(503))
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+        // ... the status query says nothing was persisted ...
+        Mock::given(method("PUT"))
+            .and(header("content-range", "bytes */5"))
+            .respond_with(ResponseTemplate::new(308))
+            .mount(&server)
+            .await;
+        // ... and the retried chunk completes the upload.
+        Mock::given(method("PUT"))
+            .and(header("content-range", "bytes 0-4/5"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id": "F1"})))
+            .mount(&server)
+            .await;
+        let api = api(&server.uri(), "");
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("a.txt");
+        std::fs::write(&file, b"hello").unwrap();
+        let init = ApiRequest::post(api.root_url("upload/files"))
+            .query("uploadType", "resumable")
+            .json(json!({"name": "a.txt"}));
+        let v = api
+            .upload_resumable(init, &file, "text/plain")
+            .await
+            .unwrap();
+        assert_eq!(v["id"], "F1");
+    }
+
+    #[tokio::test]
+    async fn resumable_upload_maps_api_errors() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(403).set_body_json(json!({
+                "error": {"code": 403, "message": "nope", "errors": [{"reason": "forbidden"}]}
+            })))
+            .mount(&server)
+            .await;
+        let api = api(&server.uri(), "");
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("a.txt");
+        std::fs::write(&file, b"x").unwrap();
+        let init = ApiRequest::post(api.root_url("upload/files")).json(json!({}));
+        let err = api
+            .upload_resumable(init, &file, "text/plain")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, GwsError::Api { code: 403, .. }), "{err:?}");
+    }
+
+    #[tokio::test]
     async fn resumable_upload_rejects_foreign_session_url() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
@@ -1114,21 +1034,5 @@ mod tests {
         assert_eq!(safe_filename(".bashrc", "x"), "bashrc");
         assert_eq!(safe_filename("a\nb:c", "x"), "a_b_c");
         assert_eq!(safe_filename("Report Q1.pdf", "x"), "Report Q1.pdf");
-    }
-
-    #[test]
-    fn parse_range_end_works() {
-        assert_eq!(parse_range_end("bytes=0-8388607"), Some(8_388_607));
-        assert_eq!(parse_range_end("garbage"), None);
-    }
-
-    #[test]
-    fn write_file_atomic_respects_overwrite() {
-        let dir = tempfile::tempdir().unwrap();
-        let p = dir.path().join("f.txt");
-        write_file_atomic(&p, b"a", false).unwrap();
-        assert!(write_file_atomic(&p, b"b", false).is_err());
-        write_file_atomic(&p, b"c", true).unwrap();
-        assert_eq!(std::fs::read(&p).unwrap(), b"c");
     }
 }

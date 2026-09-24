@@ -28,6 +28,15 @@ use std::time::{Duration, Instant};
 /// fsyncs the file, renames it over `path`, then fsyncs the parent directory
 /// so the rename itself is durable.
 ///
+/// This is deliberately separate from [`crate::output_file`], which writes
+/// user-requested output files: the semantics differ. Secret-bearing
+/// configuration must stay private (0600, where output files get the normal
+/// umask mode), must always replace the previous version (there is no
+/// `--overwrite` choice), must survive a crash (parent directory fsync), and
+/// is written from synchronous code — often while holding a
+/// [`FileLock`] — whose callers map the `io::Error` into their own error types
+/// (e.g. `AuthError::Storage`).
+///
 /// # Errors
 ///
 /// Returns an `io::Error` if the temporary file cannot be created or written,

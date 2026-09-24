@@ -259,6 +259,24 @@ impl Progress {
     }
 }
 
+/// The upload session URL returned by the server must stay on the origin of
+/// the initiating request: the file contents, and the credentials the
+/// transport attaches, would otherwise be sent to another host.
+fn ensure_same_origin(request_url: &str, session_url: &str) -> Result<(), GwsError> {
+    let request = reqwest::Url::parse(request_url)
+        .map_err(|e| GwsError::other(anyhow::anyhow!("invalid upload URL '{request_url}': {e}")))?;
+    let session = reqwest::Url::parse(session_url)
+        .map_err(|e| GwsError::other(anyhow::anyhow!("invalid upload session URL: {e}")))?;
+    if request.origin() != session.origin() {
+        return Err(GwsError::other(anyhow::anyhow!(
+            "upload session URL origin {} does not match request origin {}; refusing to send the file there",
+            session.origin().ascii_serialization(),
+            request.origin().ascii_serialization()
+        )));
+    }
+    Ok(())
+}
+
 /// Parameters for [`resumable_upload`].
 pub(crate) struct Resumable<'a> {
     pub method: Method,
@@ -325,6 +343,7 @@ pub(crate) async fn resumable_upload(
                 init.response.status()
             ))
         })?;
+    ensure_same_origin(req.url, &session)?;
 
     // Chunks are retried by the resume logic below, not by the transport:
     // after a failure the server may have persisted part of the chunk.
@@ -531,6 +550,24 @@ mod tests {
             file.read_range(8, 4).await.is_err(),
             "short read must fail loudly"
         );
+    }
+
+    #[test]
+    fn session_url_must_stay_on_the_request_origin() {
+        let req = "https://www.googleapis.com/upload/drive/v3/files";
+        ensure_same_origin(
+            req,
+            "https://www.googleapis.com/upload/drive/v3/files?upload_id=x",
+        )
+        .unwrap();
+        for bad in [
+            "https://evil.example/upload",
+            "http://www.googleapis.com/upload",
+            "https://www.googleapis.com:8443/upload",
+            "not a url",
+        ] {
+            assert!(ensure_same_origin(req, bad).is_err(), "{bad}");
+        }
     }
 
     #[test]

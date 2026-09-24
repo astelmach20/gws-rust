@@ -80,7 +80,9 @@ Helpers are implemented using the `Helper` trait defined in `mod.rs`.
 1. **Passes the litmus test** — cannot be done with a single Discovery command
 2. **Flags are bounded** — only flags controlling orchestration, not API params/output
 3. **Uses shared infrastructure:**
-   - `crate::client::build_client()` for HTTP
+   - `helpers::http::Api` for HTTP (it sends through the shared `crate::transport::Transport`, so retries, endpoint policy and `--dry-run` recording apply)
+   - `crate::args` to read flags (fallible accessors; never `get_one`/`get_flag` directly)
+   - `Api::upload_resumable` for file uploads and `crate::output_file` for writing local files (atomic, honors `--overwrite`)
    - `crate::validate::validate_resource_name()` for user-supplied resource IDs
    - `crate::validate::encode_path_segment()` for URL path segments
    - `crate::output::sanitize_for_terminal()` for error messages

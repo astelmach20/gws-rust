@@ -24,13 +24,13 @@
 
 pub mod batch;
 mod body_schema;
-mod download;
+pub(crate) mod download;
 mod input;
 mod operation;
 pub mod options;
 mod output;
 mod pagination;
-mod upload;
+pub(crate) mod upload;
 mod url;
 
 #[cfg(test)]
@@ -528,7 +528,7 @@ pub(crate) async fn execute_to(
                 // otherwise wrap it as a JSON string (never raw on stdout).
                 match &output {
                     Some(OutputTarget::File(path)) => {
-                        download::write_file_atomic(path, &raw).await?;
+                        crate::output_file::write_atomic(path, &raw, true).await?;
                         out.single(json!({"status": "success", "saved_file": path.display().to_string(), "bytes": raw.len()}))?;
                     }
                     Some(OutputTarget::Stdout) => {
