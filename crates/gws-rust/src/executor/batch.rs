@@ -28,7 +28,6 @@
 //! failed, after printing every result.
 
 use std::io::IsTerminal;
-use std::sync::Arc;
 
 use clap::{Arg, ArgAction, Command};
 use reqwest::Method;
@@ -181,26 +180,15 @@ pub async fn handle_batch_command(args: &[String]) -> Result<(), GwsError> {
 }
 
 async fn batch_credentials(calls: &[BatchCall<'_>]) -> Result<Credentials, GwsError> {
-    let mut scopes: Vec<&str> = calls
-        .iter()
-        .filter_map(|c| crate::select_scope(&c.method.scopes))
-        .collect();
+    let mut scopes: Vec<String> = Vec::new();
+    for call in calls {
+        let chosen = crate::auth::scopes_for_method(&call.method.scopes, &call.method.http_method)
+            .map_err(|e| GwsError::Auth(format!("{e:#}")))?;
+        scopes.extend(chosen);
+    }
     scopes.sort_unstable();
     scopes.dedup();
-    match crate::auth::get_token(&scopes).await {
-        Ok(token) => Ok(Credentials::Refreshable {
-            token,
-            provider: Arc::new(crate::auth::token_provider(&scopes)),
-        }),
-        Err(e) => {
-            let msg = format!("{e:#}");
-            if msg.starts_with("No credentials found") {
-                Ok(Credentials::None)
-            } else {
-                Err(GwsError::Auth(format!("Authentication failed: {msg}")))
-            }
-        }
-    }
+    super::options::credentials_for_scopes(&scopes).await
 }
 
 /// Resolve `files.get`, `drive.files.get` or `permissions.list` style names.
