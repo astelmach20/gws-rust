@@ -69,6 +69,7 @@ csv = { version = "1.4.0", default-features = false }
 pulldown-cmark = { version = "0.13.4", default-features = false }
 
 [dev-dependencies]
+assert_cmd = "2.2.2"
 serial_test.workspace = true
 wiremock = "0.6.5"
 
