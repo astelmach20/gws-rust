@@ -27,7 +27,8 @@
 //! page_delay_ms = 100       # default --page-delay               (GWSR_PAGE_DELAY_MS)
 //! sanitize_template = "projects/p/locations/l/templates/t"     # (GWSR_SANITIZE_TEMPLATE)
 //! sanitize_mode = "warn"    # warn | block                       (GWSR_SANITIZE_MODE)
-//! profile = "work"          # credential profile                 (GWSR_PROFILE)
+//! profile = "work"          # credential profile; --profile, GWSR_PROFILE and
+//!                           # `gwsr auth use` take precedence (read by auth)
 //! timeout_secs = 60         # HTTP request timeout; the executor's --timeout flag and
 //!                           # GWSR_TIMEOUT take precedence (read by the executor)
 //! log = "gwsr=info"         # stderr log filter                  (GWSR_LOG, RUST_LOG)
@@ -97,7 +98,8 @@ pub struct Settings {
     pub sanitize_template: Option<String>,
     /// Model Armor mode.
     pub sanitize_mode: SanitizeModePref,
-    /// Credential profile name.
+    /// Credential profile name (config only; `--profile` and `GWSR_PROFILE`
+    /// are resolved by auth and take precedence).
     pub profile: Option<String>,
     /// HTTP request timeout in seconds (config only; `--timeout` and
     /// `GWSR_TIMEOUT` are resolved by the executor and take precedence).
@@ -228,7 +230,8 @@ pub fn resolve(
         page_delay_ms,
         sanitize_template: env("GWSR_SANITIZE_TEMPLATE").or_else(|| file.sanitize_template.clone()),
         sanitize_mode,
-        profile: env("GWSR_PROFILE").or_else(|| file.profile.clone()),
+        // GWSR_PROFILE is owned and read by auth; config is the fallback.
+        profile: file.profile.clone(),
         // GWSR_TIMEOUT is owned and read by the executor; config is the fallback.
         timeout_secs: file.timeout_secs,
         log,
@@ -315,6 +318,21 @@ log_file = "/tmp/logs"
         // Empty env values count as unset.
         let s = resolve(Some(&file), &origin(), &env_of(&[("GWSR_FORMAT", "")])).unwrap();
         assert_eq!(s.format, OutputFormat::Table);
+    }
+
+    #[test]
+    fn profile_and_timeout_are_config_only() {
+        // GWSR_PROFILE belongs to auth and GWSR_TIMEOUT to the executor; both
+        // outrank config there, so config must not read them itself.
+        let file = parse_config("profile = \"work\"\ntimeout_secs = 30\n", &origin()).unwrap();
+        let s = resolve(
+            Some(&file),
+            &origin(),
+            &env_of(&[("GWSR_PROFILE", "home"), ("GWSR_TIMEOUT", "5")]),
+        )
+        .unwrap();
+        assert_eq!(s.profile.as_deref(), Some("work"));
+        assert_eq!(s.timeout_secs, Some(30));
     }
 
     #[test]
