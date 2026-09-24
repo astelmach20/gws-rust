@@ -23,9 +23,9 @@ pub mod drive;
 pub mod events;
 pub mod gmail;
 pub mod modelarmor;
-pub(crate) mod rest;
 #[cfg(test)]
 mod registry_tests;
+pub(crate) mod rest;
 pub mod script;
 pub mod sheets;
 pub mod workflows;
