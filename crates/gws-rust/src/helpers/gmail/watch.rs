@@ -291,7 +291,7 @@ async fn watch_pull_loop(
                 match result {
                     Ok(r) => r,
                     Err(e) if e.is_timeout() => continue,
-                    Err(e) => return Err(GwsError::Other(anyhow::anyhow!("Pub/Sub pull failed: {e}"))),
+                    Err(e) => return Err(GwsError::other(anyhow::anyhow!("Pub/Sub pull failed: {e}"))),
                 }
             }
             _ = super::super::shutdown_signal() => {
@@ -801,11 +801,11 @@ mod tests {
 
     #[test]
     fn test_parse_watch_args_invalid_output_dir() {
-        let matches = make_matches_watch(&["test", "--output-dir", "../../etc"]);
+        let matches = make_matches_watch(&["test", "--output-dir", "bad\x01dir"]);
         let result = parse_watch_args(&matches);
         assert!(result.is_err());
         let msg = result.unwrap_err().to_string();
-        assert!(msg.contains("outside the current directory"));
+        assert!(msg.contains("control characters"));
     }
 
     #[test]

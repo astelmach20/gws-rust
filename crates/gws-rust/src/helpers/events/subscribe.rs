@@ -705,11 +705,11 @@ mod tests {
 
     #[test]
     fn test_parse_subscribe_args_invalid_output_dir() {
-        let matches = make_matches_subscribe(&["test", "--output-dir", "../../etc"]);
+        let matches = make_matches_subscribe(&["test", "--output-dir", "bad\x01dir"]);
         let result = parse_subscribe_args(&matches);
         assert!(result.is_err());
         let msg = result.unwrap_err().to_string();
-        assert!(msg.contains("outside the current directory"));
+        assert!(msg.contains("control characters"));
     }
 
     #[test]

@@ -27,18 +27,25 @@ keywords = ["google-workspace", "google", "discovery", "api-client"]
 categories = ["api-bindings", "web-programming"]
 
 [dependencies]
-anyhow.workspace = true
+anyhow = { workspace = true, optional = true }
 percent-encoding.workspace = true
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+strsim = "0.11.1"
+tempfile.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
+url = "2.5.8"
 
 [dev-dependencies]
-serial_test.workspace = true
-tempfile.workspace = true
+proptest = "1.11.0"
+wiremock = "0.6.5"
+
+[features]
+# Enables `From<anyhow::Error> for GwsError` for binaries that use anyhow.
+anyhow = ["dep:anyhow"]
 
 [lints]
 workspace = true
