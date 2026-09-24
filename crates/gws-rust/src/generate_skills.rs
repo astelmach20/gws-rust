@@ -1291,7 +1291,7 @@ mod tests {
         assert_eq!(dry["dry_run"], true);
         assert_eq!(dry["wouldPrune"][0], "gwsr-old");
         assert!(dry.get("pruned").is_none());
-        assert_eq!(dry["skills"][0]["path"], "/out/gwsr-shared/SKILL.md");
+        assert_eq!(dry["skills"][0]["path"], expected.display().to_string());
     }
 
     #[test]
