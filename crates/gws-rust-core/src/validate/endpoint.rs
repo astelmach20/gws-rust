@@ -119,21 +119,94 @@ pub fn validate_api_base(url: &str) -> Result<Url, GwsError> {
 /// Like [`validate_api_base`], with the override passed explicitly.
 pub fn validate_api_base_with(url: &str, override_base: Option<&Url>) -> Result<Url, GwsError> {
     let parsed = parse_url(url, "API base URL")?;
-    if let Some(base) = override_base
-        && parsed.origin() == base.origin()
-    {
-        return Ok(parsed);
-    }
-    let host = parsed.host_str().unwrap_or_default();
-    let trusted_host =
-        matches!(parsed.host(), Some(url::Host::Domain(_))) && is_google_api_host(host);
-    if parsed.scheme() != "https" || parsed.port().is_some() || !trusted_host {
+    if !is_trusted(&parsed, override_base) {
         return Err(GwsError::Validation(format!(
             "Refusing to use untrusted API base URL '{url}': it must be https://*.googleapis.com/. \
              Set {API_BASE_URL_ENV} to allow a private endpoint explicitly."
         )));
     }
     Ok(parsed)
+}
+
+/// The single trust rule: same origin as the operator override, or `https`
+/// on the default port to `googleapis.com` / `*.googleapis.com`.
+fn is_trusted(parsed: &Url, override_base: Option<&Url>) -> bool {
+    if let Some(base) = override_base
+        && parsed.origin() == base.origin()
+    {
+        return true;
+    }
+    let google_host = match parsed.host() {
+        Some(url::Host::Domain(host)) => is_google_api_host(host),
+        _ => false,
+    };
+    parsed.scheme() == "https" && parsed.port().is_none() && google_host
+}
+
+/// Decides which request URLs may receive credentials.
+///
+/// Holds the validated `GWSR_API_BASE_URL` override (if any) and applies the
+/// same trust rule as [`validate_api_base`] to full request URLs, which may
+/// carry a query string.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct EndpointPolicy {
+    override_base: Option<Url>,
+}
+
+impl EndpointPolicy {
+    /// Trust Google API hosts only.
+    pub fn google_only() -> Self {
+        Self::default()
+    }
+
+    /// Trust Google API hosts plus the origin of `base`
+    /// (see [`parse_api_base_override`] for what `base` may be).
+    pub fn with_override(base: &str) -> Result<Self, GwsError> {
+        let override_base = parse_api_base_override(Some(base))?.ok_or_else(|| {
+            GwsError::Validation(format!("{API_BASE_URL_ENV} override must not be empty"))
+        })?;
+        Ok(Self {
+            override_base: Some(override_base),
+        })
+    }
+
+    /// Read `GWSR_API_BASE_URL`; unset or empty means [`Self::google_only`].
+    pub fn from_env() -> Result<Self, GwsError> {
+        Ok(Self {
+            override_base: api_base_override()?,
+        })
+    }
+
+    /// The operator-supplied base URL (always ends in `/`).
+    pub fn override_base(&self) -> Option<&Url> {
+        self.override_base.as_ref()
+    }
+
+    /// Validate that `url` may receive a bearer token. Returns the parsed URL.
+    pub fn check(&self, url: &str) -> Result<Url, GwsError> {
+        let parsed = Url::parse(url).map_err(|e| {
+            GwsError::Validation(format!(
+                "Refusing to send credentials to invalid URL {url:?}: {e}"
+            ))
+        })?;
+        let clean_userinfo = parsed.username().is_empty() && parsed.password().is_none();
+        if clean_userinfo
+            && parsed.fragment().is_none()
+            && is_trusted(&parsed, self.override_base())
+        {
+            return Ok(parsed);
+        }
+        let mut shown = parsed.clone();
+        shown.set_query(None);
+        shown.set_fragment(None);
+        // Never echo embedded credentials.
+        let _ = shown.set_username("");
+        let _ = shown.set_password(None);
+        Err(GwsError::Validation(format!(
+            "Refusing to send credentials to {shown}: only https://*.googleapis.com is trusted \
+             (set {API_BASE_URL_ENV} to route requests to another endpoint)"
+        )))
+    }
 }
 
 #[cfg(test)]
@@ -214,6 +287,56 @@ mod tests {
             "proxy.example",
         ] {
             assert!(parse_api_base_override(Some(bad)).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn endpoint_policy_default_trusts_googleapis_https_only() {
+        let p = EndpointPolicy::google_only();
+        assert!(
+            p.check("https://www.googleapis.com/drive/v3/files?q=a")
+                .is_ok()
+        );
+        assert!(p.check("https://gmail.googleapis.com/gmail/v1/x").is_ok());
+        for bad in [
+            "http://www.googleapis.com/drive/v3/files",
+            "https://evil.com/drive",
+            "https://googleapis.com.evil.com/",
+            "https://evilgoogleapis.com/",
+            "https://www.googleapis.com:8443/x",
+            "https://user:pw@www.googleapis.com/x",
+            "https://www.googleapis.com/x#frag",
+        ] {
+            let err = p.check(bad).unwrap_err().to_string();
+            assert!(!err.contains("pw"), "{err}");
+        }
+    }
+
+    #[test]
+    fn endpoint_policy_override() {
+        let p = EndpointPolicy::with_override("https://proxy.corp.example/api").unwrap();
+        assert_eq!(
+            p.override_base().unwrap().as_str(),
+            "https://proxy.corp.example/api/"
+        );
+        assert!(
+            p.check("https://proxy.corp.example/api/drive/v3/files")
+                .is_ok()
+        );
+        assert!(p.check("https://other.example/").is_err());
+        assert!(p.check("https://www.googleapis.com/x").is_ok());
+
+        assert!(EndpointPolicy::with_override("http://127.0.0.1:8080").is_ok());
+        assert!(EndpointPolicy::with_override("http://localhost:8080/").is_ok());
+        for bad in [
+            "http://proxy.corp.example/",
+            "https://user:pw@proxy.example/",
+            "https://proxy.example/?a=b",
+            "ftp://proxy.example/",
+            "not a url",
+            "",
+        ] {
+            assert!(EndpointPolicy::with_override(bad).is_err(), "{bad}");
         }
     }
 }

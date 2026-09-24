@@ -16,49 +16,22 @@
 
 use serde_json::{Value, json};
 
-use crate::discovery::{RestDescription, RestMethod};
+use crate::discovery::{PageTokenLocation, RestDescription, RestMethod};
 use crate::error::GwsError;
-
-/// Where a method takes its `pageToken`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum TokenLocation {
-    Query,
-    Body,
-}
-
-/// How a method paginates, or `None` if it doesn't.
-///
-/// Switch-over point: core's `RestMethod::pagination(&doc)`.
-pub(crate) fn token_location(doc: &RestDescription, method: &RestMethod) -> Option<TokenLocation> {
-    if method
-        .parameters
-        .get("pageToken")
-        .is_some_and(|p| p.location.as_deref() != Some("path"))
-    {
-        return Some(TokenLocation::Query);
-    }
-    let body_has_token = method
-        .request
-        .as_ref()
-        .and_then(|r| r.schema_ref.as_deref())
-        .and_then(|name| doc.schemas.get(name))
-        .is_some_and(|s| s.properties.contains_key("pageToken"));
-    body_has_token.then_some(TokenLocation::Body)
-}
 
 /// Put `token` where the method expects it.
 pub(crate) fn place_token(
-    location: TokenLocation,
+    location: PageTokenLocation,
     token: &str,
     query: &mut Vec<(String, String)>,
     body: &mut Option<Value>,
 ) -> Result<(), GwsError> {
     match location {
-        TokenLocation::Query => {
+        PageTokenLocation::Query => {
             query.retain(|(k, _)| k != "pageToken");
             query.push(("pageToken".to_string(), token.to_string()));
         }
-        TokenLocation::Body => {
+        PageTokenLocation::Body => {
             let obj = body.get_or_insert_with(|| json!({}));
             let map = obj.as_object_mut().ok_or_else(|| {
                 GwsError::Validation(
@@ -66,6 +39,11 @@ pub(crate) fn place_token(
                 )
             })?;
             map.insert("pageToken".to_string(), Value::String(token.to_string()));
+        }
+        unknown => {
+            return Err(GwsError::Discovery(format!(
+                "unsupported pageToken location {unknown:?} in the Discovery Document"
+            )));
         }
     }
     Ok(())
@@ -142,7 +120,7 @@ pub(crate) fn item_field(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::discovery::{JsonSchema, JsonSchemaProperty, MethodParameter, SchemaRef};
+    use crate::discovery::{JsonSchema, JsonSchemaProperty, SchemaRef};
     use std::collections::HashMap;
 
     fn schema(props: &[(&str, &str)]) -> JsonSchema {
@@ -171,44 +149,15 @@ mod tests {
     }
 
     #[test]
-    fn detects_query_and_body_tokens() {
-        let mut params = HashMap::new();
-        params.insert(
-            "pageToken".to_string(),
-            MethodParameter {
-                location: Some("query".into()),
-                ..Default::default()
-            },
-        );
-        let list = RestMethod {
-            parameters: params,
-            ..Default::default()
-        };
-        let mut schemas = HashMap::new();
-        schemas.insert("QueryReq".to_string(), schema(&[("pageToken", "string")]));
-        let doc = RestDescription {
-            schemas,
-            ..Default::default()
-        };
-        let query = RestMethod {
-            request: sref("QueryReq"),
-            ..Default::default()
-        };
-        assert_eq!(token_location(&doc, &list), Some(TokenLocation::Query));
-        assert_eq!(token_location(&doc, &query), Some(TokenLocation::Body));
-        assert_eq!(token_location(&doc, &RestMethod::default()), None);
-    }
-
-    #[test]
     fn places_tokens() {
         let mut q = vec![("pageToken".to_string(), "old".to_string())];
         let mut body = None;
-        place_token(TokenLocation::Query, "t2", &mut q, &mut body).unwrap();
+        place_token(PageTokenLocation::Query, "t2", &mut q, &mut body).unwrap();
         assert_eq!(q, vec![("pageToken".to_string(), "t2".to_string())]);
-        place_token(TokenLocation::Body, "t3", &mut q, &mut body).unwrap();
+        place_token(PageTokenLocation::Body, "t3", &mut q, &mut body).unwrap();
         assert_eq!(body, Some(json!({"pageToken": "t3"})));
         let mut bad = Some(json!([1]));
-        assert!(place_token(TokenLocation::Body, "t", &mut q, &mut bad).is_err());
+        assert!(place_token(PageTokenLocation::Body, "t", &mut q, &mut bad).is_err());
     }
 
     #[test]

@@ -578,7 +578,13 @@ mod tests {
     fn test_parse_watch_args_validation() {
         let m = helper_matches(&["+watch", "--subscription", "projects/p/subscriptions/../x"]);
         assert!(parse_watch_args(&m).is_err());
-        let m = helper_matches(&["+watch", "--subscription", "s", "--output-dir", "bad\x01dir"]);
+        let m = helper_matches(&[
+            "+watch",
+            "--subscription",
+            "s",
+            "--output-dir",
+            "bad\x01dir",
+        ]);
         assert!(parse_watch_args(&m).is_err());
         let m = helper_matches(&["+watch", "--subscription", "projects/p/subscriptions/s"]);
         let c = parse_watch_args(&m).unwrap();

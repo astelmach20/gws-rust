@@ -27,9 +27,9 @@
 //!   backoff and full jitter, honours `Retry-After` in both its delta-seconds
 //!   and HTTP-date forms, and never re-sends a non-idempotent request unless
 //!   the failure proves the request never left this process.
-//! * **One endpoint policy.** [`EndpointPolicy`] decides which hosts may
-//!   receive a bearer token: `https://*.googleapis.com` plus an explicit
-//!   operator override (`GWSR_API_BASE_URL`).
+//!
+//! Which hosts may receive a bearer token is decided by
+//! [`crate::validate::EndpointPolicy`].
 
 use std::sync::OnceLock;
 use std::time::{Duration, SystemTime};
@@ -42,9 +42,6 @@ use crate::error::GwsError;
 /// Environment variable holding the per-request timeout in seconds
 /// (`0` disables it).
 pub const TIMEOUT_ENV: &str = "GWSR_TIMEOUT";
-/// Environment variable that points every API request at a different base URL
-/// (a private endpoint, a VPC-SC gateway, a recording proxy or a test server).
-pub const API_BASE_URL_ENV: &str = "GWSR_API_BASE_URL";
 
 /// Default time allowed for a server to start responding.
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(60);
@@ -102,12 +99,6 @@ pub fn shared_client() -> Result<reqwest::Client, GwsError> {
         Ok(client) => Ok(client.clone()),
         Err(message) => Err(GwsError::other(message.clone())),
     }
-}
-
-/// Alias of [`shared_client`], kept because it is the name most call sites
-/// use. It does **not** build a new connection pool.
-pub fn build_client() -> Result<reqwest::Client, GwsError> {
-    shared_client()
 }
 
 // ── Timeouts ────────────────────────────────────────────────────────────
@@ -569,135 +560,6 @@ fn redact_url(url: &Url) -> String {
     clean.to_string()
 }
 
-// ── Endpoint policy ─────────────────────────────────────────────────────
-
-/// Decides which URLs may receive credentials.
-///
-/// By default only `https://googleapis.com` and `https://*.googleapis.com`
-/// are trusted. An operator can add exactly one extra origin with
-/// `GWSR_API_BASE_URL`; that value also replaces the Discovery `rootUrl` so
-/// every request is routed there.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct EndpointPolicy {
-    override_base: Option<Url>,
-}
-
-impl EndpointPolicy {
-    /// Trust Google API hosts only.
-    pub fn google_only() -> Self {
-        Self::default()
-    }
-
-    /// Trust Google API hosts plus the origin of `base`.
-    ///
-    /// `base` must be `https://`, or `http://` on a loopback address (for local
-    /// proxies and tests), and must not carry credentials, a query or a fragment.
-    pub fn with_override(base: &str) -> Result<Self, GwsError> {
-        let mut url = Url::parse(base.trim()).map_err(|e| {
-            GwsError::Validation(format!(
-                "{API_BASE_URL_ENV} is not a valid URL ({base:?}): {e}"
-            ))
-        })?;
-        let loopback = is_loopback(&url);
-        match url.scheme() {
-            "https" => {}
-            "http" if loopback => {}
-            other => {
-                return Err(GwsError::Validation(format!(
-                    "{API_BASE_URL_ENV} must use https:// (http:// is allowed only for loopback hosts), got scheme {other:?}"
-                )));
-            }
-        }
-        if url.host_str().is_none() {
-            return Err(GwsError::Validation(format!(
-                "{API_BASE_URL_ENV} must include a host: {base:?}"
-            )));
-        }
-        if !url.username().is_empty() || url.password().is_some() {
-            return Err(GwsError::Validation(format!(
-                "{API_BASE_URL_ENV} must not embed credentials"
-            )));
-        }
-        if url.query().is_some() || url.fragment().is_some() {
-            return Err(GwsError::Validation(format!(
-                "{API_BASE_URL_ENV} must not include a query string or fragment"
-            )));
-        }
-        if !url.path().ends_with('/') {
-            let path = format!("{}/", url.path());
-            url.set_path(&path);
-        }
-        Ok(Self {
-            override_base: Some(url),
-        })
-    }
-
-    /// Read `GWSR_API_BASE_URL`; unset or empty means [`Self::google_only`].
-    pub fn from_env() -> Result<Self, GwsError> {
-        match std::env::var(API_BASE_URL_ENV) {
-            Ok(v) if v.trim().is_empty() => Ok(Self::google_only()),
-            Ok(v) => Self::with_override(&v),
-            Err(std::env::VarError::NotPresent) => Ok(Self::google_only()),
-            Err(std::env::VarError::NotUnicode(_)) => Err(GwsError::Validation(format!(
-                "{API_BASE_URL_ENV} is not valid UTF-8"
-            ))),
-        }
-    }
-
-    /// The operator-supplied base URL (always ends in `/`).
-    pub fn override_base(&self) -> Option<&Url> {
-        self.override_base.as_ref()
-    }
-
-    /// The root URL requests should be built from: the override when set,
-    /// otherwise the Discovery document's `rootUrl`.
-    pub fn root_url(&self, discovery_root: &str) -> String {
-        match &self.override_base {
-            Some(base) => base.to_string(),
-            None => discovery_root.to_string(),
-        }
-    }
-
-    /// Validate that `url` may receive a bearer token. Returns the parsed URL.
-    pub fn check(&self, url: &str) -> Result<Url, GwsError> {
-        let parsed = Url::parse(url).map_err(|e| {
-            GwsError::Validation(format!(
-                "Refusing to send credentials to invalid URL {url:?}: {e}"
-            ))
-        })?;
-        if let Some(base) = &self.override_base
-            && same_origin(base, &parsed)
-        {
-            return Ok(parsed);
-        }
-        let host = parsed.host_str().unwrap_or_default();
-        let google = host == "googleapis.com" || host.ends_with(".googleapis.com");
-        if parsed.scheme() == "https" && google {
-            return Ok(parsed);
-        }
-        Err(GwsError::Validation(format!(
-            "Refusing to send credentials to {}: only https://*.googleapis.com is trusted \
-             (set {API_BASE_URL_ENV} to route requests to another endpoint)",
-            redact_url(&parsed)
-        )))
-    }
-}
-
-fn same_origin(a: &Url, b: &Url) -> bool {
-    a.scheme() == b.scheme()
-        && a.host_str() == b.host_str()
-        && a.port_or_known_default() == b.port_or_known_default()
-}
-
-fn is_loopback(url: &Url) -> bool {
-    match url.host() {
-        Some(url::Host::Domain(d)) => d.eq_ignore_ascii_case("localhost"),
-        Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
-        Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
-        None => false,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -773,7 +635,7 @@ mod tests {
     #[test]
     fn shared_client_is_reused() {
         let a = shared_client().unwrap();
-        let b = build_client().unwrap();
+        let b = shared_client().unwrap();
         let ra = a.get("https://example.com").build().unwrap();
         let rb = b.get("https://example.com").build().unwrap();
         assert_eq!(ra.url(), rb.url());
@@ -1066,43 +928,5 @@ mod tests {
         assert!(!received[0].headers.contains_key("authorization"));
         let first = origin.received_requests().await.unwrap();
         assert!(first[0].headers.contains_key("authorization"));
-    }
-
-    #[test]
-    fn endpoint_policy_default_trusts_googleapis_https_only() {
-        let p = EndpointPolicy::google_only();
-        assert!(p.check("https://www.googleapis.com/drive/v3/files").is_ok());
-        assert!(p.check("https://gmail.googleapis.com/gmail/v1/x").is_ok());
-        assert!(p.check("http://www.googleapis.com/drive/v3/files").is_err());
-        assert!(p.check("https://evil.com/drive").is_err());
-        assert!(p.check("https://googleapis.com.evil.com/").is_err());
-        assert!(p.check("https://evilgoogleapis.com/").is_err());
-    }
-
-    #[test]
-    fn endpoint_policy_override() {
-        let p = EndpointPolicy::with_override("https://proxy.corp.example/api").unwrap();
-        assert_eq!(
-            p.override_base().unwrap().as_str(),
-            "https://proxy.corp.example/api/"
-        );
-        assert_eq!(
-            p.root_url("https://www.googleapis.com/"),
-            "https://proxy.corp.example/api/"
-        );
-        assert!(
-            p.check("https://proxy.corp.example/api/drive/v3/files")
-                .is_ok()
-        );
-        assert!(p.check("https://other.example/").is_err());
-        assert!(p.check("https://www.googleapis.com/x").is_ok());
-
-        assert!(EndpointPolicy::with_override("http://127.0.0.1:8080").is_ok());
-        assert!(EndpointPolicy::with_override("http://localhost:8080/").is_ok());
-        assert!(EndpointPolicy::with_override("http://proxy.corp.example/").is_err());
-        assert!(EndpointPolicy::with_override("https://user:pw@proxy.example/").is_err());
-        assert!(EndpointPolicy::with_override("https://proxy.example/?a=b").is_err());
-        assert!(EndpointPolicy::with_override("ftp://proxy.example/").is_err());
-        assert!(EndpointPolicy::with_override("not a url").is_err());
     }
 }

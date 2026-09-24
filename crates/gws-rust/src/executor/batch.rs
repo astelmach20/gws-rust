@@ -33,12 +33,13 @@ use reqwest::Method;
 use serde_json::{Map, Value, json};
 use tokio::io::AsyncReadExt;
 
-use gws_rust_core::client::{EndpointPolicy, Idempotency};
+use gws_rust_core::client::Idempotency;
+use gws_rust_core::validate::EndpointPolicy;
 
-use super::errors::{error_from_response, other};
+use super::errors::error_from_response;
 use super::output::Emitter;
 use super::transport::{Credentials, Transport, read_body};
-use super::url::{UrlTarget, api_root, build_url};
+use super::url::{UrlTarget, build_url};
 use super::{ExecOptions, body_schema, input, safety};
 use crate::discovery::{RestDescription, RestMethod, RestResource};
 use crate::error::GwsError;
@@ -252,12 +253,11 @@ fn relative_target(
     query: &[(String, String)],
 ) -> Result<String, GwsError> {
     let mut parsed = reqwest::Url::parse(url)
-        .map_err(|e| other(anyhow::anyhow!("invalid request URL {url}: {e}")))?;
+        .map_err(|e| GwsError::other(anyhow::anyhow!("invalid request URL {url}: {e}")))?;
     if !query.is_empty() {
         parsed.query_pairs_mut().extend_pairs(query);
     }
-    let root = reqwest::Url::parse(&api_root(doc, endpoints))
-        .map_err(|e| other(anyhow::anyhow!("invalid API root: {e}")))?;
+    let root = doc.api_root(endpoints.override_base())?;
     if parsed.host_str() != root.host_str() {
         return Err(GwsError::Validation(format!(
             "method URL host {:?} differs from the batch endpoint host {:?}",
@@ -288,8 +288,9 @@ pub(crate) fn build_batch_body(
         ));
         match &call.body {
             Some(b) => {
-                let json = serde_json::to_string(b)
-                    .map_err(|e| other(anyhow::anyhow!("failed to serialize batch body: {e}")))?;
+                let json = serde_json::to_string(b).map_err(|e| {
+                    GwsError::other(anyhow::anyhow!("failed to serialize batch body: {e}"))
+                })?;
                 body.push_str(&format!(
                     "Content-Type: application/json; charset=UTF-8\r\nContent-Length: {}\r\n\r\n{json}\r\n",
                     json.len()
@@ -334,7 +335,7 @@ pub(crate) fn parse_batch_response(
     body: &str,
 ) -> Result<Vec<PartResponse>, GwsError> {
     let boundary = boundary_of(content_type).ok_or_else(|| {
-        other(anyhow::anyhow!(
+        GwsError::other(anyhow::anyhow!(
             "batch response has no multipart boundary (Content-Type: {content_type})"
         ))
     })?;
@@ -362,7 +363,7 @@ pub(crate) fn parse_batch_response(
             .nth(1)
             .and_then(|s| s.parse::<u16>().ok())
             .ok_or_else(|| {
-                other(anyhow::anyhow!(
+                GwsError::other(anyhow::anyhow!(
                     "malformed batch part status line {status_line:?}"
                 ))
             })?;
@@ -396,7 +397,7 @@ pub(crate) async fn run_batch(
         .collect();
     let batch_url = format!(
         "{}batch/{}/{}",
-        api_root(doc, &options.endpoints),
+        doc.api_root(options.endpoints.override_base())?,
         doc.name,
         doc.version
     );
@@ -470,7 +471,7 @@ pub(crate) async fn run_batch(
         }
         let parts = parse_batch_response(&resp_type, &text)?;
         if parts.len() != chunk.len() {
-            return Err(other(anyhow::anyhow!(
+            return Err(GwsError::other(anyhow::anyhow!(
                 "batch response has {} parts for {} calls",
                 parts.len(),
                 chunk.len()

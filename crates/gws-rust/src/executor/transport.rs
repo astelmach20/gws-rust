@@ -26,10 +26,10 @@ use std::time::Duration;
 use futures_util::StreamExt;
 use reqwest::{Method, StatusCode};
 
-use gws_rust_core::client::{EndpointPolicy, Idempotency, RetryPolicy, Sent};
+use gws_rust_core::client::{Idempotency, RetryPolicy, Sent};
+use gws_rust_core::validate::EndpointPolicy;
 
 use super::AuthMethod;
-use super::errors::other;
 use crate::auth::AccessTokenProvider;
 use crate::error::GwsError;
 
@@ -118,7 +118,7 @@ impl Transport {
         self.token
             .lock()
             .map(|t| t.clone())
-            .map_err(|_| other(anyhow::anyhow!("access token lock poisoned")))
+            .map_err(|_| GwsError::other(anyhow::anyhow!("access token lock poisoned")))
     }
 
     async fn refresh_token(&self) -> Result<(), GwsError> {
@@ -133,7 +133,7 @@ impl Transport {
         let mut guard = self
             .token
             .lock()
-            .map_err(|_| other(anyhow::anyhow!("access token lock poisoned")))?;
+            .map_err(|_| GwsError::other(anyhow::anyhow!("access token lock poisoned")))?;
         *guard = Some(fresh);
         Ok(())
     }
@@ -220,7 +220,7 @@ where
         Some(limit) => tokio::time::timeout(limit, stream.next())
             .await
             .map_err(|_| {
-                other(anyhow::anyhow!(
+                GwsError::other(anyhow::anyhow!(
                     "no data received for {}s while reading the response body (see --timeout)",
                     limit.as_secs()
                 ))
@@ -228,7 +228,7 @@ where
         None => stream.next().await,
     };
     next.transpose()
-        .map_err(|e| other(anyhow::Error::new(e).context("failed to read response body")))
+        .map_err(|e| GwsError::other(anyhow::Error::new(e).context("failed to read response body")))
 }
 
 /// Timeout for a request that uploads `bytes`: the base response timeout plus

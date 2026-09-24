@@ -23,7 +23,6 @@ use std::sync::Mutex;
 use serde_json::Value;
 use tokio::io::AsyncWriteExt;
 
-use super::errors::other;
 use crate::error::GwsError;
 use crate::formatter::OutputFormat;
 
@@ -62,7 +61,7 @@ impl Emitter {
         match &self.captured {
             Some(buf) => {
                 buf.lock()
-                    .map_err(|_| other(anyhow::anyhow!("output buffer lock poisoned")))?
+                    .map_err(|_| GwsError::other(anyhow::anyhow!("output buffer lock poisoned")))?
                     .extend_from_slice(bytes);
                 Ok(true)
             }

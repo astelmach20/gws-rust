@@ -26,7 +26,7 @@ use serde_json::{Map, Value, json};
 
 use gws_rust_core::client::Idempotency;
 
-use super::errors::{error_from_response, other};
+use super::errors::error_from_response;
 use super::transport::{Transport, read_body};
 use super::url::{UrlTarget, build_url};
 use crate::discovery::{RestDescription, RestMethod, RestResource};
@@ -143,7 +143,7 @@ pub(crate) async fn wait(
     let name = op
         .get("name")
         .and_then(Value::as_str)
-        .ok_or_else(|| other(anyhow::anyhow!("operation has no name to poll")))?
+        .ok_or_else(|| GwsError::other(anyhow::anyhow!("operation has no name to poll")))?
         .to_string();
     let param = get
         .parameter_order
@@ -167,7 +167,7 @@ pub(crate) async fn wait(
     let auth = transport.auth_method()?;
     while !is_done(&op) {
         if started.elapsed() + interval > cfg.timeout {
-            return Err(other(anyhow::anyhow!(
+            return Err(GwsError::other(anyhow::anyhow!(
                 "--wait: operation {name} did not finish within {}s; last state: {}",
                 cfg.timeout.as_secs(),
                 op.get("metadata").cloned().unwrap_or(json!(null))
@@ -189,8 +189,9 @@ pub(crate) async fn wait(
         if !status.is_success() {
             return Err(error_from_response(status, &text, &auth, note.as_deref()));
         }
-        op = serde_json::from_str(&text)
-            .map_err(|e| other(anyhow::anyhow!("operations.get returned invalid JSON: {e}")))?;
+        op = serde_json::from_str(&text).map_err(|e| {
+            GwsError::other(anyhow::anyhow!("operations.get returned invalid JSON: {e}"))
+        })?;
     }
     Ok(op)
 }
