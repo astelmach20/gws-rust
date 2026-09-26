@@ -593,4 +593,19 @@ mod tests {
         );
         assert_eq!(chunk_timeout(None, DEFAULT_CHUNK_SIZE), None);
     }
+
+    #[test]
+    fn huge_timeout_saturates_instead_of_overflowing() {
+        // `--timeout 18446744073709551615` is accepted; adding the per-byte
+        // allowance must not overflow.
+        let max = Duration::from_secs(u64::MAX);
+        assert_eq!(
+            chunk_timeout(Some(max), DEFAULT_CHUNK_SIZE),
+            Some(Duration::MAX)
+        );
+        assert_eq!(
+            crate::transport::upload_timeout(Some(max), u64::MAX),
+            Some(Duration::MAX)
+        );
+    }
 }
