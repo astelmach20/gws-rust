@@ -88,10 +88,26 @@ pub fn complete_if_requested() -> Result<bool, clap::Error> {
     // be read, clap completes paths without it (a completion script has no
     // channel to report an error to the user's shell prompt).
     let cwd = std::env::current_dir().ok();
-    CompleteEnv::with_factory(move || completion_command(&words))
+    CompleteEnv::with_factory(move || with_auth_tree(completion_command(&words)))
         .var(COMPLETE_VAR)
         .bin("gwsr")
         .try_complete(args, cwd.as_deref())
+}
+
+/// Replace the top-level `auth` passthrough argument with the real `gwsr auth`
+/// tree, which `auth` parses on its own, so completion and man pages cover its
+/// subcommands and flags. The top-level description is kept.
+fn with_auth_tree(root: Command) -> Command {
+    root.mut_subcommands(|sub| {
+        if sub.get_name() != "auth" {
+            return sub;
+        }
+        let auth = crate::auth::commands::auth_command();
+        match sub.get_about() {
+            Some(about) => auth.about(about.clone()),
+            None => auth,
+        }
+    })
 }
 
 /// Print the registration script for `shell`.
@@ -125,7 +141,7 @@ pub fn write_man_pages(dir: &Path, dry_run: bool) -> Result<Vec<std::path::PathB
             )
         })?;
     }
-    let mut root = crate::cli_args::command();
+    let mut root = with_auth_tree(crate::cli_args::command());
     root.build();
     let mut written = Vec::new();
     write_page(&root, "gwsr", dir, dry_run, &mut written)?;
@@ -201,6 +217,30 @@ mod tests {
         for name in ["auth", "schema", "commands", "completions", "cache", "dev"] {
             assert!(cmd.find_subcommand(name).is_some(), "{name}");
         }
+    }
+
+    #[test]
+    fn auth_tree_replaces_the_passthrough_and_stays_valid() {
+        let cmd = with_auth_tree(completion_command(&words(&["gwsr", "auth"])));
+        cmd.clone().debug_assert();
+        let auth = cmd.find_subcommand("auth").unwrap();
+        for sub in [
+            "login", "status", "list", "use", "export", "logout", "setup",
+        ] {
+            assert!(auth.find_subcommand(sub).is_some(), "{sub}");
+        }
+        assert!(
+            auth.get_arguments().all(|a| a.get_id() != "args"),
+            "the passthrough argument is gone"
+        );
+        let top = crate::cli_args::command();
+        assert_eq!(
+            auth.get_about().map(ToString::to_string),
+            top.find_subcommand("auth")
+                .unwrap()
+                .get_about()
+                .map(ToString::to_string)
+        );
     }
 
     #[test]
