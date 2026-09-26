@@ -565,14 +565,13 @@ async fn write_stream(
 ) -> Result<u64, GwsError> {
     match target {
         OutputTarget::Stdout => {
-            use futures_util::StreamExt;
             use tokio::io::AsyncWriteExt;
+            let expected = resp.content_length();
             let mut stream = resp.bytes_stream();
             let mut written: u64 = 0;
             let mut out = tokio::io::stdout();
-            while let Some(chunk) = stream.next().await {
-                let chunk =
-                    chunk.map_err(|e| other_err(anyhow::anyhow!("Download interrupted: {e}")))?;
+            // Same idle limit and error class as a download to a file.
+            while let Some(chunk) = crate::transport::next_chunk(&mut stream, idle).await? {
                 out.write_all(&chunk)
                     .await
                     .map_err(|e| other_err(anyhow::anyhow!("Failed writing to stdout: {e}")))?;
@@ -581,6 +580,7 @@ async fn write_stream(
             out.flush()
                 .await
                 .map_err(|e| other_err(anyhow::anyhow!("Failed flushing stdout: {e}")))?;
+            crate::executor::download::check_length(expected, written)?;
             Ok(written)
         }
         OutputTarget::File { path, overwrite } => {
