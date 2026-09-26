@@ -290,6 +290,10 @@ impl Api {
     }
 
     fn record(&self, value: Value) -> Result<(), GwsError> {
+        // A dry run must refuse what the real send would refuse.
+        if let Some(url) = value.get("url").and_then(Value::as_str) {
+            crate::validate::reject_dot_segments(url)?;
+        }
         self.planned
             .lock()
             .map_err(|_| other_err(anyhow::anyhow!("dry-run plan lock poisoned")))?

@@ -134,6 +134,7 @@ pub(crate) fn build_url(
                 )
             }
         };
+    crate::validate::reject_dot_segments(&url)?;
 
     Ok(RequestUrl { url, query })
 }
