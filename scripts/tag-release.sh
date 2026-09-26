@@ -4,7 +4,7 @@
 # already exists on origin, that version was already released and there is nothing to do.
 #
 # Tags pushed with the workflow GITHUB_TOKEN do not trigger other workflows, so when
-# GWSR_DISPATCH_RELEASE=1 the script also starts release.yml on the tag via workflow_dispatch
+# RELEASE_DISPATCH=1 the script also starts release.yml on the tag via workflow_dispatch
 # (requires `gh` and GH_TOKEN with actions:write).
 set -euo pipefail
 
@@ -31,7 +31,7 @@ echo "Creating tag ${tag} at ${head_sha}"
 git tag --annotate "$tag" --message "gws-rust ${tag}"
 git push origin "refs/tags/${tag}"
 
-if [[ "${GWSR_DISPATCH_RELEASE:-0}" == 1 ]]; then
+if [[ "${RELEASE_DISPATCH:-0}" == 1 ]]; then
   echo "Dispatching release.yml for ${tag}"
   gh workflow run release.yml --ref "$tag"
 fi
