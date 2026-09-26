@@ -184,7 +184,7 @@ pub(crate) async fn stream_binary(
     }
 }
 
-fn check_length(expected: Option<u64>, actual: u64) -> Result<(), GwsError> {
+pub(crate) fn check_length(expected: Option<u64>, actual: u64) -> Result<(), GwsError> {
     match expected {
         Some(e) if e != actual => Err(GwsError::other(anyhow::anyhow!(
             "download truncated: Content-Length was {e} bytes but {actual} were received"

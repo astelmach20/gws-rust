@@ -440,3 +440,82 @@ async fn text_responses_of_generated_methods_are_screened_by_model_armor() {
     );
     assert!(!out.status.success());
 }
+
+/// A local HTTP server for `drive +download`: file metadata answers normally,
+/// but the `alt=media` body stalls after its first bytes (it announces 1000
+/// bytes, sends 5, then goes quiet without closing the connection).
+fn stalling_drive_server() -> String {
+    use std::io::{BufRead, BufReader, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { return };
+            std::thread::spawn(move || {
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut request_line = String::new();
+                if reader.read_line(&mut request_line).is_err() {
+                    return;
+                }
+                loop {
+                    let mut line = String::new();
+                    match reader.read_line(&mut line) {
+                        Ok(0) | Err(_) => return,
+                        Ok(_) if line == "\r\n" => break,
+                        Ok(_) => {}
+                    }
+                }
+                let response = if request_line.contains("alt=media") {
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\n\
+                     Content-Length: 1000\r\n\r\nhello"
+                        .to_string()
+                } else {
+                    let body =
+                        r#"{"id":"F1","name":"f.bin","mimeType":"application/octet-stream"}"#;
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+                         Content-Length: {}\r\n\r\n{body}",
+                        body.len()
+                    )
+                };
+                stream.write_all(response.as_bytes()).unwrap();
+                stream.flush().unwrap();
+                // Keep the connection open (and the media body unfinished).
+                std::thread::sleep(std::time::Duration::from_secs(60));
+            });
+        }
+    });
+    format!("http://{addr}")
+}
+
+/// `--output -` streams the body to stdout; a stalled body must hit the
+/// `--timeout`/`GWSR_TIMEOUT` idle limit and fail as a network error (exit
+/// 10), exactly like a download to a file, instead of hanging forever.
+#[test]
+fn drive_download_to_stdout_honors_the_idle_timeout() {
+    let dir = setup();
+    let base = stalling_drive_server();
+    for output in ["copy.bin", "-"] {
+        let started = std::time::Instant::now();
+        let out = gwsr(dir.path())
+            .env("GWSR_TOKEN", "test-token")
+            .env("GWSR_API_BASE_URL", &base)
+            .env("GWSR_TIMEOUT", "1")
+            .args(["drive", "+download", "--file-id", "F1", "--output", output])
+            .timeout(std::time::Duration::from_secs(20))
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(15),
+            "--output {output}: a stalled download body was never timed out \
+             (killed after {:?}); stderr: {stderr}",
+            started.elapsed()
+        );
+        assert_eq!(out.status.code(), Some(10), "--output {output}: {stderr}");
+        assert!(
+            stderr.contains("no data received"),
+            "--output {output}: {stderr}"
+        );
+    }
+}
