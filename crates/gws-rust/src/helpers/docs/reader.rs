@@ -235,7 +235,7 @@ fn cell_text(cell: &Value, document: &Value, markdown: bool) -> String {
     let mut out = String::with_capacity(joined.len());
     let mut backslashes = 0usize;
     for c in joined.chars() {
-        if c == '|' && backslashes % 2 == 0 {
+        if c == '|' && backslashes.is_multiple_of(2) {
             out.push('\\');
         }
         backslashes = if c == '\\' { backslashes + 1 } else { 0 };
