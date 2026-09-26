@@ -25,7 +25,8 @@
 //! optional). Output is NDJSON, one line per call, in input order:
 //! `{"id": ..., "status": 200, "body": ...}`. Calls are grouped into batches
 //! of at most 100 (Google's limit). The command fails (exit 1) when any call
-//! failed, after printing every result.
+//! failed, after printing every result. With `--sanitize`, every result body
+//! is screened by Model Armor before it is printed, as for a single call.
 
 use std::io::IsTerminal;
 
@@ -41,6 +42,7 @@ use super::url::{UrlTarget, build_url};
 use super::{ExecOptions, body_schema, input};
 use crate::discovery::{RestDescription, RestMethod, RestResource};
 use crate::error::GwsError;
+use crate::helpers::modelarmor::SanitizeConfig;
 use crate::transport::errors::error_from_response;
 use crate::transport::{Credentials, Transport, read_body};
 
@@ -90,6 +92,8 @@ pub struct BatchContext {
     pub dry_run: bool,
     /// `--api-version`: overrides the `:VERSION` suffix.
     pub api_version: Option<String>,
+    /// `--sanitize` / `GWSR_SANITIZE_TEMPLATE`: screen every result body.
+    pub sanitize: SanitizeConfig,
 }
 
 /// Entry point for `gwsr batch ...`.
@@ -133,7 +137,15 @@ pub async fn handle_batch_command(args: &BatchArgs, ctx: &BatchContext) -> Resul
     } else {
         batch_credentials(&calls).await?
     };
-    run_batch(&doc, &calls, credentials, &options, &Emitter::stdout()).await
+    run_batch(
+        &doc,
+        &calls,
+        credentials,
+        &options,
+        &ctx.sanitize,
+        &Emitter::stdout(),
+    )
+    .await
 }
 
 async fn batch_credentials(calls: &[BatchCall<'_>]) -> Result<Credentials, GwsError> {
@@ -157,6 +169,10 @@ pub(crate) fn find_method<'a>(doc: &'a RestDescription, name: &str) -> Option<&'
         .split('.')
         .collect();
     let (method_name, resources) = path.split_last()?;
+    if resources.is_empty() {
+        // A method declared outside any resource (e.g. `oauth2.tokeninfo`).
+        return doc.methods.get(*method_name);
+    }
     let mut current: Option<&RestResource> = None;
     for r in resources {
         let map = match current {
@@ -183,7 +199,7 @@ pub(crate) fn parse_calls<'a>(
         let at =
             |msg: String| GwsError::Validation(format!("batch input line {}: {msg}", lineno + 1));
         let entry: Value =
-            serde_json::from_str(line).map_err(|e| at(format!("invalid JSON: {e}")))?;
+            super::input::parse_strict_json(line).map_err(|e| at(format!("invalid JSON: {e}")))?;
         let obj = entry
             .as_object()
             .ok_or_else(|| at("expected a JSON object".to_string()))?;
@@ -439,6 +455,7 @@ pub(crate) async fn run_batch(
     calls: &[BatchCall<'_>],
     credentials: Credentials,
     options: &ExecOptions,
+    sanitize: &SanitizeConfig,
     emitter: &Emitter,
 ) -> Result<(), GwsError> {
     let destructive: Vec<&str> = calls
@@ -531,9 +548,11 @@ pub(crate) async fn run_batch(
             if !(200..300).contains(&part.status) {
                 failures += 1;
             }
-            emitter.line(
-                &json!({"id": call.id, "status": part.status, "body": part.body}).to_string(),
+            let body = crate::helpers::modelarmor::require_pass(
+                crate::helpers::modelarmor::sanitize_value(sanitize, part.body).await?,
             )?;
+            emitter
+                .line(&json!({"id": call.id, "status": part.status, "body": body}).to_string())?;
         }
     }
     if failures > 0 {
@@ -613,6 +632,18 @@ mod tests {
         assert!(find_method(&doc, "drive.files.get").is_some());
         assert!(find_method(&doc, "files.nope").is_none());
         assert!(find_method(&doc, "get").is_none());
+
+        let mut doc = doc;
+        doc.methods.insert(
+            "about".into(),
+            RestMethod {
+                http_method: "GET".into(),
+                ..Default::default()
+            },
+        );
+        assert!(find_method(&doc, "about").is_some());
+        assert!(find_method(&doc, "drive.about").is_some());
+        assert!(find_method(&doc, "about.get").is_none());
     }
 
     #[test]
@@ -650,6 +681,10 @@ mod tests {
             (
                 "{\"method\":\"files.get\",\"params\":{\"fileId\":\"1\",\"fieldz\":1}}",
                 "did you mean 'fields'",
+            ),
+            (
+                "{\"method\":\"files.get\",\"params\":{\"fileId\":\"1\",\"fileId\":\"2\"}}",
+                "duplicate key 'fileId'",
             ),
         ] {
             let err = parse_calls(&doc, line, &opts()).unwrap_err().to_string();
