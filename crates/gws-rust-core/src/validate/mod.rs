@@ -37,7 +37,8 @@ pub use endpoint::{
 };
 pub use modelarmor::ModelArmorTemplate;
 pub use paths::{
-    PathPolicy, RESTRICT_PATHS_ENV, resolve_dir_path, resolve_file_path, resolve_output_dir,
+    PathPolicy, RESTRICT_PATHS_ENV, check_derived_path, resolve_dir_path, resolve_file_path,
+    resolve_output_dir,
 };
 
 use crate::error::GwsError;

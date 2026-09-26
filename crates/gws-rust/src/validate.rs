@@ -48,3 +48,14 @@ pub fn validate_safe_output_dir(dir: &str) -> Result<PathBuf, GwsError> {
 pub fn validate_safe_dir_path(dir: &str) -> Result<PathBuf, GwsError> {
     resolve_dir_path(dir, policy()?, &current_dir()?)
 }
+
+/// Check a file path built by the program (e.g. a validated directory joined
+/// with a remote file name) under the process path policy before writing it.
+/// See [`check_derived_path`].
+pub fn check_output_path(path: &std::path::Path) -> Result<(), GwsError> {
+    let policy = policy()?;
+    if policy == PathPolicy::Unrestricted {
+        return Ok(());
+    }
+    check_derived_path(path, policy, &current_dir()?)
+}
