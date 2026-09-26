@@ -112,6 +112,63 @@ pub(super) fn strip_angle_brackets(id: &str) -> &str {
         .unwrap_or(id.trim())
 }
 
+/// Bare message IDs from a `Message-ID`, `References` or `In-Reply-To` value.
+///
+/// RFC 5322 §3.6.4 allows IDs with no white space between them
+/// (`<a@x><b@x>`) and comments around them (`<a@x> (relay)`), so IDs are the
+/// `<...>` tokens outside comments. A value with no angle brackets at all
+/// (non-conforming senders) is split on white space and commas instead.
+pub(super) fn parse_msg_ids(value: &str) -> Vec<String> {
+    let mut outside = String::with_capacity(value.len());
+    let mut depth = 0usize;
+    let mut escaped = false;
+    for c in value.chars() {
+        if depth > 0 {
+            match c {
+                _ if escaped => escaped = false,
+                '\\' => escaped = true,
+                '(' => depth += 1,
+                ')' => depth -= 1,
+                _ => {}
+            }
+            continue;
+        }
+        if c == '(' {
+            depth = 1;
+            outside.push(' ');
+        } else {
+            outside.push(c);
+        }
+    }
+    let bare = |id: &str| id.trim().to_string();
+    if !outside.contains('<') {
+        return outside
+            .split(|c: char| c.is_whitespace() || c == ',')
+            .filter(|t| !t.is_empty())
+            .map(bare)
+            .collect();
+    }
+    let mut ids = Vec::new();
+    let mut rest = outside.as_str();
+    while let Some(open) = rest.find('<') {
+        let after = &rest[open + 1..];
+        let Some(close) = after.find(['<', '>']) else {
+            break;
+        };
+        if after.as_bytes()[close] == b'>' {
+            let id = bare(&after[..close]);
+            if !id.is_empty() {
+                ids.push(id);
+            }
+            rest = &after[close + 1..];
+        } else {
+            // A `<` with no `>` before the next `<`: drop the fragment.
+            rest = &after[close..];
+        }
+    }
+    ids
+}
+
 /// Split an RFC 5322 mailbox list on commas, respecting quoted strings.
 /// Returns raw string slices — use `Mailbox::parse_list` for structured parsing.
 pub(super) fn split_raw_mailbox_list(header: &str) -> Vec<&str> {
@@ -380,6 +437,19 @@ mod tests {
                 "Display name with {description} must be quoted: {to_line}"
             );
         }
+    }
+
+    #[test]
+    fn test_parse_msg_ids() {
+        assert_eq!(parse_msg_ids("<a@x><b@x>"), ["a@x", "b@x"]);
+        assert_eq!(parse_msg_ids(" <a@x>\r\n\t<b@x> "), ["a@x", "b@x"]);
+        assert_eq!(parse_msg_ids("<a@x> (relay <c@x>)"), ["a@x"]);
+        assert_eq!(parse_msg_ids("<a@x>,<b@x>"), ["a@x", "b@x"]);
+        assert_eq!(parse_msg_ids("a@x b@x,c@x"), ["a@x", "b@x", "c@x"]);
+        assert_eq!(parse_msg_ids("<broken <a@x>"), ["a@x"]);
+        assert_eq!(parse_msg_ids("<a@x> <unterminated"), ["a@x"]);
+        assert!(parse_msg_ids("<> ( <x@y> )").is_empty());
+        assert!(parse_msg_ids("").is_empty());
     }
 
     #[test]
