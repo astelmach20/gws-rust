@@ -71,6 +71,11 @@ pub fn is_destructive(method: &RestMethod) -> bool {
     crate::confirm::is_destructive_method(method)
 }
 
+/// Whether `method` is behind the confirmation gate and so takes `--yes`.
+pub fn is_gated(method: &RestMethod) -> bool {
+    crate::confirm::method_impact(method).is_some()
+}
+
 /// Configuration for auto-pagination.
 #[derive(Debug, Clone)]
 pub struct PaginationConfig {
@@ -412,11 +417,14 @@ pub(crate) async fn execute_to(
         return Ok(None);
     }
 
-    if is_destructive(method) {
-        options.gate().check(
-            crate::confirm::Impact::Destructive,
-            &format!("run destructive method {method_id}"),
-        )?;
+    match crate::confirm::method_impact(method) {
+        Some(impact @ crate::confirm::Impact::Destructive) => options
+            .gate()
+            .check(impact, &format!("run destructive method {method_id}"))?,
+        Some(impact @ crate::confirm::Impact::Outbound) => options
+            .gate()
+            .check(impact, &format!("run outbound method {method_id}"))?,
+        None => {}
     }
 
     let quota_project = if options.quota_project {

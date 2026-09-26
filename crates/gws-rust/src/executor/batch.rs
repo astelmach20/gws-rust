@@ -395,6 +395,13 @@ pub(crate) async fn run_batch(
         .filter(|c| super::is_destructive(c.method))
         .map(|c| c.id.as_str())
         .collect();
+    let outbound: Vec<&str> = calls
+        .iter()
+        .filter(|c| {
+            crate::confirm::method_impact(c.method) == Some(crate::confirm::Impact::Outbound)
+        })
+        .map(|c| c.id.as_str())
+        .collect();
     let batch_url = format!(
         "{}batch/{}/{}",
         doc.api_root(options.endpoints.override_base())?,
@@ -419,6 +426,16 @@ pub(crate) async fn run_batch(
                 "run a batch with {} destructive call(s): {}",
                 destructive.len(),
                 destructive.join(", ")
+            ),
+        )?;
+    }
+    if !outbound.is_empty() {
+        options.gate().check(
+            crate::confirm::Impact::Outbound,
+            &format!(
+                "run a batch with {} outbound call(s): {}",
+                outbound.len(),
+                outbound.join(", ")
             ),
         )?;
     }
