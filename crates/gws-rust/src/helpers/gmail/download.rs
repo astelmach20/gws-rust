@@ -40,11 +40,16 @@ pub(super) fn safe_filename(raw: &str, fallback: &str) -> String {
             c => c,
         })
         .collect();
-    let cleaned = cleaned.trim().trim_start_matches('.').trim().to_string();
+    let cleaned = cleaned.trim().trim_start_matches('.');
+    // Windows drops trailing dots and spaces, and opens a device for names
+    // such as `CON.pdf`; see `http::is_windows_device_name`.
+    let cleaned = cleaned.trim_end_matches(['.', ' ']).trim();
     let name = if cleaned.is_empty() {
         fallback.to_string()
+    } else if crate::helpers::http::is_windows_device_name(cleaned) {
+        format!("_{cleaned}")
     } else {
-        cleaned
+        cleaned.to_string()
     };
     truncate_filename(&name)
 }
@@ -255,6 +260,16 @@ mod tests {
         assert_eq!(safe_filename("..", "fallback.bin"), "fallback.bin");
         assert_eq!(safe_filename(".bashrc", "f"), "bashrc");
         assert_eq!(safe_filename("   ", "f.bin"), "f.bin");
+    }
+
+    #[test]
+    fn safe_filename_avoids_windows_reserved_names() {
+        assert_eq!(safe_filename("CON.pdf", "f"), "_CON.pdf");
+        assert_eq!(safe_filename("../nul", "f"), "_nul");
+        assert_eq!(safe_filename("lpt1.TXT", "f"), "_lpt1.TXT");
+        assert_eq!(safe_filename("aux .doc", "f"), "_aux .doc");
+        assert_eq!(safe_filename("invoice.", "f"), "invoice");
+        assert_eq!(safe_filename("CONTRACT.pdf", "f"), "CONTRACT.pdf");
     }
 
     #[test]

@@ -373,6 +373,17 @@ fn local_path_for(name: &str, file_type: &str) -> Result<PathBuf, GwsError> {
                 "Refusing unsafe Apps Script file name '{name}'"
             )));
         }
+        // The name maps back to the path on +push, so it cannot be renamed
+        // on disk; refuse names Windows would treat as a device (`CON.gs`)
+        // or silently change (a trailing dot or space on a directory).
+        if crate::helpers::http::is_windows_device_name(part)
+            || (i != last && part.ends_with(['.', ' ']))
+        {
+            return Err(GwsError::Validation(format!(
+                "Refusing Apps Script file name '{name}': '{part}' is not a valid file or \
+                 directory name on Windows; rename it in the Apps Script editor"
+            )));
+        }
         // Append the extension rather than `set_extension`, which would
         // replace everything after a dot in the name (`a.b` -> `a.gs`).
         if i == last {
@@ -614,6 +625,20 @@ mod tests {
         assert!(local_path_for("../evil", "HTML").is_err());
         assert!(local_path_for("/abs", "HTML").is_err());
         assert!(local_path_for("x", "WEIRD").is_err());
+    }
+
+    #[test]
+    fn local_paths_refuse_windows_device_names() {
+        // `CON.gs` would open the console on Windows; the file cannot be
+        // renamed on disk because +push maps the path back to the name.
+        for name in [
+            "CON", "con", "lib/nul", "aux/util", "COM1", "lpt9.x", "dir./a", "dir /a",
+        ] {
+            let err = local_path_for(name, "SERVER_JS").unwrap_err().to_string();
+            assert!(err.contains("Windows"), "{name}: {err}");
+        }
+        assert!(local_path_for("CONTRACT", "SERVER_JS").is_ok());
+        assert!(local_path_for("lib/console", "SERVER_JS").is_ok());
     }
 
     #[tokio::test]
