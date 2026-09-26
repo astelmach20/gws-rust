@@ -87,8 +87,13 @@ pub fn try_config_dir() -> anyhow::Result<PathBuf> {
     Ok(home.join(".config").join("gwsr"))
 }
 
-/// Validate a profile name: 1-64 characters of `[A-Za-z0-9_.-]`, not starting
+/// Validate a profile name: 1-64 characters of `[a-z0-9_.-]`, not starting
 /// with `.` (so it can never be `.`/`..` or a hidden file).
+///
+/// Uppercase is refused because the name is a directory name: on
+/// case-insensitive file systems (macOS and Windows by default) `Work` and
+/// `work` would be one profile, and logging in to one would replace the
+/// credentials of the other.
 ///
 /// # Errors
 ///
@@ -96,12 +101,12 @@ pub fn try_config_dir() -> anyhow::Result<PathBuf> {
 pub fn validate_profile_name(name: &str) -> anyhow::Result<()> {
     let valid_chars = name
         .chars()
-        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'));
+        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '-' | '_' | '.'));
     if name.is_empty() || name.len() > MAX_PROFILE_NAME_LEN || !valid_chars || name.starts_with('.')
     {
         anyhow::bail!(
-            "invalid profile name '{name}': use 1-{MAX_PROFILE_NAME_LEN} letters, digits, '-', \
-             '_' or '.', not starting with '.'"
+            "invalid profile name '{name}': use 1-{MAX_PROFILE_NAME_LEN} lowercase letters, \
+             digits, '-', '_' or '.', not starting with '.'"
         );
     }
     Ok(())
@@ -326,12 +331,26 @@ mod tests {
 
     #[test]
     fn profile_name_validation() {
-        for ok in ["default", "work", "a.b-c_d", "X9"] {
+        for ok in ["default", "work", "a.b-c_d", "x9"] {
             validate_profile_name(ok).unwrap();
         }
         for bad in ["", ".", "..", ".hidden", "a/b", "a b", "ä", &"x".repeat(65)] {
             assert!(validate_profile_name(bad).is_err(), "{bad}");
         }
+    }
+
+    /// On case-insensitive file systems (macOS and Windows by default)
+    /// `profiles/Work` and `profiles/work` are one directory, so a login to
+    /// `work` would silently replace the credentials of `Work`. Profile names
+    /// are therefore lowercase only.
+    #[test]
+    fn profile_names_differing_only_by_case_are_impossible() {
+        for bad in ["Work", "X9", "DEFAULT", "myProfile"] {
+            assert!(validate_profile_name(bad).is_err(), "{bad} was accepted");
+        }
+        let dir = tempfile::tempdir().unwrap();
+        assert!(set_active_profile(dir.path(), "Work").is_err());
+        assert!(resolve_active_profile(dir.path(), Some("Work".into()), None).is_err());
     }
 
     #[test]
