@@ -19,13 +19,17 @@
 //! turned into one `insertText` followed by style requests. Bullets are
 //! created last and in reverse document order, because `createParagraphBullets`
 //! removes the leading tabs used to express nesting and would otherwise shift
-//! the indices of later requests.
+//! the indices of later requests. Each list item is a single Docs paragraph:
+//! its hard breaks, later paragraphs and code blocks continue it after a line
+//! break (U+000B) so they neither become bullets nor split the list.
 
 use crate::error::GwsError;
 use pulldown_cmark::{Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 use serde_json::{Value, json};
 
 const MONOSPACE: &str = "Courier New";
+/// A line break inside a paragraph (Shift+Enter in the Docs editor).
+const LINE_BREAK: &str = "\u{000b}";
 
 #[derive(Debug, Clone, PartialEq)]
 enum ParaKind {
@@ -82,6 +86,8 @@ struct Builder {
     next_list_id: usize,
     in_quote: usize,
     in_code_block: bool,
+    /// The open code block belongs to a list item and continues its paragraph.
+    code_in_item: bool,
 }
 
 impl Builder {
@@ -117,6 +123,43 @@ impl Builder {
             Some(&(ordered, list_id)) => ParaKind::Bullet { ordered, list_id },
             None => ParaKind::Normal,
         }
+    }
+
+    /// Continue the current list item on a new line of the same Docs
+    /// paragraph (a vertical tab, which Docs renders as a line break).
+    ///
+    /// A list item is one Docs paragraph: a separate paragraph would either
+    /// become a bullet of its own or, as a plain paragraph, split the list in
+    /// two and restart its numbering. If the item's paragraph was already
+    /// closed (by a nested list or a paragraph end), the last bullet
+    /// paragraph is reopened.
+    fn continue_item(&mut self) {
+        match &self.para_start {
+            Some((start, _)) => {
+                if self.len > *start {
+                    self.push(LINE_BREAK);
+                }
+            }
+            None => {
+                let reopen = self.out.paras.last().is_some_and(|p| {
+                    p.end == self.len && matches!(p.kind, ParaKind::Bullet { .. })
+                });
+                if let (true, Some(p)) = (reopen, self.out.paras.pop()) {
+                    // Drop the paragraph's '\n' (one UTF-16 unit).
+                    self.out.text.pop();
+                    self.len -= 1;
+                    self.para_start = Some((p.start, p.kind));
+                    self.push(LINE_BREAK);
+                } else {
+                    let kind = self.list_item_kind();
+                    self.begin_para(kind);
+                }
+            }
+        }
+    }
+
+    fn in_list_item(&self) -> bool {
+        !self.lists.is_empty()
     }
 
     fn text(&mut self, t: &str) {
@@ -163,13 +206,19 @@ pub(super) fn render(md: &str) -> Result<Rendered, GwsError> {
         next_list_id: 0,
         in_quote: 0,
         in_code_block: false,
+        code_in_item: false,
     };
     for event in Parser::new_ext(md, options) {
         match event {
             Event::Start(tag) => match tag {
                 Tag::Paragraph => {
-                    let kind = b.list_item_kind();
-                    b.begin_para(kind);
+                    if b.in_list_item() && b.para_start.is_none() {
+                        // A later paragraph of the same list item.
+                        b.continue_item();
+                    } else {
+                        let kind = b.list_item_kind();
+                        b.begin_para(kind);
+                    }
                 }
                 Tag::Heading { level, .. } => {
                     b.end_para();
@@ -180,7 +229,10 @@ pub(super) fn render(md: &str) -> Result<Rendered, GwsError> {
                     b.in_quote += 1;
                 }
                 Tag::CodeBlock(_) => {
-                    b.end_para();
+                    b.code_in_item = b.in_list_item();
+                    if !b.code_in_item {
+                        b.end_para();
+                    }
                     b.in_code_block = true;
                 }
                 Tag::List(start) => {
@@ -233,6 +285,7 @@ pub(super) fn render(md: &str) -> Result<Rendered, GwsError> {
                 }
                 TagEnd::CodeBlock => {
                     b.in_code_block = false;
+                    b.code_in_item = false;
                 }
                 TagEnd::List(_) => {
                     b.end_para();
@@ -244,7 +297,22 @@ pub(super) fn render(md: &str) -> Result<Rendered, GwsError> {
                 _ => {}
             },
             Event::Text(t) => {
-                if b.in_code_block {
+                if b.code_in_item {
+                    // Code lines continue the list item's paragraph.
+                    for line in t.split_inclusive('\n') {
+                        b.continue_item();
+                        let content = line.strip_suffix('\n').unwrap_or(line);
+                        let start = b.len;
+                        b.push(content);
+                        if b.len > start {
+                            b.out.spans.push(Span {
+                                start,
+                                end: b.len,
+                                style: SpanStyle::Code,
+                            });
+                        }
+                    }
+                } else if b.in_code_block {
                     // One Docs paragraph per code line.
                     for line in t.split_inclusive('\n') {
                         b.begin_para(ParaKind::Code);
@@ -283,14 +351,13 @@ pub(super) fn render(md: &str) -> Result<Rendered, GwsError> {
                     .as_ref()
                     .map(|(_, k)| k.clone())
                     .unwrap_or(ParaKind::Normal);
-                b.end_para();
-                // Continuation lines of a list item are not new bullets.
-                let kind = if matches!(kind, ParaKind::Bullet { .. }) {
-                    ParaKind::Normal
+                if matches!(kind, ParaKind::Bullet { .. }) {
+                    // Continuation lines of a list item stay in its paragraph.
+                    b.continue_item();
                 } else {
-                    kind
-                };
-                b.begin_para(kind);
+                    b.end_para();
+                    b.begin_para(kind);
+                }
             }
             Event::Rule => {
                 b.end_para();
@@ -568,6 +635,68 @@ mod tests {
         assert!(render("![img](x.png)").is_err());
         assert!(render("<div>x</div>").is_err());
         assert!(render("").is_err());
+    }
+
+    fn bullet_ranges(r: &Rendered) -> Vec<Value> {
+        find(&r.to_requests(1, false), "createParagraphBullets")
+            .into_iter()
+            .map(|b| b["range"].clone())
+            .collect()
+    }
+
+    #[test]
+    fn list_item_continuation_paragraph_is_not_a_new_item() {
+        // A second paragraph inside item 1 must not become item 2.
+        let r = render("1. a\n\n   more\n2. b\n").unwrap();
+        assert_eq!(
+            bullet_ranges(&r),
+            vec![json!({"startIndex": 1, "endIndex": 10})]
+        );
+        assert_eq!(r.paras.len(), 2);
+        assert_eq!(r.text, "a\u{b}more\nb\n");
+    }
+
+    #[test]
+    fn list_item_hard_break_keeps_one_numbered_list() {
+        // A hard break inside an item must not split the list (which
+        // restarts the numbering of the following items at 1).
+        let r = render("1. a  \n   more\n2. b\n").unwrap();
+        assert_eq!(
+            bullet_ranges(&r),
+            vec![json!({"startIndex": 1, "endIndex": 10})]
+        );
+        assert_eq!(r.text, "a\u{b}more\nb\n");
+    }
+
+    #[test]
+    fn list_item_code_block_keeps_one_numbered_list() {
+        let r = render("1. a\n\n   ```\n   x\n   y\n   ```\n2. b\n").unwrap();
+        assert_eq!(
+            bullet_ranges(&r),
+            vec![json!({"startIndex": 1, "endIndex": 9})]
+        );
+        assert_eq!(r.text, "a\u{b}x\u{b}y\nb\n");
+        let code: Vec<_> = r
+            .spans
+            .iter()
+            .filter(|s| s.style == SpanStyle::Code)
+            .map(|s| (s.start, s.end))
+            .collect();
+        assert_eq!(code, vec![(2, 3), (4, 5)]);
+    }
+
+    #[test]
+    fn nested_item_continuation_stays_in_the_nested_item() {
+        let r = render("- a\n  - b\n\n    cont\n- c\n").unwrap();
+        assert_eq!(r.paras.len(), 3);
+        assert_eq!(r.text, "a\n\tb\u{b}cont\nc\n");
+    }
+
+    #[test]
+    fn hard_break_outside_lists_still_splits_paragraphs() {
+        let r = render("one  \ntwo").unwrap();
+        assert_eq!(r.text, "one\ntwo\n");
+        assert_eq!(r.paras.len(), 2);
     }
 
     #[test]
