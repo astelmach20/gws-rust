@@ -41,7 +41,7 @@ pub(super) async fn handle_read(
     if crate::args::dry_run(matches)? {
         let url = format!(
             "{}/users/me/messages/{}",
-            super::api::GMAIL_API_BASE,
+            super::api::api_base()?,
             crate::validate::encode_path_segment(&message_id)
         );
         return crate::helpers::http::print_dry_run(

@@ -388,3 +388,88 @@ async fn text_responses_of_generated_methods_are_screened_by_model_armor() {
     );
     assert!(!out.status.success());
 }
+
+// ── GWSR_API_BASE_URL in Gmail helpers ──────────────────────────────────
+
+/// Gmail helpers must route to the GWSR_API_BASE_URL override like generated
+/// methods do, for real requests and in their --dry-run plans.
+#[tokio::test(flavor = "multi_thread")]
+async fn gmail_helpers_honor_the_api_base_override() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/gmail/v1/users/me/messages"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"resultSizeEstimate": 0})))
+        .mount(&server)
+        .await;
+    let dir = setup();
+    seed(dir.path(), "gmail", "v1", "");
+
+    let run = |args: &[&str]| {
+        gwsr(dir.path())
+            .env("GWSR_TOKEN", "test-token")
+            .env("GWSR_API_BASE_URL", server.uri())
+            // Anything that ignores the override fails fast instead of
+            // reaching Google.
+            .env("HTTPS_PROXY", "http://127.0.0.1:9")
+            .args(args)
+            .output()
+            .unwrap()
+    };
+
+    let out = run(&["gmail", "+search", "--query", "from:a@example.com"]);
+    assert!(
+        out.status.success(),
+        "+search did not reach the override: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let received = server.received_requests().await.unwrap();
+    assert_eq!(received.len(), 1, "{received:?}");
+
+    let base = format!("{}/", server.uri());
+    let cases: [(&[&str], &str); 4] = [
+        (
+            &["gmail", "+search", "--query", "x", "--dry-run"],
+            "gmail/v1/users/me/messages",
+        ),
+        (
+            &["gmail", "+read", "--message-id", "M1", "--dry-run"],
+            "gmail/v1/users/me/messages/M1",
+        ),
+        (
+            &["gmail", "+filter", "list", "--dry-run"],
+            "gmail/v1/users/me/settings/filters",
+        ),
+        (
+            &[
+                "gmail",
+                "+send",
+                "--to",
+                "a@example.com",
+                "--subject",
+                "s",
+                "--body",
+                "b",
+                "--dry-run",
+            ],
+            "upload/gmail/v1/users/me/messages/send",
+        ),
+    ];
+    for (args, want) in cases {
+        let out = run(args);
+        assert!(
+            out.status.success(),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let plan: Value = serde_json::from_slice(&out.stdout).unwrap();
+        let url = plan["url"]
+            .as_str()
+            .or_else(|| plan["requests"][0]["url"].as_str())
+            .unwrap_or_default()
+            .to_string();
+        assert_eq!(url, format!("{base}{want}"), "{args:?}: {plan}");
+    }
+}
