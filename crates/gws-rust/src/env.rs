@@ -503,7 +503,7 @@ fn parse_bool(value: &str) -> Result<bool, String> {
     }
 }
 
-fn check_printable(value: &str) -> Result<(), String> {
+pub(crate) fn check_printable(value: &str) -> Result<(), String> {
     if value.chars().all(|c| c.is_ascii_graphic()) {
         Ok(())
     } else {

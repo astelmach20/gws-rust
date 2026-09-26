@@ -112,6 +112,8 @@ pub fn save_client_config(
     client_secret: &SecretString,
     project_id: Option<&str>,
 ) -> anyhow::Result<()> {
+    check_field(path, "client_id", client_id)?;
+    check_field(path, "client_secret", client_secret.expose_secret())?;
     let file = ClientSecretFile {
         installed: InstalledConfig {
             client_id: client_id.to_string(),
@@ -131,6 +133,27 @@ pub fn save_client_config(
     );
     crate::fs_util::atomic_write(path, &json)
         .with_context(|| format!("cannot write '{}'", path.display()))
+}
+
+/// Reject an empty client ID/secret or one with whitespace, control or
+/// non-ASCII characters (the same rule as `GWSR_CLIENT_ID`). A stray pasted
+/// space otherwise reaches Google and fails as `invalid_client` ("The OAuth
+/// client was not found"), which does not point at the file. The value itself
+/// is never echoed.
+fn check_field(path: &Path, field: &str, value: &str) -> anyhow::Result<()> {
+    let problem = if value.is_empty() {
+        "is empty".to_string()
+    } else {
+        match crate::env::check_printable(value) {
+            Ok(()) => return Ok(()),
+            Err(p) => p,
+        }
+    };
+    anyhow::bail!(
+        "\"{field}\" in '{}' {problem}; edit the file (for example remove a stray space pasted \
+         with the value), or delete it and run `gwsr auth setup` again",
+        path.display()
+    )
 }
 
 /// Load a saved client configuration; `Ok(None)` if the file does not exist.
@@ -154,6 +177,8 @@ pub fn load_from(path: &Path) -> anyhow::Result<Option<ClientConfig>> {
             path.display()
         )
     })?;
+    check_field(path, "client_id", &file.installed.client_id)?;
+    check_field(path, "client_secret", &file.installed.client_secret)?;
     Ok(Some(ClientConfig {
         client_id: file.installed.client_id.clone(),
         client_secret: SecretString::from(file.installed.client_secret.clone()),
@@ -315,6 +340,45 @@ mod tests {
             load_from(&dir.path().join("missing.json"))
                 .unwrap()
                 .is_none()
+        );
+    }
+
+    /// A pasted client ID with a trailing space produced `invalid_client`
+    /// ("The OAuth client was not found") at login; it must be rejected when
+    /// the file is loaded, naming the field.
+    #[test]
+    fn whitespace_in_client_credentials_is_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("client_secret.json");
+        for (json, field) in [
+            (
+                r#"{"installed":{"client_id":"123-abc.apps.googleusercontent.com ","client_secret":"cs"}}"#,
+                "client_id",
+            ),
+            (
+                r#"{"installed":{"client_id":"\t123-abc.apps.googleusercontent.com","client_secret":"cs"}}"#,
+                "client_id",
+            ),
+            (
+                r#"{"installed":{"client_id":"123-abc.apps.googleusercontent.com","client_secret":"cs\n"}}"#,
+                "client_secret",
+            ),
+            (
+                r#"{"installed":{"client_id":"","client_secret":"cs"}}"#,
+                "client_id",
+            ),
+        ] {
+            crate::fs_util::atomic_write(&path, json.as_bytes()).unwrap();
+            let err = match load_from(&path) {
+                Ok(c) => panic!("accepted {:?} from {json}", c.map(|c| c.client_id)),
+                Err(e) => format!("{e:#}"),
+            };
+            assert!(err.contains(field), "{err}");
+            assert!(!err.contains("\"cs"), "secret must not be echoed: {err}");
+        }
+        assert!(
+            save_client_config(&path, "cid ", &secret("cs"), None).is_err(),
+            "a dirty client ID must never be written"
         );
     }
 
