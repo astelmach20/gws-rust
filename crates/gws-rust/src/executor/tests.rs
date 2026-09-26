@@ -503,6 +503,36 @@ async fn page_items_emits_one_line_per_item() {
     assert_eq!(ids, ["1", "2", "3", "4"]);
 }
 
+/// A misspelled `--page-items=FIELD` must not silently print nothing: the
+/// response schema says which fields exist.
+#[tokio::test]
+async fn page_items_rejects_a_field_the_response_schema_lacks() {
+    let server = MockServer::start().await;
+    mount_pages(&server).await;
+    let d = doc(&server.uri());
+    let mut call = Call::new(&d, "list", &server);
+    call.pagination.page_delay_ms = 0;
+    call.options.page_items = Some(ItemsMode::Field("file".into()));
+    let em = Emitter::capturing();
+    let result = call.run(&em).await;
+    let printed = lines(&em);
+    let err = result.expect_err(&format!(
+        "--page-items=file must be rejected; printed {printed:?}"
+    ));
+    assert!(matches!(err, GwsError::Validation(_)), "{err:?}");
+    let msg = err.to_string();
+    assert!(msg.contains("'file'") && msg.contains("files"), "{msg}");
+    assert!(printed.is_empty(), "{printed:?}");
+
+    // The right name still works.
+    let mut call = Call::new(&d, "list", &server);
+    call.pagination.page_delay_ms = 0;
+    call.options.page_items = Some(ItemsMode::Field("files".into()));
+    let em = Emitter::capturing();
+    call.run(&em).await.unwrap();
+    assert_eq!(lines(&em).len(), 4);
+}
+
 #[tokio::test]
 async fn body_page_token_is_injected() {
     let server = MockServer::start().await;
