@@ -50,8 +50,12 @@ pub(crate) struct AtomicFile {
 
 impl AtomicFile {
     /// Start writing `target`, creating its parent directories. Fails with a
-    /// validation error when the target exists and `overwrite` is false.
+    /// validation error when the target is a directory, or exists and
+    /// `overwrite` is false.
     pub(crate) fn create(target: &Path, overwrite: bool) -> Result<Self, GwsError> {
+        // A directory can never be replaced by the rename in `commit`; refuse
+        // it before any data is written (and whatever `overwrite` says).
+        crate::validate::reject_directory(target, "output path")?;
         if !overwrite && target.exists() {
             return Err(exists_error(target));
         }
@@ -155,6 +159,20 @@ mod tests {
         assert_eq!(std::fs::read(&p).unwrap(), b"a");
         write_atomic(&p, b"c", true).await.unwrap();
         assert_eq!(std::fs::read(&p).unwrap(), b"c");
+    }
+
+    #[tokio::test]
+    async fn a_directory_target_is_refused_before_writing() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("out");
+        std::fs::create_dir(&target).unwrap();
+        for overwrite in [false, true] {
+            let err = write_atomic(&target, b"x", overwrite).await.unwrap_err();
+            assert!(matches!(err, GwsError::Validation(_)), "{err:?}");
+            assert!(err.to_string().contains("is a directory"), "{err}");
+        }
+        assert!(target.is_dir());
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
     }
 
     #[tokio::test]

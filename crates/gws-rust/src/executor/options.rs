@@ -135,7 +135,7 @@ pub async fn run_from_matches(
     let output: Option<OutputTarget> = match args::optional_if_defined(m, "output")? {
         Some("-") => Some(OutputTarget::Stdout),
         Some(p) => Some(OutputTarget::File(
-            crate::validate::validate_safe_file_path(p, "--output")?,
+            crate::validate::validate_output_file_path(p, "--output")?,
         )),
         None => None,
     };

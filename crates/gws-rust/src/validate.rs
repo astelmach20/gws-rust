@@ -37,6 +37,27 @@ pub fn validate_safe_file_path(path_str: &str, flag_name: &str) -> Result<PathBu
     resolve_file_path(path_str, flag_name, policy()?, &current_dir()?)
 }
 
+/// Validate a single output file path (`-o/--output`) under the process path
+/// policy. Like [`validate_safe_file_path`], but an existing directory is
+/// refused up front: it can never be replaced by a file, so accepting it
+/// would only fail after the whole request and download.
+pub fn validate_output_file_path(path_str: &str, flag_name: &str) -> Result<PathBuf, GwsError> {
+    let path = validate_safe_file_path(path_str, flag_name)?;
+    reject_directory(&path, flag_name)?;
+    Ok(path)
+}
+
+/// Refuse an output file path that names an existing directory.
+pub fn reject_directory(path: &std::path::Path, flag_name: &str) -> Result<(), GwsError> {
+    if path.is_dir() {
+        return Err(GwsError::Validation(format!(
+            "{flag_name} '{}' is a directory; give a file path inside it instead",
+            path.display()
+        )));
+    }
+    Ok(())
+}
+
 /// Validate an output directory (e.g. `--output-dir`) under the process path
 /// policy. See [`resolve_output_dir`].
 pub fn validate_safe_output_dir(dir: &str) -> Result<PathBuf, GwsError> {
