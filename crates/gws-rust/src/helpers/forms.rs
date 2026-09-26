@@ -71,7 +71,8 @@ EXAMPLES:
 TIPS:
   Read-only. One row per response; one column per question (grid rows get
   their own column). Multiple answers in a cell are joined with '; ';
-  file uploads are listed by file name.",
+  file uploads are listed by file name. In CSV, cells starting with =, +, -
+  or @ get a leading ' so spreadsheets do not run them as formulas.",
                 ),
         )
     }
@@ -262,9 +263,17 @@ impl Table {
     fn to_csv(&self) -> Result<String, GwsError> {
         let mut w = csv::Writer::from_writer(Vec::new());
         let enc = |e: csv::Error| http::other_err(anyhow::anyhow!("Failed to encode CSV: {e}"));
-        w.write_record(self.headers()).map_err(enc)?;
+        // Answers come from untrusted respondents: guard against formula
+        // injection when the CSV is opened in a spreadsheet.
+        let guard = |cells: &[String]| -> Vec<String> {
+            cells
+                .iter()
+                .map(|c| crate::formatter::csv_text_cell(c))
+                .collect()
+        };
+        w.write_record(guard(&self.headers())).map_err(enc)?;
         for r in &self.rows {
-            w.write_record(r).map_err(enc)?;
+            w.write_record(guard(r)).map_err(enc)?;
         }
         let bytes = w
             .into_inner()
@@ -337,6 +346,37 @@ mod tests {
         let j = t.to_json();
         assert_eq!(j["responses"][0]["Colors"], "red; blue");
         assert_eq!(j["count"], 1);
+    }
+
+    #[test]
+    fn csv_neutralises_formula_injection_from_respondents() {
+        // Respondents are untrusted: an answer or a question title starting
+        // with =, +, -, @ must not become a live formula when the exported
+        // CSV is opened in a spreadsheet (same guard as `--format csv`).
+        let form = json!({"items": [
+            {"title": "=cmd", "questionItem": {"question": {"questionId": "q1"}}},
+            {"title": "Plain", "questionItem": {"question": {"questionId": "q2"}}}
+        ]});
+        let responses = vec![json!({
+            "responseId": "r1",
+            "answers": {
+                "q1": {"textAnswers": {"answers": [{"value": "=HYPERLINK(\"http://x.test\",\"y\")"}]}},
+                "q2": {"textAnswers": {"answers": [{"value": "@SUM(A1)"}]}}
+            }
+        })];
+        let csv = build_table(&form, &responses).to_csv().unwrap();
+        let lines: Vec<&str> = csv.lines().collect();
+        assert_eq!(
+            lines[1],
+            "r1,,,,\"'=HYPERLINK(\"\"http://x.test\"\",\"\"y\"\")\",'@SUM(A1)"
+        );
+        assert_eq!(
+            lines[0],
+            "responseId,createTime,lastSubmittedTime,respondentEmail,'=cmd,Plain"
+        );
+        // The JSON output keeps answers verbatim.
+        let j = build_table(&form, &responses).to_json();
+        assert_eq!(j["responses"][0]["Plain"], "@SUM(A1)");
     }
 
     #[tokio::test]

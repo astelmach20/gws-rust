@@ -43,7 +43,8 @@ gwsr forms +responses --form-id FORM_ID --output responses.csv
 
 - Read-only. One row per response; one column per question (grid rows get
 - their own column). Multiple answers in a cell are joined with '; ';
-- file uploads are listed by file name.
+- file uploads are listed by file name. In CSV, cells starting with =, +, -
+- or @ get a leading ' so spreadsheets do not run them as formulas.
 
 ## See Also
 
