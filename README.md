@@ -344,7 +344,7 @@ Ranges contain `!`, which interactive bash history-expands inside double quotes.
 
 ### Quota project
 
-Requests carry an `x-goog-user-project` header naming the project that is billed and whose quota is used. It comes from `GWSR_PROJECT_ID`, then the OAuth client configuration's project, then `quota_project_id` in Application Default Credentials. A source that exists but can't be used is an error, not skipped: for example an unreadable client config or ADC file (exit `8` or `9`). Skipping it would silently bill a different project. Set `GWSR_PROJECT_ID`, or pass `--no-quota-project` (`GWSR_NO_QUOTA_PROJECT=1`) to send no header at all.
+Requests carry an `x-goog-user-project` header naming the project that is billed and whose quota is used. It comes from `GWSR_PROJECT_ID`, then the OAuth client configuration's project, then `quota_project_id` in Application Default Credentials (only when ADC is the credential in use; it is never sent with a `gwsr` profile, `GWSR_CREDENTIALS_FILE` or a token). A source that exists but can't be used is an error, not skipped: for example an unreadable client config or ADC file (exit `8` or `9`). Skipping it would silently bill a different project. Set `GWSR_PROJECT_ID`, or pass `--no-quota-project` (`GWSR_NO_QUOTA_PROJECT=1`) to send no header at all.
 
 ### Pagination
 
