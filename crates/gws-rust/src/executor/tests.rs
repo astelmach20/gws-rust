@@ -312,6 +312,7 @@ struct Call<'a> {
     output: Option<OutputTarget>,
     pagination: PaginationConfig,
     options: ExecOptions,
+    format: OutputFormat,
 }
 
 impl<'a> Call<'a> {
@@ -326,6 +327,7 @@ impl<'a> Call<'a> {
             output: None,
             pagination: PaginationConfig::default(),
             options: options(server),
+            format: OutputFormat::Json,
         }
     }
 
@@ -341,7 +343,7 @@ impl<'a> Call<'a> {
                 output: self.output,
                 pagination: self.pagination,
                 sanitize: SanitizeConfig::default(),
-                format: OutputFormat::Json,
+                format: self.format,
                 capture_output: false,
                 options: self.options,
             },
@@ -428,6 +430,56 @@ async fn page_all_is_unlimited_by_default() {
     let out = lines(&em);
     assert_eq!(out.len(), 3);
     assert_eq!(out[2]["files"][0]["id"], "4");
+}
+
+/// Mounts two list pages whose items have different key sets and order.
+async fn mount_ragged_pages(server: &MockServer) {
+    Mock::given(method("GET"))
+        .and(path("/drive/v3/files"))
+        .and(query_param_is_missing("pageToken"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({"files": [{"id": "1", "name": "a"}], "nextPageToken": "p2"})),
+        )
+        .mount(server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/drive/v3/files"))
+        .and(query_param("pageToken", "p2"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"files": [
+            {"extra": "x", "name": "b", "id": "2"},
+            {"id": "3"}
+        ]})))
+        .mount(server)
+        .await;
+}
+
+#[tokio::test]
+async fn page_all_csv_rows_align_with_the_first_page_header() {
+    let server = MockServer::start().await;
+    mount_ragged_pages(&server).await;
+    let d = doc(&server.uri());
+    let mut call = Call::new(&d, "list", &server);
+    call.pagination.page_all = true;
+    call.pagination.page_delay_ms = 0;
+    call.format = OutputFormat::Csv;
+    let em = Emitter::capturing();
+    call.run(&em).await.unwrap();
+    assert_eq!(em.captured_text(), "id,name\n1,a\n2,b\n3,\n");
+}
+
+#[tokio::test]
+async fn page_items_table_rows_align_with_the_first_item_header() {
+    let server = MockServer::start().await;
+    mount_ragged_pages(&server).await;
+    let d = doc(&server.uri());
+    let mut call = Call::new(&d, "list", &server);
+    call.pagination.page_delay_ms = 0;
+    call.options.page_items = Some(ItemsMode::Auto);
+    call.format = OutputFormat::Table;
+    let em = Emitter::capturing();
+    call.run(&em).await.unwrap();
+    assert_eq!(em.captured_text(), "id  name\n──  ────\n1   a\n2   b\n3\n");
 }
 
 #[tokio::test]
