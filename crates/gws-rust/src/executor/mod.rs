@@ -450,6 +450,9 @@ pub(crate) async fn execute_to(
     let mut query = request_url.query.clone();
     let mut pages: u32 = 0;
     let mut item_field: Option<String> = None;
+    // Page tokens already followed: an API that repeats one would otherwise
+    // loop forever under the default unlimited --page-limit.
+    let mut seen_tokens: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     loop {
         let sent = match (&upload_plan, pages) {
@@ -516,7 +519,7 @@ pub(crate) async fn execute_to(
             )
             .await?
             {
-                out.single(summary)?;
+                out.single(screen_inline(&sanitize, output.as_ref(), summary).await?)?;
             }
             break;
         }
@@ -546,7 +549,10 @@ pub(crate) async fn execute_to(
                         emitter.bytes(&raw).await?;
                         emitter.flush().await?;
                     }
-                    None => out.single(download::wrap_text(status.as_u16(), "(none)", &raw)?)?,
+                    None => {
+                        let text = download::wrap_text(status.as_u16(), "(none)", &raw)?;
+                        out.single(screen_inline(&sanitize, None, text).await?)?;
+                    }
                 }
                 break;
             }
@@ -598,7 +604,7 @@ pub(crate) async fn execute_to(
                 )
                 .await?
                 {
-                    out.single(summary)?;
+                    out.single(screen_inline(&sanitize, output.as_ref(), summary).await?)?;
                 }
                 break;
             }
@@ -676,6 +682,12 @@ pub(crate) async fn execute_to(
             }
             break;
         }
+        if !seen_tokens.insert(token.clone()) {
+            return Err(GwsError::other(anyhow::anyhow!(
+                "{method_id} returned a repeated nextPageToken after {pages} page(s); \
+                 aborting --page-all instead of looping forever"
+            )));
+        }
         if let Some(loc) = token_location {
             pagination::place_token(loc, &token, &mut query, &mut body)?;
         }
@@ -685,6 +697,22 @@ pub(crate) async fn execute_to(
     }
 
     Ok(out.finish())
+}
+
+/// Screen a text response inlined into the JSON output with Model Armor, like
+/// a JSON response. Summaries of bodies saved to a file (`-o PATH`) or
+/// streamed raw on request (`-o -`) carry no API content and pass unchanged.
+async fn screen_inline(
+    sanitize: &SanitizeConfig,
+    output: Option<&OutputTarget>,
+    value: Value,
+) -> Result<Value, GwsError> {
+    if output.is_some() || sanitize.template.is_none() {
+        return Ok(value);
+    }
+    crate::helpers::modelarmor::require_pass(
+        crate::helpers::modelarmor::sanitize_value(sanitize, value).await?,
+    )
 }
 
 async fn send_plain(
