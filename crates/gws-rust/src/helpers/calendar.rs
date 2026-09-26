@@ -722,10 +722,13 @@ async fn agenda(api: &Api, args: &AgendaArgs, tz: &TzInfo) -> Result<Value, GwsE
                     .query("singleEvents", "true")
                     .query("orderBy", "startTime")
                     .query("maxResults", "250");
+                // Keep the error's class (and so its exit code): only the
+                // calendar name is added.
                 let page = api.paginate(req, "items", None).await.map_err(|e| {
-                    http::other_err(anyhow::anyhow!(
-                        "Failed to read calendar '{name}' ({id}): {e}"
-                    ))
+                    crate::transport::errors::with_context(
+                        e,
+                        &format!("Failed to read calendar '{name}' ({id})"),
+                    )
                 })?;
                 Ok::<_, GwsError>(
                     page.items
@@ -1313,6 +1316,43 @@ mod tests {
         };
         let err = agenda(&api, &args, &tz("UTC", false)).await.unwrap_err();
         assert!(err.to_string().contains("Work"), "{err}");
+    }
+
+    /// A per-calendar failure keeps its error class, so the documented exit
+    /// code (1 API, 2 auth, 6 retryable, 10 network) survives the added
+    /// calendar name instead of collapsing into exit 5 (internal error).
+    #[tokio::test]
+    async fn agenda_calendar_errors_keep_their_exit_code() {
+        for (status, reason, expected) in [
+            (404, "notFound", GwsError::EXIT_CODE_API),
+            (429, "rateLimitExceeded", GwsError::EXIT_CODE_API_RETRYABLE),
+        ] {
+            let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .and(path("/users/me/calendarList"))
+                .respond_with(
+                    ResponseTemplate::new(200)
+                        .set_body_json(json!({"items": [{"id": "a@x", "summary": "Work"}]})),
+                )
+                .mount(&server)
+                .await;
+            Mock::given(method("GET"))
+                .and(path("/calendars/a@x/events"))
+                .respond_with(ResponseTemplate::new(status).set_body_json(json!({
+                    "error": {"code": status, "message": "nope", "errors": [{"reason": reason}]}
+                })))
+                .mount(&server)
+                .await;
+            let api = api(&server.uri(), "");
+            let args = AgendaArgs {
+                window: Window::Today,
+                calendar_ids: vec![],
+                calendar_name: None,
+            };
+            let err = agenda(&api, &args, &tz("UTC", false)).await.unwrap_err();
+            assert!(err.to_string().contains("Work"), "{err}");
+            assert_eq!(err.exit_code(), expected, "HTTP {status}: {err}");
+        }
     }
 
     #[tokio::test]
