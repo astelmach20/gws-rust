@@ -248,12 +248,12 @@ pub fn service_scope_prefixes(service: &str) -> Vec<&str> {
         "sheets" => vec!["spreadsheets"],
         "slides" => vec!["presentations"],
         "docs" => vec!["documents"],
-        "people" | "contacts" => vec!["contacts", "directory"],
+        "people" => vec!["contacts", "directory"],
         "meet" => vec!["meetings"],
         "admin" => vec!["admin"],
         "admin-reports" | "reports" => vec!["admin.reports"],
         "directory" | "admin-directory" => vec!["admin.directory"],
-        "alertcenter" | "alerts" => vec!["apps.alerts"],
+        "alertcenter" => vec!["apps.alerts"],
         "groupssettings" => vec!["apps.groups.settings"],
         "licensing" => vec!["apps.licensing"],
         "reseller" => vec!["apps.order"],
@@ -265,13 +265,36 @@ pub fn service_scope_prefixes(service: &str) -> Vec<&str> {
     }
 }
 
+/// Check that every `--services` name is a known service (an alias such as
+/// `gmail` or `sheets`, or `<api>:<version>`).
+///
+/// # Errors
+///
+/// [`crate::error::GwsError::Validation`] naming the first unknown entry, so a
+/// typo or a scope name (`calendar.events`) is never silently dropped.
+pub fn validate_service_names(services: &HashSet<String>) -> Result<(), crate::error::GwsError> {
+    let mut names: Vec<&String> = services.iter().collect();
+    names.sort();
+    for name in names {
+        crate::services::resolve_service(name).map_err(|e| {
+            crate::error::GwsError::Validation(format!(
+                "--services: '{name}' is not a service name ({e}). Pass exact scopes with \
+                 --scopes instead"
+            ))
+        })?;
+    }
+    Ok(())
+}
+
 /// Whether `scope_url` belongs to one of `services`.
 ///
-/// `cloud-platform` matches every service; `https://mail.google.com/` belongs
-/// to `gmail`.
+/// `https://mail.google.com/` belongs to `gmail`. `cloud-platform` belongs to
+/// none: it grants access to every Google Cloud resource, so it is only
+/// requested when asked for explicitly (`--full` without `--services`,
+/// `--scopes`, or its own row in the picker).
 pub fn scope_matches_service(scope_url: &str, services: &HashSet<String>) -> bool {
     if scope_url == PLATFORM_SCOPE {
-        return true;
+        return false;
     }
     if scope_url == GMAIL_FULL_SCOPE {
         return services.contains("gmail");
@@ -305,10 +328,7 @@ pub fn find_unmatched_services(scopes: &[String], services: &HashSet<String>) ->
         .iter()
         .filter(|svc| {
             let one: HashSet<String> = std::iter::once((*svc).clone()).collect();
-            !scopes
-                .iter()
-                .filter(|s| s.as_str() != PLATFORM_SCOPE)
-                .any(|s| scope_matches_service(s, &one))
+            !scopes.iter().any(|s| scope_matches_service(s, &one))
         })
         .cloned()
         .collect()
@@ -558,8 +578,22 @@ mod tests {
             &a("contacts.readonly"),
             &set(&["people"])
         ));
-        assert!(scope_matches_service(PLATFORM_SCOPE, &set(&["drive"])));
+        // cloud-platform reaches every Google Cloud resource; it belongs to no
+        // Workspace service, so `-s drive` must not keep it.
+        assert!(!scope_matches_service(PLATFORM_SCOPE, &set(&["drive"])));
+        assert!(!scope_matches_service(PLATFORM_SCOPE, &set(&["gmail"])));
         assert!(!scope_matches_service(&a("drivelabels"), &set(&["drive"])));
+    }
+
+    #[test]
+    fn service_names_are_validated() {
+        let set = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<HashSet<_>>();
+        assert!(validate_service_names(&set(&["gmail", "drive", "sheets", "chat"])).is_ok());
+        let err = validate_service_names(&set(&["gmail", "contacts.other.readonly"]))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("contacts.other.readonly"), "{err}");
+        assert!(validate_service_names(&set(&["calendar.events"])).is_err());
     }
 
     #[test]

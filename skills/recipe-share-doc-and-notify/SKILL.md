@@ -18,7 +18,7 @@ metadata:
 
 # Share a Google Doc and Notify Collaborators
 
-> **PREREQUISITE:** Load the following skills to execute this recipe: `gwsr-drive`, `gwsr-docs`, `gwsr-gmail`
+> **PREREQUISITE:** Load the following skills to execute this recipe: `gwsr-drive`, `gwsr-docs`, `gwsr-gmail` (install any that are missing with `npx skills add https://github.com/astelmach20/gws-rust/tree/main/skills/<name>`)
 
 Share a Google Docs document with edit access and email collaborators the link.
 

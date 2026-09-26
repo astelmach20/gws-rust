@@ -17,7 +17,7 @@ metadata:
 
 # Create a Google Sheets Expense Tracker
 
-> **PREREQUISITE:** Load the following skills to execute this recipe: `gwsr-sheets`, `gwsr-drive`
+> **PREREQUISITE:** Load the following skills to execute this recipe: `gwsr-sheets`, `gwsr-drive` (install any that are missing with `npx skills add https://github.com/astelmach20/gws-rust/tree/main/skills/<name>`)
 
 Set up a Google Sheets spreadsheet for tracking expenses with headers and initial entries.
 

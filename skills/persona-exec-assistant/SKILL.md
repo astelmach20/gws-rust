@@ -18,7 +18,7 @@ metadata:
 
 # Executive Assistant
 
-> **PREREQUISITE:** Load the following utility skills to operate as this persona: `gwsr-gmail`, `gwsr-calendar`, `gwsr-drive`, `gwsr-chat`
+> **PREREQUISITE:** Load the following utility skills to operate as this persona: `gwsr-gmail`, `gwsr-calendar`, `gwsr-drive`, `gwsr-chat` (install any that are missing with `npx skills add https://github.com/astelmach20/gws-rust/tree/main/skills/<name>`)
 
 Manage an executive's schedule, inbox, and communications.
 

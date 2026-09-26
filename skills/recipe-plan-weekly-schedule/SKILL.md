@@ -16,7 +16,7 @@ metadata:
 
 # Plan Your Weekly Google Calendar Schedule
 
-> **PREREQUISITE:** Load the following skills to execute this recipe: `gwsr-calendar`
+> **PREREQUISITE:** Load the following skills to execute this recipe: `gwsr-calendar` (install any that are missing with `npx skills add https://github.com/astelmach20/gws-rust/tree/main/skills/<name>`)
 
 Review your Google Calendar week, identify gaps, and add events to fill them.
 
