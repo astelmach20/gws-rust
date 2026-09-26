@@ -27,6 +27,7 @@ use crate::auth::http::Endpoints;
 use crate::auth::keystore::{Keystore, Purpose};
 use crate::auth::profiles::{self, ProfileMetadata};
 use crate::auth::scopes;
+use crate::auth::token_cache::TokenCache;
 use crate::error::GwsError;
 
 /// First NDJSON event of `auth login`: the URL to open (for agents driving
@@ -102,6 +103,9 @@ pub(crate) fn parse_args(m: &clap::ArgMatches) -> Result<LoginArgs, GwsError> {
             .filter(|s| !s.is_empty())
             .collect::<HashSet<String>>()
     });
+    if let Some(services) = &services {
+        scopes::validate_service_names(services)?;
+    }
     let timeout = crate::args::value::<u64>(m, "timeout")?
         .copied()
         .ok_or_else(|| GwsError::Validation("--timeout is required".into()))?;
@@ -156,7 +160,7 @@ async fn resolve_scopes(
     };
     let mut result = scopes::filter_scopes_by_services(base, services);
     if let Some(services) = services {
-        super::picker::augment_with_discovery_scopes(&mut result, services, readonly_only).await;
+        super::picker::augment_with_discovery_scopes(&mut result, services, readonly_only).await?;
     }
     if result.is_empty() {
         return Err(GwsError::Validation(
@@ -256,9 +260,7 @@ pub(crate) async fn handle(m: &clap::ArgMatches) -> Result<(), GwsError> {
     };
     let save_paths = paths.clone();
     let ks = std::sync::Arc::clone(&keystore);
-    let save_base = base.clone();
-    let profile_name = active.name.clone();
-    let made_active = tokio::task::spawn_blocking(move || -> Result<bool, GwsError> {
+    tokio::task::spawn_blocking(move || -> Result<(), GwsError> {
         save_paths.ensure_dir().map_err(crate::auth::to_gws_error)?;
         let ct = ks.encrypt(Purpose::Credentials, json.as_bytes())?;
         crate::fs_util::atomic_write(&save_paths.credentials, &ct).map_err(|e| {
@@ -267,18 +269,24 @@ pub(crate) async fn handle(m: &clap::ArgMatches) -> Result<(), GwsError> {
                 save_paths.credentials.display()
             ))
         })?;
-        profiles::save_metadata(&save_paths.metadata, &meta).map_err(crate::auth::to_gws_error)?;
-        // Access tokens cached for the previous grant are now stale.
-        match std::fs::remove_file(&save_paths.token_cache) {
-            Ok(()) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => {
-                return Err(GwsError::CredentialStore(format!(
-                    "cannot clear the old token cache '{}': {e}",
-                    save_paths.token_cache.display()
-                )));
-            }
-        }
+        profiles::save_metadata(&save_paths.metadata, &meta).map_err(crate::auth::to_gws_error)
+    })
+    .await
+    .map_err(|e| GwsError::other(format!("save task failed: {e}")))??;
+
+    // Access tokens cached for the previous grant are now stale. Clear them
+    // under the cache lock so a concurrent refresh cannot write one back.
+    TokenCache::new(
+        &paths.token_cache,
+        &paths.token_lock,
+        std::sync::Arc::clone(&keystore),
+    )
+    .clear()
+    .await?;
+
+    let save_base = base.clone();
+    let profile_name = active.name.clone();
+    let made_active = tokio::task::spawn_blocking(move || -> Result<bool, GwsError> {
         let configured = crate::config::profile_in(&crate::config::config_path_in(&save_base))?;
         if configured.is_some() {
             Ok(false)
@@ -353,8 +361,6 @@ mod tests {
         let a = parse_args(&matches(&[
             "--scopes",
             "gmail.modify, https://mail.google.com/",
-            "-s",
-            "Gmail,drive",
             "--no-browser",
             "--no-localhost",
             "--timeout",
@@ -368,16 +374,20 @@ mod tests {
                 "https://mail.google.com/".into()
             ])
         );
+        assert!(a.services.is_none());
+        assert!(!a.open_browser);
+        assert_eq!(a.mode, RedirectMode::Manual);
+        assert_eq!(a.timeout, Duration::from_secs(30));
+        assert!(parse_args(&matches(&["--scopes", " , "])).is_err());
+
+        let a = parse_args(&matches(&["-s", "Gmail,drive", "--write"])).unwrap();
+        assert_eq!(a.scope_mode, ScopeMode::Write);
         assert_eq!(
             a.services.unwrap(),
             ["gmail".to_string(), "drive".to_string()]
                 .into_iter()
                 .collect()
         );
-        assert!(!a.open_browser);
-        assert_eq!(a.mode, RedirectMode::Manual);
-        assert_eq!(a.timeout, Duration::from_secs(30));
-        assert!(parse_args(&matches(&["--scopes", " , "])).is_err());
     }
 
     #[tokio::test]
@@ -412,18 +422,29 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn custom_scopes_bypass_filter() {
-        let services: HashSet<String> = ["drive".to_string()].into_iter().collect();
-        let custom = vec!["https://mail.google.com/".to_string()];
-        let s = resolve_scopes(
-            ScopeMode::Custom(custom.clone()),
-            None,
-            Some(&services),
-            false,
-        )
-        .await
-        .unwrap();
-        assert_eq!(s, custom);
+    async fn services_filter_drops_cloud_platform() {
+        let services: HashSet<String> = ["gmail".to_string()].into_iter().collect();
+        let s = resolve_scopes(ScopeMode::Full, None, Some(&services), false)
+            .await
+            .unwrap();
+        assert!(
+            !s.iter().any(|x| x == scopes::PLATFORM_SCOPE),
+            "`--full -s gmail` must not request cloud-platform: {s:?}"
+        );
+        let s = resolve_scopes(ScopeMode::Full, None, None, false)
+            .await
+            .unwrap();
+        assert!(s.iter().any(|x| x == scopes::PLATFORM_SCOPE));
+    }
+
+    #[test]
+    fn unknown_service_names_are_rejected() {
+        let err = parse_args(&matches(&["-s", "gmail,contacts.other.readonly"]))
+            .err()
+            .expect("unknown service must be an error")
+            .to_string();
+        assert!(err.contains("contacts.other.readonly"), "{err}");
+        assert!(parse_args(&matches(&["-s", "gmail,drive,chat"])).is_ok());
     }
 
     #[test]
