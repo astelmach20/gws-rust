@@ -360,7 +360,12 @@ async fn dispatch(
     }
     match command {
         TopCommand::Auth { args } => {
-            auth::commands::handle_auth_command(&args, cli.global.auth_overrides()).await?
+            auth::commands::handle_auth_command(
+                &args,
+                cli.global.auth_overrides(),
+                cli.global.dry_run,
+            )
+            .await?
         }
         TopCommand::Batch(batch_args) => {
             let ctx = executor::batch::BatchContext {
