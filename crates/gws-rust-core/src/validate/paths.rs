@@ -99,6 +99,24 @@ pub fn resolve_dir_path(dir: &str, policy: PathPolicy, cwd: &Path) -> Result<Pat
     Ok(resolved)
 }
 
+/// Checks a path the program built itself, such as a validated `--dir`
+/// joined with a remote file name, against `policy` just before writing it.
+///
+/// Symlinks in the existing prefix are resolved, so a sub-directory under an
+/// allowed directory that links elsewhere cannot carry a write outside `cwd`.
+/// No character check is applied: the components come from sanitized remote
+/// names, not from the command line.
+pub fn check_derived_path(path: &Path, policy: PathPolicy, cwd: &Path) -> Result<(), GwsError> {
+    if policy == PathPolicy::Unrestricted {
+        return Ok(());
+    }
+    let shown = path.display().to_string();
+    let resolved = normalize_existing_prefix(&cwd.join(path)).map_err(|e| {
+        GwsError::Validation(format!("Failed to resolve output path '{shown}': {e}"))
+    })?;
+    enforce_policy(&resolved, &shown, "output path", policy, cwd)
+}
+
 fn resolve_any(path_str: &str, flag_name: &str, cwd: &Path) -> Result<PathBuf, GwsError> {
     if path_str.is_empty() {
         return Err(GwsError::Validation(format!(
@@ -244,6 +262,28 @@ mod tests {
             .to_string();
         assert!(err.contains("outside the current directory"), "{err}");
         assert!(err.contains("GWSR_RESTRICT_PATHS=cwd"), "{err}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn derived_path_through_a_symlinked_subdir_is_checked() {
+        let (_d, cwd) = canon_tmp();
+        let (_o, outside) = canon_tmp();
+        fs::create_dir(cwd.join("out")).unwrap();
+        std::os::unix::fs::symlink(&outside, cwd.join("out").join("lib")).unwrap();
+        let escaping = cwd.join("out").join("lib").join("Code.gs");
+        let err = check_derived_path(&escaping, PathPolicy::Cwd, &cwd)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("outside the current directory"), "{err}");
+        // Inside cwd (existing or not) is fine, and the default allows anything.
+        check_derived_path(
+            &cwd.join("out").join("new").join("a.gs"),
+            PathPolicy::Cwd,
+            &cwd,
+        )
+        .unwrap();
+        check_derived_path(&escaping, PathPolicy::Unrestricted, &cwd).unwrap();
     }
 
     #[test]
