@@ -117,7 +117,7 @@ impl TokenCache {
         let now = chrono::Utc::now().timestamp();
         if freshness == Freshness::Cached
             && let Some(entry) = cache.entries.get(key)
-            && entry.expires_at - EXPIRY_MARGIN_SECS > now
+            && entry.expires_at.saturating_sub(EXPIRY_MARGIN_SECS) > now
         {
             tracing::debug!(key, "using cached access token");
             return Ok(SecretString::from(entry.access_token.clone()));
@@ -335,6 +335,37 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(t.expose_secret(), "ya29.s2");
+    }
+
+    #[tokio::test]
+    async fn extreme_expiry_times_do_not_overflow() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = cache_in(dir.path());
+        let at = |value: &str, expires_at: i64| AccessToken {
+            token: SecretString::from(value.to_string()),
+            expires_at: Some(expires_at),
+            scopes: None,
+        };
+        // A token that expired at the earliest representable time is stale.
+        cache
+            .get_or_fetch("k", Freshness::Cached, || async {
+                Ok(at("ya29.old", i64::MIN))
+            })
+            .await
+            .unwrap();
+        let t = cache
+            .get_or_fetch("k", Freshness::Cached, || async {
+                Ok(at("ya29.new", i64::MAX))
+            })
+            .await
+            .unwrap();
+        assert_eq!(t.expose_secret(), "ya29.new");
+        // One that expires at the latest representable time is reused.
+        let t = cache
+            .get_or_fetch("k", Freshness::Cached, || async { Ok(at("ya29.x", 0)) })
+            .await
+            .unwrap();
+        assert_eq!(t.expose_secret(), "ya29.new");
     }
 
     #[tokio::test]
