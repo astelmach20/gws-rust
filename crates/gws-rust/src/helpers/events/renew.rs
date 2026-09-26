@@ -17,7 +17,7 @@
 //! Renewing sets `ttl` to `0s`, which the API interprets as the maximum
 //! allowed lifetime (`PATCH subscriptions/{id}?updateMask=ttl`).
 //! `--reactivate` calls `:reactivate`, which only applies to SUSPENDED
-//! subscriptions. Every failure is reported; the command exits non-zero if
+//! subscriptions, so `--all --reactivate` selects by state, not expiry. Every failure is reported; the command exits non-zero if
 //! any subscription could not be renewed.
 
 use super::{WORKSPACE_EVENTS_API_BASE, parse_event_types, scopes_for_event_types};
@@ -144,6 +144,21 @@ fn filter_subscriptions_to_renew(
     Ok(result)
 }
 
+/// Subscriptions from a list page that are SUSPENDED: the only ones
+/// `:reactivate` accepts. Expiry is irrelevant for reactivation.
+fn filter_subscriptions_to_reactivate(subs: &[Value]) -> Result<Vec<String>, GwsError> {
+    let mut result = Vec::new();
+    for sub in subs {
+        let name = sub.get("name").and_then(Value::as_str).ok_or_else(|| {
+            GwsError::other(format!("subscriptions.list entry without name: {sub}"))
+        })?;
+        if sub.get("state").and_then(Value::as_str) == Some("SUSPENDED") {
+            result.push(name.to_string());
+        }
+    }
+    Ok(result)
+}
+
 /// Workspace Events client (base URL injectable for tests).
 struct EventsApi {
     rest: Transport,
@@ -215,7 +230,11 @@ async fn run(api: &EventsApi, config: &RenewConfig, now: i64) -> Result<Value, G
         Some(name) => vec![name.clone()],
         None => {
             let subs = api.list_all(&list_filter(&config.event_types)).await?;
-            filter_subscriptions_to_renew(&subs, now, config.within_secs)?
+            if config.reactivate {
+                filter_subscriptions_to_reactivate(&subs)?
+            } else {
+                filter_subscriptions_to_renew(&subs, now, config.within_secs)?
+            }
         }
     };
     let mut renewed = Vec::new();
@@ -247,7 +266,8 @@ pub(super) async fn handle_renew(matches: &ArgMatches) -> Result<(), GwsError> {
             "action": if config.reactivate { "reactivate" } else { "renew (ttl=0s: maximum lifetime)" },
             "subscription": config.subscription,
             "filter": (!config.event_types.is_empty()).then(|| list_filter(&config.event_types)),
-            "withinSeconds": config.all.then_some(config.within_secs),
+            "withinSeconds": (config.all && !config.reactivate).then_some(config.within_secs),
+            "state": (config.all && config.reactivate).then_some("SUSPENDED"),
         });
         return crate::helpers::http::print_value(matches, &plan);
     }
@@ -413,7 +433,7 @@ mod tests {
             .and(path("/v1/subscriptions"))
             .and(query_param("pageToken", "p2"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "subscriptions": [{"name": "subscriptions/b", "expireTime": "1970-01-01T00:10:00Z"}]
+                "subscriptions": [{"name": "subscriptions/b", "state": "SUSPENDED", "expireTime": "1970-01-01T00:10:00Z"}]
             })))
             .mount(&server)
             .await;
@@ -421,7 +441,7 @@ mod tests {
             .and(path("/v1/subscriptions"))
             .and(query_param("filter", r#"event_types:"google.workspace.chat.message.v1.created""#))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "subscriptions": [{"name": "subscriptions/a", "expireTime": "1970-01-01T00:10:00Z"}],
+                "subscriptions": [{"name": "subscriptions/a", "state": "SUSPENDED", "expireTime": "1970-01-01T00:10:00Z"}],
                 "nextPageToken": "p2"
             })))
             .mount(&server)
@@ -448,5 +468,51 @@ mod tests {
         };
         let err = run(&api(&server), &config, 0).await.unwrap_err();
         assert!(err.to_string().contains("1 of 2"), "{err}");
+    }
+    #[tokio::test]
+    async fn test_all_reactivate_targets_suspended_not_expiring() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/subscriptions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "subscriptions": [
+                    // Active and about to expire: nothing to reactivate.
+                    {"name": "subscriptions/active", "state": "ACTIVE",
+                     "expireTime": "1970-01-01T00:10:00Z"},
+                    // Suspended, expiring outside --within: must be reactivated.
+                    {"name": "subscriptions/suspended", "state": "SUSPENDED",
+                     "suspensionReason": "USER_SCOPE_REVOKED",
+                     "expireTime": "1970-01-06T00:00:00Z"}
+                ]
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/v1/subscriptions/suspended:reactivate"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"name": "operations/r"})))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/v1/subscriptions/active:reactivate"))
+            .respond_with(
+                ResponseTemplate::new(400)
+                    .set_body_json(json!({"error": {"message": "not suspended"}})),
+            )
+            .expect(0)
+            .mount(&server)
+            .await;
+        let config = RenewConfig {
+            subscription: None,
+            all: true,
+            event_types: vec!["google.workspace.chat.message.v1.created".into()],
+            within_secs: 3600,
+            reactivate: true,
+        };
+        let out = run(&api(&server), &config, 0).await.unwrap();
+        assert_eq!(
+            out["renewed"],
+            json!([{"name": "subscriptions/suspended", "operation": {"name": "operations/r"}}])
+        );
     }
 }
