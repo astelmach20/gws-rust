@@ -358,7 +358,7 @@ fn create_reply_raw_message(
         .subject(envelope.subject);
 
     let mb = apply_optional_headers(mb, envelope.from, envelope.cc, envelope.bcc);
-    let mb = set_threading_headers(mb, &envelope.threading);
+    let mb = set_threading_headers(mb, &envelope.threading)?;
 
     let (quoted, separator) = if envelope.html {
         (format_quoted_original_html(original), "<br>\r\n")
@@ -426,7 +426,7 @@ fn parse_reply_args(matches: &ArgMatches) -> Result<ReplyConfig, GwsError> {
         .filter(|v| !v.is_empty());
 
     Ok(ReplyConfig {
-        message_id: required_str(matches, "message-id")?,
+        message_id: super::cli::required_message_id(matches)?,
         body: required_str(matches, "body")?,
         from: parse_optional_mailboxes(matches, "from")?,
         extra_to: parse_optional_mailboxes(matches, "to")?,

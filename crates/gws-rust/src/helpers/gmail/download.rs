@@ -191,7 +191,7 @@ pub(super) async fn handle_attachments(
                 .to_string(),
         ));
     }
-    let message_id = required_str(matches, "message-id")?;
+    let message_id = super::cli::required_message_id(matches)?;
     let dir = crate::validate::validate_safe_output_dir(&required_str(matches, "output-dir")?)?;
     let include_inline = crate::args::flag(matches, "include-inline")?;
     let overwrite = crate::args::flag(matches, "overwrite")?;
