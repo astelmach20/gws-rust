@@ -610,6 +610,31 @@ async fn configure_consent_screen(
     )))
 }
 
+/// Manual steps still needed when setup cannot prompt for an OAuth client;
+/// `None` when the saved client already serves `project_id`.
+///
+/// A saved client that records a different project does not count: its
+/// project stays the quota project, so reporting success would leave
+/// requests billed to (and APIs checked in) the old project.
+fn noninteractive_client_steps(
+    client_path: &std::path::Path,
+    project_id: &str,
+) -> Result<Option<String>, GwsError> {
+    let saved =
+        crate::auth::client_config::load_from(client_path).map_err(crate::auth::to_gws_error)?;
+    let instructions = messages::manual_oauth_instructions(project_id, client_path);
+    match saved {
+        None => Ok(Some(instructions)),
+        Some(client) => match client.project_id {
+            Some(saved_project) if saved_project != project_id => Ok(Some(format!(
+                "The saved OAuth client in {} belongs to project '{saved_project}', not                  '{project_id}'; gwsr would keep using '{saved_project}' as the quota project.                  Replace it with a Desktop client from '{project_id}'.\n\n{instructions}",
+                client_path.display()
+            ))),
+            _ => Ok(None),
+        },
+    }
+}
+
 async fn stage_configure_oauth(ctx: &mut Ctx) -> Result<Stage, GwsError> {
     ctx.step(4, StepStatus::InProgress("configuring...".into()))?;
     let token = ctx.gcloud.access_token().await.map_err(gcloud_err)?;
@@ -623,15 +648,7 @@ async fn stage_configure_oauth(ctx: &mut Ctx) -> Result<Stage, GwsError> {
         }
     }
     if !ctx.interactive {
-        let configured = crate::auth::client_config::load_from(&ctx.client_path)
-            .map_err(crate::auth::to_gws_error)?
-            .is_some();
-        if !configured {
-            ctx.manual_steps = Some(messages::manual_oauth_instructions(
-                &ctx.project_id,
-                &ctx.client_path,
-            ));
-        }
+        ctx.manual_steps = noninteractive_client_steps(&ctx.client_path, &ctx.project_id)?;
         return Ok(Stage::Finish);
     }
 
@@ -879,6 +896,50 @@ mod tests {
         assert!(o.non_interactive);
         assert!(parse_setup_args(&["--verbose".into()]).is_err());
         assert!(parse_setup_args(&["--help".into()]).unwrap().is_none());
+    }
+
+    fn saved_client(dir: &std::path::Path, project: Option<&str>) -> std::path::PathBuf {
+        let path = dir.join("client_secret.json");
+        crate::auth::client_config::save_client_config(
+            &path,
+            "cid.apps.googleusercontent.com",
+            &SecretString::from("secret".to_string()),
+            project,
+        )
+        .unwrap();
+        path
+    }
+
+    #[test]
+    fn noninteractive_client_steps_accept_a_client_for_the_same_project() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = saved_client(dir.path(), Some("proj-a"));
+        assert_eq!(noninteractive_client_steps(&path, "proj-a").unwrap(), None);
+        // A client without a recorded project cannot be checked; keep it.
+        let dir = tempfile::tempdir().unwrap();
+        let path = saved_client(dir.path(), None);
+        assert_eq!(noninteractive_client_steps(&path, "proj-a").unwrap(), None);
+    }
+
+    #[test]
+    fn noninteractive_client_steps_require_a_client_when_none_is_saved() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("client_secret.json");
+        let steps = noninteractive_client_steps(&path, "proj-a")
+            .unwrap()
+            .expect("manual steps");
+        assert!(steps.contains("?project=proj-a"), "{steps}");
+    }
+
+    #[test]
+    fn noninteractive_client_steps_reject_a_client_from_another_project() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = saved_client(dir.path(), Some("proj-a"));
+        let steps = noninteractive_client_steps(&path, "proj-b")
+            .unwrap()
+            .expect("a client from proj-a must not count as configured for proj-b");
+        assert!(steps.contains("proj-a"), "{steps}");
+        assert!(steps.contains("?project=proj-b"), "{steps}");
     }
 
     #[test]
