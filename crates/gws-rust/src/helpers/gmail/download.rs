@@ -66,9 +66,17 @@ fn truncate_filename(name: &str) -> String {
     format!("{}{ext}", &stem[..end])
 }
 
+/// How a file system that ignores case and Unicode normalization (APFS,
+/// NTFS) compares names: NFC, then lowercase.
+fn collision_key(name: &str) -> String {
+    icu_normalizer::ComposingNormalizerBorrowed::new_nfc()
+        .normalize(name)
+        .to_lowercase()
+}
+
 /// Make `name` unique within `taken` by appending " (n)" before the extension.
 fn dedupe(name: &str, taken: &mut HashSet<String>) -> String {
-    if taken.insert(name.to_lowercase()) {
+    if taken.insert(collision_key(name)) {
         return name.to_string();
     }
     let (stem, ext) = match name.rfind('.') {
@@ -78,7 +86,7 @@ fn dedupe(name: &str, taken: &mut HashSet<String>) -> String {
     let mut n = 1;
     loop {
         let candidate = format!("{stem} ({n}){ext}");
-        if taken.insert(candidate.to_lowercase()) {
+        if taken.insert(collision_key(&candidate)) {
             return candidate;
         }
         n += 1;
@@ -329,6 +337,34 @@ mod tests {
 
     /// "hi" as unpadded base64url.
     const URL_SAFE_NO_PAD_ENCODE: &str = "aGk";
+
+    /// Senders' names are kept byte for byte, but APFS (the macOS default)
+    /// treats the NFC and NFD spellings of a name as one file: `café.txt`
+    /// (precomposed) and `cafe\u{301}.txt` (decomposed) must get distinct
+    /// paths, or with --overwrite the second silently replaces the first.
+    #[tokio::test]
+    async fn names_differing_only_by_unicode_normalization_do_not_collide() {
+        let mut taken = HashSet::new();
+        let first = dedupe("caf\u{e9}.txt", &mut taken);
+        let second = dedupe("cafe\u{301}.txt", &mut taken);
+        assert_eq!(first, "caf\u{e9}.txt");
+        assert_eq!(second, "cafe\u{301} (1).txt");
+
+        let server = MockServer::start().await;
+        let dir = tempfile::tempdir().unwrap();
+        let parts = vec![
+            part("caf\u{e9}.txt", PartData::Inline("QQ".into()), false), // "A"
+            part("cafe\u{301}.txt", PartData::Inline("Qg".into()), false), // "B"
+        ];
+        let saved = download(&mock_api(&server), "m1", &parts, dir.path(), true)
+            .await
+            .unwrap();
+        let contents: Vec<Vec<u8>> = saved
+            .iter()
+            .map(|s| std::fs::read(s["path"].as_str().unwrap()).unwrap())
+            .collect();
+        assert_eq!(contents, vec![b"A".to_vec(), b"B".to_vec()], "{saved:?}");
+    }
 
     #[tokio::test]
     async fn download_failure_is_an_error() {
