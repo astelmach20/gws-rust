@@ -452,8 +452,11 @@ impl TzInfo {
         }
     }
 
-    fn for_event(&self, start: &When) -> Option<&str> {
-        (self.explicit || start.is_local()).then_some(self.name.as_str())
+    /// The zone to attach to both ends of an event: whenever either end is a
+    /// local time (it was validated in this zone and means nothing without
+    /// it), or when --timezone was given.
+    fn for_event(&self, start: &When, end: &When) -> Option<&str> {
+        (self.explicit || start.is_local() || end.is_local()).then_some(self.name.as_str())
     }
 }
 
@@ -518,8 +521,8 @@ impl InsertArgs {
         let mut attendees = many(m, "attendee")?;
         let mut body = json!({
             "summary": summary,
-            "start": start.to_event_time(tz.for_event(&start)),
-            "end": end.to_event_time(tz.for_event(&start)),
+            "start": start.to_event_time(tz.for_event(&start, &end)),
+            "end": end.to_event_time(tz.for_event(&start, &end)),
         });
         if let Some(loc) = optional(m, "location")? {
             body["location"] = json!(loc);
@@ -952,8 +955,11 @@ async fn update(api: &Api, m: &ArgMatches, tz: &TzInfo) -> Result<Value, GwsErro
         } else {
             resolve_range(&start_s, end_opt, dur_opt, tz.tz)?
         };
-        patch.insert("start".into(), start.to_event_time(tz.for_event(&start)));
-        patch.insert("end".into(), end.to_event_time(tz.for_event(&start)));
+        patch.insert(
+            "start".into(),
+            start.to_event_time(tz.for_event(&start, &end)),
+        );
+        patch.insert("end".into(), end.to_event_time(tz.for_event(&start, &end)));
     }
 
     if !add.is_empty() || !remove.is_empty() {
@@ -1478,6 +1484,75 @@ mod tests {
         )
         .await
         .unwrap();
+    }
+
+    /// `--end` alone reuses the event's current start, which the API returns
+    /// with an offset. A local `--end` must still carry the time zone it was
+    /// validated in; `"timeZone": null` is the #912 HTTP 400 again.
+    #[tokio::test]
+    async fn update_local_end_with_offset_start_keeps_time_zone() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/calendars/primary/events/E1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "start": {"dateTime": "2026-03-18T14:00:00-06:00", "timeZone": "America/Denver"},
+                "end": {"dateTime": "2026-03-18T15:00:00-06:00", "timeZone": "America/Denver"}
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("PATCH"))
+            .and(path("/calendars/primary/events/E1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id": "E1"})))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let api = api(&server.uri(), "");
+        let m = parse(&[
+            "gwsr",
+            "+update",
+            "--event-id",
+            "E1",
+            "--end",
+            "2026-03-18T15:30",
+        ]);
+        update(
+            &api,
+            m.subcommand_matches("+update").unwrap(),
+            &tz("America/Denver", false),
+        )
+        .await
+        .unwrap();
+        let reqs = server.received_requests().await.unwrap();
+        let patch = reqs.iter().find(|r| r.method.as_str() == "PATCH").unwrap();
+        let body: Value = serde_json::from_slice(&patch.body).unwrap();
+        assert_eq!(
+            body["end"],
+            json!({"dateTime": "2026-03-18T15:30:00", "timeZone": "America/Denver"}),
+            "{body}"
+        );
+    }
+
+    #[test]
+    fn insert_mixed_offset_and_local_times_carry_time_zone() {
+        let a = insert_args(
+            &[
+                "gwsr",
+                "+insert",
+                "--summary",
+                "S",
+                "--start",
+                "2026-03-18T14:00:00-06:00",
+                "--end",
+                "2026-03-18T15:00",
+            ],
+            &tz("America/Denver", false),
+        )
+        .unwrap();
+        assert_eq!(
+            a.body["end"],
+            json!({"dateTime": "2026-03-18T15:00:00", "timeZone": "America/Denver"})
+        );
+        assert_eq!(a.body["start"]["timeZone"], "America/Denver");
     }
 
     #[tokio::test]
