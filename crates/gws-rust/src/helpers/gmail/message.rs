@@ -200,10 +200,10 @@ pub(super) fn parse_original_message(msg: &Value) -> Result<OriginalMessage, Gws
         return Err(GwsError::other("Message is missing From header"));
     }
 
-    let message_id = strip_angle_brackets(&parsed_headers.message_id);
-    if message_id.is_empty() {
-        return Err(GwsError::other("Message is missing Message-ID header"));
-    }
+    let message_id = parse_msg_ids(&parsed_headers.message_id)
+        .into_iter()
+        .next()
+        .ok_or_else(|| GwsError::other("Message is missing Message-ID header"))?;
 
     let PayloadContents {
         body_text: extracted_text,
@@ -232,25 +232,19 @@ pub(super) fn parse_original_message(msg: &Value) -> Result<OriginalMessage, Gws
         },
     };
 
-    // Parse references: split on whitespace and strip any angle brackets, producing bare IDs
-    let references = parsed_headers
-        .references
-        .split_whitespace()
-        .map(|id| strip_angle_brackets(id).to_string())
-        .filter(|id| !id.is_empty())
-        .collect();
+    let references = parse_msg_ids(&parsed_headers.references);
 
-    let reply_to = non_empty_then(&parsed_headers.reply_to, Mailbox::parse_list);
-    let cc = non_empty_then(&parsed_headers.cc, Mailbox::parse_list);
+    let reply_to = non_empty_then(&parsed_headers.reply_to, Mailbox::parse_header_list);
+    let cc = non_empty_then(&parsed_headers.cc, Mailbox::parse_header_list);
     let date = Some(parsed_headers.date).filter(|s| !s.is_empty());
 
     Ok(OriginalMessage {
         thread_id,
-        message_id: message_id.to_string(),
+        message_id,
         references,
         from: Mailbox::parse(&parsed_headers.from),
         reply_to,
-        to: Mailbox::parse_list(&parsed_headers.to),
+        to: Mailbox::parse_header_list(&parsed_headers.to),
         cc,
         subject: parsed_headers.subject,
         date,
@@ -544,6 +538,35 @@ mod tests {
         let original = parse_original_message(&msg).unwrap();
         // Bare ID (no angle brackets) should be preserved as-is
         assert_eq!(original.message_id, "bare-id@example.com");
+    }
+
+    /// RFC 5322 §3.6.4: `References` is `1*msg-id` with *optional* folding
+    /// white space between IDs, so `<a@x><b@x>` is two IDs. Splitting on
+    /// white space alone glued them into one ID containing `><`.
+    #[test]
+    fn test_parse_original_message_references_without_spaces() {
+        let msg = json!({
+            "threadId": "t1",
+            "payload": {
+                "mimeType": "text/plain",
+                "headers": [
+                    { "name": "From", "value": "alice@example.com" },
+                    { "name": "Message-ID", "value": "<msg@example.com> (added by relay)" },
+                    { "name": "References", "value": "<ref-1@example.com><ref-2@example.com>\r\n <ref-3@example.com>" }
+                ],
+                "body": { "data": URL_SAFE.encode("text") }
+            }
+        });
+        let original = parse_original_message(&msg).unwrap();
+        assert_eq!(
+            original.references,
+            vec![
+                "ref-1@example.com",
+                "ref-2@example.com",
+                "ref-3@example.com"
+            ]
+        );
+        assert_eq!(original.message_id, "msg@example.com");
     }
 
     #[test]

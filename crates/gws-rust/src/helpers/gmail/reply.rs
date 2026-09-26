@@ -37,14 +37,10 @@ pub(super) async fn handle_reply(matches: &ArgMatches, reply_all: bool) -> Resul
         let api = super::api::authenticated(&[GMAIL_SCOPE]).await?;
         let orig = api.get_original_message(&config.message_id).await?;
         config.from = resolve_sender(&api, config.from.as_deref()).await?;
-        // For reply-all, fetch the primary address for self-dedup and
-        // self-reply detection. The --from alias (if any) is handled separately.
-        let self_addr = if reply_all {
-            Some(fetch_user_email(&api).await?)
-        } else {
-            None
-        };
-        (orig, Some(api), self_addr)
+        // Fetch the primary address for self-reply detection (both modes) and
+        // self-dedup (reply-all). The --from alias (if any) is handled separately.
+        let self_addr = fetch_user_email(&api).await?;
+        (orig, Some(api), Some(self_addr))
     };
 
     let self_email = self_email.as_deref();
@@ -64,10 +60,12 @@ pub(super) async fn handle_reply(matches: &ArgMatches, reply_all: bool) -> Resul
             from_alias_email,
         )
     } else {
-        Ok(ReplyRecipients {
-            to: extract_reply_to_address(&original),
-            cc: config.cc.clone(),
-        })
+        Ok(build_reply_recipients(
+            &original,
+            config.cc.as_deref(),
+            self_email,
+            from_alias_email,
+        ))
     }?;
 
     // Append extra --to recipients
@@ -157,8 +155,8 @@ pub(super) struct ReplyConfig {
 }
 
 /// Fetch the authenticated user's primary email from the Gmail profile API.
-/// Used in reply-all for self-dedup (excluding the user from recipients) and
-/// self-reply detection (switching to original-To-based addressing).
+/// Used for self-reply detection in both modes (switching to original-To-based
+/// addressing) and, in reply-all, for self-dedup (excluding the user).
 async fn fetch_user_email(api: &GmailApi) -> Result<String, GwsError> {
     let profile = api.profile().await?;
     profile
@@ -177,6 +175,54 @@ fn extract_reply_to_address(original: &OriginalMessage) -> Vec<Mailbox> {
     }
 }
 
+/// Whether `original` was sent by the user (primary address or `--from` alias).
+///
+/// Gmail web addresses a reply to your own message to the original To
+/// recipients and ignores Reply-To. We approximate "sent by you" by checking
+/// the primary address and the current From alias.
+fn is_self_reply(
+    original: &OriginalMessage,
+    self_email: Option<&str>,
+    from_alias: Option<&str>,
+) -> bool {
+    [self_email, from_alias]
+        .into_iter()
+        .flatten()
+        .any(|e| original.from.email.eq_ignore_ascii_case(e))
+}
+
+/// Recipients for a plain `+reply`: the sender (Reply-To, else From), or the
+/// original To recipients when replying to your own message. Cc is only what
+/// the user passed with `--cc`.
+fn build_reply_recipients(
+    original: &OriginalMessage,
+    extra_cc: Option<&[Mailbox]>,
+    self_email: Option<&str>,
+    from_alias: Option<&str>,
+) -> ReplyRecipients {
+    let to = if is_self_reply(original, self_email, from_alias) {
+        let excluded = collect_excluded_emails(None, self_email, from_alias);
+        let others: Vec<Mailbox> = original
+            .to
+            .iter()
+            .filter(|m| !excluded.contains(&m.email_lowercase()))
+            .cloned()
+            .collect();
+        // A note-to-self has no one else to reply to: keep the original To.
+        if others.is_empty() {
+            original.to.clone()
+        } else {
+            others
+        }
+    } else {
+        extract_reply_to_address(original)
+    };
+    ReplyRecipients {
+        to,
+        cc: extra_cc.map(<[Mailbox]>::to_vec),
+    }
+}
+
 fn build_reply_all_recipients(
     original: &OriginalMessage,
     extra_cc: Option<&[Mailbox]>,
@@ -187,16 +233,9 @@ fn build_reply_all_recipients(
     let excluded = collect_excluded_emails(remove, self_email, from_alias);
 
     // When replying to your own message, the original sender (you) would be
-    // excluded from To, leaving it empty. Gmail web handles this by using the
-    // original To recipients as the reply targets instead, ignoring Reply-To.
-    // (Gmail ignores Reply-To on self-sent messages — we approximate this by
-    // checking the primary address and the current From alias.)
-    let is_self_reply = [self_email, from_alias]
-        .into_iter()
-        .flatten()
-        .any(|e| original.from.email.eq_ignore_ascii_case(e));
-
-    let (to_candidates, mut cc_candidates) = if is_self_reply {
+    // excluded from To, leaving it empty. Gmail web uses the original To
+    // recipients as the reply targets instead (see `is_self_reply`).
+    let (to_candidates, mut cc_candidates) = if is_self_reply(original, self_email, from_alias) {
         // Self-reply: To = original To, CC = original CC
         let cc = original.cc.clone().unwrap_or_default();
         (original.to.clone(), cc)
@@ -628,6 +667,107 @@ mod tests {
         assert_eq!(recipients.to[0].email, "bob@example.com");
     }
 
+    #[test]
+    fn test_reply_to_own_message_goes_to_original_to() {
+        let original = OriginalMessage {
+            from: Mailbox::parse("me@example.com"),
+            to: vec![Mailbox::parse("bob@example.com")],
+            ..Default::default()
+        };
+        let recipients = build_reply_recipients(&original, None, Some("me@example.com"), None);
+        assert_eq!(recipients.to.len(), 1);
+        assert_eq!(recipients.to[0].email, "bob@example.com");
+        assert!(recipients.cc.is_none());
+    }
+
+    #[test]
+    fn test_reply_to_own_message_via_from_alias_goes_to_original_to() {
+        let original = OriginalMessage {
+            from: Mailbox::parse("sales@example.com"),
+            to: vec![Mailbox::parse("bob@example.com")],
+            // Gmail ignores Reply-To on self-sent messages.
+            reply_to: Some(vec![Mailbox::parse("list@example.com")]),
+            ..Default::default()
+        };
+        let recipients = build_reply_recipients(
+            &original,
+            None,
+            Some("me@example.com"),
+            Some("sales@example.com"),
+        );
+        assert_eq!(recipients.to.len(), 1);
+        assert_eq!(recipients.to[0].email, "bob@example.com");
+    }
+
+    #[test]
+    fn test_reply_to_own_message_does_not_cc_original_recipients() {
+        let original = OriginalMessage {
+            from: Mailbox::parse("me@example.com"),
+            to: vec![
+                Mailbox::parse("me@example.com"),
+                Mailbox::parse("bob@example.com"),
+            ],
+            cc: Some(vec![Mailbox::parse("carol@example.com")]),
+            ..Default::default()
+        };
+        let extra_cc = Mailbox::parse_list("dave@example.com");
+        let recipients =
+            build_reply_recipients(&original, Some(&extra_cc), Some("ME@example.com"), None);
+        // Self is dropped from To; original Cc is not carried over (plain reply).
+        assert_eq!(recipients.to.len(), 1);
+        assert_eq!(recipients.to[0].email, "bob@example.com");
+        let cc = recipients.cc.unwrap();
+        assert_eq!(cc.len(), 1);
+        assert_eq!(cc[0].email, "dave@example.com");
+    }
+
+    #[test]
+    fn test_reply_to_note_to_self_stays_with_self() {
+        // A message sent only to yourself has no one else to reply to.
+        let original = OriginalMessage {
+            from: Mailbox::parse("me@example.com"),
+            to: vec![Mailbox::parse("me@example.com")],
+            ..Default::default()
+        };
+        let recipients = build_reply_recipients(&original, None, Some("me@example.com"), None);
+        assert_eq!(recipients.to.len(), 1);
+        assert_eq!(recipients.to[0].email, "me@example.com");
+    }
+
+    #[test]
+    fn test_reply_to_someone_else_goes_to_sender() {
+        let original = OriginalMessage {
+            from: Mailbox::parse("alice@example.com"),
+            to: vec![
+                Mailbox::parse("me@example.com"),
+                Mailbox::parse("bob@example.com"),
+            ],
+            ..Default::default()
+        };
+        let recipients = build_reply_recipients(
+            &original,
+            None,
+            Some("me@example.com"),
+            Some("sales@example.com"),
+        );
+        assert_eq!(recipients.to.len(), 1);
+        assert_eq!(recipients.to[0].email, "alice@example.com");
+        assert!(recipients.cc.is_none());
+    }
+
+    #[test]
+    fn test_reply_to_someone_else_honors_reply_to() {
+        let original = OriginalMessage {
+            from: Mailbox::parse("alice@example.com"),
+            to: vec![Mailbox::parse("me@example.com")],
+            reply_to: Some(vec![Mailbox::parse("list@example.com")]),
+            ..Default::default()
+        };
+        let recipients = build_reply_recipients(&original, None, Some("me@example.com"), None);
+        assert_eq!(recipients.to.len(), 1);
+        assert_eq!(recipients.to[0].email, "list@example.com");
+    }
+
     fn make_reply_matches(args: &[&str]) -> ArgMatches {
         let mut full = vec!["+reply-all"];
         full.extend_from_slice(&args[1..]);
@@ -764,6 +904,71 @@ mod tests {
         // joann@example.com should remain, ann@example.com should be removed
         assert_eq!(cc.len(), 1);
         assert_eq!(cc[0].email, "joann@example.com");
+    }
+
+    /// RFC 5322 allows comments in address headers, and the legacy
+    /// `addr (Display Name)` form is still sent by some mailers. The comment
+    /// must not end up inside the reply's address, and a comma inside a
+    /// comment must not split the mailbox in two.
+    #[test]
+    fn test_reply_recipients_ignore_rfc5322_comments() {
+        let msg = json!({
+            "threadId": "t1",
+            "payload": {
+                "headers": [
+                    { "name": "From", "value": "alice@example.com (Alice Smith)" },
+                    { "name": "To", "value": "me@example.com" },
+                    { "name": "Cc", "value": "bob@example.com (Smith, Bob), carol@example.com" },
+                    { "name": "Subject", "value": "Hello" },
+                    { "name": "Message-ID", "value": "<m1@example.com>" }
+                ]
+            }
+        });
+        let original = parse_original_message(&msg).unwrap();
+
+        // Plain reply goes to the bare address.
+        let to = extract_reply_to_address(&original);
+        assert_eq!(to.len(), 1);
+        assert_eq!(to[0].email, "alice@example.com");
+
+        let recipients =
+            build_reply_all_recipients(&original, None, None, Some("me@example.com"), None)
+                .unwrap();
+        let emails = |list: &[Mailbox]| list.iter().map(|m| m.email.clone()).collect::<Vec<_>>();
+        assert_eq!(emails(&recipients.to), vec!["alice@example.com"]);
+        assert_eq!(
+            emails(&recipients.cc.unwrap_or_default()),
+            vec!["bob@example.com", "carol@example.com"]
+        );
+    }
+
+    /// A message sent with only Bcc recipients carries the RFC 5322 empty group
+    /// `To: undisclosed-recipients:;`. Reply-all must not turn the group name
+    /// into a Cc recipient, and members of a named group must keep their
+    /// addresses intact.
+    #[test]
+    fn test_reply_all_ignores_rfc5322_group_syntax() {
+        let msg = json!({
+            "threadId": "t1",
+            "payload": {
+                "headers": [
+                    { "name": "From", "value": "alice@example.com" },
+                    { "name": "To", "value": "undisclosed-recipients:;" },
+                    { "name": "Cc", "value": "Team: bob@example.com, Carol <carol@example.com>;" },
+                    { "name": "Subject", "value": "Hello" },
+                    { "name": "Message-ID", "value": "<m1@example.com>" }
+                ]
+            }
+        });
+        let original = parse_original_message(&msg).unwrap();
+        let recipients = build_reply_all_recipients(&original, None, None, None, None).unwrap();
+
+        let emails = |list: &[Mailbox]| list.iter().map(|m| m.email.clone()).collect::<Vec<_>>();
+        assert_eq!(emails(&recipients.to), vec!["alice@example.com"]);
+        assert_eq!(
+            emails(&recipients.cc.unwrap_or_default()),
+            vec!["bob@example.com", "carol@example.com"]
+        );
     }
 
     #[test]
