@@ -16,7 +16,7 @@ metadata:
 
 # Forward Labeled Gmail Messages
 
-> **PREREQUISITE:** Load the following skills to execute this recipe: `gwsr-gmail`
+> **PREREQUISITE:** Load the following skills to execute this recipe: `gwsr-gmail` (install any that are missing with `npx skills add https://github.com/astelmach20/gws-rust/tree/main/skills/<name>`)
 
 Find Gmail messages with a specific label and forward them to another address.
 

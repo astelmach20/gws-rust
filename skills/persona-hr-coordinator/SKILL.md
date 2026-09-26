@@ -18,7 +18,7 @@ metadata:
 
 # HR Coordinator
 
-> **PREREQUISITE:** Load the following utility skills to operate as this persona: `gwsr-gmail`, `gwsr-calendar`, `gwsr-drive`, `gwsr-chat`
+> **PREREQUISITE:** Load the following utility skills to operate as this persona: `gwsr-gmail`, `gwsr-calendar`, `gwsr-drive`, `gwsr-chat` (install any that are missing with `npx skills add https://github.com/astelmach20/gws-rust/tree/main/skills/<name>`)
 
 Handle HR workflows — onboarding, announcements, and employee comms.
 

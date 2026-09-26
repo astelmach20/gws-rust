@@ -17,7 +17,7 @@ metadata:
 
 # Export a Google Sheet as CSV
 
-> **PREREQUISITE:** Load the following skills to execute this recipe: `gwsr-sheets`, `gwsr-drive`
+> **PREREQUISITE:** Load the following skills to execute this recipe: `gwsr-sheets`, `gwsr-drive` (install any that are missing with `npx skills add https://github.com/astelmach20/gws-rust/tree/main/skills/<name>`)
 
 Export a Google Sheets spreadsheet as a CSV file for local backup or processing.
 

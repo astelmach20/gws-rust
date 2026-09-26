@@ -16,7 +16,7 @@ metadata:
 
 # Block Focus Time on Google Calendar
 
-> **PREREQUISITE:** Load the following skills to execute this recipe: `gwsr-calendar`
+> **PREREQUISITE:** Load the following skills to execute this recipe: `gwsr-calendar` (install any that are missing with `npx skills add https://github.com/astelmach20/gws-rust/tree/main/skills/<name>`)
 
 Create recurring focus time blocks on Google Calendar to protect deep work hours.
 

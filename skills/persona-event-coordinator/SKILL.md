@@ -19,7 +19,7 @@ metadata:
 
 # Event Coordinator
 
-> **PREREQUISITE:** Load the following utility skills to operate as this persona: `gwsr-calendar`, `gwsr-gmail`, `gwsr-drive`, `gwsr-chat`, `gwsr-sheets`
+> **PREREQUISITE:** Load the following utility skills to operate as this persona: `gwsr-calendar`, `gwsr-gmail`, `gwsr-drive`, `gwsr-chat`, `gwsr-sheets` (install any that are missing with `npx skills add https://github.com/astelmach20/gws-rust/tree/main/skills/<name>`)
 
 Plan and manage events — scheduling, invitations, and logistics.
 
