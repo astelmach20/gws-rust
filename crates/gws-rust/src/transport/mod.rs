@@ -160,7 +160,7 @@ impl Transport {
         let quota_project = quota_project.filter(|_| token.is_some());
         Ok(Self {
             shared: Arc::new(Shared {
-                client: crate::client::shared_client()?,
+                client: http_client()?,
                 endpoints,
                 token: Mutex::new(token),
                 provider,
@@ -411,6 +411,22 @@ impl Transport {
             context,
         )
         .await
+    }
+}
+
+/// The HTTP client for a new [`Transport`].
+///
+/// `gwsr` runs a single Tokio runtime, so every transport shares the
+/// process-wide connection pool. Unit tests start a runtime per
+/// `#[tokio::test]`, and a pooled connection is driven by a task on the
+/// runtime that opened it; sharing the pool let one test pick up another
+/// test's connection and fail with "runtime dropped the dispatch task". Under
+/// `cfg(test)` each transport therefore gets its own pool.
+fn http_client() -> Result<reqwest::Client, GwsError> {
+    if cfg!(test) {
+        crate::client::build_client()
+    } else {
+        crate::client::shared_client()
     }
 }
 
@@ -684,5 +700,48 @@ mod tests {
         assert_eq!(v, json!({}));
         let err = t.get_json(&url, &[], "get").await.unwrap_err();
         assert!(err.to_string().contains("not valid JSON"), "{err}");
+    }
+
+    /// Every `#[tokio::test]` runs on its own runtime, and a pooled
+    /// connection's I/O task lives on the runtime that opened it. If test
+    /// transports shared one pool, a later test could check out a connection
+    /// whose task is parked on an idle runtime (the request hangs) or on one
+    /// that has shut down (`runtime dropped the dispatch task`).
+    #[test]
+    fn test_transports_do_not_share_connections_across_runtimes() {
+        let runtime = || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+        };
+        let first = runtime();
+        let server = first.block_on(async {
+            let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+                .mount(&server)
+                .await;
+            server
+        });
+        let url = format!("{}/v1/x", server.uri());
+        first
+            .block_on(Transport::for_test(&server.uri()).get_json(&url, &[], "first"))
+            .unwrap();
+        // `first` stays alive but is never driven again, like the runtime of
+        // a test that has finished, so its connection task never runs again.
+        let second = runtime();
+        let got = second.block_on(async {
+            tokio::time::timeout(
+                Duration::from_secs(5),
+                Transport::for_test(&server.uri()).get_json(&url, &[], "second"),
+            )
+            .await
+        });
+        assert!(
+            matches!(got, Ok(Ok(_))),
+            "second runtime reused the first runtime's connection: {got:?}"
+        );
+        drop(first);
     }
 }
