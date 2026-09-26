@@ -29,9 +29,9 @@ gwsr events +renew
 | Flag | Required | Default | Description |
 |------|----------|---------|-------------|
 | `--subscription-id` | — | — | Subscription to renew (subscriptions/SUB_ID or SUB_ID) |
-| `--all` | — | — | Renew every subscription for --event-types that expires within --within |
+| `--all` | — | — | Renew every subscription for --event-types that expires within --within (with --reactivate: every SUSPENDED one) |
 | `--event-types` | — | — | Comma-separated event types (required with --all; selects the OAuth scope) |
-| `--within` | — | 1h | Time window for --all (e.g., 30m, 1h, 2d) |
+| `--within` | — | 1h | Time window for --all renewals (e.g., 30m, 1h, 2d); ignored with --reactivate |
 | `--reactivate` | — | — | Reactivate a SUSPENDED subscription instead of extending its expiry |
 
 ## Examples

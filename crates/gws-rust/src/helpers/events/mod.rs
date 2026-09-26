@@ -189,7 +189,7 @@ fn renew_cmd() -> Command {
         .arg(
             Arg::new("all")
                 .long("all")
-                .help("Renew every subscription for --event-types that expires within --within")
+                .help("Renew every subscription for --event-types that expires within --within (with --reactivate: every SUSPENDED one)")
                 .action(ArgAction::SetTrue)
                 .requires("event-types"),
         )
@@ -202,7 +202,7 @@ fn renew_cmd() -> Command {
         .arg(
             Arg::new("within")
                 .long("within")
-                .help("Time window for --all (e.g., 30m, 1h, 2d)")
+                .help("Time window for --all renewals (e.g., 30m, 1h, 2d); ignored with --reactivate")
                 .default_value("1h")
                 .value_name("DURATION"),
         )
