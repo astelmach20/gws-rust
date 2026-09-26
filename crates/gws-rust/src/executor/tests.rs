@@ -1114,9 +1114,16 @@ async fn batch_round_trip_reports_partial_failure() {
     )
     .unwrap();
     let em = Emitter::capturing();
-    let err = batch::run_batch(&d, &calls, Credentials::Static("tok".into()), &opts, &em)
-        .await
-        .unwrap_err();
+    let err = batch::run_batch(
+        &d,
+        &calls,
+        Credentials::Static("tok".into()),
+        &opts,
+        &SanitizeConfig::default(),
+        &em,
+    )
+    .await
+    .unwrap_err();
     assert!(err.to_string().contains("1 of 2 batch call(s) failed"));
     let out = lines(&em);
     assert_eq!(
