@@ -419,13 +419,19 @@ pub(crate) async fn run_batch(
         doc.version
     );
 
+    // Every line honours --format, --jq and --columns like a paginated
+    // stream: NDJSON, or one CSV/table header followed by one row per line.
+    let format = crate::formatter::default_format();
+    let mut first = true;
     if options.dry_run {
         for chunk in calls.chunks(MAX_BATCH) {
             let (content_type, body) = build_batch_body(chunk, "batch_dry_run")?;
-            emitter.value(
+            emitter.page(
                 &json!({"dry_run": true, "url": batch_url, "contentType": content_type, "body": body}),
-                &crate::formatter::OutputFormat::Json,
+                &format,
+                first,
             )?;
+            first = false;
         }
         return Ok(());
     }
@@ -507,7 +513,12 @@ pub(crate) async fn run_batch(
             let body = crate::helpers::modelarmor::require_pass(
                 crate::helpers::modelarmor::sanitize_value(sanitize, part.body).await?,
             )?;
-            emitter.line(&json!({"id": id, "status": part.status, "body": body}).to_string())?;
+            emitter.page(
+                &json!({"id": id, "status": part.status, "body": body}),
+                &format,
+                first,
+            )?;
+            first = false;
         }
     }
     if failures > 0 {
