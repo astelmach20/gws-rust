@@ -229,6 +229,13 @@ pub(crate) fn parse_calls<'a>(
         if id.contains(['\r', '\n', '<', '>']) {
             return Err(at("\"id\" must not contain CR, LF, '<' or '>'".to_string()));
         }
+        // Results are matched to calls by id; a repeated one (explicit, or a
+        // generated line number that equals an explicit id) is ambiguous.
+        if calls.iter().any(|c: &BatchCall<'_>| c.id == id) {
+            return Err(at(format!(
+                "duplicate id \"{id}\"; every call needs a unique id (lines without one get their position)"
+            )));
+        }
         calls.push(BatchCall {
             id,
             method,
@@ -383,6 +390,50 @@ pub(crate) fn parse_batch_response(
     Ok(parts)
 }
 
+/// Order response parts like `chunk`. Parts carry `response-item-<id>`
+/// Content-IDs and may arrive in any order; a part without a Content-ID
+/// stands for the call at its position.
+fn in_call_order(
+    chunk: &[BatchCall<'_>],
+    parts: Vec<PartResponse>,
+) -> Result<Vec<PartResponse>, GwsError> {
+    let mut slots: Vec<Option<PartResponse>> = chunk.iter().map(|_| None).collect();
+    for (position, part) in parts.into_iter().enumerate() {
+        let index = match part.content_id.as_deref() {
+            None => position,
+            Some(cid) => cid
+                .strip_prefix("response-item-")
+                .and_then(|id| chunk.iter().position(|c| c.id == id))
+                .ok_or_else(|| {
+                    GwsError::other(anyhow::anyhow!(
+                        "batch response part has Content-ID {cid:?}, which matches no call"
+                    ))
+                })?,
+        };
+        let slot = slots.get_mut(index).ok_or_else(|| {
+            GwsError::other(anyhow::anyhow!("batch response has more parts than calls"))
+        })?;
+        if slot.replace(part).is_some() {
+            return Err(GwsError::other(anyhow::anyhow!(
+                "batch response has two parts for call {:?}",
+                chunk[index].id
+            )));
+        }
+    }
+    slots
+        .into_iter()
+        .zip(chunk)
+        .map(|(slot, call)| {
+            slot.ok_or_else(|| {
+                GwsError::other(anyhow::anyhow!(
+                    "batch response has no part for call {:?}",
+                    call.id
+                ))
+            })
+        })
+        .collect()
+}
+
 pub(crate) async fn run_batch(
     doc: &RestDescription,
     calls: &[BatchCall<'_>],
@@ -476,19 +527,13 @@ pub(crate) async fn run_batch(
                 chunk.len()
             )));
         }
-        for (i, part) in parts.into_iter().enumerate() {
-            // Responses carry `response-item-<id>`; fall back to position.
-            let id = part
-                .content_id
-                .as_deref()
-                .and_then(|c| c.strip_prefix("response-item-"))
-                .map(str::to_string)
-                .unwrap_or_else(|| chunk[i].id.clone());
+        for (call, part) in chunk.iter().zip(in_call_order(chunk, parts)?) {
             if !(200..300).contains(&part.status) {
                 failures += 1;
             }
-            emitter
-                .line(&json!({"id": id, "status": part.status, "body": part.body}).to_string())?;
+            emitter.line(
+                &json!({"id": call.id, "status": part.status, "body": part.body}).to_string(),
+            )?;
         }
     }
     if failures > 0 {
@@ -628,5 +673,52 @@ mod tests {
         assert_eq!(parts[2].status, 204);
         assert_eq!(parts[2].body, Value::Null);
         assert!(parse_batch_response("application/json", "").is_err());
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn parts_are_matched_to_calls_by_content_id() {
+        let doc = drive_doc("https://www.googleapis.com/");
+        let calls = parse_calls(
+            &doc,
+            "{\"id\":\"a\",\"method\":\"files.get\",\"params\":{\"fileId\":\"1\"}}\n\
+             {\"id\":\"b\",\"method\":\"files.get\",\"params\":{\"fileId\":\"2\"}}",
+            &opts(),
+        )
+        .unwrap();
+        let part = |cid: Option<&str>, status| PartResponse {
+            content_id: cid.map(str::to_string),
+            status,
+            body: Value::Null,
+        };
+        let statuses = |parts| {
+            in_call_order(&calls, parts).map(|p| p.iter().map(|p| p.status).collect::<Vec<_>>())
+        };
+        assert_eq!(
+            statuses(vec![
+                part(Some("response-item-b"), 404),
+                part(Some("response-item-a"), 200)
+            ])
+            .unwrap(),
+            vec![200, 404]
+        );
+        // Without Content-IDs, position decides.
+        assert_eq!(
+            statuses(vec![part(None, 200), part(None, 404)]).unwrap(),
+            vec![200, 404]
+        );
+        for bad in [
+            vec![
+                part(Some("response-item-a"), 200),
+                part(Some("response-item-zz"), 200),
+            ],
+            vec![
+                part(Some("response-item-a"), 200),
+                part(Some("response-item-a"), 200),
+            ],
+            vec![part(Some("response-item-a"), 200)],
+        ] {
+            assert!(statuses(bad).is_err());
+        }
     }
 }
