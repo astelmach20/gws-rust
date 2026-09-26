@@ -945,6 +945,47 @@ fn is_up_to_date(local: &Path, remote_modified: Option<&str>) -> Result<bool, Gw
     Ok(chrono::DateTime::<chrono::Utc>::from(modified) >= remote.with_timezone(&chrono::Utc))
 }
 
+/// What `+sync` does with one Drive child.
+#[derive(Clone, Copy)]
+enum SyncKind {
+    Folder,
+    Export(&'static ExportFormat),
+    Media,
+}
+
+/// Final local names for the children of one folder, in input order.
+///
+/// Files and sub-folders share one namespace on disk, so a name claimed by
+/// more than one child (after sanitizing and adding export extensions) is
+/// given to none of them: every claimant becomes `{id}-{name}`. This keeps
+/// the layout independent of the order Drive lists children in, and a plain
+/// name always belongs to the only item that has it, so a later run never
+/// mistakes one item's local copy for another's. A prefixed name that still
+/// collides (an item literally named `{other id}-{name}`) is an error rather
+/// than a silent overwrite.
+fn disambiguate(children: &[(&str, &str)]) -> Result<Vec<String>, GwsError> {
+    let mut claims: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    for &(_, name) in children {
+        *claims.entry(name).or_insert(0) += 1;
+    }
+    let mut used = std::collections::HashSet::new();
+    let mut out = Vec::with_capacity(children.len());
+    for &(id, name) in children {
+        let local = if matches!(claims.get(name), Some(&n) if n > 1) {
+            safe_filename(&format!("{id}-{name}"), id)
+        } else {
+            name.to_string()
+        };
+        if !used.insert(local.clone()) {
+            return Err(GwsError::other(anyhow::anyhow!(
+                "cannot sync: more than one Drive item in the same folder maps to the local name '{local}' (item '{id}'); rename one in Drive"
+            )));
+        }
+        out.push(local);
+    }
+    Ok(out)
+}
+
 async fn sync(api: &Api, folder_id: &str, dir: &Path) -> Result<Value, GwsError> {
     let mut downloaded = Vec::new();
     let mut unchanged = Vec::new();
@@ -965,36 +1006,47 @@ async fn sync(api: &Api, folder_id: &str, dir: &Path) -> Result<Value, GwsError>
         if !visited.insert(id.clone()) {
             continue;
         }
-        let mut used_names = std::collections::HashSet::new();
+        let mut entries = Vec::new();
         for child in list_children(api, &id).await? {
             let child_id = str_field(&child, "id")?;
             let name = str_field(&child, "name")?;
             let mime = str_field(&child, "mimeType")?;
-            let modified = child.get("modifiedTime").and_then(Value::as_str);
-            let mut local_name = safe_filename(name, child_id);
-            if mime == FOLDER_MIME {
-                stack.push((child_id.to_string(), local_dir.join(&local_name)));
-                continue;
-            }
-            let export = if mime.starts_with("application/vnd.google-apps.") {
+            let local_name = safe_filename(name, child_id);
+            let kind = if mime == FOLDER_MIME {
+                SyncKind::Folder
+            } else if mime.starts_with("application/vnd.google-apps.") {
                 match sync_export(mime) {
-                    Some(f) => {
-                        local_name = with_extension(&local_name, f.ext);
-                        Some(f)
-                    }
+                    Some(f) => SyncKind::Export(f),
                     None => {
                         skipped.push(json!({"id": child_id, "name": name, "mimeType": mime, "reason": "Google-native type with no export"}));
                         continue;
                     }
                 }
             } else {
-                None
+                SyncKind::Media
             };
-            // Two Drive items can share a name; disambiguate with the ID.
-            if !used_names.insert(local_name.clone()) {
-                local_name = format!("{child_id}-{local_name}");
-                used_names.insert(local_name.clone());
-            }
+            let local_name = match kind {
+                SyncKind::Export(f) => with_extension(&local_name, f.ext),
+                SyncKind::Folder | SyncKind::Media => local_name,
+            };
+            entries.push((child_id.to_string(), local_name, kind, child));
+        }
+        let keys: Vec<(&str, &str)> = entries
+            .iter()
+            .map(|(cid, n, _, _)| (cid.as_str(), n.as_str()))
+            .collect();
+        let names = disambiguate(&keys)?;
+        for ((child_id, _, kind, child), local_name) in entries.iter().zip(names) {
+            let child_id = child_id.as_str();
+            let modified = child.get("modifiedTime").and_then(Value::as_str);
+            let export = match kind {
+                SyncKind::Folder => {
+                    stack.push((child_id.to_string(), local_dir.join(&local_name)));
+                    continue;
+                }
+                SyncKind::Export(f) => Some(*f),
+                SyncKind::Media => None,
+            };
             let path = local_dir.join(&local_name);
             if is_up_to_date(&path, modified)? {
                 unchanged.push(path.display().to_string());
@@ -1421,6 +1473,189 @@ mod tests {
         // Second run: local copies are newer than the 2020 remote timestamps.
         let v = sync(&api, "ROOT", dir.path()).await.unwrap();
         assert_eq!(v["unchanged"].as_array().unwrap().len(), 2);
+    }
+
+    /// Mounts a `files.list` response for `parent` and an `alt=media`
+    /// download returning `id` as the body for each plain file listed.
+    async fn mount_listing(server: &MockServer, parent: &str, files: Value) {
+        for f in files.as_array().unwrap() {
+            if f["mimeType"] != FOLDER_MIME {
+                let id = f["id"].as_str().unwrap().to_string();
+                Mock::given(method("GET"))
+                    .and(path(format!("/drive/v3/files/{id}")))
+                    .and(query_param("alt", "media"))
+                    .respond_with(ResponseTemplate::new(200).set_body_bytes(id.into_bytes()))
+                    .mount(server)
+                    .await;
+            }
+        }
+        Mock::given(method("GET"))
+            .and(path("/drive/v3/files"))
+            .and(query_param(
+                "q",
+                format!("'{parent}' in parents and trashed = false"),
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "files": files })))
+            .mount(server)
+            .await;
+    }
+
+    #[tokio::test]
+    async fn sync_keeps_same_named_sibling_folders_apart() {
+        let server = MockServer::start().await;
+        mount_listing(
+            &server,
+            "ROOT",
+            json!([
+                {"id": "R1", "name": "Reports", "mimeType": FOLDER_MIME},
+                {"id": "R2", "name": "Reports", "mimeType": FOLDER_MIME}
+            ]),
+        )
+        .await;
+        for (parent, file) in [("R1", "F1"), ("R2", "F2")] {
+            mount_listing(
+                &server,
+                parent,
+                json!([{"id": file, "name": "a.txt", "mimeType": "text/plain",
+                        "modifiedTime": "2020-01-01T00:00:00Z"}]),
+            )
+            .await;
+        }
+        let api = api(&server.uri(), "drive/v3/");
+        let dir = tempfile::tempdir().unwrap();
+        let v = sync(&api, "ROOT", dir.path()).await.unwrap();
+        assert_eq!(v["downloaded"].as_array().unwrap().len(), 2, "{v}");
+        assert!(v["unchanged"].as_array().unwrap().is_empty(), "{v}");
+        // Colliding names are all prefixed, so neither folder owns the plain
+        // name and the layout does not depend on listing order.
+        assert!(!dir.path().join("Reports").exists());
+        assert_eq!(
+            std::fs::read(dir.path().join("R1-Reports/a.txt")).unwrap(),
+            b"F1"
+        );
+        assert_eq!(
+            std::fs::read(dir.path().join("R2-Reports/a.txt")).unwrap(),
+            b"F2"
+        );
+    }
+
+    #[tokio::test]
+    async fn sync_keeps_a_folder_and_file_with_one_name_apart() {
+        let server = MockServer::start().await;
+        mount_listing(
+            &server,
+            "ROOT",
+            json!([
+                {"id": "FILE", "name": "Reports", "mimeType": "text/plain"},
+                {"id": "DIR", "name": "Reports", "mimeType": FOLDER_MIME}
+            ]),
+        )
+        .await;
+        mount_listing(
+            &server,
+            "DIR",
+            json!([{"id": "IN", "name": "a.txt", "mimeType": "text/plain"}]),
+        )
+        .await;
+        let api = api(&server.uri(), "drive/v3/");
+        let dir = tempfile::tempdir().unwrap();
+        let v = sync(&api, "ROOT", dir.path()).await.unwrap();
+        assert_eq!(v["downloaded"].as_array().unwrap().len(), 2, "{v}");
+        assert_eq!(
+            std::fs::read(dir.path().join("FILE-Reports")).unwrap(),
+            b"FILE"
+        );
+        assert_eq!(
+            std::fs::read(dir.path().join("DIR-Reports/a.txt")).unwrap(),
+            b"IN"
+        );
+    }
+
+    #[tokio::test]
+    async fn sync_names_do_not_depend_on_listing_order() {
+        let listing = |first: &str, second: &str| {
+            json!([
+                {"id": first, "name": "a.txt", "mimeType": "text/plain"},
+                {"id": second, "name": "a.txt", "mimeType": "text/plain"},
+                {"id": "U", "name": "unique.txt", "mimeType": "text/plain"}
+            ])
+        };
+        let mut layouts = Vec::new();
+        for (first, second) in [("P", "Q"), ("Q", "P")] {
+            let server = MockServer::start().await;
+            mount_listing(&server, "ROOT", listing(first, second)).await;
+            let api = api(&server.uri(), "drive/v3/");
+            let dir = tempfile::tempdir().unwrap();
+            sync(&api, "ROOT", dir.path()).await.unwrap();
+            let mut names: Vec<String> = std::fs::read_dir(dir.path())
+                .unwrap()
+                .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+                .collect();
+            names.sort();
+            layouts.push(names);
+        }
+        assert_eq!(layouts[0], ["P-a.txt", "Q-a.txt", "unique.txt"]);
+        assert_eq!(layouts[0], layouts[1]);
+    }
+
+    #[tokio::test]
+    async fn sync_rejects_a_prefixed_name_that_collides_with_a_real_one() {
+        let server = MockServer::start().await;
+        mount_listing(
+            &server,
+            "ROOT",
+            json!([
+                {"id": "P", "name": "a.txt", "mimeType": "text/plain"},
+                {"id": "Q", "name": "a.txt", "mimeType": "text/plain"},
+                {"id": "Z", "name": "P-a.txt", "mimeType": "text/plain"}
+            ]),
+        )
+        .await;
+        let api = api(&server.uri(), "drive/v3/");
+        let dir = tempfile::tempdir().unwrap();
+        let err = sync(&api, "ROOT", dir.path()).await.unwrap_err();
+        assert!(err.to_string().contains("P-a.txt"), "{err}");
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+    }
+
+    /// File systems cap a name at 255 bytes, not characters: a long non-ASCII
+    /// Drive name (plus the export extension) must still be writable.
+    #[tokio::test]
+    async fn sync_fits_long_multibyte_names_in_the_file_system_limit() {
+        // 150 chars: 300 UTF-16 units (APFS limit 255) and 600 UTF-8 bytes
+        // (ext4 limit 255).
+        let long_name = "\u{1F4C4}".repeat(150);
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/drive/v3/files"))
+            .and(query_param("q", "'ROOT' in parents and trashed = false"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"files": [
+                {"id": "D", "name": long_name, "mimeType": DOC},
+                {"id": "A", "name": "a.txt", "mimeType": "text/plain"}
+            ]})))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/drive/v3/files/A"))
+            .and(query_param("alt", "media"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(b"A".to_vec()))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/drive/v3/files/D/export"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(b"DOCX".to_vec()))
+            .mount(&server)
+            .await;
+        let api = api(&server.uri(), "drive/v3/");
+        let dir = tempfile::tempdir().unwrap();
+        let v = sync(&api, "ROOT", dir.path()).await.unwrap();
+        assert_eq!(v["downloaded"].as_array().unwrap().len(), 2, "{v}");
+        let doc = PathBuf::from(v["downloaded"][0]["path"].as_str().unwrap());
+        let file_name = doc.file_name().unwrap().to_str().unwrap();
+        assert!(file_name.len() <= 255, "{file_name}");
+        assert!(file_name.starts_with('\u{1F4C4}'), "{file_name}");
+        assert!(file_name.ends_with(".docx"), "{file_name}");
+        assert_eq!(std::fs::read(&doc).unwrap(), b"DOCX");
     }
 
     #[test]
