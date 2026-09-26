@@ -126,8 +126,16 @@ jobs:
           set -euo pipefail
           cargo cyclonedx --manifest-path crates/gws-rust/Cargo.toml --all-features --target all \
             --format json --spec-version 1.5 --override-filename "gws-rust-${VERSION}.cdx"
-          mv "crates/gws-rust/gws-rust-${VERSION}.cdx.json" dist/
-          jq -e '.bomFormat == "CycloneDX" and (.components | length) > 0' "dist/gws-rust-${VERSION}.cdx.json" >/dev/null
+          # cargo-cyclonedx omits serialNumber when SOURCE_DATE_EPOCH is set (a random UUID would
+          # break reproducibility), but actions/attest rejects a CycloneDX SBOM without one. Derive
+          # a stable UUIDv5 from the release so the SBOM stays reproducible.
+          serial="urn:uuid:$(python3 -c 'import sys, uuid; print(uuid.uuid5(uuid.NAMESPACE_URL, sys.argv[1]))' \
+            "https://github.com/${GITHUB_REPOSITORY}/releases/v${VERSION}")"
+          jq --arg serial "$serial" '.serialNumber = $serial' "crates/gws-rust/gws-rust-${VERSION}.cdx.json" \
+            > "dist/gws-rust-${VERSION}.cdx.json"
+          rm "crates/gws-rust/gws-rust-${VERSION}.cdx.json"
+          jq -e '.bomFormat == "CycloneDX" and (.serialNumber | startswith("urn:uuid:")) and (.components | length) > 0' \
+            "dist/gws-rust-${VERSION}.cdx.json" >/dev/null
 
       - name: Checksums
         working-directory: dist
