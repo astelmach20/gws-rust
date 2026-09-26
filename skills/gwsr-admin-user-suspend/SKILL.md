@@ -2,7 +2,7 @@
 name: gwsr-admin-user-suspend
 description: "Google Workspace Admin SDK: Suspend (or with --unsuspend, restore) a user."
 metadata:
-  version: 0.23.0
+  version: 0.23.1
   openclaw:
     category: "productivity"
     requires:

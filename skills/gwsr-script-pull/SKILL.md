@@ -2,7 +2,7 @@
 name: gwsr-script-pull
 description: "Google Apps Script: Download a project's files into a local directory."
 metadata:
-  version: 0.23.0
+  version: 0.23.1
   openclaw:
     category: "productivity"
     requires:

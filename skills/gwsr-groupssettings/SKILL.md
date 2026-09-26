@@ -2,7 +2,7 @@
 name: gwsr-groupssettings
 description: "Manage Google Groups settings."
 metadata:
-  version: 0.23.0
+  version: 0.23.1
   openclaw:
     category: "productivity"
     requires:

@@ -2,7 +2,7 @@
 name: gwsr-docs-create
 description: "Google Docs: Create a new document, optionally with content."
 metadata:
-  version: 0.23.0
+  version: 0.23.1
   openclaw:
     category: "productivity"
     requires:

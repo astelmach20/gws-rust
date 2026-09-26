@@ -2,7 +2,7 @@
 name: gwsr-meet-create
 description: "Google Meet: Create a Meet meeting space and print its link."
 metadata:
-  version: 0.23.0
+  version: 0.23.1
   openclaw:
     category: "productivity"
     requires:

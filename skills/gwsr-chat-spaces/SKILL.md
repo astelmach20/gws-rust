@@ -2,7 +2,7 @@
 name: gwsr-chat-spaces
 description: "Google Chat: List the spaces you are a member of."
 metadata:
-  version: 0.23.0
+  version: 0.23.1
   openclaw:
     category: "productivity"
     requires:

@@ -2,7 +2,7 @@
 name: gwsr-cloudsearch
 description: "Google Cloud Search: Manage Cloud Search data sources and queries."
 metadata:
-  version: 0.23.0
+  version: 0.23.1
   openclaw:
     category: "productivity"
     requires:

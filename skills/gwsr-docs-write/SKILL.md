@@ -2,7 +2,7 @@
 name: gwsr-docs-write
 description: "Google Docs: Append text or Markdown to the end of a document."
 metadata:
-  version: 0.23.0
+  version: 0.23.1
   openclaw:
     category: "productivity"
     requires:
