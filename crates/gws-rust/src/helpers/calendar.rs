@@ -485,7 +485,7 @@ fn resolve_range(
     let start = time::parse_when(start, "--start")?;
     let end = match (end, duration) {
         (Some(e), _) => time::parse_when(e, "--end")?,
-        (None, Some(d)) => start.plus(time::parse_duration(d)?)?,
+        (None, Some(d)) => start.plus(time::parse_duration(d)?, tz)?,
         (None, None) => match &start {
             When::Date(d) => When::Date(*d + chrono::Duration::days(1)),
             _ => {
@@ -963,7 +963,7 @@ async fn update(api: &Api, m: &ArgMatches, tz: &TzInfo) -> Result<Value, GwsErro
                         "Switching between all-day and timed needs an explicit --end".into(),
                     ));
                 }
-                _ => new_start.plus(ce.to_utc(tz.tz)? - cs.to_utc(tz.tz)?)?,
+                _ => new_start.plus(ce.to_utc(tz.tz)? - cs.to_utc(tz.tz)?, tz.tz)?,
             };
             time::check_range(&new_start, &end, tz.tz)?;
             (new_start, end)
@@ -1138,6 +1138,45 @@ mod tests {
             a.body["end"],
             json!({"dateTime": "2026-03-18T14:30:00", "timeZone": "America/Denver"})
         );
+    }
+
+    #[test]
+    fn insert_duration_is_elapsed_time_across_dst() {
+        let ny = tz("America/New_York", false);
+        let insert = |start: &str, duration: &str| {
+            insert_args(
+                &[
+                    "gwsr",
+                    "+insert",
+                    "--summary",
+                    "S",
+                    "--start",
+                    start,
+                    "--duration",
+                    duration,
+                ],
+                &ny,
+            )
+        };
+        // Fall back (2026-11-01 02:00 EDT -> 01:00 EST): 00:30 EDT plus two
+        // hours is 01:30 EST, not the 02:30 wall-clock time (three hours).
+        let a = insert("2026-11-01T00:30", "2h").unwrap();
+        let end = when_utc(&a.body["end"], ny.tz);
+        let start = when_utc(&a.body["start"], ny.tz);
+        assert_eq!(end - start, chrono::Duration::hours(2), "{}", a.body);
+        // Spring forward (2026-03-08 02:00 EST -> 03:00 EDT): 01:30 EST plus
+        // one hour is 03:30 EDT; 02:30 does not exist and must not be sent.
+        let a = insert("2026-03-08T01:30", "1h").unwrap();
+        let end = when_utc(&a.body["end"], ny.tz);
+        let start = when_utc(&a.body["start"], ny.tz);
+        assert_eq!(end - start, chrono::Duration::hours(1), "{}", a.body);
+    }
+
+    /// The instant a Calendar `EventDateTime` denotes, resolving a local
+    /// `dateTime` in its `timeZone` the way the Calendar API does.
+    fn when_utc(v: &Value, tz: Tz) -> chrono::DateTime<chrono::Utc> {
+        let s = v["dateTime"].as_str().unwrap();
+        time::parse_when(s, "t").unwrap().to_utc(tz).unwrap()
     }
 
     #[test]
