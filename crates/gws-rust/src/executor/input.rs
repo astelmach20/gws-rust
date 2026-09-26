@@ -88,12 +88,78 @@ async fn resolve(arg: JsonArg<'_>, flag: &str) -> Result<String, GwsError> {
     }
 }
 
+/// Walks a JSON document and fails on the first object that repeats a key.
+///
+/// `serde_json` keeps the last of repeated keys, so `{"fileId":"a","fileId":"b"}`
+/// would silently act on `b`. RFC 8259 leaves such objects' meaning
+/// undefined; an ambiguous argument is rejected instead of guessed.
+struct NoDuplicateKeys;
+
+impl<'de> serde::Deserialize<'de> for NoDuplicateKeys {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        deserializer.deserialize_any(NoDuplicateKeysVisitor)
+    }
+}
+
+struct NoDuplicateKeysVisitor;
+
+impl<'de> serde::de::Visitor<'de> for NoDuplicateKeysVisitor {
+    type Value = NoDuplicateKeys;
+
+    fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("any JSON value")
+    }
+
+    fn visit_bool<E>(self, _: bool) -> Result<Self::Value, E> {
+        Ok(NoDuplicateKeys)
+    }
+    fn visit_i64<E>(self, _: i64) -> Result<Self::Value, E> {
+        Ok(NoDuplicateKeys)
+    }
+    fn visit_u64<E>(self, _: u64) -> Result<Self::Value, E> {
+        Ok(NoDuplicateKeys)
+    }
+    fn visit_f64<E>(self, _: f64) -> Result<Self::Value, E> {
+        Ok(NoDuplicateKeys)
+    }
+    fn visit_str<E>(self, _: &str) -> Result<Self::Value, E> {
+        Ok(NoDuplicateKeys)
+    }
+    fn visit_unit<E>(self) -> Result<Self::Value, E> {
+        Ok(NoDuplicateKeys)
+    }
+
+    fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+        while seq.next_element::<NoDuplicateKeys>()?.is_some() {}
+        Ok(NoDuplicateKeys)
+    }
+
+    fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+        let mut seen = std::collections::HashSet::new();
+        while let Some(key) = map.next_key::<String>()? {
+            map.next_value::<NoDuplicateKeys>()?;
+            if !seen.insert(key.clone()) {
+                return Err(serde::de::Error::custom(format!(
+                    "duplicate key '{key}' in a JSON object; give each key once"
+                )));
+            }
+        }
+        Ok(NoDuplicateKeys)
+    }
+}
+
+/// Parse user-supplied JSON, rejecting objects with repeated keys.
+pub(crate) fn parse_strict_json(text: &str) -> Result<Value, serde_json::Error> {
+    serde_json::from_str::<NoDuplicateKeys>(text)?;
+    serde_json::from_str(text)
+}
+
 /// Parse `--params` text into a JSON object.
 pub(crate) fn parse_params(text: Option<&str>) -> Result<Map<String, Value>, GwsError> {
     let Some(text) = text else {
         return Ok(Map::new());
     };
-    match serde_json::from_str::<Value>(text) {
+    match parse_strict_json(text) {
         Ok(Value::Object(map)) => Ok(map),
         Ok(other) => Err(GwsError::Validation(format!(
             "--params must be a JSON object, got {}",
@@ -106,8 +172,7 @@ pub(crate) fn parse_params(text: Option<&str>) -> Result<Map<String, Value>, Gws
 /// Parse `--json` text.
 pub(crate) fn parse_body(text: Option<&str>) -> Result<Option<Value>, GwsError> {
     text.map(|t| {
-        serde_json::from_str(t)
-            .map_err(|e| GwsError::Validation(format!("Invalid --json body: {e}")))
+        parse_strict_json(t).map_err(|e| GwsError::Validation(format!("Invalid --json body: {e}")))
     })
     .transpose()
 }
@@ -338,16 +403,17 @@ mod tests {
         assert!(err.to_string().contains("cannot both read stdin"));
     }
 
+    // Uses an absolute path: changing the process working directory would
+    // leak into every test running concurrently (and into their children).
     #[tokio::test]
-    #[serial_test::serial]
     async fn reads_json_from_file() {
         let dir = tempfile::tempdir().unwrap();
-        let saved = std::env::current_dir().unwrap();
-        std::env::set_current_dir(dir.path()).unwrap();
-        std::fs::write("body.json", r#"{"name":"x"}"#).unwrap();
-        let result = read_json_args(Some(r#"{"a":1}"#), Some("@body.json")).await;
-        std::env::set_current_dir(saved).unwrap();
-        let (params, body) = result.unwrap();
+        let file = dir.path().join("body.json");
+        std::fs::write(&file, r#"{"name":"x"}"#).unwrap();
+        let arg = format!("@{}", file.display());
+        let (params, body) = read_json_args(Some(r#"{"a":1}"#), Some(&arg))
+            .await
+            .unwrap();
         assert_eq!(params.as_deref(), Some(r#"{"a":1}"#));
         assert_eq!(body.as_deref(), Some(r#"{"name":"x"}"#));
     }
@@ -357,6 +423,40 @@ mod tests {
         assert!(parse_params(Some("[1]")).is_err());
         assert!(parse_params(Some("{")).is_err());
         assert_eq!(parse_params(None).unwrap().len(), 0);
+    }
+
+    /// `{"fileId":"a","fileId":"b"}` is ambiguous: silently acting on the
+    /// last value could target the wrong resource (e.g. a delete).
+    #[test]
+    fn duplicate_keys_are_rejected_not_last_wins() {
+        let err = parse_params(Some(r#"{"fileId":"a","fileId":"b"}"#))
+            .map(|m| Value::Object(m).to_string())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("duplicate key 'fileId'"), "{err}");
+
+        for body in [
+            r#"{"name":"a","name":"b"}"#,
+            r#"{"requests":[{"x":{"k":1,"k":2}}]}"#,
+        ] {
+            let err = parse_body(Some(body))
+                .map(|v| format!("{v:?}"))
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("duplicate key"), "{body}: {err}");
+        }
+
+        // Equal keys in different objects are fine.
+        let ok = parse_body(Some(r#"{"a":{"k":1},"b":{"k":2},"c":[{"k":3},{"k":4}]}"#))
+            .unwrap()
+            .unwrap();
+        assert_eq!(ok["c"][1]["k"], 4);
+        assert_eq!(
+            parse_params(Some(r#"{"fileId":"a","pageSize":2}"#))
+                .unwrap()
+                .len(),
+            2
+        );
     }
 
     #[test]
