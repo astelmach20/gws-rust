@@ -297,6 +297,11 @@ fn schema_to_json(schema: &JsonSchema) -> Value {
 }
 
 /// Recursively resolves "$ref" fields in the JSON value.
+///
+/// `seen` holds the schemas being expanded on the current branch; a `$ref`
+/// to one of them is left unexpanded, which is what ends `$ref` cycles
+/// (Docs `Tab.childTabs`, `StructuralElement` → `Table` → … →
+/// `StructuralElement`).
 fn resolve_schema_refs(
     val: &mut Value,
     doc: &RestDescription,
@@ -304,35 +309,31 @@ fn resolve_schema_refs(
 ) {
     match val {
         Value::Object(map) => {
-            // Check if this object is a reference
-            if let Some(ref_name) = map
+            // Expand a reference not already being expanded on this branch.
+            let expanding = map
                 .get("$ref")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string())
-            {
-                // If we haven't seen this schema yet in this branch
-                if !seen.contains(&ref_name)
-                    && let Some(schema) = doc.schemas.get(&ref_name)
-                {
-                    seen.insert(ref_name.clone());
-                    let mut resolved = schema_to_json(schema);
-                    // Recursively resolve the resolved schema
-                    resolve_schema_refs(&mut resolved, doc, seen);
-                    seen.remove(&ref_name);
-
-                    // Merge resolved schema into current object, but preserve existing fields
-                    // (though usually $ref stands alone)
-                    if let Value::Object(resolved_map) = resolved {
-                        for (k, v) in resolved_map {
-                            map.entry(k).or_insert(v);
-                        }
+                .and_then(Value::as_str)
+                .filter(|name| !seen.contains(*name))
+                .and_then(|name| doc.schemas.get(name).map(|s| (name.to_string(), s)));
+            if let Some((name, schema)) = &expanding {
+                // Merge the referenced schema, keeping fields the reference
+                // already has (usually `$ref` stands alone).
+                if let Value::Object(resolved) = schema_to_json(schema) {
+                    for (k, v) in resolved {
+                        map.entry(k).or_insert(v);
                     }
                 }
+                seen.insert(name.clone());
             }
 
-            // Recurse into all fields
+            // Walk every field once, with this schema still marked as being
+            // expanded, so nested references back to it stay unexpanded.
             for (_, v) in map.iter_mut() {
                 resolve_schema_refs(v, doc, seen);
+            }
+
+            if let Some((name, _)) = &expanding {
+                seen.remove(name);
             }
         }
         Value::Array(arr) => {
@@ -490,6 +491,61 @@ mod tests {
 
         let f_node = &val["properties"]["f"];
         assert_eq!(f_node["type"], "integer");
+    }
+
+    /// Resolve `root` against `schemas` on a worker thread, failing instead
+    /// of hanging when resolution does not finish.
+    fn resolve_with_deadline(schemas: Value, root: Value) -> Value {
+        let doc: RestDescription = serde_json::from_value(json!({
+            "name": "x", "version": "v1", "rootUrl": "https://x.googleapis.com/",
+            "schemas": schemas
+        }))
+        .unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::Builder::new()
+            .stack_size(64 * 1024 * 1024)
+            .spawn(move || {
+                let mut val = root;
+                resolve_schema_refs(&mut val, &doc, &mut std::collections::HashSet::new());
+                tx.send(val).unwrap();
+            })
+            .unwrap();
+        rx.recv_timeout(std::time::Duration::from_secs(10))
+            .expect("resolve_schema_refs did not finish within 10s")
+    }
+
+    #[test]
+    fn test_resolve_schema_refs_self_cycle_terminates() {
+        // Docs `Tab.childTabs` is an array of `Tab`: a `$ref` cycle.
+        let schemas = json!({
+            "Tab": { "type": "object", "properties": {
+                "title": { "type": "string" },
+                "childTabs": { "type": "array", "items": { "$ref": "Tab" } }
+            } }
+        });
+        let out = resolve_with_deadline(schemas, json!({ "response": { "$ref": "Tab" } }));
+        let tab = &out["response"];
+        assert_eq!(tab["properties"]["title"]["type"], "string");
+        // The recursive occurrence stays an unexpanded reference.
+        assert_eq!(
+            tab["properties"]["childTabs"]["items"],
+            json!({ "$ref": "Tab" })
+        );
+    }
+
+    #[test]
+    fn test_resolve_schema_refs_mutual_cycle_terminates() {
+        // Docs: StructuralElement -> Table -> TableRow -> TableCell -> StructuralElement.
+        let schemas = json!({
+            "A": { "type": "object", "properties": { "b": { "$ref": "B" } } },
+            "B": { "type": "object", "properties": {
+                "c": { "type": "array", "items": { "$ref": "C" } } } },
+            "C": { "type": "object", "properties": { "a": { "$ref": "A" } } }
+        });
+        let out = resolve_with_deadline(schemas, json!({ "request": { "$ref": "A" } }));
+        let c = &out["request"]["properties"]["b"]["properties"]["c"]["items"];
+        assert_eq!(c["type"], "object");
+        assert_eq!(c["properties"]["a"], json!({ "$ref": "A" }));
     }
 
     #[test]
