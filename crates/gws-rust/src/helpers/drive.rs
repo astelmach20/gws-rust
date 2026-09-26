@@ -31,7 +31,8 @@ use std::pin::Pin;
 const SCOPE_DRIVE: &str = "https://www.googleapis.com/auth/drive";
 const SCOPE_DRIVE_READONLY: &str = "https://www.googleapis.com/auth/drive.readonly";
 const FOLDER_MIME: &str = "application/vnd.google-apps.folder";
-const FILE_FIELDS: &str = "id,name,mimeType,parents,size,modifiedTime,webViewLink,driveId";
+const FILE_FIELDS: &str =
+    "id,name,mimeType,parents,size,modifiedTime,webViewLink,driveId,shortcutDetails";
 
 pub struct DriveHelper;
 
@@ -502,10 +503,7 @@ async fn download(
         let meta = get_metadata(api, file_id).await?;
         let mime = str_field(&meta, "mimeType")?;
         if mime.starts_with("application/vnd.google-apps.") {
-            return Err(GwsError::Validation(format!(
-                "'{}' is a Google-native file ({mime}) with no binary content; use `gwsr drive +export --file-id {file_id} --to <format>`",
-                str_field(&meta, "name")?
-            )));
+            return Err(native_download_error(&meta, file_id, mime)?);
         }
         let name = str_field(&meta, "name")?.to_string();
         let target = resolve_target(output, &name, overwrite)?;
@@ -522,6 +520,42 @@ async fn download(
     let mut out = download_result(file_id, &target, bytes);
     out["name"] = json!(name);
     Ok(out)
+}
+
+const SHORTCUT: &str = "application/vnd.google-apps.shortcut";
+
+/// The error for `+download` of a Google-native file (`meta` has `mimeType`
+/// `mime`). It points only at a command that can work: `+export` with the
+/// formats valid for the type, the shortcut's target, or nothing.
+fn native_download_error(meta: &Value, file_id: &str, mime: &str) -> Result<GwsError, GwsError> {
+    let name = str_field(meta, "name")?;
+    if mime == SHORTCUT {
+        let target = meta
+            .get("shortcutDetails")
+            .and_then(|d| d.get("targetId"))
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                http::other_err(anyhow::anyhow!(
+                    "Drive response for shortcut '{file_id}' is missing 'shortcutDetails.targetId'"
+                ))
+            })?;
+        return Ok(GwsError::Validation(format!(
+            "'{name}' is a shortcut; download its target with `gwsr drive +download --file-id {target}`"
+        )));
+    }
+    let formats: Vec<&str> = EXPORT_FORMATS
+        .iter()
+        .filter(|f| f.sources.contains(&mime))
+        .map(|f| f.name)
+        .collect();
+    Ok(GwsError::Validation(if formats.is_empty() {
+        format!("'{name}' is a Google-native file ({mime}) that cannot be downloaded or exported")
+    } else {
+        format!(
+            "'{name}' is a Google-native file ({mime}) with no binary content; use `gwsr drive +export --file-id {file_id} --to <format>` (formats: {})",
+            formats.join(", ")
+        )
+    }))
 }
 
 struct ExportFormat {
@@ -1130,6 +1164,41 @@ mod tests {
         let api = api(&server.uri(), "drive/v3/");
         let err = download(&api, "DOC1", Some("-"), false).await.unwrap_err();
         assert!(err.to_string().contains("+export"));
+    }
+
+    /// Google-native types `+export` cannot handle must not be sent there:
+    /// a shortcut points at its target, anything else is plainly refused.
+    #[tokio::test]
+    async fn download_of_non_exportable_native_files_does_not_suggest_export() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/drive/v3/files/SC1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id": "SC1", "name": "Link", "mimeType": "application/vnd.google-apps.shortcut",
+                "shortcutDetails": {"targetId": "TARGET1", "targetMimeType": "application/pdf"}
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/drive/v3/files/FORM1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id": "FORM1", "name": "Survey", "mimeType": "application/vnd.google-apps.form"
+            })))
+            .mount(&server)
+            .await;
+        let api = api(&server.uri(), "drive/v3/");
+
+        let err = download(&api, "SC1", Some("-"), false).await.unwrap_err();
+        let msg = err.to_string();
+        assert!(matches!(err, GwsError::Validation(_)), "{err:?}");
+        assert!(!msg.contains("+export"), "{msg}");
+        assert!(msg.contains("--file-id TARGET1"), "{msg}");
+
+        let err = download(&api, "FORM1", Some("-"), false).await.unwrap_err();
+        let msg = err.to_string();
+        assert!(matches!(err, GwsError::Validation(_)), "{err:?}");
+        assert!(!msg.contains("+export"), "{msg}");
+        assert!(msg.contains("cannot be downloaded or exported"), "{msg}");
     }
 
     #[tokio::test]
