@@ -893,6 +893,12 @@ fn sync_export(mime: &str) -> Option<&'static ExportFormat> {
     EXPORT_FORMATS.iter().find(|f| f.name == name)
 }
 
+/// NFC form of a name. macOS file systems treat the NFC and NFD spellings
+/// of a name as the same file, while Drive keeps them distinct.
+fn nfc(name: &str) -> std::borrow::Cow<'_, str> {
+    icu_normalizer::ComposingNormalizerBorrowed::new_nfc().normalize(name)
+}
+
 async fn list_children(api: &Api, folder_id: &str) -> Result<Vec<Value>, GwsError> {
     if folder_id.contains('\'') || folder_id.contains('\\') {
         return Err(GwsError::Validation(format!(
@@ -1015,7 +1021,8 @@ async fn sync(api: &Api, folder_id: &str, dir: &Path) -> Result<Value, GwsError>
             let child_id = str_field(&child, "id")?;
             let name = str_field(&child, "name")?;
             let mime = str_field(&child, "mimeType")?;
-            let local_name = safe_filename(name, child_id);
+            // NFC so that names equal on macOS file systems compare equal below.
+            let local_name = nfc(&safe_filename(name, child_id)).into_owned();
             let kind = if mime == FOLDER_MIME {
                 SyncKind::Folder
             } else if mime.starts_with("application/vnd.google-apps.") {
@@ -1705,6 +1712,54 @@ mod tests {
         let mut contents: Vec<Vec<u8>> = paths.iter().map(|p| std::fs::read(p).unwrap()).collect();
         contents.sort();
         assert_eq!(contents, vec![b"L".to_vec(), b"U".to_vec()]);
+    }
+
+    /// Drive keeps names byte-for-byte, but APFS (the macOS default) treats
+    /// the NFC and NFD spellings of a name as the same file. `café.txt`
+    /// (precomposed) and `cafe\u{301}.txt` (decomposed) must not share a local
+    /// path, or the second is silently reported "unchanged" (or overwrites
+    /// the first).
+    #[tokio::test]
+    async fn sync_disambiguates_names_differing_only_by_unicode_normalization() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/drive/v3/files"))
+            .and(query_param("q", "'ROOT' in parents and trashed = false"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"files": [
+                {"id": "C", "name": "caf\u{e9}.txt", "mimeType": "text/plain", "modifiedTime": "2020-01-01T00:00:00Z"},
+                {"id": "D", "name": "cafe\u{301}.txt", "mimeType": "text/plain", "modifiedTime": "2020-01-01T00:00:00Z"}
+            ]})))
+            .mount(&server)
+            .await;
+        for id in ["C", "D"] {
+            Mock::given(method("GET"))
+                .and(path(format!("/drive/v3/files/{id}")))
+                .and(query_param("alt", "media"))
+                .respond_with(ResponseTemplate::new(200).set_body_bytes(id.as_bytes().to_vec()))
+                .mount(&server)
+                .await;
+        }
+        let api = api(&server.uri(), "drive/v3/");
+        let dir = tempfile::tempdir().unwrap();
+        let v = sync(&api, "ROOT", dir.path()).await.unwrap();
+        assert_eq!(v["unchanged"], json!([]), "{v}");
+        let paths: Vec<String> = v["downloaded"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|d| d["path"].as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(paths.len(), 2, "{v}");
+        let normalized: std::collections::HashSet<String> =
+            paths.iter().map(|p| nfc(p).into_owned()).collect();
+        assert_eq!(
+            normalized.len(),
+            2,
+            "paths collide after NFC normalization: {v}"
+        );
+        let mut contents: Vec<Vec<u8>> = paths.iter().map(|p| std::fs::read(p).unwrap()).collect();
+        contents.sort();
+        assert_eq!(contents, vec![b"C".to_vec(), b"D".to_vec()]);
     }
 
     #[test]

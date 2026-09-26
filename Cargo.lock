@@ -1556,6 +1556,7 @@ dependencies = [
  "gws-rust-core",
  "html2text",
  "iana-time-zone",
+ "icu_normalizer",
  "insta",
  "jaq-core",
  "jaq-json",
