@@ -27,6 +27,7 @@ use crate::helpers::http::{dry_run_request, output_format};
 use crate::transport::Transport;
 use clap::{Arg, ArgMatches, Command};
 use gws_rust_core::client::Idempotency;
+use gws_rust_core::validate::EndpointPolicy;
 use serde_json::{Value, json};
 use std::future::Future;
 use std::pin::Pin;
@@ -59,6 +60,29 @@ impl Default for Bases {
             drive: "https://www.googleapis.com/drive/v3".to_string(),
             chat: "https://chat.googleapis.com/v1".to_string(),
         }
+    }
+}
+
+impl Bases {
+    /// Google's endpoints, or every API under the `GWSR_API_BASE_URL`
+    /// override (root + the API's service path, as generated methods and the
+    /// app helpers build their URLs).
+    fn for_endpoints(endpoints: &EndpointPolicy) -> Self {
+        match endpoints.override_base() {
+            None => Self::default(),
+            // The override always ends with '/'.
+            Some(base) => Self {
+                calendar: format!("{base}calendar/v3"),
+                tasks: format!("{base}tasks/v1"),
+                gmail: format!("{base}gmail/v1"),
+                drive: format!("{base}drive/v3"),
+                chat: format!("{base}v1"),
+            },
+        }
+    }
+
+    fn from_env() -> Result<Self, GwsError> {
+        Ok(Self::for_endpoints(&crate::env::get()?.endpoint_policy()))
     }
 }
 
@@ -348,7 +372,7 @@ async fn standup_report(
 }
 
 async fn handle_standup_report(matches: &ArgMatches) -> Result<(), GwsError> {
-    let bases = Bases::default();
+    let bases = Bases::from_env()?;
     if dry_run(matches)? {
         return crate::helpers::http::print_dry_run(
             matches,
@@ -365,8 +389,8 @@ async fn handle_standup_report(matches: &ArgMatches) -> Result<(), GwsError> {
     }
     let rest = authenticated(&[CALENDAR_READONLY, TASKS_READONLY]).await?;
     let tz = crate::timezone::resolve_account_timezone(&rest, None).await?;
-    let start = crate::timezone::start_of_today(tz)?;
-    let end = start + chrono::Duration::days(1);
+    let today = chrono::Utc::now().with_timezone(&tz).date_naive();
+    let (start, end) = crate::timezone::day_bounds(today, tz)?;
     let report = standup_report(
         &rest,
         &bases,
@@ -430,7 +454,7 @@ async fn meeting_prep(
 }
 
 async fn handle_meeting_prep(matches: &ArgMatches) -> Result<(), GwsError> {
-    let bases = Bases::default();
+    let bases = Bases::from_env()?;
     let calendar_id = required(matches, "calendar-id")?;
     if dry_run(matches)? {
         return crate::helpers::http::print_dry_run(
@@ -528,7 +552,7 @@ async fn email_to_task(
 }
 
 async fn handle_email_to_task(matches: &ArgMatches) -> Result<(), GwsError> {
-    let bases = Bases::default();
+    let bases = Bases::from_env()?;
     let message_id = required(matches, "message-id")?;
     let tasklist = required(matches, "tasklist-id")?;
     if dry_run(matches)? {
@@ -596,7 +620,7 @@ async fn weekly_digest(
 }
 
 async fn handle_weekly_digest(matches: &ArgMatches) -> Result<(), GwsError> {
-    let bases = Bases::default();
+    let bases = Bases::from_env()?;
     if dry_run(matches)? {
         return crate::helpers::http::print_dry_run(
             matches,
@@ -695,7 +719,7 @@ async fn file_announce(
 }
 
 async fn handle_file_announce(matches: &ArgMatches) -> Result<(), GwsError> {
-    let bases = Bases::default();
+    let bases = Bases::from_env()?;
     let file_id = required(matches, "file-id")?;
     let space = normalize_space(&required(matches, "space-id")?)?;
     let custom = crate::args::value::<String>(matches, "message")?.map(String::as_str);
@@ -809,6 +833,25 @@ mod tests {
                 .is_ok(),
             "global --format still works"
         );
+    }
+
+    #[test]
+    fn bases_follow_the_endpoint_policy() {
+        let google = Bases::for_endpoints(&EndpointPolicy::google_only());
+        assert_eq!(google.calendar, Bases::default().calendar);
+        assert_eq!(google.chat, "https://chat.googleapis.com/v1");
+        let policy = EndpointPolicy::with_override("https://proxy.example.com/api").unwrap();
+        let routed = Bases::for_endpoints(&policy);
+        for url in [
+            &routed.calendar,
+            &routed.tasks,
+            &routed.gmail,
+            &routed.drive,
+            &routed.chat,
+        ] {
+            assert!(url.starts_with("https://proxy.example.com/api/"), "{url}");
+            policy.check(url).unwrap();
+        }
     }
 
     #[test]

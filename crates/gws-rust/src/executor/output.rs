@@ -24,7 +24,7 @@ use serde_json::Value;
 use tokio::io::AsyncWriteExt;
 
 use crate::error::GwsError;
-use crate::formatter::OutputFormat;
+use crate::formatter::{OutputFormat, PageStream};
 
 #[derive(Default)]
 pub(crate) struct Emitter {
@@ -91,10 +91,10 @@ impl Emitter {
         &self,
         value: &Value,
         format: &OutputFormat,
-        first: bool,
+        pages: &mut PageStream,
     ) -> Result<(), GwsError> {
         self.line(&crate::formatter::format_value_paginated(
-            value, format, first,
+            value, format, pages,
         )?)
     }
 

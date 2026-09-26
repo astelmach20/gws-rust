@@ -281,6 +281,8 @@ gwsr auth export --unmasked --output ci-credentials.json
 
 Table output escapes terminal control characters. CSV cells that start with a formula character get a `'` prefix.
 
+With `--page-all` or `--page-items`, `table` and `csv` print one header: the first page with rows fixes the columns (the `--columns` selection, or that page's fields), and every later row is aligned to them, with empty cells for missing fields. A field that first appears on a later page is left out, and a warning on stderr names it; pass `--columns` or use `--format json` to keep it.
+
 ### Errors
 
 On failure stdout is empty, and stderr gets exactly one JSON object:
@@ -399,7 +401,7 @@ EOF
 # {"id":"b","status":404,"body":{"error":{...}}}
 ```
 
-Every call is validated like a normal command (`--allow-unknown-params` and `--allow-unknown-fields` apply). Destructive calls need `--yes`. With `--sanitize`, each result body is screened by Model Armor before it is printed. Failed calls are reported as result lines on stdout. When any call fails, the command exits `1` with reason `batchPartialFailure` after printing every result.
+Every call is validated like a normal command (`--allow-unknown-params` and `--allow-unknown-fields` apply). A line may only carry `id`, `method`, `params` and `json`; any other key, or `json` on a method that takes no request body, is rejected. Destructive calls need `--yes`. With `--sanitize`, each result body is screened by Model Armor before it is printed. Failed calls are reported as result lines on stdout. When any call fails, the command exits `1` with reason `batchPartialFailure` after printing every result.
 
 ## Confirmations
 
@@ -408,7 +410,7 @@ One confirmation gate covers generated methods, `gwsr batch` and every helper.
 | Class | What | Gated |
 |---|---|---|
 | **Destructive** | Any `DELETE` method; `gmail.users.messages.batchDelete`, `calendar.calendars.clear`, `people.people.batchDeleteContacts`, `tasks.tasks.clear`, `drive.files.emptyTrash`; `calendar +delete`, `sheets +clear`, `script +push`, `gmail +filter delete`, `admin +user-suspend`; `drive +share` for owner transfer or writer-level access for a whole domain or anyone with the link | Always |
-| **Outbound** | Actions that notify or grant access to other people, or run code: `gmail +send/+reply/+reply-all/+forward` (not `--draft`), `gmail +unsubscribe`, `chat +send`, `drive +share`, `calendar +insert` with attendees, `+update`, `+rsvp`, `script +run`, `admin +group-add-member`, `admin +user-suspend --unsuspend`, `workflow +file-announce` | Only when `GWSR_REQUIRE_CONFIRM=1` |
+| **Outbound** | Actions that notify or grant access to other people, or run code: `gmail +send/+reply/+reply-all/+forward` (not `--draft`), `gmail +unsubscribe`, `chat +send`, `drive +share`, `calendar +insert` with attendees, `+update`, `+rsvp`, `script +run`, `admin +group-add-member`, `admin +user-suspend --unsuspend`, `workflow +file-announce`; the methods `gmail.users.messages.send`, `gmail.users.drafts.send`, `chat.spaces.messages.create`, `drive.permissions.create`, `drive.permissions.update`, `script.scripts.run`, `directory.members.insert`, `calendar.acl.insert`/`update`/`patch`, `gmail.users.settings.delegates.create`, `gmail.users.settings.updateAutoForwarding`, `gmail.users.settings.forwardingAddresses.create`, `gmail.users.settings.sendAs.create`, `gmail.users.settings.filters.create`, and `calendar.events.insert`/`update`/`patch`/`move`/`quickAdd` when `sendUpdates` is `all`/`externalOnly` or `sendNotifications` is `true` (directly or in `gwsr batch`) | Only when `GWSR_REQUIRE_CONFIRM=1` |
 
 A gated action proceeds without a prompt when `--yes`/`-y` or `--dry-run` is given. On a terminal it asks. Without a terminal it is refused with exit code `7` (`"reason":"confirmationRequired"`) and nothing is sent. Agents should ask the user, then re-run with `--yes`. `GWSR_REQUIRE_CONFIRM` accepts `1`/`true`/`yes`/`on` or `0`/`false`/`no`/`off`; any other value fails every command at startup with a configuration error (exit `8`).
 

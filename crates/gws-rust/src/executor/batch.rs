@@ -49,6 +49,9 @@ use crate::transport::{Credentials, Transport, read_body};
 /// Google's maximum number of calls per batch request.
 pub(crate) const MAX_BATCH: usize = 100;
 
+/// The keys an input line may carry.
+const LINE_KEYS: &[&str] = &["id", "method", "params", "json"];
+
 /// One parsed input line.
 #[derive(Debug)]
 pub(crate) struct BatchCall<'a> {
@@ -58,6 +61,8 @@ pub(crate) struct BatchCall<'a> {
     /// Path and query relative to the API host, e.g. `/drive/v3/files/1?fields=id`.
     pub path_and_query: String,
     pub body: Option<Value>,
+    /// The confirmation gate this call needs, from its method and params.
+    pub impact: Option<crate::confirm::Impact>,
 }
 
 /// `gwsr batch` arguments. `--dry-run` and `--api-version` are global
@@ -203,23 +208,36 @@ pub(crate) fn parse_calls<'a>(
         let obj = entry
             .as_object()
             .ok_or_else(|| at("expected a JSON object".to_string()))?;
+        if obj.contains_key("upload") {
+            return Err(at(
+                "media uploads are not supported in batch requests".to_string()
+            ));
+        }
+        // A misspelled key ("body", "param") would otherwise be dropped and
+        // the call sent without it.
+        if let Some(key) = obj.keys().find(|k| !LINE_KEYS.contains(&k.as_str())) {
+            return Err(at(format!(
+                "unknown key \"{key}\"; expected {}",
+                LINE_KEYS.join(", ")
+            )));
+        }
         let name = obj
             .get("method")
             .and_then(Value::as_str)
             .ok_or_else(|| at("missing string field \"method\"".to_string()))?;
         let method = find_method(doc, name)
             .ok_or_else(|| at(format!("unknown method '{name}' in the {} API", doc.name)))?;
-        if method.supports_media_upload && obj.contains_key("upload") {
-            return Err(at(
-                "media uploads are not supported in batch requests".to_string()
-            ));
-        }
         let params: Map<String, Value> = match obj.get("params") {
             None | Some(Value::Null) => Map::new(),
             Some(Value::Object(m)) => m.clone(),
             Some(_) => return Err(at("\"params\" must be an object".to_string())),
         };
         let body = obj.get("json").filter(|v| !v.is_null()).cloned();
+        if body.is_some() && method.request.is_none() {
+            return Err(at(format!(
+                "{name} does not take a request body; remove \"json\""
+            )));
+        }
         input::validate_params(doc, method, &params, options.allow_unknown_params)
             .map_err(|e| at(e.to_string()))?;
         if let (Some(b), Some(schema)) = (
@@ -252,12 +270,14 @@ pub(crate) fn parse_calls<'a>(
                 "duplicate id \"{id}\"; every call needs a unique id (lines without one get their position)"
             )));
         }
+        let impact = crate::confirm::method_impact(method, &params);
         calls.push(BatchCall {
             id,
             method,
             http,
             path_and_query,
             body,
+            impact,
         });
     }
     if calls.is_empty() {
@@ -463,6 +483,11 @@ pub(crate) async fn run_batch(
         .filter(|c| super::is_destructive(c.method))
         .map(|c| c.id.as_str())
         .collect();
+    let outbound: Vec<&str> = calls
+        .iter()
+        .filter(|c| c.impact == Some(crate::confirm::Impact::Outbound))
+        .map(|c| c.id.as_str())
+        .collect();
     let batch_url = format!(
         "{}batch/{}/{}",
         doc.api_root(options.endpoints.override_base())?,
@@ -487,6 +512,16 @@ pub(crate) async fn run_batch(
                 "run a batch with {} destructive call(s): {}",
                 destructive.len(),
                 destructive.join(", ")
+            ),
+        )?;
+    }
+    if !outbound.is_empty() {
+        options.gate().check(
+            crate::confirm::Impact::Outbound,
+            &format!(
+                "run a batch with {} outbound call(s): {}",
+                outbound.len(),
+                outbound.join(", ")
             ),
         )?;
     }
@@ -691,6 +726,43 @@ mod tests {
             assert!(err.contains(needle), "{line}: {err}");
         }
         assert!(parse_calls(&doc, "\n", &opts()).is_err());
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn rejects_keys_a_call_cannot_use() {
+        let doc = drive_doc("https://www.googleapis.com/");
+        let mut wrong = Vec::new();
+        for (line, needle) in [
+            // A misspelled or misplaced key must not be silently dropped: the
+            // call would go out without the body or parameters it was given.
+            (
+                "{\"method\":\"files.get\",\"params\":{\"fileId\":\"1\"},\"body\":{\"x\":1}}",
+                "unknown key \"body\"",
+            ),
+            (
+                "{\"method\":\"files.get\",\"parms\":{\"fileId\":\"1\"},\"params\":{\"fileId\":\"1\"}}",
+                "unknown key \"parms\"",
+            ),
+            // `upload` is never supported, not only on media methods.
+            (
+                "{\"method\":\"files.get\",\"params\":{\"fileId\":\"1\"},\"upload\":\"f.txt\"}",
+                "media uploads are not supported",
+            ),
+            // Like a normal command, a method without a request body takes no `json`.
+            (
+                "{\"method\":\"files.get\",\"params\":{\"fileId\":\"1\"},\"json\":{\"name\":\"x\"}}",
+                "does not take a request body",
+            ),
+        ] {
+            let err = parse_calls(&doc, line, &opts())
+                .map(|calls| format!("accepted, body = {:?}", calls[0].body))
+                .unwrap_or_else(|e| e.to_string());
+            if !err.contains(needle) {
+                wrong.push(format!("{line}\n  expected {needle}, got: {err}"));
+            }
+        }
+        assert!(wrong.is_empty(), "{}", wrong.join("\n"));
     }
 
     #[test]
