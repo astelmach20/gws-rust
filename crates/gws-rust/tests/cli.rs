@@ -1185,6 +1185,270 @@ fn dotenv_files_are_never_loaded() {
         .success();
 }
 
+// ── Outbound confirmation for generated methods ─────────────────────────
+
+/// Seed a Gmail v1 Discovery document with the two raw send methods.
+fn seed_gmail_send(env: &Env) {
+    let send = |id: &str, path: &str, schema: &str| {
+        json!({
+            "id": id,
+            "httpMethod": "POST",
+            "path": path,
+            "parameters": {"userId": {"type": "string", "location": "path", "required": true}},
+            "parameterOrder": ["userId"],
+            "request": {"$ref": schema},
+            "response": {"$ref": schema},
+            "scopes": ["https://www.googleapis.com/auth/gmail.send"]
+        })
+    };
+    let doc = json!({
+        "name": "gmail",
+        "version": "v1",
+        "rootUrl": "https://gmail.googleapis.com/",
+        "servicePath": "",
+        "batchPath": "batch/gmail/v1",
+        "schemas": {
+            "Message": {"id": "Message", "type": "object", "properties": {"raw": {"type": "string"}, "id": {"type": "string"}}},
+            "Draft": {"id": "Draft", "type": "object", "properties": {"id": {"type": "string"}}}
+        },
+        "resources": {"users": {"resources": {
+            "messages": {"methods": {"send": send("gmail.users.messages.send", "gmail/v1/users/{userId}/messages/send", "Message")}},
+            "drafts": {"methods": {"send": send("gmail.users.drafts.send", "gmail/v1/users/{userId}/drafts/send", "Draft")}}
+        }}}
+    });
+    std::fs::write(
+        env.cache_dir().join("discovery/gmail+v1.json"),
+        serde_json::to_string(&doc).unwrap(),
+    )
+    .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn require_confirm_gates_raw_send_methods_and_batch() {
+    use wiremock::matchers::any;
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    Mock::given(any())
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id": "sent"})))
+        .mount(&server)
+        .await;
+    let env = Env::new();
+    seed_gmail_send(&env);
+    let cmd = |require: &str| {
+        let mut c = env.cmd();
+        c.env("GWSR_TOKEN", "test-token")
+            .env("GWSR_API_BASE_URL", server.uri())
+            .env("GWSR_REQUIRE_CONFIRM", require);
+        c
+    };
+    let send_draft = [
+        "gmail",
+        "users",
+        "drafts",
+        "send",
+        "--params",
+        r#"{"userId":"me"}"#,
+        "--json",
+        r#"{"id":"d1"}"#,
+    ];
+    let send_raw = [
+        "gmail",
+        "users",
+        "messages",
+        "send",
+        "--params",
+        r#"{"userId":"me"}"#,
+        "--json",
+        r#"{"raw":"eA"}"#,
+    ];
+
+    // Under GWSR_REQUIRE_CONFIRM=1, sending mail through a generated method
+    // is refused without --yes, exactly like `gmail +send`.
+    for args in [&send_draft, &send_raw] {
+        let out = cmd("1").args(args).output().unwrap();
+        assert_eq!(out.status.code(), Some(7), "{args:?}: {}", stderr_of(&out));
+        assert_eq!(
+            stderr_error(&out)["error"]["reason"],
+            "confirmationRequired"
+        );
+    }
+    // ... and through `gwsr batch`.
+    let out = cmd("1")
+        .args(["batch", "gmail"])
+        .write_stdin(
+            r#"{"id":"a","method":"users.drafts.send","params":{"userId":"me"},"json":{"id":"d1"}}"#,
+        )
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(7), "{}", stderr_of(&out));
+    assert!(
+        server.received_requests().await.unwrap().is_empty(),
+        "nothing may be sent before confirmation"
+    );
+
+    // --yes confirms; without the policy the send is not gated.
+    let mut with_yes = send_draft.to_vec();
+    with_yes.push("--yes");
+    cmd("1").args(&with_yes).assert().success();
+    cmd("0").args(send_draft).assert().success();
+    assert_eq!(server.received_requests().await.unwrap().len(), 2);
+}
+
+/// Seed a Calendar v3 Discovery document with `events.insert` (which can
+/// email attendees) and `acl.insert` (which shares the calendar).
+fn seed_calendar_outbound(env: &Env) {
+    let notify_params = json!({
+        "calendarId": {"type": "string", "location": "path", "required": true},
+        "sendUpdates": {"type": "string", "location": "query", "enum": ["all", "externalOnly", "none"]},
+        "sendNotifications": {"type": "boolean", "location": "query"}
+    });
+    let doc = json!({
+        "name": "calendar",
+        "version": "v3",
+        "rootUrl": "https://www.googleapis.com/",
+        "servicePath": "calendar/v3/",
+        "batchPath": "batch/calendar/v3",
+        "schemas": {
+            "Event": {"id": "Event", "type": "object", "properties": {"id": {"type": "string"}, "summary": {"type": "string"}}},
+            "AclRule": {"id": "AclRule", "type": "object", "properties": {"id": {"type": "string"}, "role": {"type": "string"}}}
+        },
+        "resources": {
+            "events": {"methods": {"insert": {
+                "id": "calendar.events.insert",
+                "httpMethod": "POST",
+                "path": "calendars/{calendarId}/events",
+                "parameters": notify_params,
+                "parameterOrder": ["calendarId"],
+                "request": {"$ref": "Event"},
+                "response": {"$ref": "Event"},
+                "scopes": ["https://www.googleapis.com/auth/calendar"]
+            }}},
+            "acl": {"methods": {"insert": {
+                "id": "calendar.acl.insert",
+                "httpMethod": "POST",
+                "path": "calendars/{calendarId}/acl",
+                "parameters": {
+                    "calendarId": {"type": "string", "location": "path", "required": true},
+                    "sendNotifications": {"type": "boolean", "location": "query"}
+                },
+                "parameterOrder": ["calendarId"],
+                "request": {"$ref": "AclRule"},
+                "response": {"$ref": "AclRule"},
+                "scopes": ["https://www.googleapis.com/auth/calendar"]
+            }}}
+        }
+    });
+    std::fs::write(
+        env.cache_dir().join("discovery/calendar+v3.json"),
+        serde_json::to_string(&doc).unwrap(),
+    )
+    .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn require_confirm_gates_calendar_sharing_and_attendee_notifications() {
+    use wiremock::matchers::any;
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    Mock::given(any())
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id": "x"})))
+        .mount(&server)
+        .await;
+    let env = Env::new();
+    seed_calendar_outbound(&env);
+    let run = |args: &[&str]| {
+        env.cmd()
+            .env("GWSR_TOKEN", "test-token")
+            .env("GWSR_API_BASE_URL", server.uri())
+            .env("GWSR_REQUIRE_CONFIRM", "1")
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    let insert = |params: &str| {
+        vec![
+            "calendar".to_string(),
+            "events".to_string(),
+            "insert".to_string(),
+            "--params".to_string(),
+            params.to_string(),
+            "--json".to_string(),
+            r#"{"summary":"S"}"#.to_string(),
+        ]
+    };
+    let refused = |out: &std::process::Output| {
+        assert_eq!(out.status.code(), Some(7), "{}", stderr_of(out));
+        assert_eq!(stderr_error(out)["error"]["reason"], "confirmationRequired");
+    };
+
+    // Sharing a calendar grants access: always outbound.
+    let share = [
+        "calendar",
+        "acl",
+        "insert",
+        "--params",
+        r#"{"calendarId":"primary"}"#,
+        "--json",
+        r#"{"role":"reader"}"#,
+    ];
+    refused(&run(&share));
+
+    // An event write is outbound only when it would email attendees.
+    for params in [
+        r#"{"calendarId":"primary","sendUpdates":"all"}"#,
+        r#"{"calendarId":"primary","sendUpdates":"externalOnly"}"#,
+        r#"{"calendarId":"primary","sendNotifications":true}"#,
+    ] {
+        let args = insert(params);
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        refused(&run(&args));
+    }
+    assert!(
+        server.received_requests().await.unwrap().is_empty(),
+        "nothing may be sent before confirmation"
+    );
+
+    // No notification requested (the API default), or explicitly none:
+    // not gated.
+    for params in [
+        r#"{"calendarId":"primary"}"#,
+        r#"{"calendarId":"primary","sendUpdates":"none"}"#,
+        r#"{"calendarId":"primary","sendNotifications":false}"#,
+    ] {
+        let args = insert(params);
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        let out = run(&args);
+        assert!(out.status.success(), "{params}: {}", stderr_of(&out));
+    }
+    assert_eq!(server.received_requests().await.unwrap().len(), 3);
+
+    // --yes confirms both kinds.
+    let mut share_yes = share.to_vec();
+    share_yes.push("--yes");
+    assert!(run(&share_yes).status.success());
+    let mut args = insert(r#"{"calendarId":"primary","sendUpdates":"all"}"#);
+    args.push("--yes".to_string());
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    let out = run(&args);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+
+    // gwsr batch applies the same per-call rule.
+    let out = env
+        .cmd()
+        .env("GWSR_TOKEN", "test-token")
+        .env("GWSR_API_BASE_URL", server.uri())
+        .env("GWSR_REQUIRE_CONFIRM", "1")
+        .args(["batch", "calendar"])
+        .write_stdin(
+            r#"{"id":"a","method":"events.insert","params":{"calendarId":"primary","sendUpdates":"all"},"json":{"summary":"S"}}"#,
+        )
+        .output()
+        .unwrap();
+    refused(&out);
+}
+
 // ── Model Armor on generated methods and batch ──────────────────────────
 
 /// Seed a Gmail v1 Discovery document with `users.messages.get`.

@@ -58,6 +58,8 @@ pub(crate) struct BatchCall<'a> {
     /// Path and query relative to the API host, e.g. `/drive/v3/files/1?fields=id`.
     pub path_and_query: String,
     pub body: Option<Value>,
+    /// The confirmation gate this call needs, from its method and params.
+    pub impact: Option<crate::confirm::Impact>,
 }
 
 /// `gwsr batch` arguments. `--dry-run` and `--api-version` are global
@@ -245,12 +247,14 @@ pub(crate) fn parse_calls<'a>(
         if id.contains(['\r', '\n', '<', '>']) {
             return Err(at("\"id\" must not contain CR, LF, '<' or '>'".to_string()));
         }
+        let impact = crate::confirm::method_impact(method, &params);
         calls.push(BatchCall {
             id,
             method,
             http,
             path_and_query,
             body,
+            impact,
         });
     }
     if calls.is_empty() {
@@ -412,6 +416,11 @@ pub(crate) async fn run_batch(
         .filter(|c| super::is_destructive(c.method))
         .map(|c| c.id.as_str())
         .collect();
+    let outbound: Vec<&str> = calls
+        .iter()
+        .filter(|c| c.impact == Some(crate::confirm::Impact::Outbound))
+        .map(|c| c.id.as_str())
+        .collect();
     let batch_url = format!(
         "{}batch/{}/{}",
         doc.api_root(options.endpoints.override_base())?,
@@ -436,6 +445,16 @@ pub(crate) async fn run_batch(
                 "run a batch with {} destructive call(s): {}",
                 destructive.len(),
                 destructive.join(", ")
+            ),
+        )?;
+    }
+    if !outbound.is_empty() {
+        options.gate().check(
+            crate::confirm::Impact::Outbound,
+            &format!(
+                "run a batch with {} outbound call(s): {}",
+                outbound.len(),
+                outbound.join(", ")
             ),
         )?;
     }
