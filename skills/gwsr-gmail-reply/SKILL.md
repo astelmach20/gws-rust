@@ -52,6 +52,7 @@ gwsr gmail +reply --message-id 18f1a2b3c4d --body 'Draft reply' --draft
 
 - Sets In-Reply-To, References, and threadId, and quotes the original message.
 - With --html, inline images in the quoted message are preserved via cid: references.
+- Replying to a message you sent goes to its original To recipients, as in Gmail.
 - For reply-all, use +reply-all instead.
 
 ## See Also
