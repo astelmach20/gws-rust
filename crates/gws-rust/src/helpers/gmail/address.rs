@@ -61,9 +61,15 @@ impl Mailbox {
             };
             return Self { name, email };
         }
+        // Bare addr-spec, possibly with RFC 5322 comments. The legacy
+        // `alice@example.com (Alice Smith)` form carries the display name in
+        // the comment; the comment must not end up in the address.
+        let (addr, comment) = strip_comments(raw);
         Self {
-            name: None,
-            email: sanitize_control_chars(raw),
+            name: comment
+                .map(|c| sanitize_control_chars(c.trim()))
+                .filter(|c| !c.is_empty()),
+            email: sanitize_control_chars(addr.trim()),
         }
     }
 
@@ -112,31 +118,193 @@ pub(super) fn strip_angle_brackets(id: &str) -> &str {
         .unwrap_or(id.trim())
 }
 
-/// Split an RFC 5322 mailbox list on commas, respecting quoted strings.
+/// Bare message IDs from a `Message-ID`, `References` or `In-Reply-To` value.
+///
+/// RFC 5322 §3.6.4 allows IDs with no white space between them
+/// (`<a@x><b@x>`) and comments around them (`<a@x> (relay)`), so IDs are the
+/// `<...>` tokens outside comments. A value with no angle brackets at all
+/// (non-conforming senders) is split on white space and commas instead.
+pub(super) fn parse_msg_ids(value: &str) -> Vec<String> {
+    let mut outside = String::with_capacity(value.len());
+    let mut depth = 0usize;
+    let mut escaped = false;
+    for c in value.chars() {
+        if depth > 0 {
+            match c {
+                _ if escaped => escaped = false,
+                '\\' => escaped = true,
+                '(' => depth += 1,
+                ')' => depth -= 1,
+                _ => {}
+            }
+            continue;
+        }
+        if c == '(' {
+            depth = 1;
+            outside.push(' ');
+        } else {
+            outside.push(c);
+        }
+    }
+    let bare = |id: &str| id.trim().to_string();
+    if !outside.contains('<') {
+        return outside
+            .split(|c: char| c.is_whitespace() || c == ',')
+            .filter(|t| !t.is_empty())
+            .map(bare)
+            .collect();
+    }
+    let mut ids = Vec::new();
+    let mut rest = outside.as_str();
+    while let Some(open) = rest.find('<') {
+        let after = &rest[open + 1..];
+        let Some(close) = after.find(['<', '>']) else {
+            break;
+        };
+        if after.as_bytes()[close] == b'>' {
+            let id = bare(&after[..close]);
+            if !id.is_empty() {
+                ids.push(id);
+            }
+            rest = &after[close + 1..];
+        } else {
+            // A `<` with no `>` before the next `<`: drop the fragment.
+            rest = &after[close..];
+        }
+    }
+    ids
+}
+
+/// Remove RFC 5322 comments (`(...)`, which may nest and contain quoted
+/// pairs) from a mailbox, outside quoted strings.
+///
+/// Returns the mailbox without comments and the text of the first comment.
+/// Input with unbalanced parentheses is returned unchanged, so nothing is
+/// silently dropped.
+fn strip_comments(raw: &str) -> (String, Option<String>) {
+    let mut out = String::with_capacity(raw.len());
+    let mut first_comment: Option<String> = None;
+    let mut current = String::new();
+    let mut depth = 0usize;
+    let mut in_quotes = false;
+    let mut escaped = false;
+
+    for ch in raw.chars() {
+        if depth > 0 {
+            if escaped {
+                escaped = false;
+                current.push(ch);
+                continue;
+            }
+            match ch {
+                '\\' => escaped = true,
+                '(' => {
+                    depth += 1;
+                    current.push(ch);
+                }
+                ')' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        first_comment.get_or_insert_with(|| std::mem::take(&mut current));
+                        current.clear();
+                        out.push(' ');
+                    } else {
+                        current.push(ch);
+                    }
+                }
+                _ => current.push(ch),
+            }
+            continue;
+        }
+        if in_quotes {
+            match ch {
+                _ if escaped => escaped = false,
+                '\\' => escaped = true,
+                '"' => in_quotes = false,
+                _ => {}
+            }
+            out.push(ch);
+            continue;
+        }
+        match ch {
+            '(' => depth = 1,
+            '"' => {
+                in_quotes = true;
+                out.push(ch);
+            }
+            _ => out.push(ch),
+        }
+    }
+
+    if depth > 0 || in_quotes {
+        return (raw.to_string(), None);
+    }
+    (out, first_comment)
+}
+
+/// Split an RFC 5322 mailbox list on commas, respecting quoted strings and
+/// comments (a comma inside `(...)` does not separate mailboxes).
+///
+/// Parentheses that cannot be a comment (never closed, or spanning an
+/// angle-addr, as with an emoticon in an unquoted display name) are taken
+/// literally for the rest of that mailbox, so no recipient is merged into
+/// its neighbour and dropped.
 /// Returns raw string slices — use `Mailbox::parse_list` for structured parsing.
 pub(super) fn split_raw_mailbox_list(header: &str) -> Vec<&str> {
     let mut result = Vec::new();
     let mut in_quotes = false;
     let mut start = 0;
     let mut prev_backslash = false;
+    let mut comment_depth = 0usize;
+    // Byte offset of the `(` that opened the current top-level comment.
+    let mut comment_open = 0;
+    // Set after a bad comment: parentheses are literal until the next comma.
+    let mut literal_parens = false;
+    let mut i = 0;
 
-    for (i, ch) in header.char_indices() {
+    loop {
+        let Some(ch) = header[i..].chars().next() else {
+            if comment_depth == 0 {
+                break;
+            }
+            // Unclosed comment: rescan it with literal parentheses.
+            (i, comment_depth, literal_parens) = (comment_open + 1, 0, true);
+            prev_backslash = false;
+            continue;
+        };
+        let next = i + ch.len_utf8();
         match ch {
-            '\\' if in_quotes => {
+            '\\' if in_quotes || comment_depth > 0 => {
                 prev_backslash = !prev_backslash;
+                i = next;
                 continue;
             }
-            '"' if !prev_backslash => in_quotes = !in_quotes,
-            ',' if !in_quotes => {
+            '"' if !prev_backslash && comment_depth == 0 => in_quotes = !in_quotes,
+            '(' if !literal_parens && !prev_backslash && !in_quotes => {
+                if comment_depth == 0 {
+                    comment_open = i;
+                }
+                comment_depth += 1;
+            }
+            ')' if !prev_backslash && comment_depth > 0 => comment_depth -= 1,
+            '<' | '>' if comment_depth > 0 => {
+                // Not a comment: rescan it with literal parentheses.
+                (i, comment_depth, literal_parens) = (comment_open + 1, 0, true);
+                prev_backslash = false;
+                continue;
+            }
+            ',' if !in_quotes && comment_depth == 0 => {
                 let token = header[start..i].trim();
                 if !token.is_empty() {
                     result.push(token);
                 }
-                start = i + 1;
+                start = next;
+                literal_parens = false;
             }
             _ => {}
         }
         prev_backslash = false;
+        i = next;
     }
 
     let token = header[start..].trim();
@@ -333,6 +501,73 @@ mod tests {
     }
 
     #[test]
+    fn test_mailbox_parse_rfc5322_comments() {
+        // Legacy form: the comment carries the display name.
+        let m = Mailbox::parse("alice@example.com (Alice Smith)");
+        assert_eq!(m.email, "alice@example.com");
+        assert_eq!(m.name.as_deref(), Some("Alice Smith"));
+
+        // A comment after an angle-addr is dropped; the real name wins.
+        let m = Mailbox::parse("Alice <alice@example.com> (work)");
+        assert_eq!(m.email, "alice@example.com");
+        assert_eq!(m.name.as_deref(), Some("Alice"));
+
+        // Nested comments and escaped parens inside comments.
+        let m = Mailbox::parse(r"bob@example.com (Bob (the \) builder))");
+        assert_eq!(m.email, "bob@example.com");
+
+        // Parentheses inside a quoted display name are not a comment.
+        let m = Mailbox::parse(r#""Rich (CORP)" <rich@example.com>"#);
+        assert_eq!(m.name.as_deref(), Some("Rich (CORP)"));
+        assert_eq!(m.email, "rich@example.com");
+
+        // A comma inside a comment does not split the list.
+        let list = Mailbox::parse_list("bob@example.com (Smith, Bob), carol@example.com");
+        let emails: Vec<&str> = list.iter().map(|m| m.email.as_str()).collect();
+        assert_eq!(emails, vec!["bob@example.com", "carol@example.com"]);
+
+        // Unbalanced parentheses are not comments: no recipient is dropped,
+        // and parentheses in a display name are kept.
+        let list = Mailbox::parse_list("Frown :-( <a@example.com>, Smile :-) <b@example.com>");
+        let emails: Vec<&str> = list.iter().map(|m| m.email.as_str()).collect();
+        assert_eq!(emails, vec!["a@example.com", "b@example.com"]);
+        assert_eq!(list[0].name.as_deref(), Some("Frown :-("));
+        let m = Mailbox::parse("Malo (Work) <malo@example.com>");
+        assert_eq!(m.name.as_deref(), Some("Malo (Work)"));
+    }
+
+    /// Every combination of mailbox forms keeps every recipient's address.
+    #[test]
+    fn test_mailbox_parse_list_never_drops_or_mangles_recipients() {
+        let forms: &[fn(usize) -> String] = &[
+            |i| format!("u{i}@example.com"),
+            |i| format!("<u{i}@example.com>"),
+            |i| format!("Name {i} <u{i}@example.com>"),
+            |i| format!("\"Last, First ({i})\" <u{i}@example.com>"),
+            |i| format!("u{i}@example.com (Legacy, Name {i})"),
+            |i| format!("Paren ({i}) <u{i}@example.com>"),
+            |i| format!("Sad :-( {i} <u{i}@example.com>"),
+            |i| format!("Happy :-) {i} <u{i}@example.com>"),
+        ];
+        for a in 0..forms.len() {
+            for b in 0..forms.len() {
+                for c in 0..forms.len() {
+                    let raw = [forms[a](0), forms[b](1), forms[c](2)].join(", ");
+                    let emails: Vec<String> = Mailbox::parse_list(&raw)
+                        .into_iter()
+                        .map(|m| m.email)
+                        .collect();
+                    assert_eq!(
+                        emails,
+                        vec!["u0@example.com", "u1@example.com", "u2@example.com"],
+                        "input: {raw}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
     fn test_mailbox_display() {
         let bare = Mailbox {
             name: None,
@@ -380,6 +615,19 @@ mod tests {
                 "Display name with {description} must be quoted: {to_line}"
             );
         }
+    }
+
+    #[test]
+    fn test_parse_msg_ids() {
+        assert_eq!(parse_msg_ids("<a@x><b@x>"), ["a@x", "b@x"]);
+        assert_eq!(parse_msg_ids(" <a@x>\r\n\t<b@x> "), ["a@x", "b@x"]);
+        assert_eq!(parse_msg_ids("<a@x> (relay <c@x>)"), ["a@x"]);
+        assert_eq!(parse_msg_ids("<a@x>,<b@x>"), ["a@x", "b@x"]);
+        assert_eq!(parse_msg_ids("a@x b@x,c@x"), ["a@x", "b@x", "c@x"]);
+        assert_eq!(parse_msg_ids("<broken <a@x>"), ["a@x"]);
+        assert_eq!(parse_msg_ids("<a@x> <unterminated"), ["a@x"]);
+        assert!(parse_msg_ids("<> ( <x@y> )").is_empty());
+        assert!(parse_msg_ids("").is_empty());
     }
 
     #[test]
