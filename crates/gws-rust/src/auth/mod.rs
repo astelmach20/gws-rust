@@ -467,7 +467,8 @@ pub fn scopes_for_method(
 /// Returns the project ID used for quota and billing (`x-goog-user-project`).
 ///
 /// Priority: `GWSR_PROJECT_ID`, then the OAuth client configuration's project,
-/// then `quota_project_id` from Application Default Credentials.
+/// then `quota_project_id` from Application Default Credentials when ADC is
+/// the credential in use.
 ///
 /// # Errors
 ///
@@ -478,21 +479,24 @@ pub fn scopes_for_method(
 /// [`crate::env`].)
 /// `GWSR_NO_QUOTA_PROJECT` / `--no-quota-project` skip the lookup entirely.
 pub fn get_quota_project() -> Result<Option<String>, GwsError> {
-    let adc = std::env::var_os("GOOGLE_APPLICATION_CREDENTIALS")
-        .filter(|v| !v.is_empty())
-        .map(std::path::PathBuf::from)
-        .or_else(|| {
-            dirs::home_dir().map(|h| {
-                h.join(".config")
-                    .join("gcloud")
-                    .join("application_default_credentials.json")
-            })
-        });
+    let env = AuthEnv::from_process().map_err(to_gws_error)?;
     resolve_quota_project(
         crate::env::get()?.project_id.clone(),
         client_config::load_saved,
-        adc.as_deref(),
+        adc_quota_source(&env)?.as_deref(),
     )
+}
+
+/// The ADC file whose `quota_project_id` may be used: only the one that is
+/// this invocation's credential. A `quota_project_id` belongs to the ADC
+/// identity; sending it with a profile, a credentials file or a token bills
+/// (and permission-checks) a project unrelated to that credential.
+fn adc_quota_source(env: &AuthEnv) -> Result<Option<std::path::PathBuf>, GwsError> {
+    match env.source() {
+        Ok(CredentialSource::AdcEnv(path) | CredentialSource::AdcWellKnown(path)) => Ok(Some(path)),
+        Ok(_) | Err(AuthError::NoCredentials) => Ok(None),
+        Err(e) => Err(to_gws_error(e.into())),
+    }
 }
 
 fn resolve_quota_project(
@@ -586,6 +590,76 @@ mod tests {
             resolve_quota_project(None, || Ok(None), None).unwrap(),
             None
         );
+    }
+
+    /// The ADC file's `quota_project_id` belongs to the ADC identity. It must
+    /// not be sent for a gwsr profile, a credentials file or a token.
+    #[test]
+    fn adc_quota_project_only_applies_to_adc_credentials() {
+        let dir = tempfile::tempdir().unwrap();
+        let adc = dir.path().join("adc.json");
+        crate::fs_util::atomic_write(
+            &adc,
+            br#"{"type":"authorized_user","client_id":"c","client_secret":"s","refresh_token":"r","quota_project_id":"unrelated-adc-project"}"#,
+        )
+        .unwrap();
+        let (ks, _) = memory_keystore(dir.path());
+        let mut env = AuthEnv::new(
+            dir.path().to_path_buf(),
+            ActiveProfile {
+                name: "default".into(),
+                source: ProfileSource::Default,
+            },
+            ProfilePaths::new(dir.path(), "default"),
+        )
+        .with_keystore(ks);
+        env.adc_well_known = Some(adc.clone());
+        let quota = |env: &AuthEnv| {
+            resolve_quota_project(
+                None,
+                || Ok(Some(client_with_project(None))),
+                adc_quota_source(env).unwrap().as_deref(),
+            )
+            .unwrap()
+        };
+
+        // ADC is the credential: its quota project applies.
+        assert_eq!(quota(&env).as_deref(), Some("unrelated-adc-project"));
+
+        // A logged-in profile (no project_id in client_secret.json): none.
+        env.paths.ensure_dir().unwrap();
+        let ct = env
+            .keystore()
+            .encrypt(
+                Purpose::Credentials,
+                br#"{"type":"authorized_user","client_id":"c","client_secret":"s","refresh_token":"r"}"#,
+            )
+            .unwrap();
+        crate::fs_util::atomic_write(&env.paths.credentials, &ct).unwrap();
+        assert_eq!(
+            quota(&env),
+            None,
+            "profile credentials must not use ADC's quota project"
+        );
+
+        // GWSR_TOKEN: none either.
+        env.token = Some(secrecy::SecretString::from("ya29.t".to_string()));
+        assert_eq!(
+            quota(&env),
+            None,
+            "a raw token must not use ADC's quota project"
+        );
+
+        // No credentials at all: nothing to bill.
+        let empty = AuthEnv::new(
+            dir.path().join("empty"),
+            ActiveProfile {
+                name: "default".into(),
+                source: ProfileSource::Default,
+            },
+            ProfilePaths::new(&dir.path().join("empty"), "default"),
+        );
+        assert_eq!(adc_quota_source(&empty).unwrap(), None);
     }
 
     #[test]
