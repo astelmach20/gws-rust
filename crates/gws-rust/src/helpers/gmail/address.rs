@@ -52,12 +52,7 @@ impl Mailbox {
             let name = if name_part.is_empty() {
                 None
             } else {
-                // Strip surrounding quotes: "Alice Smith" → Alice Smith
-                let unquoted = name_part
-                    .strip_prefix('"')
-                    .and_then(|s| s.strip_suffix('"'))
-                    .unwrap_or(name_part);
-                Some(sanitize_control_chars(unquoted))
+                Some(sanitize_control_chars(&unquote_display_name(name_part)))
             };
             return Self { name, email };
         }
@@ -92,6 +87,31 @@ impl std::fmt::Display for Mailbox {
             None => write!(f, "{}", self.email),
         }
     }
+}
+
+/// Decode a display name that is a single RFC 5322 quoted-string:
+/// `"Bob \"B\" O\\N"` → `Bob "B" O\N`. mail-builder re-quotes and re-escapes
+/// on output, so leaving the backslashes in would double-escape them.
+/// Anything else (e.g. `"A" and "B"`) is returned unchanged.
+fn unquote_display_name(name: &str) -> String {
+    let Some(inner) = name.strip_prefix('"') else {
+        return name.to_string();
+    };
+    let mut decoded = String::with_capacity(inner.len());
+    let mut chars = inner.char_indices();
+    while let Some((i, ch)) = chars.next() {
+        match ch {
+            '\\' => match chars.next() {
+                Some((_, escaped)) => decoded.push(escaped),
+                None => break,
+            },
+            // The closing quote must end the name for it to be one quoted-string.
+            '"' if i + 1 == inner.len() => return decoded,
+            '"' => break,
+            _ => decoded.push(ch),
+        }
+    }
+    name.to_string()
 }
 
 /// Convert a single `Mailbox` to a `mail_builder::Address`.
@@ -330,6 +350,30 @@ mod tests {
         let list = Mailbox::parse_list("Alice <>, bob@example.com");
         assert_eq!(list.len(), 1);
         assert_eq!(list[0].email, "bob@example.com");
+    }
+
+    /// Quoted-pairs (`\"`, `\\`) in a quoted display name are decoded when
+    /// parsing, so re-serializing the mailbox reproduces the original header
+    /// instead of escaping the backslashes a second time.
+    #[test]
+    fn test_mailbox_parse_quoted_pairs_round_trip() {
+        let header = r#""Bob \"The Builder\" O\\Neil" <bob@example.com>"#;
+        let m = Mailbox::parse(header);
+        assert_eq!(m.name.as_deref(), Some(r#"Bob "The Builder" O\Neil"#));
+        assert_eq!(m.email, "bob@example.com");
+
+        let raw = mail_builder::MessageBuilder::new()
+            .to(to_mb_address(&m))
+            .subject("test")
+            .text_body("body")
+            .write_to_string()
+            .unwrap();
+        assert_eq!(extract_header(&raw, "To").as_deref(), Some(header));
+
+        // A name that merely starts and ends with quotes but is not one
+        // quoted string is left alone.
+        let m = Mailbox::parse(r#""A" and "B" <ab@example.com>"#);
+        assert_eq!(m.name.as_deref(), Some(r#""A" and "B""#));
     }
 
     #[test]
