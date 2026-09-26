@@ -229,6 +229,17 @@ fn resolve_pair(
 /// (with instructions for every way to provide one).
 pub fn resolve() -> anyhow::Result<ClientConfig> {
     let path = client_config_path()?;
+    resolve_optional()?.ok_or_else(|| anyhow::anyhow!("{}", no_client_message(&path)))
+}
+
+/// Like [`resolve`], but `Ok(None)` when no client is configured at all
+/// (`gwsr auth status` reports that instead of failing).
+///
+/// # Errors
+///
+/// A half-configured source or an unreadable saved file.
+pub fn resolve_optional() -> anyhow::Result<Option<ClientConfig>> {
+    let path = client_config_path()?;
     let saved = load_from(&path)?;
     let vars = crate::env::get()?;
     let env = resolve_pair(
@@ -236,17 +247,26 @@ pub fn resolve() -> anyhow::Result<ClientConfig> {
         vars.client_secret.clone(),
         "only one of GWSR_CLIENT_ID / GWSR_CLIENT_SECRET is set; set both or neither",
     )?;
-    resolve_from(env, saved, builtin_client()?, &path)
+    Ok(select(env, saved, builtin_client()?))
 }
 
+#[cfg(test)]
 fn resolve_from(
     env: Option<(String, SecretString)>,
     saved: Option<ClientConfig>,
     builtin: Option<(String, SecretString)>,
     path: &Path,
 ) -> anyhow::Result<ClientConfig> {
+    select(env, saved, builtin).ok_or_else(|| anyhow::anyhow!("{}", no_client_message(path)))
+}
+
+fn select(
+    env: Option<(String, SecretString)>,
+    saved: Option<ClientConfig>,
+    builtin: Option<(String, SecretString)>,
+) -> Option<ClientConfig> {
     if let Some((client_id, client_secret)) = env {
-        return Ok(ClientConfig {
+        return Some(ClientConfig {
             client_id,
             client_secret,
             project_id: saved.and_then(|s| s.project_id),
@@ -254,17 +274,14 @@ fn resolve_from(
         });
     }
     if let Some(saved) = saved {
-        return Ok(saved);
+        return Some(saved);
     }
-    if let Some((client_id, client_secret)) = builtin {
-        return Ok(ClientConfig {
-            client_id,
-            client_secret,
-            project_id: None,
-            source: ClientSource::BuiltIn,
-        });
-    }
-    anyhow::bail!("{}", no_client_message(path))
+    builtin.map(|(client_id, client_secret)| ClientConfig {
+        client_id,
+        client_secret,
+        project_id: None,
+        source: ClientSource::BuiltIn,
+    })
 }
 
 /// Instructions for providing an OAuth client.
