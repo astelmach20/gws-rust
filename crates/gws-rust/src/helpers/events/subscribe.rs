@@ -325,6 +325,8 @@ struct Created {
 async fn create_resources(
     config: &SubscribeConfig,
     pubsub: &PubSubClient,
+    rest: &Transport,
+    events_base: &str,
 ) -> Result<Created, GwsError> {
     let target = config
         .target
@@ -347,27 +349,39 @@ async fn create_resources(
         "creating_subscription",
         json!({ "subscription": sub }),
     );
-    pubsub.create_subscription(&sub, &topic).await?;
+    if let Err(e) = pubsub.create_subscription(&sub, &topic).await {
+        return Err(roll_back(pubsub, &[&topic], e).await);
+    }
 
-    let scopes = scopes_for_event_types(&config.event_types)?;
-    let rest = Transport::for_scopes(&scopes).await?;
     let body = json!({
         "targetResource": target,
         "eventTypes": config.event_types,
         "notificationEndpoint": { "pubsubTopic": topic },
         "payloadOptions": { "includeResource": true },
     });
-    let op = rest
+    let op = match rest
         .json(
             reqwest::Method::POST,
-            &format!("{WORKSPACE_EVENTS_API_BASE}/subscriptions"),
+            &format!("{events_base}/subscriptions"),
             &[],
             Some(&body),
             Idempotency::NonIdempotent,
             "Failed to create Workspace Events subscription",
         )
-        .await?;
-    let workspace_subscription = subscription_from_operation(&op)?;
+        .await
+    {
+        Ok(op) => op,
+        Err(e) => return Err(roll_back(pubsub, &[&sub, &topic], e).await),
+    };
+    let workspace_subscription = match subscription_from_operation(&op) {
+        Ok(name) => name,
+        // A failed operation created nothing that publishes to the topic.
+        // A still-running one may yet deliver there, so keep the resources.
+        Err(e) if op.get("error").is_some() => {
+            return Err(roll_back(pubsub, &[&sub, &topic], e).await);
+        }
+        Err(e) => return Err(e),
+    };
     emit_diagnostic(
         "info",
         "subscribed",
@@ -378,6 +392,20 @@ async fn create_resources(
         subscription: sub,
         workspace_subscription,
     })
+}
+
+/// Delete the Pub/Sub resources created by a setup that failed at a later
+/// step: nothing will ever publish to them. A failed deletion is reported
+/// alongside the original error, which is returned.
+async fn roll_back(pubsub: &PubSubClient, names: &[&str], error: GwsError) -> GwsError {
+    if let Err(c) = cleanup_resources(pubsub, names).await {
+        emit_diagnostic(
+            "error",
+            "cleanup_failed",
+            json!({ "message": c.to_string() }),
+        );
+    }
+    error
 }
 
 fn dry_run_plan(matches: &ArgMatches, config: &SubscribeConfig) -> Result<(), GwsError> {
@@ -417,7 +445,10 @@ pub(super) async fn handle_subscribe(
     let (subscription, created) = match &config.subscription {
         Some(sub) => (sub.clone(), None),
         None => {
-            let created = create_resources(&config, &pubsub).await?;
+            let scopes = scopes_for_event_types(&config.event_types)?;
+            let rest = Transport::for_scopes(&scopes).await?;
+            let created =
+                create_resources(&config, &pubsub, &rest, WORKSPACE_EVENTS_API_BASE).await?;
             (created.subscription.clone(), Some(created))
         }
     };
@@ -763,5 +794,89 @@ mod tests {
             }
             other => panic!("unexpected {other:?}"),
         }
+    }
+    #[tokio::test]
+    async fn test_failed_setup_deletes_created_pubsub_resources() {
+        let server = MockServer::start().await;
+        Mock::given(method("PUT"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/v1/subscriptions"))
+            .respond_with(ResponseTemplate::new(403).set_body_json(serde_json::json!(
+                {"error": {"code": 403, "message": "caller lacks permission"}}
+            )))
+            .mount(&server)
+            .await;
+        Mock::given(method("DELETE"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+            .expect(2)
+            .named("delete orphaned topic and subscription")
+            .mount(&server)
+            .await;
+        let cfg = SubscribeConfig {
+            target: Some("//chat.googleapis.com/spaces/A".into()),
+            event_types: vec!["google.workspace.chat.message.v1.created".into()],
+            project: Some("p".into()),
+            subscription: None,
+            cleanup: true,
+            ..config(false)
+        };
+        let transport = Transport::for_test(&server.uri());
+        let pubsub = PubSubClient::with_base(&transport, &server.uri());
+        let err = create_resources(&cfg, &pubsub, &transport, &format!("{}/v1", server.uri()))
+            .await
+            .err()
+            .expect("setup must fail");
+        assert!(err.to_string().contains("caller lacks permission"), "{err}");
+        let deleted: Vec<String> = server
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|r| r.method == wiremock::http::Method::DELETE)
+            .map(|r| r.url.path().to_string())
+            .collect();
+        assert_eq!(
+            deleted.len(),
+            2,
+            "orphaned Pub/Sub resources left behind: {deleted:?}"
+        );
+    }
+    #[tokio::test]
+    async fn test_pending_operation_keeps_pubsub_resources() {
+        let server = MockServer::start().await;
+        Mock::given(method("PUT"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/v1/subscriptions"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"name": "operations/op1", "done": false})),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("DELETE"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+            .expect(0)
+            .mount(&server)
+            .await;
+        let cfg = SubscribeConfig {
+            target: Some("//chat.googleapis.com/spaces/A".into()),
+            event_types: vec!["google.workspace.chat.message.v1.created".into()],
+            project: Some("p".into()),
+            subscription: None,
+            ..config(false)
+        };
+        let transport = Transport::for_test(&server.uri());
+        let pubsub = PubSubClient::with_base(&transport, &server.uri());
+        let err = create_resources(&cfg, &pubsub, &transport, &format!("{}/v1", server.uri()))
+            .await
+            .err()
+            .expect("a pending operation has no subscription name yet");
+        assert!(err.to_string().contains("operations/op1"), "{err}");
     }
 }
