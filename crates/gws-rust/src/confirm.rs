@@ -22,7 +22,8 @@
 //!   such as clearing a range or deleting a filter. Always gated.
 //! - [`Impact::Outbound`]: actions that notify or grant access to other people
 //!   or run code (sending mail or chat messages, sharing, RSVPs, running
-//!   scripts). Gated only when `GWSR_REQUIRE_CONFIRM` is `1`/`true`.
+//!   scripts), including the generated methods in [`OUTBOUND_METHODS`].
+//!   Gated only when `GWSR_REQUIRE_CONFIRM` is `1`/`true`.
 //!
 //! | gated action           | `--yes` or `--dry-run` | terminal | no terminal |
 //! |------------------------|------------------------|----------|-------------|
@@ -55,6 +56,19 @@ pub(crate) enum Impact {
     Outbound,
 }
 
+/// API methods that send mail or messages, share files or run code: the
+/// generated-method counterparts of the outbound helpers (`gmail +send`,
+/// `chat +send`, `drive +share`, `script +run`, `admin +group-add-member`).
+pub(crate) const OUTBOUND_METHODS: &[&str] = &[
+    "gmail.users.messages.send",
+    "gmail.users.drafts.send",
+    "chat.spaces.messages.create",
+    "drive.permissions.create",
+    "drive.permissions.update",
+    "script.scripts.run",
+    "directory.members.insert",
+];
+
 /// Whether a Discovery method is destructive.
 pub(crate) fn is_destructive_method(method: &RestMethod) -> bool {
     method.http_method.eq_ignore_ascii_case("DELETE")
@@ -62,6 +76,21 @@ pub(crate) fn is_destructive_method(method: &RestMethod) -> bool {
             .id
             .as_deref()
             .is_some_and(|id| PERMANENT_DELETE_METHODS.contains(&id))
+}
+
+/// The gate that applies to a Discovery method, if any.
+pub(crate) fn method_impact(method: &RestMethod) -> Option<Impact> {
+    if is_destructive_method(method) {
+        Some(Impact::Destructive)
+    } else if method
+        .id
+        .as_deref()
+        .is_some_and(|id| OUTBOUND_METHODS.contains(&id))
+    {
+        Some(Impact::Outbound)
+    } else {
+        None
+    }
 }
 
 /// The `--yes`/`-y` flag, identical on every gated command.
@@ -312,6 +341,28 @@ mod tests {
             "POST",
             "gmail.users.messages.trash"
         )));
+    }
+
+    #[test]
+    fn method_impact_classifies_outbound_methods() {
+        let m = |http: &str, id: &str| RestMethod {
+            http_method: http.to_string(),
+            id: Some(id.to_string()),
+            ..Default::default()
+        };
+        for id in OUTBOUND_METHODS {
+            assert_eq!(
+                method_impact(&m("POST", id)),
+                Some(Impact::Outbound),
+                "{id}"
+            );
+        }
+        assert_eq!(
+            method_impact(&m("DELETE", "drive.permissions.delete")),
+            Some(Impact::Destructive)
+        );
+        assert_eq!(method_impact(&m("POST", "gmail.users.drafts.create")), None);
+        assert_eq!(method_impact(&m("GET", "drive.permissions.list")), None);
     }
 
     #[test]

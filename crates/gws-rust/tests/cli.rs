@@ -1068,3 +1068,113 @@ fn dotenv_files_are_never_loaded() {
         .assert()
         .success();
 }
+
+// ── Outbound confirmation for generated methods ─────────────────────────
+
+/// Seed a Gmail v1 Discovery document with the two raw send methods.
+fn seed_gmail_send(env: &Env) {
+    let send = |id: &str, path: &str, schema: &str| {
+        json!({
+            "id": id,
+            "httpMethod": "POST",
+            "path": path,
+            "parameters": {"userId": {"type": "string", "location": "path", "required": true}},
+            "parameterOrder": ["userId"],
+            "request": {"$ref": schema},
+            "response": {"$ref": schema},
+            "scopes": ["https://www.googleapis.com/auth/gmail.send"]
+        })
+    };
+    let doc = json!({
+        "name": "gmail",
+        "version": "v1",
+        "rootUrl": "https://gmail.googleapis.com/",
+        "servicePath": "",
+        "batchPath": "batch/gmail/v1",
+        "schemas": {
+            "Message": {"id": "Message", "type": "object", "properties": {"raw": {"type": "string"}, "id": {"type": "string"}}},
+            "Draft": {"id": "Draft", "type": "object", "properties": {"id": {"type": "string"}}}
+        },
+        "resources": {"users": {"resources": {
+            "messages": {"methods": {"send": send("gmail.users.messages.send", "gmail/v1/users/{userId}/messages/send", "Message")}},
+            "drafts": {"methods": {"send": send("gmail.users.drafts.send", "gmail/v1/users/{userId}/drafts/send", "Draft")}}
+        }}}
+    });
+    std::fs::write(
+        env.cache_dir().join("discovery/gmail+v1.json"),
+        serde_json::to_string(&doc).unwrap(),
+    )
+    .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn require_confirm_gates_raw_send_methods_and_batch() {
+    use wiremock::matchers::any;
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    Mock::given(any())
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id": "sent"})))
+        .mount(&server)
+        .await;
+    let env = Env::new();
+    seed_gmail_send(&env);
+    let cmd = |require: &str| {
+        let mut c = env.cmd();
+        c.env("GWSR_TOKEN", "test-token")
+            .env("GWSR_API_BASE_URL", server.uri())
+            .env("GWSR_REQUIRE_CONFIRM", require);
+        c
+    };
+    let send_draft = [
+        "gmail",
+        "users",
+        "drafts",
+        "send",
+        "--params",
+        r#"{"userId":"me"}"#,
+        "--json",
+        r#"{"id":"d1"}"#,
+    ];
+    let send_raw = [
+        "gmail",
+        "users",
+        "messages",
+        "send",
+        "--params",
+        r#"{"userId":"me"}"#,
+        "--json",
+        r#"{"raw":"eA"}"#,
+    ];
+
+    // Under GWSR_REQUIRE_CONFIRM=1, sending mail through a generated method
+    // is refused without --yes, exactly like `gmail +send`.
+    for args in [&send_draft, &send_raw] {
+        let out = cmd("1").args(args).output().unwrap();
+        assert_eq!(out.status.code(), Some(7), "{args:?}: {}", stderr_of(&out));
+        assert_eq!(
+            stderr_error(&out)["error"]["reason"],
+            "confirmationRequired"
+        );
+    }
+    // ... and through `gwsr batch`.
+    let out = cmd("1")
+        .args(["batch", "gmail"])
+        .write_stdin(
+            r#"{"id":"a","method":"users.drafts.send","params":{"userId":"me"},"json":{"id":"d1"}}"#,
+        )
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(7), "{}", stderr_of(&out));
+    assert!(
+        server.received_requests().await.unwrap().is_empty(),
+        "nothing may be sent before confirmation"
+    );
+
+    // --yes confirms; without the policy the send is not gated.
+    let mut with_yes = send_draft.to_vec();
+    with_yes.push("--yes");
+    cmd("1").args(&with_yes).assert().success();
+    cmd("0").args(send_draft).assert().success();
+    assert_eq!(server.received_requests().await.unwrap().len(), 2);
+}
