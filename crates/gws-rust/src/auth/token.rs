@@ -77,8 +77,8 @@ pub(crate) fn oauth_client(
 }
 
 /// Convert an `oauth2` token-request error into an [`AuthError`].
-pub(crate) fn map_token_error<RE: std::error::Error + 'static>(
-    err: RequestTokenError<RE, oauth2::basic::BasicErrorResponse>,
+pub(crate) fn map_token_error(
+    err: RequestTokenError<http::HttpError, oauth2::basic::BasicErrorResponse>,
     login_command: &str,
     requested: &[String],
 ) -> AuthError {
@@ -99,6 +99,9 @@ pub(crate) fn map_token_error<RE: std::error::Error + 'static>(
                 },
                 other => AuthError::TokenEndpoint(format!("{other}: {description}")),
             }
+        }
+        RequestTokenError::Request(http::HttpError::Unavailable { status, detail }) => {
+            AuthError::TokenEndpointUnavailable { status, detail }
         }
         RequestTokenError::Request(e) => AuthError::Network(format!("{e}")),
         RequestTokenError::Parse(e, _) => {
@@ -273,6 +276,12 @@ pub async fn service_account_token(
         .bytes()
         .await
         .map_err(|e| AuthError::Network(format!("cannot read token response: {e}")))?;
+    if http::is_unavailable(status) {
+        return Err(AuthError::TokenEndpointUnavailable {
+            status: status.as_u16(),
+            detail: http::body_excerpt(&body),
+        });
+    }
     if !status.is_success() {
         let detail = match serde_json::from_slice::<EndpointError>(&body) {
             Ok(err) => {
@@ -300,10 +309,7 @@ pub async fn service_account_token(
                 }
                 format!("{}: {desc}", err.error)
             }
-            Err(_) => format!(
-                "HTTP {status}: {}",
-                crate::output::sanitize_for_terminal(&String::from_utf8_lossy(&body))
-            ),
+            Err(_) => format!("HTTP {status}: {}", http::body_excerpt(&body)),
         };
         return Err(AuthError::TokenEndpoint(detail));
     }
@@ -542,6 +548,57 @@ pub(crate) mod tests {
         .unwrap_err()
         .to_string();
         assert!(err.contains("domain-wide delegation"), "{err}");
+    }
+
+    /// A 5xx, 429 or non-OAuth body from the token endpoint is a transient
+    /// server problem, not a rejected credential: it must exit 6 (retry with
+    /// backoff), never 2 ("sign in again").
+    #[tokio::test]
+    async fn token_endpoint_server_errors_are_retryable_not_auth_errors() {
+        use crate::error::GwsError;
+        let cases = [
+            (
+                503,
+                ResponseTemplate::new(503).set_body_string("<html>Service Unavailable</html>"),
+            ),
+            (
+                500,
+                ResponseTemplate::new(500).set_body_json(serde_json::json!({
+                    "error": "internal_failure",
+                    "error_description": "Backend Error"
+                })),
+            ),
+            (502, ResponseTemplate::new(502)),
+            (
+                429,
+                ResponseTemplate::new(429).set_body_string("Too Many Requests"),
+            ),
+        ];
+        for (status, template) in cases {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/token"))
+                .respond_with(template)
+                .mount(&server)
+                .await;
+            let refresh = refresh_user(&user(), None, &endpoints(&server), "gwsr auth login")
+                .await
+                .unwrap_err();
+            let sa =
+                service_account_token(&test_sa_key(), &["s".into()], None, &endpoints(&server))
+                    .await
+                    .unwrap_err();
+            for err in [refresh, sa] {
+                let text = err.to_string();
+                let gws = GwsError::from(err);
+                assert_eq!(
+                    gws.exit_code(),
+                    GwsError::EXIT_CODE_API_RETRYABLE,
+                    "HTTP {status}: {text} -> {gws:?}"
+                );
+                assert!(gws.is_retryable(), "{text}");
+            }
+        }
     }
 
     #[tokio::test]
