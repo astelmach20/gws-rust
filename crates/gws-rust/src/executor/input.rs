@@ -338,16 +338,17 @@ mod tests {
         assert!(err.to_string().contains("cannot both read stdin"));
     }
 
+    // Uses an absolute path: changing the process working directory would
+    // leak into every test running concurrently (and into their children).
     #[tokio::test]
-    #[serial_test::serial]
     async fn reads_json_from_file() {
         let dir = tempfile::tempdir().unwrap();
-        let saved = std::env::current_dir().unwrap();
-        std::env::set_current_dir(dir.path()).unwrap();
-        std::fs::write("body.json", r#"{"name":"x"}"#).unwrap();
-        let result = read_json_args(Some(r#"{"a":1}"#), Some("@body.json")).await;
-        std::env::set_current_dir(saved).unwrap();
-        let (params, body) = result.unwrap();
+        let file = dir.path().join("body.json");
+        std::fs::write(&file, r#"{"name":"x"}"#).unwrap();
+        let arg = format!("@{}", file.display());
+        let (params, body) = read_json_args(Some(r#"{"a":1}"#), Some(&arg))
+            .await
+            .unwrap();
         assert_eq!(params.as_deref(), Some(r#"{"a":1}"#));
         assert_eq!(body.as_deref(), Some(r#"{"name":"x"}"#));
     }
