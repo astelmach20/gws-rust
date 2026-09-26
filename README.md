@@ -281,6 +281,8 @@ gwsr auth export --unmasked --output ci-credentials.json
 
 Table output escapes terminal control characters. CSV cells that start with a formula character get a `'` prefix.
 
+With `--page-all` or `--page-items`, `table` and `csv` print one header: the first page with rows fixes the columns (the `--columns` selection, or that page's fields), and every later row is aligned to them, with empty cells for missing fields. A field that first appears on a later page is left out, and a warning on stderr names it; pass `--columns` or use `--format json` to keep it.
+
 ### Errors
 
 On failure stdout is empty, and stderr gets exactly one JSON object:
