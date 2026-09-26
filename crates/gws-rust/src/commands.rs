@@ -40,6 +40,12 @@ pub fn build_cli(doc: &RestDescription) -> Command {
     // Add resource subcommands (unless helper suppresses them)
     let skip_resources = helper.as_ref().is_some_and(|h| h.helper_only());
     if !skip_resources {
+        // Methods declared outside any resource (e.g. `oauth2:v2 tokeninfo`).
+        let mut method_names: Vec<_> = doc.methods.keys().collect();
+        method_names.sort();
+        for name in method_names {
+            root = root.subcommand(build_method_command(doc, name, &doc.methods[name]));
+        }
         let mut resource_names: Vec<_> = doc.resources.keys().collect();
         resource_names.sort();
         for name in resource_names {
@@ -222,7 +228,7 @@ pub fn method_args(doc: &RestDescription, method: &RestMethod) -> Vec<Arg> {
         );
     }
 
-    if crate::executor::is_destructive(method) {
+    if crate::executor::is_gated(method) {
         args.push(crate::confirm::yes_arg().help_heading(HEADING_REQUEST));
     }
 
@@ -246,7 +252,7 @@ fn summary(desc: Option<&str>) -> String {
 }
 
 /// The "Parameters" block appended to a method's help.
-pub fn parameters_help(method: &RestMethod) -> Option<String> {
+pub fn parameters_help(doc: &RestDescription, method: &RestMethod) -> Option<String> {
     let mut params: Vec<(&String, &crate::discovery::MethodParameter)> = method
         .parameters
         .iter()
@@ -284,10 +290,29 @@ pub fn parameters_help(method: &RestMethod) -> Option<String> {
         text.push_str(line.trim_end());
         text.push('\n');
     }
-    if let Some(id) = &method.id {
-        text.push_str(&format!("\nFull request/response schema: gwsr schema {id}"));
+    if let Some(path) = crate::schema::method_schema_path(doc, method) {
+        text.push_str(&format!(
+            "\nFull request/response schema: gwsr schema {path}"
+        ));
     }
     Some(text)
+}
+
+/// The command for one Discovery method (hidden when deprecated).
+fn build_method_command(doc: &RestDescription, name: &str, method: &RestMethod) -> Command {
+    let about = crate::text::truncate_description(
+        method.description.as_deref().unwrap_or(""),
+        crate::text::CLI_DESCRIPTION_LIMIT,
+        true,
+    );
+    let mut cmd = Command::new(name.to_string())
+        .about(about)
+        .hide(is_deprecated(method))
+        .args(method_args(doc, method));
+    if let Some(help) = parameters_help(doc, method) {
+        cmd = cmd.after_help(help);
+    }
+    cmd
 }
 
 /// Recursively builds a Command for a resource.
@@ -308,24 +333,9 @@ fn build_resource_command(
     let mut method_names: Vec<_> = resource.methods.keys().collect();
     method_names.sort();
     for method_name in method_names {
-        let method = &resource.methods[method_name];
+        let method_cmd = build_method_command(doc, method_name, &resource.methods[method_name]);
         has_children = true;
-
-        let about = crate::text::truncate_description(
-            method.description.as_deref().unwrap_or(""),
-            crate::text::CLI_DESCRIPTION_LIMIT,
-            true,
-        );
-        let deprecated = is_deprecated(method);
-        all_hidden &= deprecated;
-
-        let mut method_cmd = Command::new(method_name.to_string())
-            .about(about)
-            .hide(deprecated)
-            .args(method_args(doc, method));
-        if let Some(help) = parameters_help(method) {
-            method_cmd = method_cmd.after_help(help);
-        }
+        all_hidden &= method_cmd.is_hide_set();
         cmd = cmd.subcommand(method_cmd);
     }
 
@@ -414,9 +424,28 @@ mod tests {
             batch_path: None,
             schemas: HashMap::new(),
             resources,
+            methods: HashMap::new(),
             parameters: HashMap::new(),
             auth: None,
         }
+    }
+
+    #[test]
+    fn top_level_methods_become_root_commands() {
+        let mut doc = make_doc();
+        doc.methods.insert(
+            "about".into(),
+            RestMethod {
+                id: Some("drive.about".into()),
+                description: Some("Service info.".into()),
+                http_method: "GET".into(),
+                ..Default::default()
+            },
+        );
+        let cmd = build_cli(&doc);
+        let about = cmd.find_subcommand("about").expect("top-level method");
+        assert!(about.get_arguments().any(|a| a.get_id() == "params"));
+        assert!(cmd.find_subcommand("files").is_some());
     }
 
     #[test]
@@ -523,12 +552,17 @@ mod tests {
                 ..Default::default()
             },
         );
-        let m = RestMethod {
-            id: Some("drive.files.get".into()),
-            parameters: p,
-            ..Default::default()
-        };
-        let help = parameters_help(&m).unwrap();
+        let mut doc = make_doc();
+        doc.resources.get_mut("files").unwrap().methods.insert(
+            "get".into(),
+            RestMethod {
+                id: Some("drive.files.get".into()),
+                parameters: p,
+                ..Default::default()
+            },
+        );
+        let m = &doc.resources["files"].methods["get"];
+        let help = parameters_help(&doc, m).unwrap();
         assert!(help.contains("fileId"));
         assert!(help.contains("(required, path)"));
         assert!(help.contains("The ID of the file"));
