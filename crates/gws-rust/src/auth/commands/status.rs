@@ -43,13 +43,23 @@ pub(super) async fn build_report(env: &AuthEnv, offline: bool) -> Value {
 
     out["keyring_backend"] = json!(env.keyring_backend.as_str());
 
-    match client_config::client_config_path().and_then(|p| client_config::load_from(&p)) {
+    // Report the client `auth login` would use (same resolution order), and
+    // name a saved file that the environment variables shadow.
+    match client_config::resolve_optional() {
         Ok(Some(c)) => {
-            out["client"] = json!({
+            let mut client = json!({
                 "source": c.source.kind(),
                 "client_id": client_config::mask_client_id(&c.client_id),
                 "project_id": c.project_id,
             });
+            if c.source == client_config::ClientSource::EnvVars {
+                match client_config::client_config_path() {
+                    Ok(p) if p.exists() => client["overrides"] = json!(p.display().to_string()),
+                    Ok(_) => {}
+                    Err(e) => out["client_error"] = json!(format!("{e:#}")),
+                }
+            }
+            out["client"] = client;
         }
         Ok(None) => out["client"] = Value::Null,
         Err(e) => out["client_error"] = json!(format!("{e:#}")),
