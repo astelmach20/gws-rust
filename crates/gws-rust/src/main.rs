@@ -287,6 +287,25 @@ fn effective_format(global: &GlobalArgs, settings: &Settings) -> Result<OutputFo
     }
 }
 
+/// Model Armor settings: `--sanitize` > `GWSR_SANITIZE_TEMPLATE` > config.
+fn sanitize_config(
+    global: &GlobalArgs,
+    settings: &Settings,
+) -> Result<helpers::modelarmor::SanitizeConfig, GwsError> {
+    let template = global
+        .sanitize
+        .clone()
+        .or_else(|| settings.sanitize_template.clone());
+    // SEC-05: a malformed template fails before any request is made.
+    if let Some(t) = &template {
+        helpers::modelarmor::ModelArmorTemplate::parse(t)?;
+    }
+    Ok(helpers::modelarmor::SanitizeConfig {
+        template,
+        mode: settings.sanitize_mode.clone(),
+    })
+}
+
 fn emit_value(value: &serde_json::Value, format: OutputFormat) -> Result<(), CliError> {
     let text = formatter::format_value(value, &format)?;
     output::emit(&text)?;
@@ -347,6 +366,7 @@ async fn dispatch(
             let ctx = executor::batch::BatchContext {
                 dry_run: cli.global.dry_run,
                 api_version: cli.global.api_version.clone(),
+                sanitize: sanitize_config(&cli.global, settings)?,
             };
             executor::batch::handle_batch_command(&batch_args, &ctx).await?;
         }
@@ -464,18 +484,7 @@ async fn run_service(
     });
 
     let output_format = OutputFormat::from_matches(&matches)?;
-    let sanitize_template = global
-        .sanitize
-        .clone()
-        .or_else(|| settings.sanitize_template.clone());
-    // SEC-05: a malformed template fails before any request is made.
-    if let Some(t) = &sanitize_template {
-        helpers::modelarmor::ModelArmorTemplate::parse(t)?;
-    }
-    let sanitize_config = helpers::modelarmor::SanitizeConfig {
-        template: sanitize_template,
-        mode: settings.sanitize_mode.clone(),
-    };
+    let sanitize_config = sanitize_config(&global, settings)?;
 
     // Check if a helper wants to handle this command
     if let Some(helper) = helpers::get_helper(&doc.name)
@@ -530,6 +539,13 @@ fn resolve_method_from_matches<'a>(
         return Err(GwsError::Validation(
             "No resource or method specified".to_string(),
         ));
+    }
+
+    // A method declared outside any resource: ["tokeninfo"]
+    if let [method_name] = path.as_slice()
+        && let Some(method) = doc.methods.get(*method_name)
+    {
+        return Ok((method, current_matches));
     }
 
     // path looks like ["files", "list"] or ["files", "permissions", "list"]
