@@ -48,6 +48,8 @@ mail-builder = "1.0"
 mime_guess2 = "2.3.1"
 percent-encoding.workspace = true
 rand = "0.10"
+# Discovery `pattern` checks on `{+name}` path parameters.
+regex = "1.12"
 ratatui = "0.30.2"
 reqwest = { workspace = true, features = ["stream", "socks"] }
 serde.workspace = true
