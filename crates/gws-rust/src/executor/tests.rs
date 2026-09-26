@@ -1003,6 +1003,113 @@ async fn upload_session_uri_on_foreign_host_is_refused() {
     );
 }
 
+/// Runs a resumable upload of `size` bytes against a session whose every
+/// `PUT` gets `chunk_response`, bounded so a hang fails the test.
+async fn resumable_against(
+    size: usize,
+    chunk_response: ResponseTemplate,
+) -> (
+    Result<Result<Option<Value>, GwsError>, tokio::time::error::Elapsed>,
+    usize,
+) {
+    let server = MockServer::start().await;
+    let session = format!("{}/session/s", server.uri());
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).insert_header("location", session.as_str()))
+        .mount(&server)
+        .await;
+    Mock::given(method("PUT"))
+        .respond_with(chunk_response)
+        .mount(&server)
+        .await;
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("f.bin");
+    std::fs::write(&file, vec![7u8; size]).unwrap();
+    let file_path = file.to_str().unwrap().to_string();
+    let d = doc(&server.uri());
+    let mut call = Call::new(&d, "create", &server);
+    call.upload = Some(UploadSource {
+        path: &file_path,
+        content_type: Some("application/octet-stream"),
+    });
+    call.options.upload_mode = UploadMode::Resumable;
+    let em = Emitter::capturing();
+    let result = tokio::time::timeout(Duration::from_secs(10), call.run(&em)).await;
+    let puts = server
+        .received_requests()
+        .await
+        .unwrap()
+        .iter()
+        .filter(|r| r.method.as_str() == "PUT")
+        .count();
+    (result, puts)
+}
+
+#[tokio::test]
+async fn resumable_upload_without_progress_gives_up() {
+    // A 308 without a Range header means "nothing persisted": the chunk is
+    // resent, but a session that never makes progress must not loop forever.
+    let (result, puts) = resumable_against(1000, ResponseTemplate::new(308)).await;
+    let err = result
+        .expect("the upload must give up, not loop forever")
+        .unwrap_err();
+    assert!(err.to_string().contains("no progress"), "{err}");
+    assert!(puts <= 20, "{puts} PUTs");
+}
+
+#[tokio::test]
+async fn resumable_range_beyond_the_file_is_an_error_not_a_panic() {
+    let (result, _) = resumable_against(
+        1000,
+        ResponseTemplate::new(308).insert_header("range", "bytes=0-4999"),
+    )
+    .await;
+    let err = result.expect("must finish").unwrap_err();
+    assert!(err.to_string().contains("5000"), "{err}");
+}
+
+#[tokio::test]
+async fn resumable_308_with_every_byte_finalizes_with_a_status_query() {
+    // The server has all 1000 bytes but has not answered with the resource:
+    // the next request must be a valid `bytes */1000` query, not the
+    // malformed `bytes 1000-999/1000`.
+    let server = MockServer::start().await;
+    let session = format!("{}/session/s", server.uri());
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).insert_header("location", session.as_str()))
+        .mount(&server)
+        .await;
+    Mock::given(method("PUT"))
+        .and(header("content-range", "bytes 0-999/1000"))
+        .respond_with(ResponseTemplate::new(308).insert_header("range", "bytes=0-999"))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("PUT"))
+        .and(header("content-range", "bytes */1000"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id": "done"})))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("f.bin");
+    std::fs::write(&file, vec![7u8; 1000]).unwrap();
+    let file_path = file.to_str().unwrap().to_string();
+    let d = doc(&server.uri());
+    let mut call = Call::new(&d, "create", &server);
+    call.upload = Some(UploadSource {
+        path: &file_path,
+        content_type: Some("application/octet-stream"),
+    });
+    call.options.upload_mode = UploadMode::Resumable;
+    let em = Emitter::capturing();
+    tokio::time::timeout(Duration::from_secs(10), call.run(&em))
+        .await
+        .expect("must finish")
+        .unwrap();
+    assert_eq!(lines(&em)[0]["id"], "done");
+}
+
 // ── Downloads ───────────────────────────────────────────────────────────
 
 #[tokio::test]
