@@ -183,7 +183,7 @@ pub(crate) fn parse_calls<'a>(
         let at =
             |msg: String| GwsError::Validation(format!("batch input line {}: {msg}", lineno + 1));
         let entry: Value =
-            serde_json::from_str(line).map_err(|e| at(format!("invalid JSON: {e}")))?;
+            super::input::parse_strict_json(line).map_err(|e| at(format!("invalid JSON: {e}")))?;
         let obj = entry
             .as_object()
             .ok_or_else(|| at("expected a JSON object".to_string()))?;
@@ -605,6 +605,10 @@ mod tests {
             (
                 "{\"method\":\"files.get\",\"params\":{\"fileId\":\"1\",\"fieldz\":1}}",
                 "did you mean 'fields'",
+            ),
+            (
+                "{\"method\":\"files.get\",\"params\":{\"fileId\":\"1\",\"fileId\":\"2\"}}",
+                "duplicate key 'fileId'",
             ),
         ] {
             let err = parse_calls(&doc, line, &opts()).unwrap_err().to_string();
