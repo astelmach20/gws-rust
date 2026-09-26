@@ -436,28 +436,31 @@ fn parse_since(s: &str, now: chrono::DateTime<chrono::Utc>) -> Result<String, Gw
             .with_timezone(&chrono::Utc)
             .to_rfc3339_opts(chrono::SecondsFormat::Secs, true));
     }
-    let (num, unit) = s.split_at(s.len().saturating_sub(1));
-    let n: i64 = num.parse().map_err(|_| {
+    let invalid = || {
         GwsError::Validation(format!(
             "--since '{s}' is not RFC 3339 or a look-back like 24h/7d"
         ))
-    })?;
+    };
+    // Split off the last character, not the last byte: the input may be
+    // arbitrary Unicode.
+    let mut chars = s.chars();
+    let unit = chars.next_back().ok_or_else(invalid)?;
+    let n: i64 = chars.as_str().parse().map_err(|_| invalid())?;
     let d = match unit {
-        "m" => chrono::Duration::minutes(n),
-        "h" => chrono::Duration::hours(n),
-        "d" => chrono::Duration::days(n),
-        _ => {
-            return Err(GwsError::Validation(format!(
-                "--since '{s}' is not RFC 3339 or a look-back like 24h/7d"
-            )));
-        }
+        'm' => chrono::TimeDelta::try_minutes(n),
+        'h' => chrono::TimeDelta::try_hours(n),
+        'd' => chrono::TimeDelta::try_days(n),
+        _ => return Err(invalid()),
     };
     if n <= 0 {
         return Err(GwsError::Validation(
             "--since look-back must be positive".into(),
         ));
     }
-    Ok((now - d).to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
+    let start = d.and_then(|d| now.checked_sub_signed(d)).ok_or_else(|| {
+        GwsError::Validation(format!("--since '{s}' reaches too far into the past"))
+    })?;
+    Ok(start.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
 }
 
 impl Audit {
@@ -631,6 +634,27 @@ mod tests {
         );
         for bad in ["", "7", "7w", "-1d", "0h"] {
             assert!(parse_since(bad, now).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn since_rejects_non_ascii_and_out_of_range_without_panicking() {
+        let now = chrono::DateTime::parse_from_rfc3339("2026-01-10T00:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        // A multi-byte last character, a look-back chrono cannot represent,
+        // and one that lands before the earliest representable date must be
+        // validation errors (exit 3), not panics (exit 101).
+        for bad in [
+            "7é",
+            "1日",
+            "99999999999999d",
+            "9223372036854775807m",
+            "999999999d",
+            "100000000d",
+        ] {
+            let err = parse_since(bad, now).unwrap_err();
+            assert!(matches!(err, GwsError::Validation(_)), "{bad}: {err:?}");
         }
     }
 
