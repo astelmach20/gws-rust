@@ -310,6 +310,59 @@ fn calendar_events_url(bases: &Bases, calendar_id: &str) -> String {
     )
 }
 
+// Each request's query is built by one function that both the real run and
+// the `--dry-run` plan use, so the plan lists exactly what is sent. Values
+// only known at run time are `<placeholders>` in the plan.
+
+/// Query of `events.list` for the events between two instants, expanded and
+/// ordered by start time.
+fn events_between_query(time_min: &str, time_max: &str) -> Vec<(&'static str, String)> {
+    vec![
+        ("timeMin", time_min.to_string()),
+        ("timeMax", time_max.to_string()),
+        ("singleEvents", "true".to_string()),
+        ("orderBy", "startTime".to_string()),
+        ("maxResults", "250".to_string()),
+    ]
+}
+
+/// Query of `tasks.list` for the open tasks of the default list.
+fn open_tasks_query() -> Vec<(&'static str, String)> {
+    vec![
+        ("showCompleted", "false".to_string()),
+        ("maxResults", "100".to_string()),
+    ]
+}
+
+/// Query of `messages.get` for a message's Subject header and snippet.
+fn message_subject_query() -> Vec<(&'static str, String)> {
+    vec![
+        ("format", "metadata".to_string()),
+        ("metadataHeaders", "Subject".to_string()),
+    ]
+}
+
+/// Query of `messages.list` that estimates the number of unread messages.
+fn unread_count_query() -> Vec<(&'static str, String)> {
+    vec![
+        ("q", "is:unread".to_string()),
+        ("maxResults", "1".to_string()),
+    ]
+}
+
+/// Query of `files.get` for the name and link of a file on any drive.
+fn announced_file_query() -> Vec<(&'static str, String)> {
+    vec![
+        ("fields", "id,name,webViewLink".to_string()),
+        ("supportsAllDrives", "true".to_string()),
+    ]
+}
+
+/// Query of Chat `messages.create`; `requestId` makes it idempotent.
+fn chat_message_query(request_id: &str) -> Vec<(&'static str, String)> {
+    vec![("requestId", request_id.to_string())]
+}
+
 /// Events between two instants, expanded and ordered by start time.
 async fn events_between(
     rest: &Transport,
@@ -320,13 +373,7 @@ async fn events_between(
     get_all_items(
         rest,
         &calendar_events_url(bases, "primary"),
-        &[
-            ("timeMin", time_min.to_string()),
-            ("timeMax", time_max.to_string()),
-            ("singleEvents", "true".to_string()),
-            ("orderBy", "startTime".to_string()),
-            ("maxResults", "250".to_string()),
-        ],
+        &events_between_query(time_min, time_max),
         "Failed to fetch calendar events",
     )
     .await
@@ -351,10 +398,7 @@ async fn standup_report(
     let tasks = get_all_items(
         rest,
         &format!("{}/lists/@default/tasks", bases.tasks),
-        &[
-            ("showCompleted", "false".to_string()),
-            ("maxResults", "100".to_string()),
-        ],
+        &open_tasks_query(),
         "Failed to fetch tasks",
     )
     .await?;
@@ -377,11 +421,19 @@ async fn handle_standup_report(matches: &ArgMatches) -> Result<(), GwsError> {
         return crate::helpers::http::print_dry_run(
             matches,
             vec![
-                dry_run_request("GET", &calendar_events_url(&bases, "primary"), &[], None),
+                dry_run_request(
+                    "GET",
+                    &calendar_events_url(&bases, "primary"),
+                    &events_between_query(
+                        "<start of today in the account time zone>",
+                        "<start of tomorrow in the account time zone>",
+                    ),
+                    None,
+                ),
                 dry_run_request(
                     "GET",
                     &format!("{}/lists/@default/tasks", bases.tasks),
-                    &[],
+                    &open_tasks_query(),
                     None,
                 ),
             ],
@@ -502,10 +554,7 @@ async fn email_to_task(
     let msg = rest
         .get_json(
             &message_url(bases, message_id),
-            &[
-                ("format", "metadata".to_string()),
-                ("metadataHeaders", "Subject".to_string()),
-            ],
+            &message_subject_query(),
             &format!("Failed to fetch message {message_id}"),
         )
         .await?;
@@ -562,7 +611,7 @@ async fn handle_email_to_task(matches: &ArgMatches) -> Result<(), GwsError> {
                 dry_run_request(
                     "GET",
                     &message_url(&bases, &message_id),
-                    &[("format", "metadata".to_string())],
+                    &message_subject_query(),
                     None,
                 ),
                 dry_run_request(
@@ -570,7 +619,7 @@ async fn handle_email_to_task(matches: &ArgMatches) -> Result<(), GwsError> {
                     &tasks_insert_url(&bases, &tasklist),
                     &[],
                     Some(
-                        &json!({ "title": "<subject of the message>", "notes": format!("From email: {message_id}") }),
+                        &json!({ "title": "<subject of the message>", "notes": format!("From email: {message_id}\n\n<snippet of the message>") }),
                     ),
                 ),
             ],
@@ -599,10 +648,7 @@ async fn weekly_digest(
     let unread = rest
         .get_json(
             &format!("{}/users/me/messages", bases.gmail),
-            &[
-                ("q", "is:unread".to_string()),
-                ("maxResults", "1".to_string()),
-            ],
+            &unread_count_query(),
             "Failed to count unread email",
         )
         .await?;
@@ -625,11 +671,16 @@ async fn handle_weekly_digest(matches: &ArgMatches) -> Result<(), GwsError> {
         return crate::helpers::http::print_dry_run(
             matches,
             vec![
-                dry_run_request("GET", &calendar_events_url(&bases, "primary"), &[], None),
+                dry_run_request(
+                    "GET",
+                    &calendar_events_url(&bases, "primary"),
+                    &events_between_query("<now>", "<now + 7 days>"),
+                    None,
+                ),
                 dry_run_request(
                     "GET",
                     &format!("{}/users/me/messages", bases.gmail),
-                    &[("q", "is:unread".to_string())],
+                    &unread_count_query(),
                     None,
                 ),
             ],
@@ -682,10 +733,7 @@ async fn file_announce(
                 bases.drive,
                 crate::validate::encode_path_segment(file_id)
             ),
-            &[
-                ("fields", "id,name,webViewLink".to_string()),
-                ("supportsAllDrives", "true".to_string()),
-            ],
+            &announced_file_query(),
             &format!("Failed to fetch Drive file {file_id}"),
         )
         .await?;
@@ -703,7 +751,7 @@ async fn file_announce(
         .json(
             reqwest::Method::POST,
             &format!("{}/{space}/messages", bases.chat),
-            &[("requestId", request_id.to_string())],
+            &chat_message_query(request_id),
             Some(&json!({ "text": text })),
             Idempotency::NonIdempotent,
             "Failed to send Chat message",
@@ -739,13 +787,13 @@ async fn handle_file_announce(matches: &ArgMatches) -> Result<(), GwsError> {
                         bases.drive,
                         crate::validate::encode_path_segment(&file_id)
                     ),
-                    &[],
+                    &announced_file_query(),
                     None,
                 ),
                 dry_run_request(
                     "POST",
                     &format!("{}/{space}/messages", bases.chat),
-                    &[],
+                    &chat_message_query("<random UUID>"),
                     Some(
                         &json!({ "text": announcement_text(custom, "<file name>", "<file link>") }),
                     ),
