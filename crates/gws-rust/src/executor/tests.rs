@@ -312,6 +312,7 @@ struct Call<'a> {
     output: Option<OutputTarget>,
     pagination: PaginationConfig,
     options: ExecOptions,
+    format: OutputFormat,
 }
 
 impl<'a> Call<'a> {
@@ -326,6 +327,7 @@ impl<'a> Call<'a> {
             output: None,
             pagination: PaginationConfig::default(),
             options: options(server),
+            format: OutputFormat::Json,
         }
     }
 
@@ -341,7 +343,7 @@ impl<'a> Call<'a> {
                 output: self.output,
                 pagination: self.pagination,
                 sanitize: SanitizeConfig::default(),
-                format: OutputFormat::Json,
+                format: self.format,
                 capture_output: false,
                 options: self.options,
             },
@@ -430,6 +432,56 @@ async fn page_all_is_unlimited_by_default() {
     assert_eq!(out[2]["files"][0]["id"], "4");
 }
 
+/// Mounts two list pages whose items have different key sets and order.
+async fn mount_ragged_pages(server: &MockServer) {
+    Mock::given(method("GET"))
+        .and(path("/drive/v3/files"))
+        .and(query_param_is_missing("pageToken"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({"files": [{"id": "1", "name": "a"}], "nextPageToken": "p2"})),
+        )
+        .mount(server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/drive/v3/files"))
+        .and(query_param("pageToken", "p2"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"files": [
+            {"extra": "x", "name": "b", "id": "2"},
+            {"id": "3"}
+        ]})))
+        .mount(server)
+        .await;
+}
+
+#[tokio::test]
+async fn page_all_csv_rows_align_with_the_first_page_header() {
+    let server = MockServer::start().await;
+    mount_ragged_pages(&server).await;
+    let d = doc(&server.uri());
+    let mut call = Call::new(&d, "list", &server);
+    call.pagination.page_all = true;
+    call.pagination.page_delay_ms = 0;
+    call.format = OutputFormat::Csv;
+    let em = Emitter::capturing();
+    call.run(&em).await.unwrap();
+    assert_eq!(em.captured_text(), "id,name\n1,a\n2,b\n3,\n");
+}
+
+#[tokio::test]
+async fn page_items_table_rows_align_with_the_first_item_header() {
+    let server = MockServer::start().await;
+    mount_ragged_pages(&server).await;
+    let d = doc(&server.uri());
+    let mut call = Call::new(&d, "list", &server);
+    call.pagination.page_delay_ms = 0;
+    call.options.page_items = Some(ItemsMode::Auto);
+    call.format = OutputFormat::Table;
+    let em = Emitter::capturing();
+    call.run(&em).await.unwrap();
+    assert_eq!(em.captured_text(), "id  name\n──  ────\n1   a\n2   b\n3\n");
+}
+
 #[tokio::test]
 async fn page_limit_truncation_is_marked() {
     let server = MockServer::start().await;
@@ -449,6 +501,41 @@ async fn page_limit_truncation_is_marked() {
         out[2],
         json!({"_truncated": {"pagesFetched": 2, "nextPageToken": "p3"}})
     );
+}
+
+#[tokio::test]
+async fn page_all_repeated_token_is_an_error_not_an_infinite_loop() {
+    let server = MockServer::start().await;
+    // A misbehaving API that hands back the same page token forever.
+    let (responder, calls) = seq(vec![
+        ResponseTemplate::new(200)
+            .set_body_json(json!({"files": [{"id": "1"}], "nextPageToken": "p2"})),
+        ResponseTemplate::new(200)
+            .set_body_json(json!({"files": [{"id": "2"}], "nextPageToken": "p2"})),
+    ]);
+    Mock::given(method("GET"))
+        .and(path("/drive/v3/files"))
+        .respond_with(responder)
+        .mount(&server)
+        .await;
+    let d = doc(&server.uri());
+    let mut call = Call::new(&d, "list", &server);
+    call.pagination = PaginationConfig {
+        page_all: true,
+        page_limit: 0,
+        page_delay_ms: 0,
+    };
+    let em = Emitter::capturing();
+    let result = tokio::time::timeout(Duration::from_secs(5), call.run(&em)).await;
+    let n = calls.load(Ordering::SeqCst);
+    let Ok(result) = result else {
+        panic!("--page-all did not terminate: {n} requests sent for a repeated nextPageToken");
+    };
+    let err = result.unwrap_err();
+    assert!(err.to_string().contains("repeated nextPageToken"), "{err}");
+    assert_eq!(n, 2, "stops as soon as the token repeats");
+    // The pages that were fetched before the repeat were still emitted.
+    assert_eq!(lines(&em).len(), 2);
 }
 
 #[tokio::test]
@@ -1144,9 +1231,16 @@ async fn batch_round_trip_reports_partial_failure() {
     )
     .unwrap();
     let em = Emitter::capturing();
-    let err = batch::run_batch(&d, &calls, Credentials::Static("tok".into()), &opts, &em)
-        .await
-        .unwrap_err();
+    let err = batch::run_batch(
+        &d,
+        &calls,
+        Credentials::Static("tok".into()),
+        &opts,
+        &SanitizeConfig::default(),
+        &em,
+    )
+    .await
+    .unwrap_err();
     assert!(err.to_string().contains("1 of 2 batch call(s) failed"));
     let out = lines(&em);
     assert_eq!(

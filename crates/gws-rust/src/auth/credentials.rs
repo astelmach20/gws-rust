@@ -293,6 +293,17 @@ impl AuthEnv {
             self.token_file.clone().map(CredentialSource::TokenFile)
         };
         if let Some(src) = direct {
+            if self.profile.source == ProfileSource::Flag {
+                let var = if self.token.is_some() {
+                    "GWSR_TOKEN"
+                } else {
+                    "GWSR_TOKEN_FILE"
+                };
+                return Err(AuthError::Config(format!(
+                    "--profile {} conflicts with {var}; unset one of them",
+                    self.profile.name
+                )));
+            }
             if self.impersonate.is_some() {
                 return Err(AuthError::Config(
                     "--impersonate/GWSR_IMPERSONATE cannot be used with a pre-obtained access \
@@ -555,6 +566,32 @@ mod tests {
         let mut env = env_in(dir.path(), ProfileSource::Flag);
         env.credentials_file = Some(path);
         assert!(matches!(env.source(), Err(AuthError::Config(_))));
+    }
+
+    /// An explicit `--profile` must never be silently replaced by another
+    /// identity: a pre-obtained token conflicts with it exactly like
+    /// GWSR_CREDENTIALS_FILE does.
+    #[test]
+    fn token_env_and_token_file_conflict_with_profile_flag() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("token");
+        write_private(&path, "ya29.abc");
+        let mut env = env_in(dir.path(), ProfileSource::Flag);
+        env.token = Some(SecretString::from("tok".to_string()));
+        let err = env.source().unwrap_err();
+        assert!(matches!(err, AuthError::Config(_)), "{err:?}");
+        assert!(err.to_string().contains("GWSR_TOKEN"), "{err}");
+
+        env.token = None;
+        env.token_file = Some(path);
+        let err = env.source().unwrap_err();
+        assert!(matches!(err, AuthError::Config(_)), "{err:?}");
+        assert!(err.to_string().contains("GWSR_TOKEN_FILE"), "{err}");
+
+        // Without --profile the token still wins.
+        let mut env = env_in(dir.path(), ProfileSource::Default);
+        env.token = Some(SecretString::from("tok".to_string()));
+        assert_eq!(env.source().unwrap(), CredentialSource::TokenEnv);
     }
 
     #[test]
