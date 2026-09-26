@@ -635,9 +635,11 @@ async fn stage_configure_oauth(ctx: &mut Ctx) -> Result<Stage, GwsError> {
         return Ok(Stage::Finish);
     }
 
-    let existing_id = crate::auth::client_config::load_from(&ctx.client_path)
-        .map_err(crate::auth::to_gws_error)?
-        .map(|c| c.client_id);
+    let existing_id = client_id_prefill(
+        crate::auth::client_config::load_from(&ctx.client_path)
+            .map_err(crate::auth::to_gws_error)?,
+        &ctx.project_id,
+    );
     let project = ctx.project_id.clone();
     let note = ctx
         .consent_note
@@ -696,6 +698,18 @@ async fn stage_configure_oauth(ctx: &mut Ctx) -> Result<Stage, GwsError> {
     .map_err(crate::auth::to_gws_error)?;
     ctx.step(4, StepStatus::Done("configured".into()))?;
     Ok(Stage::Finish)
+}
+
+/// The client ID to pre-fill in the interactive OAuth client prompt: the
+/// saved client's, unless it records a different project. Pre-filling another
+/// project's client would let a single Enter save it under `project_id`.
+fn client_id_prefill(
+    saved: Option<crate::auth::client_config::ClientConfig>,
+    project_id: &str,
+) -> Option<String> {
+    saved
+        .filter(|c| c.project_id.as_deref().is_none_or(|p| p == project_id))
+        .map(|c| c.client_id)
 }
 
 fn setup_summary(ctx: &Ctx, status: &str, message: &str) -> serde_json::Value {
@@ -946,5 +960,43 @@ mod tests {
         );
         let r = simulate(list, &[KeyCode::Char('a'), KeyCode::Enter], true);
         assert_eq!(api_choice(&r).len(), apis::WORKSPACE_APIS.len());
+    }
+
+    fn client_for(project: Option<&str>) -> crate::auth::client_config::ClientConfig {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("client_secret.json");
+        crate::auth::client_config::save_client_config(
+            &path,
+            "old.apps.googleusercontent.com",
+            &SecretString::from("secret".to_string()),
+            project,
+        )
+        .unwrap();
+        crate::auth::client_config::load_from(&path)
+            .unwrap()
+            .unwrap()
+    }
+
+    #[test]
+    fn client_id_prefill_keeps_a_client_for_the_same_project() {
+        assert_eq!(client_id_prefill(None, "proj-a"), None);
+        assert_eq!(
+            client_id_prefill(Some(client_for(Some("proj-a"))), "proj-a").as_deref(),
+            Some("old.apps.googleusercontent.com")
+        );
+        // A client without a recorded project cannot be checked; offer it.
+        assert_eq!(
+            client_id_prefill(Some(client_for(None)), "proj-a").as_deref(),
+            Some("old.apps.googleusercontent.com")
+        );
+    }
+
+    #[test]
+    fn client_id_prefill_drops_a_client_from_another_project() {
+        // Accepting the pre-filled ID would save proj-a's client as proj-b's.
+        assert_eq!(
+            client_id_prefill(Some(client_for(Some("proj-a"))), "proj-b"),
+            None
+        );
     }
 }
