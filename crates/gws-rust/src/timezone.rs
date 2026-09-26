@@ -105,11 +105,21 @@ fn write_cache(path: &std::path::Path, tz_name: &str) {
     }
 }
 
+/// The Calendar Settings URL for the account time zone, under the
+/// `GWSR_API_BASE_URL` override when the transport has one.
+fn settings_url(transport: &Transport) -> String {
+    let base = transport
+        .endpoints()
+        .override_base()
+        .map_or("https://www.googleapis.com/", |b| b.as_str());
+    format!("{base}calendar/v3/users/me/settings/timezone")
+}
+
 /// Fetch the account timezone from the Google Calendar Settings API.
 async fn fetch_account_timezone(transport: &Transport) -> Result<Tz, GwsError> {
-    let url = "https://www.googleapis.com/calendar/v3/users/me/settings/timezone";
+    let url = settings_url(transport);
     let json = transport
-        .get_json(url, &[], "Failed to fetch account timezone")
+        .get_json(&url, &[], "Failed to fetch account timezone")
         .await?;
 
     let tz_name = json
@@ -196,22 +206,42 @@ pub(crate) async fn resolve_account_timezone(
     Ok(tz)
 }
 
-/// Return the start of today (midnight) in the given timezone as a
-/// timezone-aware `DateTime`. Errors if midnight cannot be resolved
-/// (e.g. a DST transition that skips midnight — extremely rare).
-pub fn start_of_today(tz: Tz) -> Result<chrono::DateTime<Tz>, crate::error::GwsError> {
-    use chrono::{NaiveTime, TimeZone, Utc};
+/// The first instant of the local calendar day `date` in `tz`.
+///
+/// Normally local midnight. When midnight is ambiguous (clocks fall back
+/// across it) this is the earlier of the two; when midnight does not exist
+/// (clocks spring forward across it, as in some South American zones) it is
+/// the first local time that does exist that day, i.e. the transition instant.
+fn start_of_day(
+    date: chrono::NaiveDate,
+    tz: Tz,
+) -> Result<chrono::DateTime<Tz>, crate::error::GwsError> {
+    use chrono::{Duration, NaiveTime, TimeZone};
 
-    let now_in_tz = Utc::now().with_timezone(&tz);
-    let today_start = now_in_tz.date_naive().and_time(NaiveTime::MIN);
-    tz.from_local_datetime(&today_start)
-        .earliest()
+    let midnight = date.and_time(NaiveTime::MIN);
+    // Offset changes happen on whole minutes, so stepping a minute at a time
+    // through the day finds the end of any gap covering midnight.
+    (0..24 * 60)
+        .map(|m| midnight + Duration::minutes(m))
+        .find_map(|local| tz.from_local_datetime(&local).earliest())
         .ok_or_else(|| {
             crate::error::GwsError::other(anyhow::anyhow!(
-                "Could not determine start of day in timezone '{}'",
-                tz
+                "Could not determine the start of {date} in timezone '{tz}'"
             ))
         })
+}
+
+/// The local calendar day `date` in `tz` as a half-open interval
+/// `[start of day, start of next day)`. This is 23 or 25 hours long on
+/// daylight-saving transition days, never a fixed 24 hours.
+pub fn day_bounds(
+    date: chrono::NaiveDate,
+    tz: Tz,
+) -> Result<(chrono::DateTime<Tz>, chrono::DateTime<Tz>), crate::error::GwsError> {
+    let next = date.succ_opt().ok_or_else(|| {
+        crate::error::GwsError::other(anyhow::anyhow!("{date} has no following day"))
+    })?;
+    Ok((start_of_day(date, tz)?, start_of_day(next, tz)?))
 }
 
 /// Machine-local IANA timezone, read from the OS by `iana-time-zone`.
@@ -224,6 +254,7 @@ fn local_timezone() -> Result<Tz, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::TimeZone;
 
     #[test]
     fn parse_valid_iana_timezone() {
@@ -270,6 +301,15 @@ mod tests {
     }
 
     #[test]
+    fn settings_url_honours_api_base_override() {
+        let t = Transport::for_test("http://127.0.0.1:9/");
+        assert_eq!(
+            settings_url(&t),
+            "http://127.0.0.1:9/calendar/v3/users/me/settings/timezone"
+        );
+    }
+
+    #[test]
     fn local_timezone_is_parseable_when_detected() {
         // Detection can legitimately fail in minimal containers; when it
         // succeeds the name must be a valid IANA zone.
@@ -278,10 +318,53 @@ mod tests {
         }
     }
 
+    fn day(s: &str) -> chrono::NaiveDate {
+        s.parse().unwrap()
+    }
+
     #[test]
-    fn start_of_today_is_midnight() {
-        use chrono::Timelike;
-        let start = start_of_today(chrono_tz::America::Denver).unwrap();
-        assert_eq!((start.hour(), start.minute(), start.second()), (0, 0, 0));
+    fn day_bounds_follow_local_midnights_across_dst() {
+        let tz = chrono_tz::America::Denver;
+        let fmt = |(s, e): (chrono::DateTime<Tz>, chrono::DateTime<Tz>)| {
+            (s.to_rfc3339(), e.to_rfc3339(), (e - s).num_hours())
+        };
+        assert_eq!(
+            fmt(day_bounds(day("2026-11-01"), tz).unwrap()),
+            (
+                "2026-11-01T00:00:00-06:00".to_string(),
+                "2026-11-02T00:00:00-07:00".to_string(),
+                25
+            )
+        );
+        assert_eq!(
+            fmt(day_bounds(day("2026-03-08"), tz).unwrap()),
+            (
+                "2026-03-08T00:00:00-07:00".to_string(),
+                "2026-03-09T00:00:00-06:00".to_string(),
+                23
+            )
+        );
+        assert_eq!(fmt(day_bounds(day("2026-06-17"), tz).unwrap()).2, 24);
+    }
+
+    #[test]
+    fn start_of_day_skips_a_nonexistent_midnight() {
+        // Chile springs forward at local midnight: 2026-09-06 00:00 does not
+        // exist, so the day starts at 01:00 (-03:00).
+        let tz = chrono_tz::America::Santiago;
+        assert!(
+            tz.from_local_datetime(&day("2026-09-06").and_time(chrono::NaiveTime::MIN))
+                .earliest()
+                .is_none()
+        );
+        let (start, end) = day_bounds(day("2026-09-06"), tz).unwrap();
+        assert_eq!(start.to_rfc3339(), "2026-09-06T01:00:00-03:00");
+        assert_eq!(end.to_rfc3339(), "2026-09-07T00:00:00-03:00");
+    }
+
+    #[test]
+    fn day_bounds_reject_the_last_representable_day() {
+        let err = day_bounds(chrono::NaiveDate::MAX, chrono_tz::UTC).unwrap_err();
+        assert!(err.to_string().contains("no following day"), "{err}");
     }
 }
