@@ -154,8 +154,17 @@ pub(super) async fn handle_filter(
                 let remove = resolve_label_ids(&spec.remove_labels, &labels)?;
                 build_filter(&spec, &add, &remove)
             };
+            // Screen the filter (which may forward mail) before creating it:
+            // screening the response afterwards could not undo the creation.
+            let screening =
+                crate::helpers::modelarmor::screen_outgoing(sanitize, &body, None).await?;
             let created = api.create_filter(&body).await?;
-            print(created, sub, sanitize).await
+            let created = match screening {
+                Some(annotation) => crate::helpers::modelarmor::annotate(created, annotation),
+                None => created,
+            };
+            let format = crate::helpers::http::output_format(sub)?;
+            crate::output::emit(&crate::formatter::format_value(&created, &format)?)
         }
         Some(("delete", sub)) => {
             let id = required_str(sub, "filter-id")?;

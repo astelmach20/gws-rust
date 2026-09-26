@@ -53,6 +53,8 @@ gwsr gmail +reply --message-id 18f1a2b3c4d --body 'Draft reply' --draft
 - Sets In-Reply-To, References, and threadId, and quotes the original message.
 - With --html, inline images in the quoted message are preserved via cid: references.
 - For reply-all, use +reply-all instead.
+- --sanitize screens the subject and body, quoted original included, before sending;
+- in block mode a match or a Model Armor failure sends nothing. --dry-run does not call Model Armor.
 
 ## See Also
 

@@ -53,6 +53,8 @@ gwsr gmail +forward --message-id 18f1a2b3c4d --to dave@example.com --no-original
 - Original attachments are included by default (matching Gmail web).
 - In plain-text mode, inline images are not included (matching Gmail web).
 - Combined size of original and added attachments is limited to 25MB.
+- --sanitize screens the subject, note and forwarded message before sending;
+- in block mode a match or a Model Armor failure sends nothing. --dry-run does not call Model Armor.
 
 ## See Also
 

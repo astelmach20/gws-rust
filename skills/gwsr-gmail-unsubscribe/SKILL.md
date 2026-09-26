@@ -44,6 +44,8 @@ gwsr gmail +unsubscribe --message-id 18f1a2b3c4d --dry-run
 - List-Unsubscribe-Post: List-Unsubscribe=One-Click with an https URL and
 - Gmail verified its DKIM signature. Otherwise the available unsubscribe
 - links are printed and nothing is sent.
+- With --sanitize, the unsubscribe URL is screened before the POST (block mode:
+- a match or a Model Armor failure sends nothing).
 
 ## See Also
 

@@ -82,8 +82,9 @@ pub enum GwsError {
     #[error("{0}")]
     ConfirmationRequired(String),
 
-    /// Model Armor screening (`--sanitize` in `block` mode) matched the
-    /// output, so it was withheld. The request itself succeeded.
+    /// Model Armor screening (`--sanitize` in `block` mode) matched: either
+    /// the output, which was withheld (the request itself succeeded), or
+    /// outgoing content, which was not sent.
     #[error("{0}")]
     SanitizationBlocked(String),
 

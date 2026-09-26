@@ -65,8 +65,9 @@ Exit codes: `0` success, `1` API error (permanent), `2` auth, `3` validation,
 `7` confirmation required (nothing was sent; re-run with `--yes` once the user agrees),
 `8` configuration (`configError`), `9` credential store (`credentialStoreError`: keyring or
 stored credentials), `10` network (`networkError`: no response; a non-idempotent call may
-have been applied, so check before retrying), `11` output blocked by Model Armor
-(`sanitizationBlocked`: `--sanitize` in block mode; the request itself succeeded).
+have been applied, so check before retrying), `11` blocked by Model Armor
+(`sanitizationBlocked`: `--sanitize` in block mode; output was withheld after the request
+succeeded, or, for `gmail` sends, filters and unsubscribes, nothing was sent).
 
 ## CLI Syntax
 
