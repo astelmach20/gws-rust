@@ -440,3 +440,63 @@ async fn text_responses_of_generated_methods_are_screened_by_model_armor() {
     );
     assert!(!out.status.success());
 }
+
+/// A helper's `--dry-run` plan must list every query parameter the real
+/// request sends.
+#[test]
+fn dry_run_plan_keeps_flag_only_query_parameter() {
+    let dir = setup();
+    seed(dir.path(), "gmail", "v1", "gmail/v1/");
+    let out = gwsr(dir.path())
+        .args([
+            "gmail",
+            "+search",
+            "--query",
+            "x",
+            "--include-spam-trash",
+            "--dry-run",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let v = stdout_json(&out);
+    assert_eq!(
+        v["requests"][0]["query_params"]["includeSpamTrash"], "true",
+        "{v}"
+    );
+}
+
+#[test]
+fn dry_run_plan_keeps_repeated_query_keys() {
+    let dir = setup();
+    seed(dir.path(), "people", "v1", "");
+    let out = gwsr(dir.path())
+        .args([
+            "people",
+            "+find",
+            "--query",
+            "bob",
+            "--directory",
+            "--dry-run",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let v = stdout_json(&out);
+    assert_eq!(
+        v["requests"][0]["query_params"]["sources"],
+        json!([
+            "DIRECTORY_SOURCE_TYPE_DOMAIN_PROFILE",
+            "DIRECTORY_SOURCE_TYPE_DOMAIN_CONTACT"
+        ]),
+        "{v}"
+    );
+}
