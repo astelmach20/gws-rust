@@ -379,6 +379,7 @@ gwsr gmail users messages attachments get --params '{"userId":"me","messageId":"
 
 - A binary response needs `-o PATH` or an explicit `-o -`. `gwsr` never writes binary data to stdout unasked, and never invents a file name.
 - Files are written atomically (a temp file, then a rename) after `Content-Length` is checked. A `204` creates no file.
+- With `alt=media`, `-o` receives the file's exact bytes whatever its type, so a JSON file is saved as stored, not re-formatted.
 - Base64 fields are decoded into `-o` automatically for `format: byte` fields, or when you name one with `--decode-field`. Standard and URL-safe base64, padded or not, are accepted.
 - `drive files download` follows the returned `downloadUri`, and waits for the operation automatically when `-o` is given.
 

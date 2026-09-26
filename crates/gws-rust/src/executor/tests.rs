@@ -1170,6 +1170,55 @@ async fn binary_download_to_file_is_atomic() {
 }
 
 #[tokio::test]
+async fn media_download_of_a_json_file_keeps_the_exact_bytes() {
+    // `alt=media` returns the stored file with its own Content-Type. A JSON
+    // file must be saved byte for byte: not re-serialized, not polled as an
+    // "operation" because it has `name` and `metadata` keys, and not refused
+    // because its content is not a single JSON document.
+    let files: [&[u8]; 3] = [
+        b"{\"b\": 1,   \"a\": [1.50, 2e3]}\n",
+        b"{\"name\": \"report\", \"metadata\": {\"owner\": \"x\"}}",
+        b"{\"n\": 1}\n{\"n\": 2}\n",
+    ];
+    let mut wrong = Vec::new();
+    for (i, content) in files.iter().enumerate() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(format!("/drive/v3/files/f{i}")))
+            .and(query_param("alt", "media"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_raw(content.to_vec(), "application/json"),
+            )
+            .mount(&server)
+            .await;
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("data.json");
+        let mut d = doc(&server.uri());
+        d.parameters.insert("alt".into(), qparam("string"));
+        for target in [OutputTarget::File(out.clone()), OutputTarget::Stdout] {
+            let mut call = Call::new(&d, "get", &server);
+            call.params = json!({"fileId": format!("f{i}"), "alt": "media"});
+            call.output = Some(target.clone());
+            let em = Emitter::capturing();
+            let got = match call.run(&em).await {
+                Err(e) => format!("error: {e}"),
+                Ok(_) if target == OutputTarget::Stdout => {
+                    String::from_utf8_lossy(&em.captured_bytes()).into_owned()
+                }
+                Ok(_) => String::from_utf8_lossy(&std::fs::read(&out).unwrap()).into_owned(),
+            };
+            if got.as_bytes() != *content {
+                wrong.push(format!(
+                    "{target:?}\n  file:  {:?}\n  saved: {got:?}",
+                    String::from_utf8_lossy(content)
+                ));
+            }
+        }
+    }
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+}
+
+#[tokio::test]
 async fn json_output_decodes_base64_attachment() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
