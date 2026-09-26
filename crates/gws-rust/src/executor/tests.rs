@@ -830,6 +830,73 @@ async fn small_file_uses_multipart() {
     assert_eq!(lines(&em)[0]["id"], "new");
 }
 
+/// The dry run shows the uploadType the upload will actually send.
+#[tokio::test]
+async fn upload_dry_run_lists_the_upload_type() {
+    let server = MockServer::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("a.txt");
+    std::fs::write(&file, b"hello").unwrap();
+    let path = file.to_str().unwrap().to_string();
+    let d = doc(&server.uri());
+    let mut call = Call::new(&d, "create", &server);
+    call.body = Some(json!({"name": "a.txt"}));
+    call.upload = Some(UploadSource {
+        path: &path,
+        content_type: None,
+    });
+    call.options.dry_run = true;
+    let em = Emitter::capturing();
+    call.run(&em).await.unwrap();
+    let out = lines(&em);
+    assert_eq!(
+        out[0]["query_params"],
+        json!([["supportsAllDrives", "true"], ["uploadType", "multipart"]]),
+        "{out:?}"
+    );
+    assert!(server.received_requests().await.unwrap().is_empty());
+}
+
+/// `--upload` chooses the upload protocol itself. A `uploadType` in --params
+/// used to be sent as well (`uploadType=media&uploadType=multipart`), so the
+/// server could read the multipart envelope as the file's raw content.
+#[tokio::test]
+async fn upload_type_in_params_conflicts_with_upload() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id": "new"})))
+        .mount(&server)
+        .await;
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("a.txt");
+    std::fs::write(&file, b"hello").unwrap();
+    let path = file.to_str().unwrap().to_string();
+    let d = doc(&server.uri());
+    for upload_type in ["media", "multipart", "resumable"] {
+        for dry_run in [false, true] {
+            let mut call = Call::new(&d, "create", &server);
+            call.params = json!({"uploadType": upload_type});
+            call.body = Some(json!({"name": "a.txt"}));
+            call.upload = Some(UploadSource {
+                path: &path,
+                content_type: None,
+            });
+            call.options.dry_run = dry_run;
+            let err = call.run(&Emitter::capturing()).await.unwrap_err();
+            assert!(matches!(err, GwsError::Validation(_)), "{err:?}");
+            assert!(err.to_string().contains("uploadType"), "{err}");
+        }
+    }
+    let sent: Vec<String> = server
+        .received_requests()
+        .await
+        .unwrap()
+        .iter()
+        .map(|r| r.url.to_string())
+        .collect();
+    assert!(sent.is_empty(), "requests were sent: {sent:?}");
+}
+
 #[tokio::test]
 async fn resumable_upload_resumes_after_chunk_failure() {
     let server = MockServer::start().await;
