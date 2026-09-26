@@ -17,7 +17,7 @@ metadata:
 
 # Email a Google Drive File Link
 
-> **PREREQUISITE:** Load the following skills to execute this recipe: `gwsr-drive`, `gwsr-gmail`
+> **PREREQUISITE:** Load the following skills to execute this recipe: `gwsr-drive`, `gwsr-gmail` (install any that are missing with `npx skills add https://github.com/astelmach20/gws-rust/tree/main/skills/<name>`)
 
 Share a Google Drive file and email the link with a message to recipients.
 

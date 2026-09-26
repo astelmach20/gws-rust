@@ -17,7 +17,7 @@ metadata:
 
 # Create a Google Doc from a Template
 
-> **PREREQUISITE:** Load the following skills to execute this recipe: `gwsr-drive`, `gwsr-docs`
+> **PREREQUISITE:** Load the following skills to execute this recipe: `gwsr-drive`, `gwsr-docs` (install any that are missing with `npx skills add https://github.com/astelmach20/gws-rust/tree/main/skills/<name>`)
 
 Copy a Google Docs template, fill in content, and share with collaborators.
 

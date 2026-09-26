@@ -17,7 +17,7 @@ metadata:
 
 # Share Files with Meeting Attendees
 
-> **PREREQUISITE:** Load the following skills to execute this recipe: `gwsr-calendar`, `gwsr-drive`
+> **PREREQUISITE:** Load the following skills to execute this recipe: `gwsr-calendar`, `gwsr-drive` (install any that are missing with `npx skills add https://github.com/astelmach20/gws-rust/tree/main/skills/<name>`)
 
 Share Google Drive files with all attendees of a Google Calendar event.
 

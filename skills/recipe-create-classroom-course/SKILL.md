@@ -16,7 +16,7 @@ metadata:
 
 # Create a Google Classroom Course
 
-> **PREREQUISITE:** Load the following skills to execute this recipe: `gwsr-classroom`
+> **PREREQUISITE:** Load the following skills to execute this recipe: `gwsr-classroom` (install any that are missing with `npx skills add https://github.com/astelmach20/gws-rust/tree/main/skills/<name>`)
 
 Create a Google Classroom course and invite students.
 

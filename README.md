@@ -550,7 +550,8 @@ The repository ships 151 [Agent Skills](https://agentskills.io) (`skills/*/SKILL
 
 ```bash
 npx skills add https://github.com/astelmach20/gws-rust                                   # all skills
-npx skills add https://github.com/astelmach20/gws-rust/tree/main/skills/gwsr-gmail       # just one
+npx skills add https://github.com/astelmach20/gws-rust/tree/main/skills/gwsr-shared      # needed by every other skill
+npx skills add https://github.com/astelmach20/gws-rust/tree/main/skills/gwsr-gmail       # then just the ones you want
 ln -s "$(pwd)"/skills/gwsr-* ~/.openclaw/skills/                                      # OpenClaw
 ```
 
