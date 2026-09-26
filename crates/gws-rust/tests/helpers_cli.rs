@@ -388,3 +388,33 @@ async fn text_responses_of_generated_methods_are_screened_by_model_armor() {
     );
     assert!(!out.status.success());
 }
+
+#[test]
+fn gmail_unsubscribe_dry_run_needs_no_credentials() {
+    // README/CONTEXT: `--dry-run` loads no credentials and sends nothing.
+    // No credential source exists in this isolated environment.
+    let dir = setup();
+    seed(dir.path(), "gmail", "v1", "");
+    let out = gwsr(dir.path())
+        .args(["gmail", "+unsubscribe", "--message-id", "M1", "--dry-run"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "exit {:?}: {}",
+        out.status.code(),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let v = stdout_json(&out);
+    assert_eq!(v["dry_run"], true);
+    let reqs = v["requests"].as_array().unwrap();
+    assert_eq!(reqs.len(), 2, "{v}");
+    assert_eq!(reqs[0]["method"], "GET");
+    assert_eq!(
+        reqs[0]["url"],
+        "https://gmail.googleapis.com/gmail/v1/users/me/messages/M1"
+    );
+    assert_eq!(reqs[0]["query_params"]["format"], "metadata");
+    assert_eq!(reqs[1]["method"], "POST");
+    assert_eq!(reqs[1]["body"], "List-Unsubscribe=One-Click");
+}
