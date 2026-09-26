@@ -42,6 +42,10 @@ pub struct RestDescription {
     pub schemas: HashMap<String, JsonSchema>,
     #[serde(default)]
     pub resources: HashMap<String, RestResource>,
+    /// Methods declared at the top level, outside any resource (e.g.
+    /// `oauth2:v2`'s `tokeninfo`).
+    #[serde(default)]
+    pub methods: HashMap<String, RestMethod>,
     #[serde(default)]
     pub parameters: HashMap<String, MethodParameter>,
     pub auth: Option<AuthDescription>,
@@ -267,6 +271,9 @@ impl RestDescription {
         if let Some(batch) = &self.batch_path {
             validate_relative_path(batch, "batchPath")?;
         }
+        for method in self.methods.values() {
+            method.validate_paths()?;
+        }
         for resource in self.resources.values() {
             resource.validate_paths()?;
         }
@@ -297,16 +304,7 @@ fn validate_relative_path(path: &str, what: &str) -> Result<(), GwsError> {
 impl RestResource {
     fn validate_paths(&self) -> Result<(), GwsError> {
         for method in self.methods.values() {
-            validate_relative_path(&method.path, "method path")?;
-            if let Some(flat) = &method.flat_path {
-                validate_relative_path(flat, "method flatPath")?;
-            }
-            for proto in [method.simple_upload_path(), method.resumable_upload_path()]
-                .into_iter()
-                .flatten()
-            {
-                validate_relative_path(proto, "media upload path")?;
-            }
+            method.validate_paths()?;
         }
         for sub in self.resources.values() {
             sub.validate_paths()?;
@@ -316,6 +314,20 @@ impl RestResource {
 }
 
 impl RestMethod {
+    fn validate_paths(&self) -> Result<(), GwsError> {
+        validate_relative_path(&self.path, "method path")?;
+        if let Some(flat) = &self.flat_path {
+            validate_relative_path(flat, "method flatPath")?;
+        }
+        for proto in [self.simple_upload_path(), self.resumable_upload_path()]
+            .into_iter()
+            .flatten()
+        {
+            validate_relative_path(proto, "media upload path")?;
+        }
+        Ok(())
+    }
+
     fn upload_protocols(&self) -> Option<&MediaUploadProtocols> {
         self.media_upload.as_ref()?.protocols.as_ref()
     }
@@ -711,5 +723,34 @@ mod tests {
         let base = Url::parse("https://proxy.example/").unwrap();
         doc.validate_endpoints(Some(&base)).unwrap();
         assert!(doc.api_root(None).is_err());
+    }
+
+    #[test]
+    fn top_level_methods_are_parsed_and_their_paths_validated() {
+        let doc = |path: &str| -> RestDescription {
+            serde_json::from_value(serde_json::json!({
+                "name": "oauth2",
+                "version": "v2",
+                "rootUrl": "https://www.googleapis.com/",
+                "servicePath": "",
+                "methods": {
+                    "tokeninfo": {"id": "oauth2.tokeninfo", "httpMethod": "POST", "path": path}
+                }
+            }))
+            .unwrap()
+        };
+        let ok = doc("oauth2/v2/tokeninfo");
+        assert_eq!(ok.methods["tokeninfo"].http_method, "POST");
+        ok.validate_endpoints(None).unwrap();
+        for bad in [
+            "https://evil.example/tokeninfo",
+            "//evil.example/x",
+            "a/../../x",
+        ] {
+            assert!(
+                doc(bad).validate_endpoints(None).is_err(),
+                "{bad} should be rejected"
+            );
+        }
     }
 }
