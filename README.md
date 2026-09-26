@@ -222,7 +222,7 @@ Checked in this order:
 4. `GOOGLE_APPLICATION_CREDENTIALS`
 5. `~/.config/gcloud/application_default_credentials.json`
 
-Once a source exists, it is used or the command fails. A damaged or undecryptable credentials file is never deleted or silently skipped. A profile you selected explicitly never falls back to Application Default Credentials. `--dry-run` loads no credentials at all.
+Once a source exists, it is used or the command fails. A damaged or undecryptable credentials file is never deleted or silently skipped. A profile you selected explicitly never falls back to Application Default Credentials, and `--profile` together with `GWSR_TOKEN`, `GWSR_TOKEN_FILE` or `GWSR_CREDENTIALS_FILE` is a configuration error instead of silently using the other identity. `--dry-run` loads no credentials at all.
 
 ### Storage and key backends
 
@@ -280,6 +280,8 @@ gwsr auth export --unmasked --output ci-credentials.json
 | `--compact` / `--pretty` | Force the JSON layout (`GWSR_JSON_STYLE=auto\|compact\|pretty`) |
 
 Table output escapes terminal control characters. CSV cells that start with a formula character get a `'` prefix.
+
+With `--page-all` or `--page-items`, `table` and `csv` print one header: the first page with rows fixes the columns (the `--columns` selection, or that page's fields), and every later row is aligned to them, with empty cells for missing fields. A field that first appears on a later page is left out, and a warning on stderr names it; pass `--columns` or use `--format json` to keep it.
 
 ### Errors
 
@@ -399,7 +401,7 @@ EOF
 # {"id":"b","status":404,"body":{"error":{...}}}
 ```
 
-Every call is validated like a normal command (`--allow-unknown-params` and `--allow-unknown-fields` apply). Destructive calls need `--yes`. Failed calls are reported as result lines on stdout. When any call fails, the command exits `1` with reason `batchPartialFailure` after printing every result.
+Every call is validated like a normal command (`--allow-unknown-params` and `--allow-unknown-fields` apply). Destructive calls need `--yes`. With `--sanitize`, each result body is screened by Model Armor before it is printed. Failed calls are reported as result lines on stdout. When any call fails, the command exits `1` with reason `batchPartialFailure` after printing every result.
 
 ## Confirmations
 
