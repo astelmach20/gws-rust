@@ -271,7 +271,10 @@ pub(crate) struct PubSubClient {
 
 impl PubSubClient {
     pub(crate) fn new(transport: &Transport) -> Self {
-        Self::with_base(transport, crate::helpers::PUBSUB_API_BASE)
+        Self::with_base(
+            transport,
+            &crate::helpers::pubsub_api_base(transport.endpoints()),
+        )
     }
 
     pub(crate) fn with_base(transport: &Transport, base: &str) -> Self {
@@ -642,6 +645,19 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn pubsub_client_follows_the_api_base_override() {
+        let client = PubSubClient::new(&Transport::for_test("http://127.0.0.1:9/"));
+        assert_eq!(
+            client.url("projects/p/topics/t"),
+            "http://127.0.0.1:9/v1/projects/p/topics/t"
+        );
+        assert_eq!(
+            crate::helpers::pubsub_api_base(&gws_rust_core::validate::EndpointPolicy::google_only()),
+            "https://pubsub.googleapis.com/v1"
+        );
     }
 
     #[tokio::test]

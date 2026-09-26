@@ -28,7 +28,12 @@ use std::pin::Pin;
 pub struct EventsHelper;
 
 pub(super) const PUBSUB_SCOPE: &str = "https://www.googleapis.com/auth/pubsub";
-pub(super) const WORKSPACE_EVENTS_API_BASE: &str = "https://workspaceevents.googleapis.com/v1";
+/// Base URL for the Workspace Events v1 API (see [`crate::helpers::api_base`]).
+pub(super) fn workspace_events_api_base(
+    endpoints: &gws_rust_core::validate::EndpointPolicy,
+) -> String {
+    crate::helpers::api_base(endpoints, "https://workspaceevents.googleapis.com/", "v1")
+}
 
 /// OAuth scopes needed to manage Workspace Events subscriptions for the given
 /// CloudEvent types. The Workspace Events API requires a scope that can read

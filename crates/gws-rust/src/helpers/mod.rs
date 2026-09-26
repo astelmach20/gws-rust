@@ -38,11 +38,26 @@ pub mod slides;
 pub mod tasks;
 pub mod workflows;
 
-/// Base URL for the Google Cloud Pub/Sub v1 API.
-///
-/// Shared across `events::subscribe` and `gmail::watch` so the constant
-/// is defined in a single place.
-pub(crate) const PUBSUB_API_BASE: &str = "https://pubsub.googleapis.com/v1";
+/// Base URL `{root}{path}` for a Google API a helper calls by fixed path:
+/// Google's `google_root`, or the `GWSR_API_BASE_URL` override root when one
+/// is set, exactly as generated methods build their URLs.
+pub(crate) fn api_base(
+    endpoints: &gws_rust_core::validate::EndpointPolicy,
+    google_root: &str,
+    path: &str,
+) -> String {
+    // Both roots end with '/'.
+    let root = endpoints
+        .override_base()
+        .map_or(google_root, |b| b.as_str());
+    format!("{root}{path}")
+}
+
+/// Base URL for the Google Cloud Pub/Sub v1 API, shared across
+/// `events::subscribe` and `gmail::watch`.
+pub(crate) fn pubsub_api_base(endpoints: &gws_rust_core::validate::EndpointPolicy) -> String {
+    api_base(endpoints, "https://pubsub.googleapis.com/", "v1")
+}
 
 /// Returns a future that completes when a shutdown signal is received.
 ///

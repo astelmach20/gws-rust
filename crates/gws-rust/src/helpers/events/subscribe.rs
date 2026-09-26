@@ -19,7 +19,7 @@ use super::stream::{
     PubSubClient, StepError, StreamOptions, StreamStep, cleanup_resources, emit_diagnostic,
     run_stream,
 };
-use super::{PUBSUB_SCOPE, WORKSPACE_EVENTS_API_BASE, parse_event_types, scopes_for_event_types};
+use super::{PUBSUB_SCOPE, parse_event_types, scopes_for_event_types, workspace_events_api_base};
 
 use crate::error::GwsError;
 use crate::helpers::modelarmor::{SanitizeConfig, Sanitized, sanitize_value};
@@ -365,7 +365,10 @@ async fn create_resources(
     let op = rest
         .json(
             reqwest::Method::POST,
-            &format!("{WORKSPACE_EVENTS_API_BASE}/subscriptions"),
+            &format!(
+                "{}/subscriptions",
+                workspace_events_api_base(rest.endpoints())
+            ),
             &[],
             Some(&body),
             Idempotency::NonIdempotent,
