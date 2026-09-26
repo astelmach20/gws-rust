@@ -990,10 +990,11 @@ async fn sync(api: &Api, folder_id: &str, dir: &Path) -> Result<Value, GwsError>
             } else {
                 None
             };
-            // Two Drive items can share a name; disambiguate with the ID.
-            if !used_names.insert(local_name.clone()) {
+            // Two Drive items can share a name, or differ only by case (one
+            // file on case-insensitive file systems); disambiguate with the ID.
+            if !used_names.insert(local_name.to_lowercase()) {
                 local_name = format!("{child_id}-{local_name}");
-                used_names.insert(local_name.clone());
+                used_names.insert(local_name.to_lowercase());
             }
             let path = local_dir.join(&local_name);
             if is_up_to_date(&path, modified)? {
@@ -1421,6 +1422,51 @@ mod tests {
         // Second run: local copies are newer than the 2020 remote timestamps.
         let v = sync(&api, "ROOT", dir.path()).await.unwrap();
         assert_eq!(v["unchanged"].as_array().unwrap().len(), 2);
+    }
+
+    /// Drive names are case-sensitive but the default macOS and Windows
+    /// file systems are not: `Report.txt` and `report.txt` must not share a
+    /// local path, or the second one is silently reported "unchanged" (or
+    /// overwrites the first).
+    #[tokio::test]
+    async fn sync_disambiguates_names_differing_only_by_case() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/drive/v3/files"))
+            .and(query_param("q", "'ROOT' in parents and trashed = false"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"files": [
+                {"id": "U", "name": "Report.txt", "mimeType": "text/plain", "modifiedTime": "2020-01-01T00:00:00Z"},
+                {"id": "L", "name": "report.txt", "mimeType": "text/plain", "modifiedTime": "2020-01-01T00:00:00Z"}
+            ]})))
+            .mount(&server)
+            .await;
+        for id in ["U", "L"] {
+            Mock::given(method("GET"))
+                .and(path(format!("/drive/v3/files/{id}")))
+                .and(query_param("alt", "media"))
+                .respond_with(ResponseTemplate::new(200).set_body_bytes(id.as_bytes().to_vec()))
+                .mount(&server)
+                .await;
+        }
+        let api = api(&server.uri(), "drive/v3/");
+        let dir = tempfile::tempdir().unwrap();
+        let v = sync(&api, "ROOT", dir.path()).await.unwrap();
+        assert_eq!(v["unchanged"], json!([]), "{v}");
+        let paths: Vec<PathBuf> = v["downloaded"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|d| PathBuf::from(d["path"].as_str().unwrap()))
+            .collect();
+        assert_eq!(paths.len(), 2, "{v}");
+        let folded: std::collections::HashSet<String> = paths
+            .iter()
+            .map(|p| p.to_string_lossy().to_lowercase())
+            .collect();
+        assert_eq!(folded.len(), 2, "paths collide case-insensitively: {v}");
+        let mut contents: Vec<Vec<u8>> = paths.iter().map(|p| std::fs::read(p).unwrap()).collect();
+        contents.sort();
+        assert_eq!(contents, vec![b"L".to_vec(), b"U".to_vec()]);
     }
 
     #[test]
