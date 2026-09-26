@@ -1041,6 +1041,36 @@ async fn binary_download_without_output_is_a_json_error() {
 }
 
 #[tokio::test]
+async fn json_numbers_pass_through_unchanged() {
+    // Doubles that serde_json's default (non-roundtrip) float parser reads
+    // one ULP off, e.g. coordinates or unformatted Sheets values.
+    let numbers = [
+        "13.346133595589677",
+        "-13.336664635114445",
+        "10.938711676632721",
+        "1.0715660391465826e-75",
+    ];
+    let body = format!("{{\"values\":[{}]}}", numbers.join(","));
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(body, "application/json"))
+        .mount(&server)
+        .await;
+    let d = doc(&server.uri());
+    let mut call = Call::new(&d, "get", &server);
+    call.params = json!({"fileId": "1"});
+    let em = Emitter::capturing();
+    call.run(&em).await.unwrap();
+    let printed: Vec<String> = lines(&em)[0]["values"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|n| n.to_string())
+        .collect();
+    assert_eq!(printed, numbers, "{}", em.captured_text());
+}
+
+#[tokio::test]
 async fn text_response_is_wrapped_in_json() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
