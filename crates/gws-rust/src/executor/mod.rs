@@ -442,6 +442,9 @@ pub(crate) async fn execute_to(
     let mut query = request_url.query.clone();
     let mut pages: u32 = 0;
     let mut item_field: Option<String> = None;
+    // Page tokens already followed: an API that repeats one would otherwise
+    // loop forever under the default unlimited --page-limit.
+    let mut seen_tokens: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     loop {
         let sent = match (&upload_plan, pages) {
@@ -667,6 +670,12 @@ pub(crate) async fn execute_to(
                 out.stream(json!({"_truncated": {"pagesFetched": pages, "nextPageToken": token}}))?;
             }
             break;
+        }
+        if !seen_tokens.insert(token.clone()) {
+            return Err(GwsError::other(anyhow::anyhow!(
+                "{method_id} returned a repeated nextPageToken after {pages} page(s); \
+                 aborting --page-all instead of looping forever"
+            )));
         }
         if let Some(loc) = token_location {
             pagination::place_token(loc, &token, &mut query, &mut body)?;
