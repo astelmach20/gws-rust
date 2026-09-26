@@ -528,6 +528,27 @@ fn auth_configuration_errors_exit_with_the_config_code() {
 }
 
 #[test]
+fn auth_login_rejects_services_with_exact_scopes() {
+    let env = Env::new();
+    // `-s` only filters presets; with `--scopes` it used to be silently
+    // ignored. It is rejected before any OAuth client or keyring is touched.
+    let out = env
+        .cmd()
+        .args(["auth", "login", "-s", "gmail", "--scopes", "contacts"])
+        .assert()
+        .code(3)
+        .stdout("")
+        .get_output()
+        .clone();
+    let err = stderr_error(&out);
+    let message = err["error"]["message"].as_str().unwrap();
+    assert!(
+        message.contains("--services") && message.contains("--scopes"),
+        "{message}"
+    );
+}
+
+#[test]
 fn cache_clear_dry_run_reports_and_keeps_the_cache() {
     let env = Env::new();
     env.seed_drive("Lists files.");
