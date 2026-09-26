@@ -32,7 +32,7 @@
 //!
 //! `GWSR_LOG_FILE` (or `log_file` in `config.toml`) names a directory that
 //! receives `gwsr.log.YYYY-MM-DD` JSON-line files at debug level. The
-//! directory is created `0700` and files are created `0600` (the process
+//! directory is created (or restricted) `0700` and files are created `0600` (the process
 //! umask is `0077`). The returned [`LogGuard`] must be kept alive until the
 //! process exits so buffered records are flushed.
 
@@ -113,20 +113,14 @@ fn parse_filter(directive: &str) -> Result<EnvFilter, GwsError> {
         .map_err(|e| GwsError::Config(format!("invalid log filter '{directive}': {e}")))
 }
 
-/// Create the log directory with owner-only permissions.
+/// Create the log directory, or tighten an existing one, to owner-only
+/// permissions: debug logs name files, accounts and request URLs.
 fn create_private_dir(dir: &Path) -> Result<(), GwsError> {
-    let mut builder = std::fs::DirBuilder::new();
-    builder.recursive(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::DirBuilderExt;
-        builder.mode(0o700);
-    }
-    builder.create(dir).map_err(|e| {
-        GwsError::from(
-            anyhow::Error::new(e)
-                .context(format!("failed to create log directory {}", dir.display())),
-        )
+    crate::fs_util::ensure_private_dir(dir).map_err(|e| {
+        GwsError::from(anyhow::Error::new(e).context(format!(
+            "failed to create or restrict log directory {} to 0700",
+            dir.display()
+        )))
     })
 }
 
@@ -257,5 +251,27 @@ mod tests {
         create_private_dir(&dir).unwrap();
         let mode = std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o700);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn existing_log_dir_is_tightened_to_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("logs");
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        create_private_dir(&dir).unwrap();
+        let mode = std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o700);
+    }
+
+    #[test]
+    fn log_dir_that_is_a_file_is_an_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join("not-a-dir");
+        std::fs::write(&file, b"x").unwrap();
+        let err = create_private_dir(&file).unwrap_err();
+        assert!(err.to_string().contains("log directory"), "{err}");
     }
 }
