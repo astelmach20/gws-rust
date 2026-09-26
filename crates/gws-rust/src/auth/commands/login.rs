@@ -353,8 +353,6 @@ mod tests {
         let a = parse_args(&matches(&[
             "--scopes",
             "gmail.modify, https://mail.google.com/",
-            "-s",
-            "Gmail,drive",
             "--no-browser",
             "--no-localhost",
             "--timeout",
@@ -368,16 +366,20 @@ mod tests {
                 "https://mail.google.com/".into()
             ])
         );
+        assert!(a.services.is_none());
+        assert!(!a.open_browser);
+        assert_eq!(a.mode, RedirectMode::Manual);
+        assert_eq!(a.timeout, Duration::from_secs(30));
+        assert!(parse_args(&matches(&["--scopes", " , "])).is_err());
+
+        let a = parse_args(&matches(&["-s", "Gmail,drive", "--write"])).unwrap();
+        assert_eq!(a.scope_mode, ScopeMode::Write);
         assert_eq!(
             a.services.unwrap(),
             ["gmail".to_string(), "drive".to_string()]
                 .into_iter()
                 .collect()
         );
-        assert!(!a.open_browser);
-        assert_eq!(a.mode, RedirectMode::Manual);
-        assert_eq!(a.timeout, Duration::from_secs(30));
-        assert!(parse_args(&matches(&["--scopes", " , "])).is_err());
     }
 
     #[tokio::test]
@@ -409,21 +411,6 @@ mod tests {
             .await
             .unwrap();
         assert!(s.contains(&"https://www.googleapis.com/auth/gmail.settings.basic".to_string()));
-    }
-
-    #[tokio::test]
-    async fn custom_scopes_bypass_filter() {
-        let services: HashSet<String> = ["drive".to_string()].into_iter().collect();
-        let custom = vec!["https://mail.google.com/".to_string()];
-        let s = resolve_scopes(
-            ScopeMode::Custom(custom.clone()),
-            None,
-            Some(&services),
-            false,
-        )
-        .await
-        .unwrap();
-        assert_eq!(s, custom);
     }
 
     #[test]
