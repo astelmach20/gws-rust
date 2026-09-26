@@ -1017,6 +1017,29 @@ async fn json_output_decodes_base64_attachment() {
 // ── Long-running operations ─────────────────────────────────────────────
 
 #[tokio::test]
+async fn bodiless_post_sends_content_length_zero() {
+    // Upstream googleworkspace/cli#727: `drive files download` (a POST with no
+    // body) was rejected by Google with 411 Length Required.
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/drive/v3/files/f1/download"))
+        .and(header("content-length", "0"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({"name": "op1", "done": true, "response": {}})),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    let d = doc(&server.uri());
+    let mut call = Call::new(&d, "download", &server);
+    call.params = json!({"fileId": "f1"});
+    let em = Emitter::capturing();
+    call.run(&em).await.unwrap();
+    assert_eq!(lines(&em)[0]["name"], "op1");
+}
+
+#[tokio::test]
 async fn download_operation_is_waited_on_and_followed() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
