@@ -1683,3 +1683,77 @@ async fn batch_results_are_screened_by_model_armor() {
     );
     assert!(!out.status.success());
 }
+
+// ── -o/--output pointing at a directory ─────────────────────────────────
+
+#[tokio::test(flavor = "multi_thread")]
+async fn output_to_an_existing_directory_is_rejected_before_any_request() {
+    use wiremock::matchers::any;
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    Mock::given(any())
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_raw(b"%PDF-1.7 payload".to_vec(), "application/pdf"),
+        )
+        .mount(&server)
+        .await;
+    let env = Env::new();
+    let doc = json!({
+        "name": "drive",
+        "version": "v3",
+        "rootUrl": "https://www.googleapis.com/",
+        "servicePath": "drive/v3/",
+        "resources": {"files": {"methods": {"get": {
+            "id": "drive.files.get",
+            "httpMethod": "GET",
+            "path": "files/{fileId}",
+            "parameters": {
+                "fileId": {"type": "string", "location": "path", "required": true},
+                "alt": {"type": "string", "location": "query"}
+            },
+            "parameterOrder": ["fileId"],
+            "supportsMediaDownload": true,
+            "scopes": ["https://www.googleapis.com/auth/drive.readonly"]
+        }}}}
+    });
+    std::fs::write(
+        env.cache_dir().join("discovery/drive+v3.json"),
+        serde_json::to_string(&doc).unwrap(),
+    )
+    .unwrap();
+    let dir = env.work_dir().join("downloads");
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let out = env
+        .cmd()
+        .env("GWSR_TOKEN", "test-token")
+        .env("GWSR_API_BASE_URL", server.uri())
+        .args([
+            "drive",
+            "files",
+            "get",
+            "--params",
+            r#"{"fileId":"f1","alt":"media"}"#,
+            "-o",
+        ])
+        .arg(&dir)
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(3), "{}", stderr_of(&out));
+    let err = stderr_error(&out);
+    assert!(
+        err["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("is a directory"),
+        "{err}"
+    );
+    assert!(
+        server.received_requests().await.unwrap().is_empty(),
+        "nothing may be downloaded for an output path that can never be written"
+    );
+    assert!(dir.is_dir());
+    assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0);
+}

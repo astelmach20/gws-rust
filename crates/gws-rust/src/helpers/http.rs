@@ -191,7 +191,7 @@ impl OutputTarget {
         if value == "-" {
             return Ok(Self::Stdout);
         }
-        let path = crate::validate::validate_safe_file_path(value, "--output")?;
+        let path = crate::validate::validate_output_file_path(value, "--output")?;
         Ok(Self::File { path, overwrite })
     }
 
@@ -1040,6 +1040,19 @@ mod tests {
                 .await
                 .is_err()
         );
+    }
+
+    #[test]
+    fn output_target_refuses_an_existing_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().to_str().unwrap();
+        for overwrite in [false, true] {
+            let err = OutputTarget::parse(target, overwrite).unwrap_err();
+            assert!(matches!(err, GwsError::Validation(_)), "{err:?}");
+            assert!(err.to_string().contains("is a directory"), "{err}");
+        }
+        let file = dir.path().join("out.pdf");
+        assert!(OutputTarget::parse(file.to_str().unwrap(), false).is_ok());
     }
 
     #[test]
