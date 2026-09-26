@@ -214,11 +214,12 @@ pub(super) fn parse_original_message(msg: &Value) -> Result<OriginalMessage, Gws
     };
 
     // Prefer the text/plain part; otherwise render the HTML part as text;
-    // only when the message has neither fall back to the API snippet.
+    // only when the message has neither fall back to the API snippet, which
+    // Gmail returns HTML-escaped.
     let body_text = match (extracted_text, &body_html) {
         (Some(text), _) => text,
         (None, Some(html)) => html_to_text(html)?,
-        (None, None) => snippet,
+        (None, None) => snippet_to_text(&snippet)?,
     };
 
     let references = parse_msg_ids(&parsed_headers.references);
@@ -658,6 +659,50 @@ mod tests {
         assert_eq!(
             parse_original_message(&msg).unwrap().body_text,
             "Snippet only"
+        );
+    }
+
+    fn snippet_only_message(snippet: &str) -> Value {
+        json!({
+            "snippet": snippet,
+            "payload": {
+                "mimeType": "multipart/mixed",
+                "headers": [
+                    { "name": "From", "value": "alice@example.com" },
+                    { "name": "Message-ID", "value": "<msg@example.com>" }
+                ],
+                "parts": []
+            }
+        })
+    }
+
+    #[test]
+    fn test_snippet_fallback_decodes_html_entities() {
+        // Gmail returns `snippet` HTML-escaped; body_text is plain text.
+        let msg = snippet_only_message(
+            "Tom &amp; Jerry&#39;s &quot;plan&quot;: 1 &lt; 2 &gt; 0, a long line of text \
+             that goes well past seventy-eight columns so it must not be wrapped",
+        );
+        assert_eq!(
+            parse_original_message(&msg).unwrap().body_text,
+            "Tom & Jerry's \"plan\": 1 < 2 > 0, a long line of text \
+             that goes well past seventy-eight columns so it must not be wrapped"
+        );
+        assert_eq!(
+            parse_original_message(&snippet_only_message(""))
+                .unwrap()
+                .body_text,
+            ""
+        );
+    }
+
+    #[test]
+    fn test_snippet_fallback_is_escaped_once_in_html_quote() {
+        let original =
+            parse_original_message(&snippet_only_message("Tom &amp; Jerry&#39;s")).unwrap();
+        assert_eq!(
+            super::super::html::resolve_html_body(&original),
+            "Tom &amp; Jerry&#39;s"
         );
     }
 
