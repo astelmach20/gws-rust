@@ -57,7 +57,7 @@ impl GmailApi {
         format!("{}/users/me/{path}", self.base)
     }
 
-    fn message_url(&self, id: &str) -> String {
+    pub(super) fn message_url(&self, id: &str) -> String {
         self.url(&format!(
             "messages/{}",
             crate::validate::encode_path_segment(id)
