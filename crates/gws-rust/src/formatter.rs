@@ -26,6 +26,8 @@
 use std::sync::OnceLock;
 
 use serde_json::{Map, Value};
+use unicode_segmentation::UnicodeSegmentation;
+use unicode_width::UnicodeWidthStr;
 
 use crate::error::GwsError;
 use crate::jq::JqFilter;
@@ -457,7 +459,7 @@ fn format_table(
             }
             let width = flat
                 .iter()
-                .map(|(k, _)| k.chars().count())
+                .map(|(k, _)| display_width(&sanitize_for_terminal(k)))
                 .max()
                 .unwrap_or(0);
             let mut out = String::new();
@@ -476,17 +478,38 @@ fn format_table(
     }
 }
 
+/// Columns `s` occupies on a terminal: CJK and most emoji take two, combining
+/// marks none, and an emoji ZWJ sequence or flag counts as one character.
+fn display_width(s: &str) -> usize {
+    s.graphemes(true).map(UnicodeWidthStr::width).sum()
+}
+
 fn pad(s: &str, width: usize) -> String {
-    let len = s.chars().count();
+    let len = display_width(s);
     format!("{s}{}", " ".repeat(width.saturating_sub(len)))
 }
 
+/// Truncate `s` to at most `width` display columns, cutting only between
+/// grapheme clusters and marking the cut with `…`.
 fn truncate_cell(s: &str, width: usize) -> String {
-    if s.chars().count() > width {
-        let head: String = s.chars().take(width.saturating_sub(1)).collect();
-        format!("{head}…")
+    if display_width(s) <= width {
+        return s.to_string();
+    }
+    let budget = width.saturating_sub(1);
+    let mut used = 0;
+    let mut head = String::new();
+    for g in s.graphemes(true) {
+        let w = UnicodeWidthStr::width(g);
+        if used + w > budget {
+            break;
+        }
+        used += w;
+        head.push_str(g);
+    }
+    if width == 0 {
+        head
     } else {
-        s.to_string()
+        format!("{head}…")
     }
 }
 
@@ -519,7 +542,7 @@ fn format_array_as_table(
                 .collect()
         })
         .collect();
-    // Width: char count, capped. Later pages of a stream keep the first
+    // Width: terminal display columns, capped. Later pages of a stream keep the first
     // page's widths so their rows line up under its header.
     let widths: Vec<usize> = match &fixed {
         Some(layout) => layout.widths.clone(),
@@ -528,10 +551,10 @@ fn format_array_as_table(
             .map(|c| {
                 let data = rows
                     .iter()
-                    .map(|r| r.get(c).map_or(0, |v| v.chars().count()))
+                    .map(|r| r.get(c).map_or(0, |v| display_width(v)))
                     .max()
                     .unwrap_or(0);
-                data.max(c.chars().count()).min(MAX_COLUMN_WIDTH)
+                data.max(display_width(c)).min(MAX_COLUMN_WIDTH)
             })
             .collect(),
     };
@@ -818,6 +841,82 @@ mod tests {
         let val = json!([{"col": "😀".repeat(70)}]);
         let out = fmt(&val, OutputFormat::Table);
         assert!(out.contains('…'));
+    }
+
+    /// Terminal display width of `s` (the columns it occupies).
+    fn display_width(s: &str) -> usize {
+        unicode_width::UnicodeWidthStr::width(s)
+    }
+
+    /// Display column at which `needle` starts on `line`.
+    fn display_col(line: &str, needle: &str) -> usize {
+        let at = line.find(needle).unwrap();
+        display_width(&line[..at])
+    }
+
+    #[test]
+    fn table_aligns_columns_after_wide_characters() {
+        let val = json!([
+            {"name": "日本語", "id": "1"},
+            {"name": "abc", "id": "2"},
+            {"name": "😀😀", "id": "3"}
+        ]);
+        let out = fmt(&val, OutputFormat::Table);
+        let lines: Vec<&str> = out.lines().collect();
+        let header_col = display_col(lines[0], "name");
+        assert_eq!(display_col(lines[2], "日本語"), header_col, "{out}");
+        assert_eq!(display_col(lines[3], "abc"), header_col, "{out}");
+        assert_eq!(display_col(lines[4], "😀😀"), header_col, "{out}");
+        // Every line (and the separator) spans the same columns.
+        let sep = display_width(lines[1]);
+        assert_eq!(display_width(lines[2]), sep, "{out}");
+    }
+
+    #[test]
+    fn table_single_object_pads_wide_keys() {
+        let val = json!({"名前": "Alice", "id": "1"});
+        let out = fmt(&val, OutputFormat::Table);
+        let cols: Vec<usize> = out
+            .lines()
+            .map(|l| display_col(l, if l.contains("Alice") { "Alice" } else { "1" }))
+            .collect();
+        assert_eq!(cols[0], cols[1], "{out}");
+    }
+
+    #[test]
+    fn table_truncation_caps_display_width() {
+        for cell in ["日".repeat(70), "😀".repeat(70), "a日".repeat(50)] {
+            let val = json!([{"col": cell, "n": "x"}]);
+            let out = fmt(&val, OutputFormat::Table);
+            let lines: Vec<&str> = out.lines().collect();
+            let row = lines[2];
+            let n_col = display_col(row, "x");
+            assert_eq!(display_col(lines[0], "n"), n_col, "{out}");
+            let truncated = row[..row.find('…').unwrap() + '…'.len_utf8()].to_string();
+            assert!(
+                display_width(&truncated) <= MAX_COLUMN_WIDTH,
+                "{} > {MAX_COLUMN_WIDTH}: {out}",
+                display_width(&truncated)
+            );
+        }
+    }
+
+    #[test]
+    fn table_truncation_keeps_grapheme_clusters_whole() {
+        // Skin-tone emoji, emoji presentation selector, flag (regional-
+        // indicator pair) and a combining accent: each is one cluster of
+        // several chars, and truncation must cut between clusters.
+        for (cluster, repeat) in [("👍🏽", 40), ("❤\u{fe0f}", 40), ("🇯🇵", 40), ("e\u{301}", 70)]
+        {
+            let val = json!([{"col": cluster.repeat(repeat)}]);
+            let out = fmt(&val, OutputFormat::Table);
+            let row = out.lines().nth(2).unwrap();
+            let head = row.strip_suffix('…').unwrap_or_else(|| panic!("{out}"));
+            assert!(!head.is_empty(), "{out}");
+            assert_eq!(head.len() % cluster.len(), 0, "split cluster: {out}");
+            assert_eq!(head, cluster.repeat(head.len() / cluster.len()), "{out}");
+            assert!(display_width(row) <= MAX_COLUMN_WIDTH, "{out}");
+        }
     }
 
     #[test]
