@@ -17,7 +17,7 @@ metadata:
 
 # Save a Gmail Message to Google Docs
 
-> **PREREQUISITE:** Load the following skills to execute this recipe: `gwsr-gmail`, `gwsr-docs`
+> **PREREQUISITE:** Load the following skills to execute this recipe: `gwsr-gmail`, `gwsr-docs` (install any that are missing with `npx skills add https://github.com/astelmach20/gws-rust/tree/main/skills/<name>`)
 
 Save a Gmail message body into a Google Doc for archival or reference.
 

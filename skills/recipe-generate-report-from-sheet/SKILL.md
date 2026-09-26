@@ -18,7 +18,7 @@ metadata:
 
 # Generate a Google Docs Report from Sheet Data
 
-> **PREREQUISITE:** Load the following skills to execute this recipe: `gwsr-sheets`, `gwsr-docs`, `gwsr-drive`
+> **PREREQUISITE:** Load the following skills to execute this recipe: `gwsr-sheets`, `gwsr-docs`, `gwsr-drive` (install any that are missing with `npx skills add https://github.com/astelmach20/gws-rust/tree/main/skills/<name>`)
 
 Read data from a Google Sheet and create a formatted Google Docs report.
 

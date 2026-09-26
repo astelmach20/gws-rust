@@ -16,7 +16,7 @@ metadata:
 
 # Organize Files into Google Drive Folders
 
-> **PREREQUISITE:** Load the following skills to execute this recipe: `gwsr-drive`
+> **PREREQUISITE:** Load the following skills to execute this recipe: `gwsr-drive` (install any that are missing with `npx skills add https://github.com/astelmach20/gws-rust/tree/main/skills/<name>`)
 
 Create a Google Drive folder structure and move files into the right locations.
 

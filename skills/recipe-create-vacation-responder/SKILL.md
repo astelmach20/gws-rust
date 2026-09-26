@@ -16,7 +16,7 @@ metadata:
 
 # Set Up a Gmail Vacation Responder
 
-> **PREREQUISITE:** Load the following skills to execute this recipe: `gwsr-gmail`
+> **PREREQUISITE:** Load the following skills to execute this recipe: `gwsr-gmail` (install any that are missing with `npx skills add https://github.com/astelmach20/gws-rust/tree/main/skills/<name>`)
 
 Enable a Gmail out-of-office auto-reply with a custom message and date range.
 

@@ -16,7 +16,7 @@ metadata:
 
 # Review Google Meet Attendance
 
-> **PREREQUISITE:** Load the following skills to execute this recipe: `gwsr-meet`
+> **PREREQUISITE:** Load the following skills to execute this recipe: `gwsr-meet` (install any that are missing with `npx skills add https://github.com/astelmach20/gws-rust/tree/main/skills/<name>`)
 
 Review who attended a Google Meet conference and for how long.
 

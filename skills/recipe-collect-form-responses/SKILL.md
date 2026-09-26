@@ -16,7 +16,7 @@ metadata:
 
 # Check Form Responses
 
-> **PREREQUISITE:** Load the following skills to execute this recipe: `gwsr-forms`
+> **PREREQUISITE:** Load the following skills to execute this recipe: `gwsr-forms` (install any that are missing with `npx skills add https://github.com/astelmach20/gws-rust/tree/main/skills/<name>`)
 
 Retrieve and review responses from a Google Form.
 

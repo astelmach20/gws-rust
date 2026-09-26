@@ -19,7 +19,7 @@ metadata:
 
 # Project Manager
 
-> **PREREQUISITE:** Load the following utility skills to operate as this persona: `gwsr-drive`, `gwsr-sheets`, `gwsr-calendar`, `gwsr-gmail`, `gwsr-chat`
+> **PREREQUISITE:** Load the following utility skills to operate as this persona: `gwsr-drive`, `gwsr-sheets`, `gwsr-calendar`, `gwsr-gmail`, `gwsr-chat` (install any that are missing with `npx skills add https://github.com/astelmach20/gws-rust/tree/main/skills/<name>`)
 
 Coordinate projects — track tasks, schedule meetings, and share docs.
 

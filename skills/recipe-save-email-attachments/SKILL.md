@@ -17,7 +17,7 @@ metadata:
 
 # Save Gmail Attachments to Google Drive
 
-> **PREREQUISITE:** Load the following skills to execute this recipe: `gwsr-gmail`, `gwsr-drive`
+> **PREREQUISITE:** Load the following skills to execute this recipe: `gwsr-gmail`, `gwsr-drive` (install any that are missing with `npx skills add https://github.com/astelmach20/gws-rust/tree/main/skills/<name>`)
 
 Find Gmail messages with attachments and save them to a Google Drive folder.
 
