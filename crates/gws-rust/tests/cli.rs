@@ -113,6 +113,17 @@ impl Env {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(path, serde_json::to_string(&doc).unwrap()).unwrap();
     }
+
+    /// Seed a Discovery document into the cache as `<name>+<version>.json`.
+    fn seed_doc(&self, doc: &Value) {
+        let file = format!(
+            "{}+{}.json",
+            doc["name"].as_str().unwrap(),
+            doc["version"].as_str().unwrap()
+        );
+        let path = self.cache_dir().join("discovery").join(file);
+        std::fs::write(path, serde_json::to_string(doc).unwrap()).unwrap();
+    }
 }
 
 fn stdout_of(output: &std::process::Output) -> String {
@@ -277,6 +288,117 @@ fn sanitize_help_names_the_real_env_var() {
         .arg("--help")
         .assert()
         .stdout(predicate::str::contains("env: GWSR_SANITIZE_TEMPLATE"));
+}
+
+/// A minimal Discovery document with one GET method at `resource.method`.
+fn one_method_doc(name: &str, version: &str, resource: &str, method: &str, id: &str) -> Value {
+    json!({
+        "name": name,
+        "version": version,
+        "rootUrl": format!("https://{name}.googleapis.com/"),
+        "servicePath": "",
+        "resources": {
+            resource: {
+                "methods": {
+                    method: {
+                        "id": id,
+                        "httpMethod": "GET",
+                        "path": format!("{version}/things"),
+                        "parameters": {
+                            "part": {"type": "string", "location": "query", "required": true}
+                        },
+                        "scopes": [format!("https://www.googleapis.com/auth/{name}")]
+                    }
+                }
+            }
+        }
+    })
+}
+
+/// The `gwsr schema <path>` argument quoted after `marker` in `text`.
+fn schema_path_after<'a>(text: &'a str, marker: &str) -> &'a str {
+    assert!(text.contains(marker), "no {marker:?} in {text}");
+    let start = text.find(marker).unwrap() + marker.len();
+    text[start..]
+        .split(|c: char| c.is_whitespace() || c == '`')
+        .next()
+        .unwrap()
+}
+
+#[test]
+fn schema_hints_in_help_and_errors_name_commands_that_run() {
+    let env = Env::new();
+    // A registered service whose alias differs from its Discovery name.
+    env.seed_doc(&one_method_doc(
+        "workspaceevents",
+        "v1",
+        "subscriptions",
+        "list",
+        "workspaceevents.subscriptions.list",
+    ));
+    // A method whose id does not spell its resource path.
+    env.seed_doc(&one_method_doc(
+        "alertcenter",
+        "v1beta1",
+        "v1beta1",
+        "getSettings",
+        "alertcenter.getSettings",
+    ));
+    // An unregistered API used as `<api>:<version>`.
+    env.seed_doc(&one_method_doc(
+        "youtube",
+        "v3",
+        "videos",
+        "list",
+        "youtube.videos.list",
+    ));
+
+    for (command, expected) in [
+        (
+            vec!["events", "subscriptions", "list"],
+            "events.subscriptions.list",
+        ),
+        (
+            vec!["alertcenter", "v1beta1", "getSettings"],
+            "alertcenter.v1beta1.getSettings",
+        ),
+        (
+            vec!["youtube:v3", "videos", "list"],
+            "youtube:v3.videos.list",
+        ),
+    ] {
+        let help = env
+            .cmd()
+            .args(&command)
+            .arg("--help")
+            .assert()
+            .success()
+            .get_output()
+            .clone();
+        let help = stdout_of(&help);
+        let from_help = schema_path_after(&help, "Full request/response schema: gwsr schema ");
+        assert_eq!(from_help, expected, "{command:?} --help");
+
+        // Missing the required parameter: the error names the schema command.
+        let err = env
+            .cmd()
+            .args(&command)
+            .arg("--dry-run")
+            .assert()
+            .code(3)
+            .get_output()
+            .clone();
+        let err: Value = serde_json::from_str(stderr_of(&err).trim()).unwrap();
+        let message = err["error"]["message"].as_str().unwrap();
+        let from_error = schema_path_after(message, "Run `gwsr schema ");
+        assert_eq!(from_error, expected, "{command:?} error");
+
+        env.cmd()
+            .args(["schema", expected])
+            .assert()
+            .success()
+            .stdout(predicate::str::contains("\"httpMethod\":\"GET\""));
+    }
 }
 
 // ── Errors ──────────────────────────────────────────────────────────────
