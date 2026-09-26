@@ -308,3 +308,59 @@ fn upload_rejects_paths_outside_cwd() {
         .unwrap();
     assert_eq!(out.status.code(), Some(3));
 }
+
+#[test]
+fn gmail_filter_forward_is_gated_under_policy() {
+    let dir = setup();
+    seed(dir.path(), "gmail", "v1", "");
+    let create = |extra: &[&str]| {
+        let mut args = vec!["gmail", "+filter", "create", "--from", "boss@example.com"];
+        args.extend_from_slice(extra);
+        gwsr(dir.path())
+            .env("GWSR_REQUIRE_CONFIRM", "1")
+            .args(args)
+            .output()
+            .unwrap()
+    };
+
+    // A filter that forwards mail sends it to someone else: under the
+    // policy it needs --yes, exactly like `gmail +forward`.
+    let out = create(&["--forward", "fwd@example.com"]);
+    assert_eq!(
+        out.status.code(),
+        Some(7),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(out.stdout.is_empty());
+    let err: Value = serde_json::from_slice(&out.stderr).unwrap();
+    assert_eq!(err["error"]["reason"], "confirmationRequired", "{err}");
+    assert!(
+        err["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("fwd@example.com"),
+        "{err}"
+    );
+
+    // --yes confirms it (shown with --dry-run, which never sends anything).
+    let out = create(&["--forward", "fwd@example.com", "--yes", "--dry-run"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let plan = stdout_json(&out);
+    assert_eq!(
+        plan["requests"][0]["body"]["action"]["forward"],
+        "fwd@example.com"
+    );
+
+    // A filter that only labels or archives mail is not outbound.
+    let out = create(&["--archive", "--dry-run"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}

@@ -127,6 +127,13 @@ pub(super) async fn handle_filter(matches: &ArgMatches) -> Result<(), GwsError> 
         }
         Some(("create", sub)) => {
             let spec = parse_create_args(sub)?;
+            if let Some(to) = &spec.forward {
+                confirm::confirm(
+                    sub,
+                    Impact::Outbound,
+                    &format!("create a filter that forwards matching mail to {to}"),
+                )?;
+            }
             if dry_run {
                 let body = build_filter(&spec, &spec.add_labels, &spec.remove_labels);
                 return crate::helpers::http::print_dry_run(

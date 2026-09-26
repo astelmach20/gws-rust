@@ -36,7 +36,8 @@ gwsr gmail +filter delete --filter-id ANe1Bmj... --yes
 ## Tips
 
 - Requires the gmail.settings.basic scope (gwsr auth login -s gmail).
-- Label names must already exist. Deleting a filter always requires --yes.
+- Label names must already exist. Deleting a filter always requires --yes;
+- a filter with --forward requires it when GWSR_REQUIRE_CONFIRM=1.
 
 ## See Also
 
