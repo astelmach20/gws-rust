@@ -1003,6 +1003,97 @@ async fn upload_session_uri_on_foreign_host_is_refused() {
     );
 }
 
+/// Sends a multipart upload of a file that holds `actual` bytes although it
+/// was measured at `declared` (it changed size between planning and sending).
+async fn multipart_after_size_change(
+    declared: u64,
+    actual: usize,
+) -> (Result<gws_rust_core::client::Sent, GwsError>, Vec<Vec<u8>>) {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id": "x"})))
+        .mount(&server)
+        .await;
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("a.bin");
+    std::fs::write(&file, vec![b'A'; actual]).unwrap();
+    let data = UploadData {
+        path: file.to_str().unwrap().to_string(),
+        size: declared,
+    };
+    let transport = Transport::new(
+        &Credentials::Static("t".into()),
+        options(&server).retry,
+        EndpointPolicy::with_override(&server.uri()).unwrap(),
+        None,
+    )
+    .unwrap();
+    let result = upload::send_multipart(
+        &transport,
+        Method::POST,
+        &format!("{}/upload", server.uri()),
+        &[],
+        &None,
+        &data,
+        "application/octet-stream",
+        Idempotency::NonIdempotent,
+    )
+    .await;
+    let bodies = server
+        .received_requests()
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|r| r.body)
+        .collect();
+    (result, bodies)
+}
+
+#[tokio::test]
+async fn multipart_upload_of_a_file_that_grew_is_refused_not_truncated() {
+    // Before the fix the body was cut at the declared Content-Length: the
+    // server received all ten bytes and a truncated closing boundary.
+    let (result, bodies) = multipart_after_size_change(5, 10).await;
+    assert!(
+        bodies.is_empty(),
+        "the server received a corrupt multipart body: {:?}",
+        bodies
+            .iter()
+            .map(|b| String::from_utf8_lossy(b).into_owned())
+            .collect::<Vec<_>>()
+    );
+    let err = result.unwrap_err();
+    assert!(matches!(err, GwsError::Validation(_)), "{err:?}");
+    assert!(
+        err.to_string().contains("changed size during upload"),
+        "{err}"
+    );
+}
+
+#[tokio::test]
+async fn multipart_upload_of_an_unchanged_file_is_complete() {
+    for size in [0usize, 10] {
+        let (result, bodies) = multipart_after_size_change(size as u64, size).await;
+        result.unwrap();
+        let text = String::from_utf8_lossy(&bodies[0]).into_owned();
+        let boundary = text[2..text.find("\r\n").unwrap()].to_string();
+        let expected_media = format!("\r\n\r\n{}\r\n--{boundary}--\r\n", "A".repeat(size));
+        assert!(text.ends_with(&expected_media), "{text:?}");
+    }
+}
+
+#[tokio::test]
+async fn multipart_upload_of_a_file_that_shrank_names_the_cause() {
+    let (result, bodies) = multipart_after_size_change(10, 5).await;
+    assert!(bodies.is_empty());
+    let err = result.unwrap_err();
+    assert!(matches!(err, GwsError::Validation(_)), "{err:?}");
+    assert!(
+        err.to_string().contains("changed size during upload"),
+        "{err}"
+    );
+}
+
 // ── Downloads ───────────────────────────────────────────────────────────
 
 #[tokio::test]
