@@ -94,10 +94,13 @@ fn plan(api: &GmailApi, targets: &Targets, add: &[String], remove: &[String]) ->
     requests
 }
 
-fn print(value: &Value, matches: &ArgMatches) -> Result<(), GwsError> {
+async fn print(
+    value: Value,
+    matches: &ArgMatches,
+    sanitize: &crate::helpers::modelarmor::SanitizeConfig,
+) -> Result<(), GwsError> {
     let format = crate::helpers::http::output_format(matches)?;
-    crate::output::emit(&crate::formatter::format_value(value, &format)?)?;
-    Ok(())
+    super::emit_screened(sanitize, &format, value).await
 }
 
 /// An unauthenticated client used only to render dry-run URLs.
@@ -108,7 +111,10 @@ fn offline_api() -> Result<GmailApi, GwsError> {
 }
 
 /// Handle `+label`.
-pub(super) async fn handle_label(matches: &ArgMatches) -> Result<(), GwsError> {
+pub(super) async fn handle_label(
+    matches: &ArgMatches,
+    sanitize: &crate::helpers::modelarmor::SanitizeConfig,
+) -> Result<(), GwsError> {
     let targets = Targets::from_matches(matches)?;
     let change = LabelChange {
         add: list_values(matches, "add")?,
@@ -131,11 +137,14 @@ pub(super) async fn handle_label(matches: &ArgMatches) -> Result<(), GwsError> {
     let add = resolve_label_ids(&change.add, &labels)?;
     let remove = resolve_label_ids(&change.remove, &labels)?;
     let summary = apply(&api, &targets, &add, &remove).await?;
-    print(&summary, matches)
+    print(summary, matches, sanitize).await
 }
 
 /// Handle `+archive` (remove the INBOX label).
-pub(super) async fn handle_archive(matches: &ArgMatches) -> Result<(), GwsError> {
+pub(super) async fn handle_archive(
+    matches: &ArgMatches,
+    sanitize: &crate::helpers::modelarmor::SanitizeConfig,
+) -> Result<(), GwsError> {
     let targets = Targets::from_matches(matches)?;
     let remove = vec!["INBOX".to_string()];
     if crate::args::dry_run(matches)? {
@@ -146,11 +155,14 @@ pub(super) async fn handle_archive(matches: &ArgMatches) -> Result<(), GwsError>
     }
     let api = super::api::authenticated(&[GMAIL_SCOPE]).await?;
     let summary = apply(&api, &targets, &[], &remove).await?;
-    print(&summary, matches)
+    print(summary, matches, sanitize).await
 }
 
 /// Handle `+trash`.
-pub(super) async fn handle_trash(matches: &ArgMatches) -> Result<(), GwsError> {
+pub(super) async fn handle_trash(
+    matches: &ArgMatches,
+    sanitize: &crate::helpers::modelarmor::SanitizeConfig,
+) -> Result<(), GwsError> {
     let targets = Targets::from_matches(matches)?;
     let items: Vec<(TargetKind, &String)> = targets
         .messages
@@ -173,9 +185,11 @@ pub(super) async fn handle_trash(matches: &ArgMatches) -> Result<(), GwsError> {
         api.trash(*kind, id).await?;
     }
     print(
-        &json!({ "trashedMessages": targets.messages, "trashedThreads": targets.threads }),
+        json!({ "trashedMessages": targets.messages, "trashedThreads": targets.threads }),
         matches,
+        sanitize,
     )
+    .await
 }
 
 #[cfg(test)]

@@ -183,7 +183,10 @@ async fn post_one_click(url: &reqwest::Url) -> Result<u16, GwsError> {
 }
 
 /// Handle `+unsubscribe`.
-pub(super) async fn handle_unsubscribe(matches: &ArgMatches) -> Result<(), GwsError> {
+pub(super) async fn handle_unsubscribe(
+    matches: &ArgMatches,
+    sanitize: &crate::helpers::modelarmor::SanitizeConfig,
+) -> Result<(), GwsError> {
     let message_id = required_str(matches, "message-id")?;
     let dry_run = crate::args::dry_run(matches)?;
     // Reading the headers is always a real (read-only) request, so --dry-run can
@@ -242,8 +245,7 @@ pub(super) async fn handle_unsubscribe(matches: &ArgMatches) -> Result<(), GwsEr
         "status": status,
     });
     let format = crate::helpers::http::output_format(matches)?;
-    crate::output::emit(&crate::formatter::format_value(&out, &format)?)?;
-    Ok(())
+    super::emit_screened(sanitize, &format, out).await
 }
 
 #[cfg(test)]

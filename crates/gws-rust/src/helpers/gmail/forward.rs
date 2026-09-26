@@ -20,9 +20,12 @@ use super::prelude::*;
 use super::sender::resolve_sender;
 
 /// Handle the `+forward` subcommand.
-pub(super) async fn handle_forward(matches: &ArgMatches) -> Result<(), GwsError> {
+pub(super) async fn handle_forward(
+    matches: &ArgMatches,
+    sanitize: &crate::helpers::modelarmor::SanitizeConfig,
+) -> Result<(), GwsError> {
     let mut config = parse_forward_args(matches)?;
-    let delivery = Delivery::from_matches(matches)?;
+    let delivery = Delivery::from_matches(matches, sanitize)?;
     delivery.confirm(
         matches,
         &format!(

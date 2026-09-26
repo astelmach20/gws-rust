@@ -308,3 +308,47 @@ fn upload_rejects_paths_outside_cwd() {
         .unwrap();
     assert_eq!(out.status.code(), Some(3));
 }
+
+#[test]
+fn gmail_helper_output_honors_sanitize_block_mode() {
+    let dir = setup();
+    seed(dir.path(), "gmail", "v1", "");
+    let args = [
+        "gmail",
+        "+resolve-url",
+        "--no-verify",
+        "--url",
+        "18f1a2b3c4d5e6f7",
+    ];
+    // Without --sanitize the result is printed.
+    let out = gwsr(dir.path()).args(args).output().unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(stdout_json(&out)["id"], "18f1a2b3c4d5e6f7");
+
+    // With --sanitize in block mode the output must be screened. Model Armor
+    // can't be reached here (no credentials), so block mode fails closed and
+    // prints nothing instead of silently skipping the screen.
+    let out = gwsr(dir.path())
+        .args(args)
+        .args([
+            "--sanitize",
+            "projects/my-project/locations/us-central1/templates/t",
+        ])
+        .env("GWSR_SANITIZE_MODE", "block")
+        .output()
+        .unwrap();
+    assert!(
+        !out.status.success(),
+        "block mode printed unscreened output: {}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    assert!(
+        out.stdout.is_empty(),
+        "{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+}
