@@ -1252,3 +1252,64 @@ async fn batch_round_trip_reports_partial_failure() {
     let body = String::from_utf8_lossy(&sent[0].body);
     assert!(body.contains("GET /drive/v3/files/1 HTTP/1.1"));
 }
+
+#[tokio::test]
+async fn batch_results_follow_input_order_when_parts_are_reordered() {
+    // Parts are matched by Content-ID; Google does not promise to return them
+    // in request order, but the output contract is one line per call in input
+    // order.
+    let server = MockServer::start().await;
+    let response_body = "--b\r\nContent-Type: application/http\r\nContent-ID: <response-item-b>\r\n\r\n\
+                         HTTP/1.1 404 Not Found\r\n\r\n{\"error\":{\"code\":404}}\r\n\
+                         --b\r\nContent-Type: application/http\r\nContent-ID: <response-item-a>\r\n\r\n\
+                         HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{\"id\":\"1\"}\r\n--b--\r\n";
+    Mock::given(method("POST"))
+        .and(path("/batch/drive/v3"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_raw(response_body, "multipart/mixed; boundary=b"),
+        )
+        .mount(&server)
+        .await;
+    let d = doc(&server.uri());
+    let opts = options(&server);
+    let calls = batch::parse_calls(
+        &d,
+        "{\"id\":\"a\",\"method\":\"files.get\",\"params\":{\"fileId\":\"1\"}}\n{\"id\":\"b\",\"method\":\"files.get\",\"params\":{\"fileId\":\"2\"}}",
+        &opts,
+    )
+    .unwrap();
+    let em = Emitter::capturing();
+    batch::run_batch(
+        &d,
+        &calls,
+        Credentials::Static("tok".into()),
+        &opts,
+        &SanitizeConfig::default(),
+        &em,
+    )
+    .await
+    .unwrap_err();
+    let ids: Vec<Value> = lines(&em).iter().map(|l| l["id"].clone()).collect();
+    assert_eq!(ids, vec![json!("a"), json!("b")]);
+}
+
+#[test]
+#[serial_test::serial]
+fn batch_ids_must_be_unique() {
+    // The second line's generated id ("2") collides with the first line's
+    // explicit one: both results would be reported as id "2".
+    let d = doc("https://www.googleapis.com");
+    let mut opts = ExecOptions::from_env().unwrap();
+    opts.endpoints = EndpointPolicy::google_only();
+    let result = batch::parse_calls(
+        &d,
+        "{\"id\":\"2\",\"method\":\"files.get\",\"params\":{\"fileId\":\"1\"}}\n{\"method\":\"files.get\",\"params\":{\"fileId\":\"2\"}}",
+        &opts,
+    )
+    .map(|calls| calls.iter().map(|c| c.id.clone()).collect::<Vec<_>>());
+    let err = match result {
+        Ok(ids) => panic!("duplicate ids were accepted: {ids:?}"),
+        Err(e) => e.to_string(),
+    };
+    assert!(err.contains("duplicate id \"2\""), "{err}");
+}

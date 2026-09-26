@@ -390,7 +390,7 @@ File path flags (`-o`, `--upload`, `--output-dir`, `--dir`, `@file`) accept any 
 
 ### Batch
 
-`gwsr batch <service[:version]>` reads NDJSON calls from stdin or `--input FILE`. It sends them in `multipart/mixed` batches of up to 100, and writes one result line per call:
+`gwsr batch <service[:version]>` reads NDJSON calls from stdin or `--input FILE`. It sends them in `multipart/mixed` batches of up to 100, and writes one result line per call, in input order. `id` is optional (a line without one gets its position) but must be unique:
 
 ```bash
 cat <<'EOF' | gwsr batch drive
