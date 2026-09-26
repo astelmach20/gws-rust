@@ -228,7 +228,7 @@ pub fn method_args(doc: &RestDescription, method: &RestMethod) -> Vec<Arg> {
         );
     }
 
-    if crate::executor::is_destructive(method) {
+    if crate::executor::is_gated(method) {
         args.push(crate::confirm::yes_arg().help_heading(HEADING_REQUEST));
     }
 
