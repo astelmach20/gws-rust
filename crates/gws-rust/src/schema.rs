@@ -21,8 +21,8 @@
 use serde_json::{Value, json};
 
 use crate::discovery::{
-    JsonSchema, MethodParameter, PageTokenLocation, RestDescription, RestMethod, RestResource,
-    fetch_discovery_document,
+    JsonSchema, JsonSchemaProperty, MethodParameter, PageTokenLocation, RestDescription,
+    RestMethod, RestResource, fetch_discovery_document,
 };
 use crate::error::GwsError;
 use crate::services::resolve_service_spec;
@@ -256,44 +256,68 @@ fn schema_to_json(schema: &JsonSchema) -> Value {
         s["description"] = json!(desc);
     }
 
+    if let Some(ref r) = schema.schema_ref {
+        s["$ref"] = json!(r);
+    }
     if !schema.properties.is_empty() {
-        let mut props = json!({});
-        for (name, prop) in &schema.properties {
-            let mut p = json!({});
-            if let Some(ref t) = prop.prop_type {
-                p["type"] = json!(t);
-            }
-            if let Some(ref r) = prop.schema_ref {
-                p["$ref"] = json!(r);
-            }
-            if let Some(ref desc) = prop.description {
-                p["description"] = json!(desc);
-            }
-            if prop.read_only {
-                p["readOnly"] = json!(true);
-            }
-            if let Some(ref fmt) = prop.format {
-                p["format"] = json!(fmt);
-            }
-
-            // Handle items for array types
-            if let Some(ref items) = prop.items {
-                let mut items_json = json!({});
-                if let Some(ref t) = items.prop_type {
-                    items_json["type"] = json!(t);
-                }
-                if let Some(ref r) = items.schema_ref {
-                    items_json["$ref"] = json!(r);
-                }
-                p["items"] = items_json;
-            }
-
-            props[name] = p;
-        }
-        s["properties"] = props;
+        s["properties"] = properties_to_json(&schema.properties);
+    }
+    if !schema.required.is_empty() {
+        s["required"] = json!(schema.required);
+    }
+    if let Some(ref items) = schema.items {
+        s["items"] = property_to_json(items);
+    }
+    if let Some(ref additional) = schema.additional_properties {
+        s["additionalProperties"] = property_to_json(additional);
     }
 
     s
+}
+
+fn properties_to_json(properties: &std::collections::HashMap<String, JsonSchemaProperty>) -> Value {
+    let mut props = json!({});
+    for (name, prop) in properties {
+        props[name] = property_to_json(prop);
+    }
+    props
+}
+
+/// One property, including inline object properties, map values
+/// (`additionalProperties`) and array items at any depth.
+fn property_to_json(prop: &JsonSchemaProperty) -> Value {
+    let mut p = json!({});
+    if let Some(ref t) = prop.prop_type {
+        p["type"] = json!(t);
+    }
+    if let Some(ref r) = prop.schema_ref {
+        p["$ref"] = json!(r);
+    }
+    if let Some(ref desc) = prop.description {
+        p["description"] = json!(desc);
+    }
+    if prop.read_only {
+        p["readOnly"] = json!(true);
+    }
+    if let Some(ref fmt) = prop.format {
+        p["format"] = json!(fmt);
+    }
+    if let Some(ref def) = prop.default {
+        p["default"] = json!(def);
+    }
+    if let Some(ref vals) = prop.enum_values {
+        p["enum"] = json!(vals);
+    }
+    if !prop.properties.is_empty() {
+        p["properties"] = properties_to_json(&prop.properties);
+    }
+    if let Some(ref items) = prop.items {
+        p["items"] = property_to_json(items);
+    }
+    if let Some(ref additional) = prop.additional_properties {
+        p["additionalProperties"] = property_to_json(additional);
+    }
+    p
 }
 
 /// Recursively resolves "$ref" fields in the JSON value.
@@ -413,6 +437,91 @@ mod tests {
         assert_eq!(json["type"], "object");
         assert!(json["properties"].is_object());
         assert_eq!(json["properties"]["name"]["type"], "string");
+    }
+
+    /// Inline object properties, maps (`additionalProperties`), nested array
+    /// items and enums are part of the body the executor validates, so
+    /// `gwsr schema` must show them rather than a bare `"type": "object"`.
+    #[test]
+    fn schema_to_json_keeps_nested_structure() {
+        let doc: RestDescription = serde_json::from_value(json!({
+            "name": "x", "version": "v1", "rootUrl": "https://x.googleapis.com/",
+            "schemas": {
+                "File": {
+                    "type": "object",
+                    "properties": {
+                        "contentHints": {
+                            "type": "object",
+                            "properties": {
+                                "thumbnail": {
+                                    "type": "object",
+                                    "properties": {
+                                        "image": {"type": "string", "format": "byte"},
+                                        "owner": {"$ref": "User"}
+                                    }
+                                }
+                            }
+                        },
+                        "appProperties": {
+                            "type": "object",
+                            "additionalProperties": {"type": "string"}
+                        },
+                        "values": {
+                            "type": "array",
+                            "items": {"type": "array", "items": {"type": "any"}}
+                        },
+                        "permissions": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {"role": {"type": "string"}}
+                            }
+                        },
+                        "status": {"type": "string", "enum": ["ACTIVE", "DELETED"]}
+                    }
+                },
+                "Labels": {
+                    "type": "object",
+                    "additionalProperties": {"$ref": "User"}
+                },
+                "User": {
+                    "type": "object",
+                    "properties": {"email": {"type": "string"}}
+                }
+            }
+        }))
+        .unwrap();
+
+        let file = schema_to_json(&doc.schemas["File"]);
+        let props = &file["properties"];
+        assert_eq!(
+            props["contentHints"]["properties"]["thumbnail"]["properties"]["image"]["format"],
+            "byte",
+            "{file:#}"
+        );
+        assert_eq!(
+            props["appProperties"]["additionalProperties"]["type"], "string",
+            "{file:#}"
+        );
+        assert_eq!(props["values"]["items"]["items"]["type"], "any", "{file:#}");
+        assert_eq!(
+            props["permissions"]["items"]["properties"]["role"]["type"], "string",
+            "{file:#}"
+        );
+        assert_eq!(props["status"]["enum"], json!(["ACTIVE", "DELETED"]));
+
+        let labels = schema_to_json(&doc.schemas["Labels"]);
+        assert_eq!(labels["additionalProperties"]["$ref"], "User", "{labels:#}");
+
+        // `--resolve-refs` follows references inside inline objects too.
+        let mut resolved = file.clone();
+        resolve_schema_refs(&mut resolved, &doc, &mut std::collections::HashSet::new());
+        assert_eq!(
+            resolved["properties"]["contentHints"]["properties"]["thumbnail"]["properties"]["owner"]
+                ["properties"]["email"]["type"],
+            "string",
+            "{resolved:#}"
+        );
     }
 
     #[test]
