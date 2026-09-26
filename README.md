@@ -488,7 +488,7 @@ json_style = "auto"       # auto | compact | pretty                   (GWSR_JSON
 page_limit = 50           # default --page-limit                      (GWSR_PAGE_LIMIT)
 page_delay_ms = 100       # default --page-delay                      (GWSR_PAGE_DELAY_MS)
 timeout_secs = 60         # request timeout                           (GWSR_TIMEOUT, --timeout)
-sanitize_template = "projects/p/locations/l/templates/t"            # (GWSR_SANITIZE_TEMPLATE, --sanitize)
+sanitize_template = "projects/my-project/locations/us-central1/templates/t1"  # (GWSR_SANITIZE_TEMPLATE, --sanitize)
 sanitize_mode = "warn"    # warn | block                              (GWSR_SANITIZE_MODE)
 profile = "work"          # default profile; written by `gwsr auth use` (GWSR_PROFILE, --profile)
 log = "gwsr=info"         # stderr log filter                         (GWSR_LOG, RUST_LOG, -v/-q)
