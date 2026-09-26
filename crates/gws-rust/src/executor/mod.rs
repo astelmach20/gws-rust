@@ -449,6 +449,10 @@ pub(crate) async fn execute_to(
         captured: Vec::new(),
         pages: PageStream::default(),
     };
+    // `--decode-field` asks for a field of a JSON document, so it keeps the
+    // JSON path even with `alt=media`.
+    let media_download = options.decode_field.is_none()
+        && params.get("alt").and_then(Value::as_str) == Some("media");
     let mut query = request_url.query.clone();
     let mut pages: u32 = 0;
     let mut item_field: Option<String> = None;
@@ -506,6 +510,29 @@ pub(crate) async fn execute_to(
         let empty_success = json!({"status": "success", "httpStatus": status.as_u16()});
         if status == reqwest::StatusCode::NO_CONTENT {
             out.single(empty_success)?;
+            break;
+        }
+
+        // `alt=media` returns the stored file itself. Saved or streamed, it
+        // is delivered byte for byte, whatever its Content-Type: a JSON file
+        // must not be re-serialized or mistaken for an API response.
+        if let (true, Some(target)) = (media_download, output.as_ref()) {
+            let mime = if content_type.is_empty() {
+                "application/octet-stream"
+            } else {
+                content_type.as_str()
+            };
+            if let Some(summary) = download::stream_binary(
+                sent.response,
+                mime,
+                target,
+                options.idle_timeout(),
+                emitter,
+            )
+            .await?
+            {
+                out.single(summary)?;
+            }
             break;
         }
 
