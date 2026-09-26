@@ -166,6 +166,9 @@ pub(super) fn dry_run_list(matches: &ArgMatches, params: &SearchParams) -> Resul
     if let Some(t) = &params.page_token {
         query.push(("pageToken", t.clone()));
     }
+    if params.include_spam_trash {
+        query.push(("includeSpamTrash", "true".to_string()));
+    }
     let url = format!("{}/users/me/messages", super::api::GMAIL_API_BASE);
     crate::helpers::http::print_dry_run(
         matches,

@@ -111,12 +111,8 @@ impl ApiRequest {
             "url": self.url,
         });
         if !self.query.is_empty() {
-            let q: Map<String, Value> = self
-                .query
-                .iter()
-                .map(|(k, v)| (k.clone(), Value::String(v.clone())))
-                .collect();
-            out["query_params"] = Value::Object(q);
+            out["query_params"] =
+                query_params_json(self.query.iter().map(|(k, v)| (k.as_str(), v.as_str())));
         }
         match &self.body {
             Body::None => {}
@@ -648,6 +644,23 @@ pub(crate) fn print_text(text: &str) -> Result<(), GwsError> {
     crate::output::emit(text)
 }
 
+/// `query_params` for a dry-run plan: each key maps to its value, or to the
+/// array of its values, in order, when the request repeats the key.
+fn query_params_json<'a>(pairs: impl Iterator<Item = (&'a str, &'a str)>) -> Value {
+    let mut q = Map::new();
+    for (k, v) in pairs {
+        let v = Value::String(v.to_string());
+        match q.get_mut(k) {
+            None => {
+                q.insert(k.to_string(), v);
+            }
+            Some(Value::Array(values)) => values.push(v),
+            Some(first) => *first = Value::Array(vec![first.take(), v]),
+        }
+    }
+    Value::Object(q)
+}
+
 /// A request description for a `--dry-run` plan, in the same shape as
 /// [`ApiRequest::describe`].
 pub(crate) fn dry_run_request(
@@ -658,11 +671,7 @@ pub(crate) fn dry_run_request(
 ) -> Value {
     let mut out = json!({ "method": method, "url": url });
     if !query.is_empty() {
-        let q: Map<String, Value> = query
-            .iter()
-            .map(|(k, v)| ((*k).to_string(), Value::String(v.clone())))
-            .collect();
-        out["query_params"] = Value::Object(q);
+        out["query_params"] = query_params_json(query.iter().map(|(k, v)| (*k, v.as_str())));
     }
     if let Some(b) = body {
         out["body"] = b.clone();
@@ -753,6 +762,26 @@ mod tests {
         );
         assert_eq!(v, req.describe());
         assert_eq!(v["query_params"]["a"], "b");
+    }
+
+    #[test]
+    fn describe_lists_every_value_of_a_repeated_query_key() {
+        let req = ApiRequest::get("https://x/y")
+            .query("s", "1")
+            .query("a", "b")
+            .query("s", "2")
+            .query("s", "3");
+        assert_eq!(
+            req.describe()["query_params"],
+            json!({"s": ["1", "2", "3"], "a": "b"})
+        );
+        let v = dry_run_request(
+            "GET",
+            "https://x/y",
+            &[("s", "1".to_string()), ("s", "2".to_string())],
+            None,
+        );
+        assert_eq!(v["query_params"], json!({"s": ["1", "2"]}));
     }
 
     #[test]
