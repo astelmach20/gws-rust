@@ -605,6 +605,24 @@ fn auth_configuration_errors_exit_with_the_config_code() {
 }
 
 #[test]
+fn explicit_profile_is_never_silently_replaced_by_gwsr_token() {
+    let env = Env::new();
+    let out = env
+        .cmd()
+        .args(["--profile", "work", "auth", "status", "--offline"])
+        .env("GWSR_TOKEN", "ya29.another-identity")
+        .output()
+        .unwrap();
+    let status: Value = serde_json::from_str(&stdout_of(&out)).unwrap();
+    assert_eq!(status["authenticated"], false, "{status}");
+    let err = status["credential_error"].as_str().unwrap_or_default();
+    assert!(
+        err.contains("--profile work conflicts with GWSR_TOKEN"),
+        "{status}"
+    );
+}
+
+#[test]
 fn cache_clear_dry_run_reports_and_keeps_the_cache() {
     let env = Env::new();
     env.seed_drive("Lists files.");
