@@ -617,14 +617,26 @@ fn agenda_bounds(
     window: &Window,
     tz: Tz,
 ) -> Result<(chrono::DateTime<Tz>, chrono::DateTime<Tz>), GwsError> {
-    let today = crate::timezone::start_of_today(tz)?;
-    let day = chrono::Duration::days(1);
+    agenda_bounds_at(window, tz, chrono::Utc::now())
+}
+
+fn agenda_bounds_at(
+    window: &Window,
+    tz: Tz,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<(chrono::DateTime<Tz>, chrono::DateTime<Tz>), GwsError> {
+    let today = now.with_timezone(&tz).date_naive();
     Ok(match window {
-        Window::Today => (today, today + day),
-        Window::Tomorrow => (today + day, today + day * 2),
+        Window::Today => crate::timezone::day_bounds(today, tz)?,
+        Window::Tomorrow => {
+            let tomorrow = today
+                .succ_opt()
+                .ok_or_else(|| GwsError::Validation(format!("{today} has no following day")))?;
+            crate::timezone::day_bounds(tomorrow, tz)?
+        }
         Window::Days(n) => {
-            let now = chrono::Utc::now().with_timezone(&tz);
-            (now, now + day * i32::try_from(*n).map_err(http::other_err)?)
+            let now = now.with_timezone(&tz);
+            (now, now + chrono::Duration::days(i64::from(*n)))
         }
     })
 }
@@ -745,10 +757,13 @@ async fn agenda(api: &Api, args: &AgendaArgs, tz: &TzInfo) -> Result<Value, GwsE
                     .query("singleEvents", "true")
                     .query("orderBy", "startTime")
                     .query("maxResults", "250");
+                // Keep the error's class (and so its exit code): only the
+                // calendar name is added.
                 let page = api.paginate(req, "items", None).await.map_err(|e| {
-                    http::other_err(anyhow::anyhow!(
-                        "Failed to read calendar '{name}' ({id}): {e}"
-                    ))
+                    crate::transport::errors::with_context(
+                        e,
+                        &format!("Failed to read calendar '{name}' ({id})"),
+                    )
                 })?;
                 Ok::<_, GwsError>(
                     page.items
@@ -1382,6 +1397,43 @@ mod tests {
         assert!(err.to_string().contains("Work"), "{err}");
     }
 
+    /// A per-calendar failure keeps its error class, so the documented exit
+    /// code (1 API, 2 auth, 6 retryable, 10 network) survives the added
+    /// calendar name instead of collapsing into exit 5 (internal error).
+    #[tokio::test]
+    async fn agenda_calendar_errors_keep_their_exit_code() {
+        for (status, reason, expected) in [
+            (404, "notFound", GwsError::EXIT_CODE_API),
+            (429, "rateLimitExceeded", GwsError::EXIT_CODE_API_RETRYABLE),
+        ] {
+            let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .and(path("/users/me/calendarList"))
+                .respond_with(
+                    ResponseTemplate::new(200)
+                        .set_body_json(json!({"items": [{"id": "a@x", "summary": "Work"}]})),
+                )
+                .mount(&server)
+                .await;
+            Mock::given(method("GET"))
+                .and(path("/calendars/a@x/events"))
+                .respond_with(ResponseTemplate::new(status).set_body_json(json!({
+                    "error": {"code": status, "message": "nope", "errors": [{"reason": reason}]}
+                })))
+                .mount(&server)
+                .await;
+            let api = api(&server.uri(), "");
+            let args = AgendaArgs {
+                window: Window::Today,
+                calendar_ids: vec![],
+                calendar_name: None,
+            };
+            let err = agenda(&api, &args, &tz("UTC", false)).await.unwrap_err();
+            assert!(err.to_string().contains("Work"), "{err}");
+            assert_eq!(err.exit_code(), expected, "HTTP {status}: {err}");
+        }
+    }
+
     #[tokio::test]
     async fn freebusy_finds_slots_and_rejects_inaccessible_calendars() {
         let server = MockServer::start().await;
@@ -1638,11 +1690,96 @@ mod tests {
         );
     }
 
+    fn bounds_at(window: &Window, tz: Tz, now: &str) -> (String, String) {
+        let now = chrono::DateTime::parse_from_rfc3339(now)
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let (s, e) = agenda_bounds_at(window, tz, now).unwrap();
+        (s.to_rfc3339(), e.to_rfc3339())
+    }
+
+    #[test]
+    fn agenda_today_and_tomorrow_on_a_normal_day() {
+        let tz = chrono_tz::America::Denver;
+        let now = "2026-06-17T12:00:00-06:00";
+        assert_eq!(
+            bounds_at(&Window::Today, tz, now),
+            (
+                "2026-06-17T00:00:00-06:00".to_string(),
+                "2026-06-18T00:00:00-06:00".to_string()
+            )
+        );
+        assert_eq!(
+            bounds_at(&Window::Tomorrow, tz, now),
+            (
+                "2026-06-18T00:00:00-06:00".to_string(),
+                "2026-06-19T00:00:00-06:00".to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn agenda_today_spans_the_whole_25_hour_fall_back_day() {
+        let tz = chrono_tz::America::Denver;
+        assert_eq!(
+            bounds_at(&Window::Today, tz, "2026-11-01T12:00:00-07:00"),
+            (
+                "2026-11-01T00:00:00-06:00".to_string(),
+                "2026-11-02T00:00:00-07:00".to_string()
+            )
+        );
+        assert_eq!(
+            bounds_at(&Window::Tomorrow, tz, "2026-10-31T12:00:00-06:00"),
+            (
+                "2026-11-01T00:00:00-06:00".to_string(),
+                "2026-11-02T00:00:00-07:00".to_string()
+            )
+        );
+        // The day after the transition is an ordinary 24-hour day again.
+        assert_eq!(
+            bounds_at(&Window::Tomorrow, tz, "2026-11-01T12:00:00-07:00"),
+            (
+                "2026-11-02T00:00:00-07:00".to_string(),
+                "2026-11-03T00:00:00-07:00".to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn agenda_today_stops_at_midnight_on_the_23_hour_spring_forward_day() {
+        let tz = chrono_tz::America::Denver;
+        assert_eq!(
+            bounds_at(&Window::Today, tz, "2026-03-08T12:00:00-06:00"),
+            (
+                "2026-03-08T00:00:00-07:00".to_string(),
+                "2026-03-09T00:00:00-06:00".to_string()
+            )
+        );
+        assert_eq!(
+            bounds_at(&Window::Tomorrow, tz, "2026-03-07T12:00:00-07:00"),
+            (
+                "2026-03-08T00:00:00-07:00".to_string(),
+                "2026-03-09T00:00:00-06:00".to_string()
+            )
+        );
+        assert_eq!(
+            bounds_at(&Window::Tomorrow, tz, "2026-03-08T12:00:00-06:00"),
+            (
+                "2026-03-09T00:00:00-06:00".to_string(),
+                "2026-03-10T00:00:00-06:00".to_string()
+            )
+        );
+    }
+
     #[test]
     fn agenda_bounds_use_time_zone() {
         let (start, end) = agenda_bounds(&Window::Today, chrono_tz::America::Denver).unwrap();
         let s = start.to_rfc3339();
         assert!(s.ends_with("-07:00") || s.ends_with("-06:00"), "{s}");
-        assert_eq!(end - start, chrono::Duration::days(1));
+        use chrono::Timelike;
+        for t in [start, end] {
+            assert_eq!((t.hour(), t.minute(), t.second()), (0, 0, 0), "{t}");
+        }
+        assert_eq!(end.date_naive(), start.date_naive().succ_opt().unwrap());
     }
 }
