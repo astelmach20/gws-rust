@@ -25,7 +25,8 @@
 //! optional). Output is NDJSON, one line per call, in input order:
 //! `{"id": ..., "status": 200, "body": ...}`. Calls are grouped into batches
 //! of at most 100 (Google's limit). The command fails (exit 1) when any call
-//! failed, after printing every result.
+//! failed, after printing every result. With `--sanitize`, every result body
+//! is screened by Model Armor before it is printed, as for a single call.
 
 use std::io::IsTerminal;
 
@@ -41,11 +42,15 @@ use super::url::{UrlTarget, build_url};
 use super::{ExecOptions, body_schema, input};
 use crate::discovery::{RestDescription, RestMethod, RestResource};
 use crate::error::GwsError;
+use crate::helpers::modelarmor::SanitizeConfig;
 use crate::transport::errors::error_from_response;
 use crate::transport::{Credentials, Transport, read_body};
 
 /// Google's maximum number of calls per batch request.
 pub(crate) const MAX_BATCH: usize = 100;
+
+/// The keys an input line may carry.
+const LINE_KEYS: &[&str] = &["id", "method", "params", "json"];
 
 /// One parsed input line.
 #[derive(Debug)]
@@ -56,6 +61,8 @@ pub(crate) struct BatchCall<'a> {
     /// Path and query relative to the API host, e.g. `/drive/v3/files/1?fields=id`.
     pub path_and_query: String,
     pub body: Option<Value>,
+    /// The confirmation gate this call needs, from its method and params.
+    pub impact: Option<crate::confirm::Impact>,
 }
 
 /// `gwsr batch` arguments. `--dry-run` and `--api-version` are global
@@ -90,6 +97,8 @@ pub struct BatchContext {
     pub dry_run: bool,
     /// `--api-version`: overrides the `:VERSION` suffix.
     pub api_version: Option<String>,
+    /// `--sanitize` / `GWSR_SANITIZE_TEMPLATE`: screen every result body.
+    pub sanitize: SanitizeConfig,
 }
 
 /// Entry point for `gwsr batch ...`.
@@ -133,7 +142,15 @@ pub async fn handle_batch_command(args: &BatchArgs, ctx: &BatchContext) -> Resul
     } else {
         batch_credentials(&calls).await?
     };
-    run_batch(&doc, &calls, credentials, &options, &Emitter::stdout()).await
+    run_batch(
+        &doc,
+        &calls,
+        credentials,
+        &options,
+        &ctx.sanitize,
+        &Emitter::stdout(),
+    )
+    .await
 }
 
 async fn batch_credentials(calls: &[BatchCall<'_>]) -> Result<Credentials, GwsError> {
@@ -157,6 +174,10 @@ pub(crate) fn find_method<'a>(doc: &'a RestDescription, name: &str) -> Option<&'
         .split('.')
         .collect();
     let (method_name, resources) = path.split_last()?;
+    if resources.is_empty() {
+        // A method declared outside any resource (e.g. `oauth2.tokeninfo`).
+        return doc.methods.get(*method_name);
+    }
     let mut current: Option<&RestResource> = None;
     for r in resources {
         let map = match current {
@@ -183,27 +204,40 @@ pub(crate) fn parse_calls<'a>(
         let at =
             |msg: String| GwsError::Validation(format!("batch input line {}: {msg}", lineno + 1));
         let entry: Value =
-            serde_json::from_str(line).map_err(|e| at(format!("invalid JSON: {e}")))?;
+            super::input::parse_strict_json(line).map_err(|e| at(format!("invalid JSON: {e}")))?;
         let obj = entry
             .as_object()
             .ok_or_else(|| at("expected a JSON object".to_string()))?;
+        if obj.contains_key("upload") {
+            return Err(at(
+                "media uploads are not supported in batch requests".to_string()
+            ));
+        }
+        // A misspelled key ("body", "param") would otherwise be dropped and
+        // the call sent without it.
+        if let Some(key) = obj.keys().find(|k| !LINE_KEYS.contains(&k.as_str())) {
+            return Err(at(format!(
+                "unknown key \"{key}\"; expected {}",
+                LINE_KEYS.join(", ")
+            )));
+        }
         let name = obj
             .get("method")
             .and_then(Value::as_str)
             .ok_or_else(|| at("missing string field \"method\"".to_string()))?;
         let method = find_method(doc, name)
             .ok_or_else(|| at(format!("unknown method '{name}' in the {} API", doc.name)))?;
-        if method.supports_media_upload && obj.contains_key("upload") {
-            return Err(at(
-                "media uploads are not supported in batch requests".to_string()
-            ));
-        }
         let params: Map<String, Value> = match obj.get("params") {
             None | Some(Value::Null) => Map::new(),
             Some(Value::Object(m)) => m.clone(),
             Some(_) => return Err(at("\"params\" must be an object".to_string())),
         };
         let body = obj.get("json").filter(|v| !v.is_null()).cloned();
+        if body.is_some() && method.request.is_none() {
+            return Err(at(format!(
+                "{name} does not take a request body; remove \"json\""
+            )));
+        }
         input::validate_params(doc, method, &params, options.allow_unknown_params)
             .map_err(|e| at(e.to_string()))?;
         if let (Some(b), Some(schema)) = (
@@ -229,12 +263,14 @@ pub(crate) fn parse_calls<'a>(
         if id.contains(['\r', '\n', '<', '>']) {
             return Err(at("\"id\" must not contain CR, LF, '<' or '>'".to_string()));
         }
+        let impact = crate::confirm::method_impact(method, &params);
         calls.push(BatchCall {
             id,
             method,
             http,
             path_and_query,
             body,
+            impact,
         });
     }
     if calls.is_empty() {
@@ -388,11 +424,17 @@ pub(crate) async fn run_batch(
     calls: &[BatchCall<'_>],
     credentials: Credentials,
     options: &ExecOptions,
+    sanitize: &SanitizeConfig,
     emitter: &Emitter,
 ) -> Result<(), GwsError> {
     let destructive: Vec<&str> = calls
         .iter()
         .filter(|c| super::is_destructive(c.method))
+        .map(|c| c.id.as_str())
+        .collect();
+    let outbound: Vec<&str> = calls
+        .iter()
+        .filter(|c| c.impact == Some(crate::confirm::Impact::Outbound))
         .map(|c| c.id.as_str())
         .collect();
     let batch_url = format!(
@@ -419,6 +461,16 @@ pub(crate) async fn run_batch(
                 "run a batch with {} destructive call(s): {}",
                 destructive.len(),
                 destructive.join(", ")
+            ),
+        )?;
+    }
+    if !outbound.is_empty() {
+        options.gate().check(
+            crate::confirm::Impact::Outbound,
+            &format!(
+                "run a batch with {} outbound call(s): {}",
+                outbound.len(),
+                outbound.join(", ")
             ),
         )?;
     }
@@ -487,8 +539,10 @@ pub(crate) async fn run_batch(
             if !(200..300).contains(&part.status) {
                 failures += 1;
             }
-            emitter
-                .line(&json!({"id": id, "status": part.status, "body": part.body}).to_string())?;
+            let body = crate::helpers::modelarmor::require_pass(
+                crate::helpers::modelarmor::sanitize_value(sanitize, part.body).await?,
+            )?;
+            emitter.line(&json!({"id": id, "status": part.status, "body": body}).to_string())?;
         }
     }
     if failures > 0 {
@@ -568,6 +622,18 @@ mod tests {
         assert!(find_method(&doc, "drive.files.get").is_some());
         assert!(find_method(&doc, "files.nope").is_none());
         assert!(find_method(&doc, "get").is_none());
+
+        let mut doc = doc;
+        doc.methods.insert(
+            "about".into(),
+            RestMethod {
+                http_method: "GET".into(),
+                ..Default::default()
+            },
+        );
+        assert!(find_method(&doc, "about").is_some());
+        assert!(find_method(&doc, "drive.about").is_some());
+        assert!(find_method(&doc, "about.get").is_none());
     }
 
     #[test]
@@ -606,11 +672,52 @@ mod tests {
                 "{\"method\":\"files.get\",\"params\":{\"fileId\":\"1\",\"fieldz\":1}}",
                 "did you mean 'fields'",
             ),
+            (
+                "{\"method\":\"files.get\",\"params\":{\"fileId\":\"1\",\"fileId\":\"2\"}}",
+                "duplicate key 'fileId'",
+            ),
         ] {
             let err = parse_calls(&doc, line, &opts()).unwrap_err().to_string();
             assert!(err.contains(needle), "{line}: {err}");
         }
         assert!(parse_calls(&doc, "\n", &opts()).is_err());
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn rejects_keys_a_call_cannot_use() {
+        let doc = drive_doc("https://www.googleapis.com/");
+        let mut wrong = Vec::new();
+        for (line, needle) in [
+            // A misspelled or misplaced key must not be silently dropped: the
+            // call would go out without the body or parameters it was given.
+            (
+                "{\"method\":\"files.get\",\"params\":{\"fileId\":\"1\"},\"body\":{\"x\":1}}",
+                "unknown key \"body\"",
+            ),
+            (
+                "{\"method\":\"files.get\",\"parms\":{\"fileId\":\"1\"},\"params\":{\"fileId\":\"1\"}}",
+                "unknown key \"parms\"",
+            ),
+            // `upload` is never supported, not only on media methods.
+            (
+                "{\"method\":\"files.get\",\"params\":{\"fileId\":\"1\"},\"upload\":\"f.txt\"}",
+                "media uploads are not supported",
+            ),
+            // Like a normal command, a method without a request body takes no `json`.
+            (
+                "{\"method\":\"files.get\",\"params\":{\"fileId\":\"1\"},\"json\":{\"name\":\"x\"}}",
+                "does not take a request body",
+            ),
+        ] {
+            let err = parse_calls(&doc, line, &opts())
+                .map(|calls| format!("accepted, body = {:?}", calls[0].body))
+                .unwrap_or_else(|e| e.to_string());
+            if !err.contains(needle) {
+                wrong.push(format!("{line}\n  expected {needle}, got: {err}"));
+            }
+        }
+        assert!(wrong.is_empty(), "{}", wrong.join("\n"));
     }
 
     #[test]
