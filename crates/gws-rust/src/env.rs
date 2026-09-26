@@ -547,7 +547,7 @@ fn check_email(value: &str) -> Result<(), String> {
 
 /// A GCP project ID (optionally domain-scoped, `example.com:my-project`) or
 /// project number.
-fn is_gcp_project(value: &str) -> bool {
+pub(crate) fn is_gcp_project(value: &str) -> bool {
     let id = match value.rsplit_once(':') {
         Some((domain, id)) => {
             let domain_ok = !domain.is_empty()
