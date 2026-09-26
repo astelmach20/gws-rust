@@ -2,7 +2,7 @@
 name: gwsr-alertcenter
 description: "Google Workspace Alert Center: Manage Workspace security alerts."
 metadata:
-  version: 0.22.5
+  version: 0.23.0
   openclaw:
     category: "productivity"
     requires:

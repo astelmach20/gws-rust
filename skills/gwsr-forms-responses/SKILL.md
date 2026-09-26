@@ -2,7 +2,7 @@
 name: gwsr-forms-responses
 description: "Google Forms: Export all responses of a form as rows (JSON or CSV)."
 metadata:
-  version: 0.22.5
+  version: 0.23.0
   openclaw:
     category: "productivity"
     requires:

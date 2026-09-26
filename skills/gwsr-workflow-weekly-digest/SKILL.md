@@ -2,7 +2,7 @@
 name: gwsr-workflow-weekly-digest
 description: "Google Workflow: Weekly summary: the next 7 days of meetings and your unread email count."
 metadata:
-  version: 0.22.5
+  version: 0.23.0
   openclaw:
     category: "productivity"
     requires:
