@@ -16,7 +16,7 @@ metadata:
 
 # Add Multiple Attendees to a Calendar Event
 
-> **PREREQUISITE:** Load the following skills to execute this recipe: `gwsr-calendar`
+> **PREREQUISITE:** Load the following skills to execute this recipe: `gwsr-calendar` (install any that are missing with `npx skills add https://github.com/astelmach20/gws-rust/tree/main/skills/<name>`)
 
 Add a list of attendees to an existing Google Calendar event and send notifications.
 

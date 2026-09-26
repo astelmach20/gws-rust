@@ -17,7 +17,7 @@ metadata:
 
 # Draft a Gmail Message from a Google Doc
 
-> **PREREQUISITE:** Load the following skills to execute this recipe: `gwsr-docs`, `gwsr-gmail`
+> **PREREQUISITE:** Load the following skills to execute this recipe: `gwsr-docs`, `gwsr-gmail` (install any that are missing with `npx skills add https://github.com/astelmach20/gws-rust/tree/main/skills/<name>`)
 
 Read content from a Google Doc and use it as the body of a Gmail message.
 
