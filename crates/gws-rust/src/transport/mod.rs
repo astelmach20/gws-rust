@@ -702,6 +702,54 @@ mod tests {
         assert!(err.to_string().contains("not valid JSON"), "{err}");
     }
 
+    /// A token the API still rejects after one refresh is an invalid or
+    /// expired credential: exit code 2 ("Auth error: credentials missing,
+    /// expired or invalid"), not the permanent-API-error code 1.
+    #[tokio::test]
+    async fn rejected_token_after_refresh_is_an_auth_error() {
+        struct Provider(std::sync::atomic::AtomicUsize);
+        #[async_trait::async_trait]
+        impl AccessTokenProvider for Provider {
+            async fn refresh_access_token(&self) -> anyhow::Result<String> {
+                self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok("fresh-token".to_string())
+            }
+        }
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(401).set_body_json(json!({
+                "error": {"code": 401,
+                          "message": "Request had invalid authentication credentials.",
+                          "errors": [{"reason": "authError"}],
+                          "status": "UNAUTHENTICATED"}
+            })))
+            .expect(2)
+            .mount(&server)
+            .await;
+        let provider = Arc::new(Provider(std::sync::atomic::AtomicUsize::new(0)));
+        let t = Transport::new(
+            &Credentials::Refreshable {
+                token: "stale-token".to_string(),
+                provider: provider.clone(),
+            },
+            Transport::for_test(&server.uri()).retry,
+            EndpointPolicy::with_override(&server.uri()).unwrap(),
+            None,
+        )
+        .unwrap();
+        let err = t
+            .get_json(&format!("{}/v1/x", server.uri()), &[], "Failed to get x")
+            .await
+            .unwrap_err();
+        assert_eq!(provider.0.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(err.exit_code(), GwsError::EXIT_CODE_AUTH, "{err:?}");
+        assert!(
+            err.to_string()
+                .contains("Request had invalid authentication credentials."),
+            "{err}"
+        );
+    }
+
     /// Every `#[tokio::test]` runs on its own runtime, and a pooled
     /// connection's I/O task lives on the runtime that opened it. If test
     /// transports shared one pool, a later test could check out a connection

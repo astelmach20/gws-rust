@@ -321,9 +321,12 @@ pub async fn get_token_fresh(
                 token::refresh_user(user, downscope.as_deref(), &endpoints, &login).await
             };
             if matches!(source, CredentialSource::Profile { .. }) {
+                // The grant fingerprint keeps a token minted from a previous
+                // login's refresh token from ever being served for this one.
                 let key = format!(
-                    "{}|{}",
+                    "{}|grant:{}|{}",
                     credential.identity(),
+                    token_cache::grant_fingerprint(&user.refresh_token),
                     downscope
                         .as_ref()
                         .map(|s| sorted_join(s))
@@ -740,6 +743,80 @@ mod tests {
         assert_eq!(
             granted_scopes_for(&env).unwrap(),
             Some(vec!["gmail.readonly".into(), "openid".into()])
+        );
+    }
+
+    fn write_user_creds(env: &AuthEnv, refresh_token: &str) {
+        let json = format!(
+            r#"{{"type":"authorized_user","client_id":"cid","client_secret":"cs","refresh_token":"{refresh_token}"}}"#
+        );
+        let ct = env
+            .keystore()
+            .encrypt(Purpose::Credentials, json.as_bytes())
+            .unwrap();
+        crate::fs_util::atomic_write(&env.paths.credentials, &ct).unwrap();
+    }
+
+    fn token_reply(access_token: &str) -> ResponseTemplate {
+        ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "access_token": access_token, "expires_in": 3600, "token_type": "Bearer"
+        }))
+    }
+
+    /// A refresh that loaded the previous grant's refresh token, and only
+    /// took the cache lock after re-login cleared the cache, caches the old
+    /// grant's access token. The next lookup must not be served that token.
+    #[tokio::test]
+    async fn token_cached_from_a_previous_grant_is_not_served_after_relogin() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/token"))
+            .and(body_string_contains("refresh_token=rtold"))
+            .respond_with(token_reply("ya29.old-grant"))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/token"))
+            .and(body_string_contains("refresh_token=rtnew"))
+            .respond_with(token_reply("ya29.new-grant"))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let env = profile_env(dir.path(), &server);
+        write_user_creds(&env, "rtold");
+
+        // Re-login holds the cache lock while a concurrent command, having
+        // already loaded the old credentials, waits for it.
+        let login_lock = crate::fs_util::FileLock::acquire(
+            &env.paths.token_lock,
+            std::time::Duration::from_secs(1),
+        )
+        .unwrap();
+        let stale_env = env.clone();
+        let stale =
+            tokio::spawn(async move { get_token_fresh(&stale_env, &[], Freshness::Cached).await });
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        assert!(
+            !stale.is_finished(),
+            "the refresh must be waiting for the lock"
+        );
+        write_user_creds(&env, "rtnew");
+        match std::fs::remove_file(&env.paths.token_cache) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => panic!("{e}"),
+        }
+        drop(login_lock);
+        let old = stale.await.unwrap().unwrap();
+        assert_eq!(old.expose_secret(), "ya29.old-grant");
+
+        let next = get_token_fresh(&env, &[], Freshness::Cached).await.unwrap();
+        assert_eq!(
+            next.expose_secret(),
+            "ya29.new-grant",
+            "the previous grant's cached token was served after re-login"
         );
     }
 
