@@ -69,7 +69,8 @@ impl OriginalPart {
 /// `From` is missing. `body_text` always has a value — it falls back to the
 /// message snippet when no `text/plain` MIME part is found. Semantically optional
 /// fields (`cc`, `reply_to`, `date`, `body_html`) use `Option` so the compiler
-/// enforces absence checks.
+/// enforces absence checks. A whitespace-only `text/plain` part yields to a
+/// non-blank `text/html` part rendered as text.
 #[derive(Default, Serialize)]
 pub(super) struct OriginalMessage {
     pub thread_id: Option<String>,
@@ -214,11 +215,21 @@ pub(super) fn parse_original_message(msg: &Value) -> Result<OriginalMessage, Gws
     };
 
     // Prefer the text/plain part; otherwise render the HTML part as text;
-    // only when the message has neither fall back to the API snippet.
-    let body_text = match (extracted_text, &body_html) {
-        (Some(text), _) => text,
-        (None, Some(html)) => html_to_text(html)?,
-        (None, None) => snippet,
+    // only when the message has neither fall back to the API snippet. A
+    // whitespace-only text/plain alternative is a stub, not the body, so it
+    // yields to a non-blank HTML part.
+    let html_is_blank = body_html.as_deref().is_none_or(|h| h.trim().is_empty());
+    let body_text = match extracted_text {
+        Some(text) if html_is_blank || !text.trim().is_empty() => text,
+        _ => match &body_html {
+            Some(html) => html_to_text(html)?,
+            None => {
+                tracing::warn!(
+                    "message has no text/plain or text/html body part; using the API snippet, which may be truncated"
+                );
+                snippet
+            }
+        },
     };
 
     // Parse references: split on whitespace and strip any angle brackets, producing bare IDs
@@ -907,6 +918,61 @@ mod tests {
 
         assert_eq!(original.body_text, "Plain text body");
         assert_eq!(original.body_html.as_deref(), Some("<p>Rich HTML body</p>"));
+    }
+
+    #[test]
+    fn test_parse_original_message_blank_text_part_uses_html() {
+        // Upstream googleworkspace/cli#889: a whitespace-only text/plain
+        // alternative must not hide the real (HTML) body.
+        let msg = json!({
+            "threadId": "t1",
+            "snippet": "Snippet",
+            "payload": {
+                "mimeType": "multipart/alternative",
+                "headers": [
+                    { "name": "From", "value": "alice@example.com" },
+                    { "name": "Message-ID", "value": "<msg@example.com>" }
+                ],
+                "parts": [
+                    {
+                        "mimeType": "text/plain",
+                        "body": { "data": URL_SAFE.encode("\r\n \r\n") }
+                    },
+                    {
+                        "mimeType": "text/html",
+                        "body": { "data": URL_SAFE.encode(
+                            "<p>Reset: <a href=\"https://example.com/r?t=1\">link</a></p>"
+                        ) }
+                    }
+                ]
+            }
+        });
+
+        let original = parse_original_message(&msg).unwrap();
+
+        assert!(
+            original.body_text.contains("https://example.com/r?t=1"),
+            "body_text should be the rendered HTML, got {:?}",
+            original.body_text
+        );
+    }
+
+    #[test]
+    fn test_parse_original_message_blank_text_part_without_html_is_kept() {
+        // With no HTML alternative, a blank text part is the body: it is not
+        // replaced by the (truncated) snippet.
+        let msg = json!({
+            "snippet": "Snippet",
+            "payload": {
+                "mimeType": "text/plain",
+                "headers": [
+                    { "name": "From", "value": "alice@example.com" },
+                    { "name": "Message-ID", "value": "<msg@example.com>" }
+                ],
+                "body": { "data": URL_SAFE.encode("\r\n") }
+            }
+        });
+        assert_eq!(parse_original_message(&msg).unwrap().body_text, "\r\n");
     }
 
     #[test]
