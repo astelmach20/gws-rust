@@ -1178,3 +1178,157 @@ async fn require_confirm_gates_raw_send_methods_and_batch() {
     cmd("0").args(send_draft).assert().success();
     assert_eq!(server.received_requests().await.unwrap().len(), 2);
 }
+
+/// Seed a Calendar v3 Discovery document with `events.insert` (which can
+/// email attendees) and `acl.insert` (which shares the calendar).
+fn seed_calendar_outbound(env: &Env) {
+    let notify_params = json!({
+        "calendarId": {"type": "string", "location": "path", "required": true},
+        "sendUpdates": {"type": "string", "location": "query", "enum": ["all", "externalOnly", "none"]},
+        "sendNotifications": {"type": "boolean", "location": "query"}
+    });
+    let doc = json!({
+        "name": "calendar",
+        "version": "v3",
+        "rootUrl": "https://www.googleapis.com/",
+        "servicePath": "calendar/v3/",
+        "batchPath": "batch/calendar/v3",
+        "schemas": {
+            "Event": {"id": "Event", "type": "object", "properties": {"id": {"type": "string"}, "summary": {"type": "string"}}},
+            "AclRule": {"id": "AclRule", "type": "object", "properties": {"id": {"type": "string"}, "role": {"type": "string"}}}
+        },
+        "resources": {
+            "events": {"methods": {"insert": {
+                "id": "calendar.events.insert",
+                "httpMethod": "POST",
+                "path": "calendars/{calendarId}/events",
+                "parameters": notify_params,
+                "parameterOrder": ["calendarId"],
+                "request": {"$ref": "Event"},
+                "response": {"$ref": "Event"},
+                "scopes": ["https://www.googleapis.com/auth/calendar"]
+            }}},
+            "acl": {"methods": {"insert": {
+                "id": "calendar.acl.insert",
+                "httpMethod": "POST",
+                "path": "calendars/{calendarId}/acl",
+                "parameters": {
+                    "calendarId": {"type": "string", "location": "path", "required": true},
+                    "sendNotifications": {"type": "boolean", "location": "query"}
+                },
+                "parameterOrder": ["calendarId"],
+                "request": {"$ref": "AclRule"},
+                "response": {"$ref": "AclRule"},
+                "scopes": ["https://www.googleapis.com/auth/calendar"]
+            }}}
+        }
+    });
+    std::fs::write(
+        env.cache_dir().join("discovery/calendar+v3.json"),
+        serde_json::to_string(&doc).unwrap(),
+    )
+    .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn require_confirm_gates_calendar_sharing_and_attendee_notifications() {
+    use wiremock::matchers::any;
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    Mock::given(any())
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id": "x"})))
+        .mount(&server)
+        .await;
+    let env = Env::new();
+    seed_calendar_outbound(&env);
+    let run = |args: &[&str]| {
+        env.cmd()
+            .env("GWSR_TOKEN", "test-token")
+            .env("GWSR_API_BASE_URL", server.uri())
+            .env("GWSR_REQUIRE_CONFIRM", "1")
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    let insert = |params: &str| {
+        vec![
+            "calendar".to_string(),
+            "events".to_string(),
+            "insert".to_string(),
+            "--params".to_string(),
+            params.to_string(),
+            "--json".to_string(),
+            r#"{"summary":"S"}"#.to_string(),
+        ]
+    };
+    let refused = |out: &std::process::Output| {
+        assert_eq!(out.status.code(), Some(7), "{}", stderr_of(out));
+        assert_eq!(stderr_error(out)["error"]["reason"], "confirmationRequired");
+    };
+
+    // Sharing a calendar grants access: always outbound.
+    let share = [
+        "calendar",
+        "acl",
+        "insert",
+        "--params",
+        r#"{"calendarId":"primary"}"#,
+        "--json",
+        r#"{"role":"reader"}"#,
+    ];
+    refused(&run(&share));
+
+    // An event write is outbound only when it would email attendees.
+    for params in [
+        r#"{"calendarId":"primary","sendUpdates":"all"}"#,
+        r#"{"calendarId":"primary","sendUpdates":"externalOnly"}"#,
+        r#"{"calendarId":"primary","sendNotifications":true}"#,
+    ] {
+        let args = insert(params);
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        refused(&run(&args));
+    }
+    assert!(
+        server.received_requests().await.unwrap().is_empty(),
+        "nothing may be sent before confirmation"
+    );
+
+    // No notification requested (the API default), or explicitly none:
+    // not gated.
+    for params in [
+        r#"{"calendarId":"primary"}"#,
+        r#"{"calendarId":"primary","sendUpdates":"none"}"#,
+        r#"{"calendarId":"primary","sendNotifications":false}"#,
+    ] {
+        let args = insert(params);
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        let out = run(&args);
+        assert!(out.status.success(), "{params}: {}", stderr_of(&out));
+    }
+    assert_eq!(server.received_requests().await.unwrap().len(), 3);
+
+    // --yes confirms both kinds.
+    let mut share_yes = share.to_vec();
+    share_yes.push("--yes");
+    assert!(run(&share_yes).status.success());
+    let mut args = insert(r#"{"calendarId":"primary","sendUpdates":"all"}"#);
+    args.push("--yes".to_string());
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    let out = run(&args);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+
+    // gwsr batch applies the same per-call rule.
+    let out = env
+        .cmd()
+        .env("GWSR_TOKEN", "test-token")
+        .env("GWSR_API_BASE_URL", server.uri())
+        .env("GWSR_REQUIRE_CONFIRM", "1")
+        .args(["batch", "calendar"])
+        .write_stdin(
+            r#"{"id":"a","method":"events.insert","params":{"calendarId":"primary","sendUpdates":"all"},"json":{"summary":"S"}}"#,
+        )
+        .output()
+        .unwrap();
+    refused(&out);
+}

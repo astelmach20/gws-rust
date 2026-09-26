@@ -73,7 +73,7 @@ pub fn is_destructive(method: &RestMethod) -> bool {
 
 /// Whether `method` is behind the confirmation gate and so takes `--yes`.
 pub fn is_gated(method: &RestMethod) -> bool {
-    crate::confirm::method_impact(method).is_some()
+    crate::confirm::may_be_gated(method)
 }
 
 /// Configuration for auto-pagination.
@@ -417,7 +417,7 @@ pub(crate) async fn execute_to(
         return Ok(None);
     }
 
-    match crate::confirm::method_impact(method) {
+    match crate::confirm::method_impact(method, &params) {
         Some(impact @ crate::confirm::Impact::Destructive) => options
             .gate()
             .check(impact, &format!("run destructive method {method_id}"))?,
