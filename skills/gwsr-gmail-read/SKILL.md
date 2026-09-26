@@ -2,7 +2,7 @@
 name: gwsr-gmail-read
 description: "Gmail: Read a message and print its body and optionally headers."
 metadata:
-  version: 0.22.5
+  version: 0.23.0
   openclaw:
     category: "productivity"
     requires:

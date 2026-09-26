@@ -2,7 +2,7 @@
 name: gwsr-workflow-meeting-prep
 description: "Google Workflow: Prepare for your next meeting: agenda, attendees, and links."
 metadata:
-  version: 0.22.5
+  version: 0.23.0
   openclaw:
     category: "productivity"
     requires:

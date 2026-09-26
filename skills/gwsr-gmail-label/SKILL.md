@@ -2,7 +2,7 @@
 name: gwsr-gmail-label
 description: "Gmail: Add or remove labels on messages or threads."
 metadata:
-  version: 0.22.5
+  version: 0.23.0
   openclaw:
     category: "productivity"
     requires:

@@ -2,7 +2,7 @@
 name: gwsr-keep
 description: "Manage Google Keep notes."
 metadata:
-  version: 0.22.5
+  version: 0.23.0
   openclaw:
     category: "productivity"
     requires:
