@@ -213,16 +213,11 @@ fn derive_slug_from_event_types(event_types: &[&str]) -> String {
 /// Extract the subscription name from a `subscriptions.create` long-running operation.
 fn subscription_from_operation(op: &Value) -> Result<String, GwsError> {
     if let Some(err) = op.get("error") {
+        let (code, status) = crate::executor::operation::status_code(err);
         return Err(GwsError::Api {
-            code: err
-                .get("code")
-                .and_then(Value::as_u64)
-                // A missing or out-of-range code is reported as 500; the
-                // message below still carries the operation's own error.
-                .and_then(|c| u16::try_from(c).ok())
-                .unwrap_or(500),
+            code,
             message: format!(
-                "Workspace Events subscription creation failed: {}",
+                "Workspace Events subscription creation failed ({status}): {}",
                 err.get("message")
                     .and_then(Value::as_str)
                     .unwrap_or("unknown error")
@@ -647,10 +642,15 @@ mod tests {
             "subscriptions/direct"
         );
         assert!(subscription_from_operation(&json!({"name": "operations/pending"})).is_err());
-        let err =
-            subscription_from_operation(&json!({"error": {"code": 403, "message": "denied"}}))
-                .unwrap_err();
-        assert!(matches!(err, GwsError::Api { code: 403, .. }));
+        // The operation's error code is a gRPC code: 7 PERMISSION_DENIED is
+        // HTTP 403, 14 UNAVAILABLE is a retryable 503.
+        let err = subscription_from_operation(&json!({"error": {"code": 7, "message": "denied"}}))
+            .unwrap_err();
+        assert!(matches!(err, GwsError::Api { code: 403, .. }), "{err:?}");
+        let err = subscription_from_operation(&json!({"error": {"code": 14, "message": "busy"}}))
+            .unwrap_err();
+        assert!(matches!(err, GwsError::Api { code: 503, .. }), "{err:?}");
+        assert_eq!(err.exit_code(), GwsError::EXIT_CODE_API_RETRYABLE);
     }
 
     fn config(no_ack: bool) -> SubscribeConfig {
