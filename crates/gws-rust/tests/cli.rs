@@ -279,6 +279,83 @@ fn sanitize_help_names_the_real_env_var() {
         .stdout(predicate::str::contains("env: GWSR_SANITIZE_TEMPLATE"));
 }
 
+/// Methods declared at the top of a Discovery document (not under a
+/// resource), like `oauth2:v2 tokeninfo`, get commands and schema entries.
+#[test]
+fn top_level_discovery_methods_are_commands() {
+    let env = Env::new();
+    let doc = json!({
+        "name": "oauth2",
+        "version": "v2",
+        "rootUrl": "https://www.googleapis.com/",
+        "servicePath": "",
+        "methods": {
+            "tokeninfo": {
+                "id": "oauth2.tokeninfo",
+                "httpMethod": "POST",
+                "path": "oauth2/v2/tokeninfo",
+                "description": "Returns information about a token.",
+                "parameters": {
+                    "id_token": {"type": "string", "location": "query"}
+                },
+                "response": {"$ref": "Tokeninfo"}
+            }
+        },
+        "resources": {
+            "userinfo": {
+                "methods": {
+                    "get": {
+                        "id": "oauth2.userinfo.get",
+                        "httpMethod": "GET",
+                        "path": "oauth2/v2/userinfo",
+                        "scopes": ["openid"]
+                    }
+                }
+            }
+        },
+        "schemas": {
+            "Tokeninfo": {"id": "Tokeninfo", "type": "object", "properties": {"email": {"type": "string"}}}
+        }
+    });
+    let path = env.cache_dir().join("discovery/oauth2+v2.json");
+    std::fs::write(path, serde_json::to_string(&doc).unwrap()).unwrap();
+
+    env.cmd()
+        .args(["oauth2:v2", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("tokeninfo"))
+        .stdout(predicate::str::contains("userinfo"));
+
+    let out = env
+        .cmd()
+        .args([
+            "oauth2:v2",
+            "tokeninfo",
+            "--params",
+            r#"{"id_token":"abc"}"#,
+            "--dry-run",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+    let plan: Value = serde_json::from_str(stdout_of(&out).trim()).unwrap();
+    assert_eq!(plan["method"], "POST");
+    assert_eq!(
+        plan["url"],
+        "https://www.googleapis.com/oauth2/v2/tokeninfo"
+    );
+    assert_eq!(plan["query_params"], json!([["id_token", "abc"]]));
+
+    env.cmd()
+        .args(["schema", "oauth2:v2.tokeninfo"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"httpMethod\":\"POST\""))
+        .stdout(predicate::str::contains("Tokeninfo"));
+}
+
 // ── Errors ──────────────────────────────────────────────────────────────
 
 /// Parse stderr as exactly one JSON error object.

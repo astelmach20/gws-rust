@@ -157,6 +157,10 @@ pub(crate) fn find_method<'a>(doc: &'a RestDescription, name: &str) -> Option<&'
         .split('.')
         .collect();
     let (method_name, resources) = path.split_last()?;
+    if resources.is_empty() {
+        // A method declared outside any resource (e.g. `oauth2.tokeninfo`).
+        return doc.methods.get(*method_name);
+    }
     let mut current: Option<&RestResource> = None;
     for r in resources {
         let map = match current {
@@ -568,6 +572,18 @@ mod tests {
         assert!(find_method(&doc, "drive.files.get").is_some());
         assert!(find_method(&doc, "files.nope").is_none());
         assert!(find_method(&doc, "get").is_none());
+
+        let mut doc = doc;
+        doc.methods.insert(
+            "about".into(),
+            RestMethod {
+                http_method: "GET".into(),
+                ..Default::default()
+            },
+        );
+        assert!(find_method(&doc, "about").is_some());
+        assert!(find_method(&doc, "drive.about").is_some());
+        assert!(find_method(&doc, "about.get").is_none());
     }
 
     #[test]
