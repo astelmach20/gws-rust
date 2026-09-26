@@ -734,6 +734,65 @@ fn auth_configuration_errors_exit_with_the_config_code() {
         .stderr(predicate::str::contains("GWSR_PROFILE"));
 }
 
+/// `auth status` must report the OAuth client `auth login` would use: the
+/// GWSR_CLIENT_ID/GWSR_CLIENT_SECRET pair overrides client_secret.json.
+#[test]
+fn auth_status_reports_the_client_login_would_use() {
+    let env = Env::new();
+    let saved = env.config_dir().join("client_secret.json");
+    std::fs::write(
+        &saved,
+        r#"{"installed":{"client_id":"1111111111-saved.apps.googleusercontent.com","client_secret":"saved-secret","project_id":"saved-project"}}"#,
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&saved, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    let status = |cmd: &mut Command| -> Value {
+        let out = cmd
+            .args(["auth", "status", "--offline"])
+            .assert()
+            .success()
+            .get_output()
+            .clone();
+        serde_json::from_str(&stdout_of(&out)).unwrap()
+    };
+
+    let v = status(&mut env.cmd());
+    assert_eq!(v["client"]["source"], "client_secret.json", "{v}");
+    assert_eq!(v["client"]["client_id"], "11111111....com", "{v}");
+
+    let v = status(
+        env.cmd()
+            .env(
+                "GWSR_CLIENT_ID",
+                "2222222222-env.apps.googleusercontent.com",
+            )
+            .env("GWSR_CLIENT_SECRET", "env-secret"),
+    );
+    assert_eq!(v["client"]["source"], "environment_variables", "{v}");
+    assert_eq!(v["client"]["client_id"], "22222222....com", "{v}");
+    assert_eq!(v["client"]["project_id"], "saved-project", "{v}");
+    assert_eq!(
+        v["client"]["overrides"],
+        saved.display().to_string(),
+        "the shadowed file must be named: {v}"
+    );
+    assert!(!v.to_string().contains("env-secret"), "no secrets: {v}");
+
+    // Half a pair makes `auth login` fail; status must say so, not show the file.
+    let v = status(env.cmd().env("GWSR_CLIENT_ID", "2222222222-env.apps"));
+    assert!(v.get("client").is_none(), "{v}");
+    assert!(
+        v["client_error"]
+            .as_str()
+            .is_some_and(|e| e.contains("GWSR_CLIENT_SECRET")),
+        "{v}"
+    );
+}
+
 #[test]
 fn auth_login_rejects_services_with_exact_scopes() {
     let env = Env::new();
