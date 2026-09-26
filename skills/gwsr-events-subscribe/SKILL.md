@@ -2,7 +2,7 @@
 name: gwsr-events-subscribe
 description: "Google Workspace Events: Subscribe to Workspace events and stream them as NDJSON."
 metadata:
-  version: 0.22.5
+  version: 0.23.0
   openclaw:
     category: "productivity"
     requires:

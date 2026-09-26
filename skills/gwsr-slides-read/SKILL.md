@@ -2,7 +2,7 @@
 name: gwsr-slides-read
 description: "Google Slides: Extract the text and speaker notes of every slide."
 metadata:
-  version: 0.22.5
+  version: 0.23.0
   openclaw:
     category: "productivity"
     requires:

@@ -1,6 +1,6 @@
 {
   "name": "gws-rust",
-  "version": "0.22.5",
+  "version": "0.23.0",
   "description": "gwsr: Google Workspace CLI with a dynamic command surface built from the Google Discovery Service.",
   "contextFileName": "CONTEXT.md"
 }

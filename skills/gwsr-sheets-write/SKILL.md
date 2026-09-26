@@ -2,7 +2,7 @@
 name: gwsr-sheets-write
 description: "Google Sheets: Overwrite values in a range (values.update)."
 metadata:
-  version: 0.22.5
+  version: 0.23.0
   openclaw:
     category: "productivity"
     requires:
