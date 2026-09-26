@@ -14,7 +14,7 @@
 
 //! Delivery of a finished RFC 5322 message: send or save as draft.
 
-use super::api::GMAIL_UPLOAD_BASE;
+use super::api::{GMAIL_UPLOAD_BASE, check_raw_size};
 use super::prelude::*;
 use crate::confirm::{self, Impact};
 use crate::formatter::{OutputFormat, format_value};
@@ -84,6 +84,7 @@ pub(super) async fn deliver(
     raw_message: &str,
     thread_id: Option<&str>,
 ) -> Result<(), GwsError> {
+    check_raw_size(raw_message.len())?;
     if delivery.dry_run {
         let plan = dry_run_plan(raw_message, thread_id, delivery.draft);
         return crate::output::emit(&format_value(&plan, &delivery.format)?);
