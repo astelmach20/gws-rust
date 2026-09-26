@@ -30,7 +30,6 @@ gwsr admin +user-suspend --user <EMAIL>
 |------|----------|---------|-------------|
 | `--user` | ✓ | — | User email or ID |
 | `--unsuspend` | — | — | Restore a suspended user instead |
-| `--reason` | — | — | Suspension reason recorded on the account |
 | `--yes` | — | — | Confirm this action without prompting (required when not on a terminal) |
 
 ## Examples
@@ -43,6 +42,8 @@ gwsr admin +user-suspend --user ann@example.com --unsuspend
 ## Tips
 
 - Suspending requires --yes (or a prompt on a terminal).
+- The Directory API cannot record a suspension reason (its suspensionReason
+- field is output-only).
 
 ## See Also
 

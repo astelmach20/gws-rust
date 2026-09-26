@@ -109,7 +109,7 @@ impl Helper for AdminHelper {
                     };
                     confirm::confirm(m, impact, &action)?;
                     let api = Api::new(doc, &[SCOPE_USER], dry, sanitize).await?;
-                    let v = user_suspend(&api, user, suspend, optional(m, "reason")?).await?;
+                    let v = user_suspend(&api, user, suspend).await?;
                     (api, v)
                 }
                 "+group-add-member" => {
@@ -186,13 +186,6 @@ TIPS:
                     .help("Restore a suspended user instead")
                     .action(ArgAction::SetTrue),
             )
-            .arg(
-                Arg::new("reason")
-                    .long("reason")
-                    .help("Suspension reason recorded on the account")
-                    .conflicts_with("unsuspend")
-                    .value_name("TEXT"),
-            )
             .after_help(
                 "\
 EXAMPLES:
@@ -200,7 +193,9 @@ EXAMPLES:
   gwsr admin +user-suspend --user ann@example.com --unsuspend
 
 TIPS:
-  Suspending requires --yes (or a prompt on a terminal).",
+  Suspending requires --yes (or a prompt on a terminal).
+  The Directory API cannot record a suspension reason (its suspensionReason
+  field is output-only).",
             ),
     ))
     .subcommand(with_yes(
@@ -375,16 +370,9 @@ async fn user_create(api: &Api, args: &UserCreate) -> Result<Value, GwsError> {
 
 // ── +user-suspend / +group-add-member ────────────────────────────────
 
-async fn user_suspend(
-    api: &Api,
-    user: &str,
-    suspend: bool,
-    reason: Option<&str>,
-) -> Result<Value, GwsError> {
-    let mut body = json!({ "suspended": suspend });
-    if let Some(r) = reason {
-        body["suspensionReason"] = json!(r);
-    }
+async fn user_suspend(api: &Api, user: &str, suspend: bool) -> Result<Value, GwsError> {
+    // Only `suspended` is writable: the API's `suspensionReason` is output-only.
+    let body = json!({ "suspended": suspend });
     let resp = api
         .send(
             ApiRequest::put(api.url(&format!(
@@ -595,9 +583,7 @@ mod tests {
     #[tokio::test]
     async fn suspend_and_group_requests() {
         let api = dry_api("");
-        user_suspend(&api, "ann@x.com", true, Some("offboarding"))
-            .await
-            .unwrap();
+        user_suspend(&api, "ann@x.com", true).await.unwrap();
         group_add_member(&api, "eng@x.com", "ann@x.com", "MANAGER")
             .await
             .unwrap();
@@ -609,14 +595,58 @@ mod tests {
                 .unwrap()
                 .ends_with("/admin/directory/v1/users/ann@x.com")
         );
-        assert_eq!(
-            plan[0]["body"],
-            json!({"suspended": true, "suspensionReason": "offboarding"})
-        );
+        assert_eq!(plan[0]["body"], json!({"suspended": true}));
         assert_eq!(
             plan[1]["body"],
             json!({"email": "ann@x.com", "role": "MANAGER"})
         );
+    }
+
+    /// The `User` properties `+user-suspend` could write, as published in the
+    /// Directory API Discovery document (`admin:directory_v1`).
+    fn directory_user_schema() -> Value {
+        json!({
+            "suspended": {"type": "boolean", "description": "Indicates if user is suspended."},
+            "suspensionReason": {
+                "readOnly": true,
+                "type": "string",
+                "description": "Output only. Has the reason a user account is suspended either by the administrator or by Google at the time of suspension."
+            }
+        })
+    }
+
+    #[tokio::test]
+    async fn suspend_writes_only_writable_user_fields() {
+        let schema = directory_user_schema();
+        for suspend in [true, false] {
+            let api = dry_api("");
+            user_suspend(&api, "ann@x.com", suspend).await.unwrap();
+            let body = api.planned()[0]["body"].clone();
+            for key in body.as_object().unwrap().keys() {
+                let prop = &schema[key];
+                assert!(prop.is_object(), "unknown User field {key}");
+                assert_ne!(
+                    prop["readOnly"], true,
+                    "{key} is output-only: the API ignores it"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn suspend_has_no_reason_flag() {
+        let cmd = AdminHelper.inject_commands(Command::new("gwsr"), &doc(DIRECTORY));
+        let err = cmd
+            .try_get_matches_from([
+                "gwsr",
+                "+user-suspend",
+                "--user",
+                "ann@x.com",
+                "--reason",
+                "offboarding",
+            ])
+            .unwrap_err();
+        assert_eq!(err.kind(), clap::error::ErrorKind::UnknownArgument);
     }
 
     #[test]
