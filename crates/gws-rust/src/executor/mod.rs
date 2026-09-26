@@ -51,7 +51,7 @@ pub use upload::UploadMode;
 
 use crate::discovery::{RestDescription, RestMethod};
 use crate::error::GwsError;
-use crate::formatter::OutputFormat;
+use crate::formatter::{OutputFormat, PageStream};
 use crate::helpers::modelarmor::SanitizeConfig;
 use crate::transport::errors::error_from_response;
 use crate::transport::{Transport, read_body};
@@ -291,7 +291,8 @@ struct Output<'a> {
     format: &'a OutputFormat,
     capture: bool,
     captured: Vec<Value>,
-    lines_emitted: usize,
+    /// Column layout shared by every page of a CSV/table stream.
+    pages: PageStream,
 }
 
 impl Output<'_> {
@@ -308,9 +309,7 @@ impl Output<'_> {
             self.captured.push(value);
             return Ok(());
         }
-        let first = self.lines_emitted == 0;
-        self.lines_emitted += 1;
-        self.emitter.page(&value, self.format, first)
+        self.emitter.page(&value, self.format, &mut self.pages)
     }
 
     fn finish(mut self) -> Option<Value> {
@@ -437,7 +436,7 @@ pub(crate) async fn execute_to(
         format: &format,
         capture: capture_output,
         captured: Vec::new(),
-        lines_emitted: 0,
+        pages: PageStream::default(),
     };
     let mut query = request_url.query.clone();
     let mut pages: u32 = 0;
