@@ -14,7 +14,6 @@
 
 //! Delivery of a finished RFC 5322 message: send or save as draft.
 
-use super::api::GMAIL_UPLOAD_BASE;
 use super::prelude::*;
 use crate::confirm::{self, Impact};
 use crate::formatter::{OutputFormat, format_value};
@@ -63,12 +62,17 @@ pub(super) fn build_send_metadata(thread_id: Option<&str>, draft: bool) -> Value
 }
 
 /// Describe the upload request for `--dry-run` without authenticating.
-pub(super) fn dry_run_plan(raw_message: &str, thread_id: Option<&str>, draft: bool) -> Value {
+pub(super) fn dry_run_plan(
+    upload_base: &str,
+    raw_message: &str,
+    thread_id: Option<&str>,
+    draft: bool,
+) -> Value {
     let path = if draft { "drafts" } else { "messages/send" };
     json!({
         "dry_run": true,
         "method": "POST",
-        "url": format!("{GMAIL_UPLOAD_BASE}/users/me/{path}"),
+        "url": format!("{upload_base}/users/me/{path}"),
         "query_params": { "uploadType": "multipart" },
         "metadata": build_send_metadata(thread_id, draft),
         "raw_message": raw_message,
@@ -85,7 +89,12 @@ pub(super) async fn deliver(
     thread_id: Option<&str>,
 ) -> Result<(), GwsError> {
     if delivery.dry_run {
-        let plan = dry_run_plan(raw_message, thread_id, delivery.draft);
+        let plan = dry_run_plan(
+            &super::api::upload_base()?,
+            raw_message,
+            thread_id,
+            delivery.draft,
+        );
         return crate::output::emit(&format_value(&plan, &delivery.format)?);
     }
     let api =
@@ -132,13 +141,14 @@ mod tests {
 
     #[test]
     fn test_dry_run_plan_targets_upload_endpoint() {
-        let plan = dry_run_plan("raw", Some("t"), false);
+        let base = "https://gmail.googleapis.com/upload/gmail/v1";
+        let plan = dry_run_plan(base, "raw", Some("t"), false);
         assert_eq!(
             plan["url"],
             "https://gmail.googleapis.com/upload/gmail/v1/users/me/messages/send"
         );
         assert_eq!(plan["metadata"]["threadId"], "t");
-        let plan = dry_run_plan("raw", None, true);
+        let plan = dry_run_plan(base, "raw", None, true);
         assert!(plan["url"].as_str().unwrap().ends_with("/users/me/drafts"));
     }
 

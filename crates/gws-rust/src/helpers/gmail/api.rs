@@ -20,10 +20,31 @@
 use super::prelude::*;
 use crate::transport::Transport;
 use gws_rust_core::client::Idempotency;
+use gws_rust_core::validate::EndpointPolicy;
 use reqwest::Method;
 
-pub(super) const GMAIL_API_BASE: &str = "https://gmail.googleapis.com/gmail/v1";
-pub(super) const GMAIL_UPLOAD_BASE: &str = "https://gmail.googleapis.com/upload/gmail/v1";
+const GMAIL_API_BASE: &str = "https://gmail.googleapis.com/gmail/v1";
+const GMAIL_UPLOAD_BASE: &str = "https://gmail.googleapis.com/upload/gmail/v1";
+
+/// The Gmail REST and upload bases: Google's, or the same paths under the
+/// `GWSR_API_BASE_URL` override (as generated Gmail methods build them).
+fn bases_for(endpoints: &EndpointPolicy) -> (String, String) {
+    match endpoints.override_base() {
+        // The override always ends with '/'.
+        Some(base) => (format!("{base}gmail/v1"), format!("{base}upload/gmail/v1")),
+        None => (GMAIL_API_BASE.to_string(), GMAIL_UPLOAD_BASE.to_string()),
+    }
+}
+
+/// The Gmail REST base a real run would use, for `--dry-run` plans.
+pub(super) fn api_base() -> Result<String, GwsError> {
+    Ok(bases_for(&crate::env::get()?.endpoint_policy()).0)
+}
+
+/// The Gmail upload base a real run would use, for `--dry-run` plans.
+pub(super) fn upload_base() -> Result<String, GwsError> {
+    Ok(bases_for(&crate::env::get()?.endpoint_policy()).1)
+}
 
 /// Gmail API client bound to the authenticated user (`users/me`).
 #[derive(Clone)]
@@ -42,7 +63,8 @@ pub(super) struct Label {
 
 impl GmailApi {
     pub(super) fn new(rest: Transport) -> Self {
-        Self::with_bases(rest, GMAIL_API_BASE, GMAIL_UPLOAD_BASE)
+        let (base, upload_base) = bases_for(rest.endpoints());
+        Self::with_bases(rest, &base, &upload_base)
     }
 
     pub(super) fn with_bases(rest: Transport, base: &str, upload_base: &str) -> Self {
@@ -486,6 +508,22 @@ mod tests {
     use crate::helpers::gmail::test_support::mock_api;
     use wiremock::matchers::{body_json, method, path, query_param};
     use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    #[test]
+    fn bases_follow_the_api_base_override() {
+        assert_eq!(
+            bases_for(&EndpointPolicy::google_only()),
+            (GMAIL_API_BASE.to_string(), GMAIL_UPLOAD_BASE.to_string())
+        );
+        let base = reqwest::Url::parse("http://127.0.0.1:8080/").unwrap();
+        assert_eq!(
+            bases_for(&EndpointPolicy::new(Some(base))),
+            (
+                "http://127.0.0.1:8080/gmail/v1".to_string(),
+                "http://127.0.0.1:8080/upload/gmail/v1".to_string()
+            )
+        );
+    }
 
     #[test]
     fn related_upload_has_both_parts() {
