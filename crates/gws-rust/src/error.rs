@@ -218,6 +218,14 @@ fn lacks_scope(code: u16, message: &str, reason: &str) -> bool {
         || (code == 403 && message.contains("insufficient authentication scopes"))
 }
 
+/// Whether a 403 means the caller may not use the `x-goog-user-project`
+/// project. Drive reports this with reason `forbidden`, so the message is
+/// checked too.
+fn quota_project_denied(code: u16, message: &str, reason: &str) -> bool {
+    reason == "USER_PROJECT_DENIED"
+        || (code == 403 && message.contains("serviceusage.services.use"))
+}
+
 fn api_hint(
     code: u16,
     message: &str,
@@ -227,6 +235,17 @@ fn api_hint(
 ) -> Option<String> {
     if lacks_scope(code, message, reason) {
         return Some(scope_hint(ctx));
+    }
+    if quota_project_denied(code, message, reason) {
+        return Some(
+            "Google refused the quota project sent as x-goog-user-project: you lack \
+             serviceusage.services.use on it (common when the OAuth client belongs to a \
+             project you are not a member of). Pass --no-quota-project (or set \
+             GWSR_NO_QUOTA_PROJECT=1) to send no quota project, set GWSR_PROJECT_ID to a \
+             project you can use, or ask the project owner for \
+             roles/serviceusage.serviceUsageConsumer."
+                .to_string(),
+        );
     }
     match reason {
         "accessNotConfigured" | "SERVICE_DISABLED" => Some(match enable_url {
@@ -607,6 +626,32 @@ mod tests {
         );
         assert!(hint_for(&api(404, "notFound"), &ctx).is_none());
         assert!(hint_for(&GwsError::Validation("x".into()), &ctx).is_none());
+    }
+
+    #[test]
+    fn quota_project_denied_points_at_no_quota_project() {
+        // Upstream googleworkspace/cli#729: the caller is not a member of the
+        // project sent as x-goog-user-project. Drive reports reason "forbidden"
+        // (errors[0]); other APIs report USER_PROJECT_DENIED.
+        let ctx = ErrorContext::default();
+        let denied = GwsError::Api {
+            code: 403,
+            message: "Caller does not have required permission to use project my-proj. \
+                      Grant the caller the roles/serviceusage.serviceUsageConsumer role, \
+                      or a custom role with the serviceusage.services.use permission"
+                .into(),
+            reason: "forbidden".into(),
+            enable_url: None,
+        };
+        let hint = hint_for(&denied, &ctx).expect("a hint for USER_PROJECT_DENIED");
+        assert!(hint.contains("x-goog-user-project"), "{hint}");
+        assert!(hint.contains("--no-quota-project"), "{hint}");
+        assert!(hint.contains("GWSR_NO_QUOTA_PROJECT=1"), "{hint}");
+        assert!(hint.contains("GWSR_PROJECT_ID"), "{hint}");
+        let by_reason = hint_for(&api(403, "USER_PROJECT_DENIED"), &ctx).unwrap();
+        assert!(by_reason.contains("--no-quota-project"), "{by_reason}");
+        // An ordinary permission error is not misattributed to the quota project.
+        assert!(hint_for(&api(403, "forbidden"), &ctx).is_none());
     }
 
     #[test]
