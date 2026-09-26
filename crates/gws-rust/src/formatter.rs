@@ -139,6 +139,13 @@ pub fn emit_default(value: &Value) -> Result<(), GwsError> {
     crate::output::emit(&format_value(value, &settings().default_format)?)
 }
 
+/// A text cell for a CSV file written by a helper (for example
+/// `forms +responses --output`), with the same formula-injection guard and
+/// control-character stripping as `--format csv`.
+pub(crate) fn csv_text_cell(s: &str) -> String {
+    csv_text(s)
+}
+
 /// Format one page of a `--page-all` stream.
 ///
 /// JSON pages are always compact (one JSON document per line, NDJSON). CSV and
