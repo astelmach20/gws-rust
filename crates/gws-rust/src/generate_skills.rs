@@ -26,6 +26,18 @@ use std::path::Path;
 const PERSONAS_TOML: &str = include_str!("../registry/personas.toml");
 const RECIPES_TOML: &str = include_str!("../registry/recipes.toml");
 
+/// Where the published skills live, for `npx skills add <SKILLS_URL>/<name>`.
+/// A skill installed on its own does not bring its dependencies with it.
+const SKILLS_URL: &str = concat!(env!("CARGO_PKG_REPOSITORY"), "/tree/main/skills");
+
+/// The prerequisite line of every service and helper skill.
+const SHARED_PREREQUISITE: &str = concat!(
+    "> **PREREQUISITE:** Read `../gwsr-shared/SKILL.md` for auth, global flags, and security rules. ",
+    "If it is missing, install it with `npx skills add ",
+    env!("CARGO_PKG_REPOSITORY"),
+    "/tree/main/skills/gwsr-shared`.\n\n",
+);
+
 /// Methods blocked from skill generation.
 /// Format: (service_alias, resource, method).
 const BLOCKED_METHODS: &[(&str, &str, &str)] = &[
@@ -580,6 +592,8 @@ metadata:
     requires:
       bins:
         - gwsr
+      skills:
+        - gwsr-shared
     cliHelp: "gwsr {alias} --help"
 ---
 
@@ -591,9 +605,7 @@ metadata:
     let api_version = entry.version;
     out.push_str(&format!("# {alias} ({api_version})\n\n"));
 
-    out.push_str(
-        "> **PREREQUISITE:** Read `../gwsr-shared/SKILL.md` for auth, global flags, and security rules.\n\n",
-    );
+    out.push_str(SHARED_PREREQUISITE);
 
     out.push_str(&format!(
         "```bash\ngwsr {alias} <resource> <method> [flags]\n```\n\n",
@@ -718,6 +730,8 @@ metadata:
     requires:
       bins:
         - gwsr
+      skills:
+        - gwsr-shared
     cliHelp: "gwsr {alias} {cmd_name} --help"
 ---
 
@@ -728,9 +742,7 @@ metadata:
     // Title
     out.push_str(&format!("# {alias} {cmd_name}\n\n"));
 
-    out.push_str(
-        "> **PREREQUISITE:** Read `../gwsr-shared/SKILL.md` for auth, global flags, and security rules.\n\n",
-    );
+    out.push_str(SHARED_PREREQUISITE);
 
     out.push_str(&format!("{about}\n\n"));
 
@@ -1007,7 +1019,7 @@ metadata:
 
 # {title}
 
-> **PREREQUISITE:** Load the following utility skills to operate as this persona: {skills_list}
+> **PREREQUISITE:** Load the following utility skills to operate as this persona: {skills_list} (install any that are missing with `npx skills add {skills_url}/<name>`)
 
 {description}
 
@@ -1020,6 +1032,7 @@ metadata:
         description = persona.description,
         title = persona.title,
         skills = required_skills,
+        skills_url = SKILLS_URL,
         skills_list = persona
             .services
             .iter()
@@ -1081,7 +1094,7 @@ metadata:
 
 # {title}
 
-> **PREREQUISITE:** Load the following skills to execute this recipe: {skills_list}
+> **PREREQUISITE:** Load the following skills to execute this recipe: {skills_list} (install any that are missing with `npx skills add {skills_url}/<name>`)
 
 {description}
 
@@ -1092,6 +1105,7 @@ metadata:
         category = recipe.category,
         version = env!("CARGO_PKG_VERSION"),
         skills = required_skills,
+        skills_url = SKILLS_URL,
         skills_list = recipe
             .services
             .iter()
@@ -1754,5 +1768,76 @@ mod tests {
             fm.contains("- gwsr"),
             "frontmatter should contain '- gwsr' block entry"
         );
+    }
+
+    const SHARED_INSTALL: &str =
+        "npx skills add https://github.com/astelmach20/gws-rust/tree/main/skills/gwsr-shared";
+
+    /// A skill installed on its own (`npx skills add .../skills/gwsr-drive`)
+    /// must declare that it needs `gwsr-shared` and say how to install it.
+    #[test]
+    fn service_and_helper_skills_require_the_shared_skill() {
+        let entry = services::SERVICES
+            .iter()
+            .find(|s| s.api_name == "drive")
+            .unwrap();
+        let doc = crate::discovery::RestDescription {
+            name: entry.api_name.to_string(),
+            title: Some("Test API".to_string()),
+            ..Default::default()
+        };
+        let cli = crate::commands::build_cli(&doc);
+        let helpers: Vec<&Command> = cli
+            .get_subcommands()
+            .filter(|s| s.get_name().starts_with('+'))
+            .collect();
+        let product_name = product_name_from_title("Test API");
+        let service =
+            render_service_skill(entry.aliases[0], entry, &helpers, &[], &product_name, &doc);
+        let helper = render_helper_skill(
+            entry.aliases[0],
+            helpers[0].get_name(),
+            helpers[0],
+            entry,
+            &product_name,
+        );
+        for md in [&service, &helper] {
+            let fm = extract_frontmatter(md);
+            assert!(
+                fm.contains("      skills:\n        - gwsr-shared\n"),
+                "{fm}"
+            );
+            assert!(md.contains(SHARED_INSTALL), "{md}");
+        }
+    }
+
+    #[test]
+    fn recipe_and_persona_skills_say_how_to_install_missing_skills() {
+        let recipe = render_recipe_skill(&RecipeEntry {
+            name: "r".to_string(),
+            title: "R".to_string(),
+            description: "A recipe.".to_string(),
+            category: "testing".to_string(),
+            services: vec!["drive".to_string()],
+            steps: vec!["Step one.".to_string()],
+            caution: None,
+        });
+        let persona = render_persona_skill(&PersonaEntry {
+            name: "p".to_string(),
+            title: "P".to_string(),
+            description: "A persona.".to_string(),
+            services: vec!["gmail".to_string()],
+            workflows: vec![],
+            instructions: vec![],
+            tips: vec![],
+        });
+        for md in [&recipe, &persona] {
+            assert!(
+                md.contains(
+                    "npx skills add https://github.com/astelmach20/gws-rust/tree/main/skills/<name>"
+                ),
+                "{md}"
+            );
+        }
     }
 }

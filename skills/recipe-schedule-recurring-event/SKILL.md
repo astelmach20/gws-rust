@@ -16,7 +16,7 @@ metadata:
 
 # Schedule a Recurring Meeting
 
-> **PREREQUISITE:** Load the following skills to execute this recipe: `gwsr-calendar`
+> **PREREQUISITE:** Load the following skills to execute this recipe: `gwsr-calendar` (install any that are missing with `npx skills add https://github.com/astelmach20/gws-rust/tree/main/skills/<name>`)
 
 Create a recurring Google Calendar event with attendees.
 

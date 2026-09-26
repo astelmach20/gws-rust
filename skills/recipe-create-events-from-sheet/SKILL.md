@@ -17,7 +17,7 @@ metadata:
 
 # Create Google Calendar Events from a Sheet
 
-> **PREREQUISITE:** Load the following skills to execute this recipe: `gwsr-sheets`, `gwsr-calendar`
+> **PREREQUISITE:** Load the following skills to execute this recipe: `gwsr-sheets`, `gwsr-calendar` (install any that are missing with `npx skills add https://github.com/astelmach20/gws-rust/tree/main/skills/<name>`)
 
 Read event data from a Google Sheets spreadsheet and create Google Calendar entries for each row.
 

@@ -17,7 +17,7 @@ metadata:
 
 # Log Deal Update to Sheet
 
-> **PREREQUISITE:** Load the following skills to execute this recipe: `gwsr-sheets`, `gwsr-drive`
+> **PREREQUISITE:** Load the following skills to execute this recipe: `gwsr-sheets`, `gwsr-drive` (install any that are missing with `npx skills add https://github.com/astelmach20/gws-rust/tree/main/skills/<name>`)
 
 Append a deal status update to a Google Sheets sales tracking spreadsheet.
 

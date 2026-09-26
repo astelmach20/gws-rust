@@ -16,7 +16,7 @@ metadata:
 
 # Create a Google Slides Presentation
 
-> **PREREQUISITE:** Load the following skills to execute this recipe: `gwsr-slides`
+> **PREREQUISITE:** Load the following skills to execute this recipe: `gwsr-slides` (install any that are missing with `npx skills add https://github.com/astelmach20/gws-rust/tree/main/skills/<name>`)
 
 Create a new Google Slides presentation and add initial slides.
 

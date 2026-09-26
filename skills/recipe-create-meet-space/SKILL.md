@@ -17,7 +17,7 @@ metadata:
 
 # Create a Google Meet Conference
 
-> **PREREQUISITE:** Load the following skills to execute this recipe: `gwsr-meet`, `gwsr-gmail`
+> **PREREQUISITE:** Load the following skills to execute this recipe: `gwsr-meet`, `gwsr-gmail` (install any that are missing with `npx skills add https://github.com/astelmach20/gws-rust/tree/main/skills/<name>`)
 
 Create a Google Meet meeting space and share the join link.
 
