@@ -493,6 +493,18 @@ fn tasks_insert_url(bases: &Bases, tasklist: &str) -> String {
     )
 }
 
+/// Gmail returns a message `snippet` HTML-escaped (`&#39;`, `&amp;`, ...);
+/// decode it to the plain text a task note shows, without re-wrapping it.
+fn snippet_text(snippet: &str) -> Result<String, GwsError> {
+    if snippet.is_empty() {
+        return Ok(String::new());
+    }
+    let text = html2text::config::plain()
+        .string_from_read(snippet.as_bytes(), snippet.len())
+        .map_err(|e| GwsError::other(format!("Failed to decode the message snippet: {e}")))?;
+    Ok(text.trim_end().to_string())
+}
+
 async fn email_to_task(
     rest: &Transport,
     bases: &Bases,
@@ -524,9 +536,10 @@ async fn email_to_task(
         .and_then(Value::as_str)
         .filter(|s| !s.trim().is_empty())
         .unwrap_or("(No subject)");
+    let snippet = snippet_text(str_field(&msg, "snippet"))?;
     let task_body = json!({
         "title": subject,
-        "notes": format!("From email: {message_id}\n\n{}", str_field(&msg, "snippet")),
+        "notes": format!("From email: {message_id}\n\n{snippet}"),
     });
     // Tasks inserts are not idempotent: sent exactly once.
     let task = rest
@@ -966,6 +979,51 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, GwsError::Api { code: 500, .. }));
+    }
+
+    #[test]
+    fn test_snippet_text() {
+        assert_eq!(snippet_text("").unwrap(), "");
+        assert_eq!(snippet_text("a").unwrap(), "a");
+        assert_eq!(snippet_text("hello").unwrap(), "hello");
+        assert_eq!(snippet_text("日本語 &amp; 🎉").unwrap(), "日本語 & 🎉");
+        assert_eq!(snippet_text("&#8212; &nbsp;x").unwrap(), "\u{2014} \u{a0}x");
+    }
+
+    #[tokio::test]
+    async fn test_email_to_task_decodes_snippet_entities() {
+        // Gmail returns `snippet` HTML-escaped; task notes are plain text.
+        let snippet = "Tom &amp; Jerry&#39;s &quot;plan&quot;: 1 &lt; 2 &gt; 0, a long line of text \
+                       that goes well past seventy-eight columns so it must not be wrapped";
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/gmail/v1/users/me/messages/m1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "snippet": snippet,
+                "payload": {"headers": [{"name": "Subject", "value": "Q&A <draft>"}]}
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/tasks/v1/lists/@default/tasks"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id": "t1"})))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let out = email_to_task(&rest(&server), &bases(&server), "m1", "@default")
+            .await
+            .unwrap();
+        assert_eq!(out["taskId"], "t1");
+        let requests = server.received_requests().await.unwrap();
+        let sent: Value = serde_json::from_slice(&requests[1].body).unwrap();
+        assert_eq!(
+            sent,
+            json!({
+                "title": "Q&A <draft>",
+                "notes": "From email: m1\n\nTom & Jerry's \"plan\": 1 < 2 > 0, a long line of text \
+                          that goes well past seventy-eight columns so it must not be wrapped"
+            })
+        );
     }
 
     #[tokio::test]
