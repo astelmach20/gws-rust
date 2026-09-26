@@ -71,7 +71,8 @@ EXAMPLES:
 TIPS:
   Read-only. One row per response; one column per question (grid rows get
   their own column). Multiple answers in a cell are joined with '; ';
-  file uploads are listed by file name.",
+  file uploads are listed by file name. A repeated question title gets the
+  question ID appended, e.g. 'Comments (1a2b3c4d)'.",
                 ),
         )
     }
@@ -174,6 +175,17 @@ fn columns(form: &Value) -> Vec<Column> {
                     });
                 }
             }
+        }
+    }
+    // JSON rows are keyed by header, so a repeated title (common in
+    // multi-section forms) or one equal to a fixed column would overwrite
+    // another answer. Disambiguate repeats with the question ID.
+    let mut seen: std::collections::HashSet<String> =
+        FIXED_COLUMNS.iter().map(|s| s.to_string()).collect();
+    for c in &mut cols {
+        if !seen.insert(c.title.clone()) {
+            c.title = format!("{} ({})", c.title, c.id);
+            seen.insert(c.title.clone());
         }
     }
     cols
@@ -337,6 +349,36 @@ mod tests {
         let j = t.to_json();
         assert_eq!(j["responses"][0]["Colors"], "red; blue");
         assert_eq!(j["count"], 1);
+    }
+
+    #[test]
+    fn duplicate_question_titles_do_not_lose_answers() {
+        // Multi-section forms often repeat a title ("Comments"); a question can
+        // also be titled like a fixed column. Every answer must survive in the
+        // JSON rows, which are keyed by column header.
+        let form = json!({"items": [
+            {"title": "Comments", "questionItem": {"question": {"questionId": "q1"}}},
+            {"title": "Comments", "questionItem": {"question": {"questionId": "q2"}}},
+            {"title": "responseId", "questionItem": {"question": {"questionId": "q3"}}}
+        ]});
+        let responses = vec![json!({
+            "responseId": "r1",
+            "answers": {
+                "q1": {"textAnswers": {"answers": [{"value": "first"}]}},
+                "q2": {"textAnswers": {"answers": [{"value": "second"}]}},
+                "q3": {"textAnswers": {"answers": [{"value": "third"}]}}
+            }
+        })];
+        let j = build_table(&form, &responses).to_json();
+        let row = j["responses"][0].as_object().unwrap();
+        assert_eq!(row["responseId"], "r1");
+        let mut values: Vec<&str> = row.values().map(|v| v.as_str().unwrap()).collect();
+        values.sort_unstable();
+        assert_eq!(values, ["", "", "", "first", "r1", "second", "third"]);
+        // Headers are unique, so CSV consumers can tell the columns apart.
+        let headers = build_table(&form, &responses).headers();
+        let unique: std::collections::HashSet<&String> = headers.iter().collect();
+        assert_eq!(unique.len(), headers.len(), "{headers:?}");
     }
 
     #[tokio::test]

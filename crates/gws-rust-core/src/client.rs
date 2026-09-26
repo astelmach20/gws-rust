@@ -83,12 +83,31 @@ fn redirect_policy(attempt: reqwest::redirect::Attempt<'_>) -> reqwest::redirect
     attempt.follow()
 }
 
+/// Builds a new client, with the same configuration as [`shared_client`] but
+/// its own connection pool.
+///
+/// A pooled connection is driven by a task on the Tokio runtime that opened
+/// it, so a pool must not outlive, or be shared across, runtimes. Code that
+/// runs more than one runtime in a process (such as `#[tokio::test]`, which
+/// starts a runtime per test) needs a client per runtime.
+pub fn build_client() -> Result<reqwest::Client, GwsError> {
+    build_client_inner().map_err(GwsError::other)
+}
+
 /// Returns a clone of the single process-wide client.
 ///
 /// `reqwest::Client` is reference counted, so clones share one connection
 /// pool. Building the client can only fail if the TLS backend cannot be
 /// initialised; that failure is cached and reported on every call.
+///
+/// The pool is bound to the runtime that uses it first (see
+/// [`build_client`]), which is correct for a binary that runs a single Tokio
+/// runtime. This crate's unit tests start a runtime per test, so under
+/// `cfg(test)` every call returns a new client instead.
 pub fn shared_client() -> Result<reqwest::Client, GwsError> {
+    if cfg!(test) {
+        return build_client();
+    }
     static CLIENT: OnceLock<Result<reqwest::Client, String>> = OnceLock::new();
     match CLIENT.get_or_init(build_client_inner) {
         Ok(client) => Ok(client.clone()),
@@ -588,15 +607,6 @@ mod tests {
             "error": {"code": 403, "message": "slow down",
                       "errors": [{"reason": "userRateLimitExceeded"}]}
         }))
-    }
-
-    #[test]
-    fn shared_client_is_reused() {
-        let a = shared_client().unwrap();
-        let b = shared_client().unwrap();
-        let ra = a.get("https://example.com").build().unwrap();
-        let rb = b.get("https://example.com").build().unwrap();
-        assert_eq!(ra.url(), rb.url());
     }
 
     #[test]
