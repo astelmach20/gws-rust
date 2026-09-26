@@ -22,9 +22,7 @@ use crate::auth::setup::apis::{DiscoveredScope, ScopeClassification};
 use crate::auth::setup::tui::{PickerResult, SelectItem};
 use crate::error::GwsError;
 
-const TEMPLATE_READONLY: usize = 0;
-const TEMPLATE_WRITE: usize = 1;
-const TEMPLATE_FULL: usize = 2;
+/// Rows before the scope rows: "Read only", "Read/write", "Full access".
 const TEMPLATE_COUNT: usize = 3;
 const MANY_SCOPES_WARNING: usize = 25;
 
@@ -51,12 +49,81 @@ pub(super) async fn pick(
         },
         None => Vec::new(),
     };
-    let entries: Vec<DiscoveredScope> = if discovered.is_empty() {
+    let mut entries: Vec<DiscoveredScope> = if discovered.is_empty() {
         static_entries()
     } else {
         discovered
     };
-    run_picker(&entries, services)
+    let supplemental = match services {
+        Some(s) if !s.is_empty() => {
+            add_service_entries(&mut entries, s, fetch_service_scopes).await
+        }
+        _ => HashSet::new(),
+    };
+    ensure_platform_entry(&mut entries);
+    run_picker(&entries, services, &supplemental)
+}
+
+/// Scopes a service's Discovery document declares, for the picker.
+async fn fetch_service_scopes(service: String) -> anyhow::Result<Vec<DiscoveredScope>> {
+    let (api, version) =
+        crate::services::resolve_service(&service).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let doc = crate::discovery::fetch_discovery_document(&api, &version).await?;
+    Ok(crate::auth::setup::apis::scopes_from_document(&doc))
+}
+
+/// Add the scopes of requested services that have no entry in the list (the
+/// basic list, or a project that has not enabled the API), so `-s people`
+/// offers People scopes instead of silently dropping the service. Returns
+/// the URLs that were added.
+pub(super) async fn add_service_entries<F, Fut>(
+    entries: &mut Vec<DiscoveredScope>,
+    services: &HashSet<String>,
+    fetch: F,
+) -> HashSet<String>
+where
+    F: Fn(String) -> Fut,
+    Fut: std::future::Future<Output = anyhow::Result<Vec<DiscoveredScope>>>,
+{
+    let listed: Vec<String> = entries.iter().map(|e| e.url.clone()).collect();
+    let mut missing: Vec<String> = scopes::find_unmatched_services(&listed, services)
+        .into_iter()
+        .collect();
+    missing.sort();
+    let mut added = HashSet::new();
+    for svc in missing {
+        match fetch(svc.clone()).await {
+            Ok(found) => {
+                let before = added.len();
+                for s in found {
+                    if !entries.iter().any(|e| e.url == s.url) {
+                        added.insert(s.url.clone());
+                        entries.push(s);
+                    }
+                }
+                if added.len() == before {
+                    tracing::warn!("service '{svc}' has no OAuth scopes usable for a user login");
+                }
+            }
+            Err(e) => tracing::warn!("no scopes listed for service '{svc}': {e:#}"),
+        }
+    }
+    added
+}
+
+/// List `cloud-platform` as an entry so the "Full access" template can only
+/// select scopes the user can see (and deselect).
+pub(super) fn ensure_platform_entry(entries: &mut Vec<DiscoveredScope>) {
+    if entries.iter().any(|e| e.url == PLATFORM_SCOPE) {
+        return;
+    }
+    entries.push(DiscoveredScope {
+        url: PLATFORM_SCOPE.to_string(),
+        short: scopes::short_name(PLATFORM_SCOPE).to_string(),
+        description: "See, edit, configure and delete your Google Cloud data".to_string(),
+        is_readonly: false,
+        classification: crate::auth::setup::apis::classify(PLATFORM_SCOPE),
+    });
 }
 
 /// Scope entries used when Discovery-based lookup is unavailable.
@@ -84,7 +151,7 @@ pub(super) struct Templates {
     pub full: Vec<String>,
 }
 
-pub(super) fn templates(entries: &[&DiscoveredScope]) -> Templates {
+pub(super) fn templates(entries: &[&DiscoveredScope], supplemental: &HashSet<String>) -> Templates {
     let shorts: Vec<&str> = entries.iter().map(|e| e.short.as_str()).collect();
     let in_preset = |preset: &[&str], e: &DiscoveredScope| preset.contains(&e.url.as_str());
     let mut t = Templates {
@@ -93,10 +160,13 @@ pub(super) fn templates(entries: &[&DiscoveredScope]) -> Templates {
         full: Vec::new(),
     };
     for e in entries {
-        if in_preset(scopes::READONLY_SCOPES, e) {
+        // Scopes of a requested service that has no preset scope count as
+        // "core" for the read-only and read/write templates.
+        let extra = supplemental.contains(&e.url) && !scopes::is_workspace_admin_scope(&e.url);
+        if in_preset(scopes::READONLY_SCOPES, e) || (extra && e.is_readonly) {
             t.readonly.push(e.short.clone());
         }
-        if in_preset(scopes::WRITE_SCOPES, e) {
+        if in_preset(scopes::WRITE_SCOPES, e) || extra {
             t.write.push(e.short.clone());
         }
         if !scopes::is_workspace_admin_scope(&e.url) && !scopes::is_subsumed(&e.short, &shorts) {
@@ -109,7 +179,48 @@ pub(super) fn templates(entries: &[&DiscoveredScope]) -> Templates {
 fn run_picker(
     entries: &[DiscoveredScope],
     services: Option<&HashSet<String>>,
+    supplemental: &HashSet<String>,
 ) -> Result<Option<Vec<String>>, GwsError> {
+    let Some((items, filtered)) = picker_items(entries, services, supplemental) else {
+        return Ok(None);
+    };
+    let result = match crate::auth::setup::tui::run_picker(
+        "Select OAuth scopes",
+        "Space to toggle, Enter to confirm",
+        items,
+        true,
+    ) {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!("the scope picker failed ({e}); using the read-only defaults");
+            return Ok(None);
+        }
+    };
+    let PickerResult::Confirmed(items) = result else {
+        return Err(GwsError::Validation("login cancelled".into()));
+    };
+    let chosen = selected_from_items(&items, &filtered);
+    if chosen.len() > MANY_SCOPES_WARNING {
+        tracing::warn!(
+            "{} scopes selected; unverified OAuth apps may be refused with this many",
+            chosen.len()
+        );
+    }
+    if chosen.is_empty() {
+        return Err(GwsError::Validation(
+            "no scopes selected; login cancelled".into(),
+        ));
+    }
+    Ok(Some(chosen))
+}
+
+/// The picker rows (three templates, then one row per scope) and the scope
+/// entry behind each non-template row. `None` when no scope matches.
+pub(super) fn picker_items<'a>(
+    entries: &'a [DiscoveredScope],
+    services: Option<&HashSet<String>>,
+    supplemental: &HashSet<String>,
+) -> Option<(Vec<SelectItem>, Vec<&'a DiscoveredScope>)> {
     let filtered: Vec<&DiscoveredScope> = entries
         .iter()
         .filter(|e| !scopes::is_app_only_scope(&e.url))
@@ -118,9 +229,9 @@ fn run_picker(
         })
         .collect();
     if filtered.is_empty() {
-        return Ok(None);
+        return None;
     }
-    let t = templates(&filtered);
+    let t = templates(&filtered, supplemental);
     let mut items = vec![
         template_item(
             "Read only (recommended)",
@@ -161,35 +272,7 @@ fn run_picker(
             template_selects: vec![],
         });
     }
-
-    let result = match crate::auth::setup::tui::run_picker(
-        "Select OAuth scopes",
-        "Space to toggle, Enter to confirm",
-        items,
-        true,
-    ) {
-        Ok(r) => r,
-        Err(e) => {
-            tracing::warn!("the scope picker failed ({e}); using the read-only defaults");
-            return Ok(None);
-        }
-    };
-    let PickerResult::Confirmed(items) = result else {
-        return Err(GwsError::Validation("login cancelled".into()));
-    };
-    let chosen = selected_from_items(&items, &filtered);
-    if chosen.len() > MANY_SCOPES_WARNING {
-        tracing::warn!(
-            "{} scopes selected; unverified OAuth apps may be refused with this many",
-            chosen.len()
-        );
-    }
-    if chosen.is_empty() {
-        return Err(GwsError::Validation(
-            "no scopes selected; login cancelled".into(),
-        ));
-    }
-    Ok(Some(chosen))
+    Some((items, filtered))
 }
 
 fn template_item(label: &str, desc: &str, selected: bool, selects: Vec<String>) -> SelectItem {
@@ -203,27 +286,18 @@ fn template_item(label: &str, desc: &str, selected: bool, selects: Vec<String>) 
     }
 }
 
-/// Map confirmed picker items back to scope URLs.
+/// Map confirmed picker items back to scope URLs: exactly the ticked rows.
 pub(super) fn selected_from_items(
     items: &[SelectItem],
     entries: &[&DiscoveredScope],
 ) -> Vec<String> {
-    let template_selected = |i: usize| items.get(i).is_some_and(|it| it.selected);
-    let full = template_selected(TEMPLATE_FULL);
-    let mut chosen: Vec<String> = items
+    let chosen: Vec<String> = items
         .iter()
         .skip(TEMPLATE_COUNT)
         .zip(entries.iter())
         .filter(|(item, _)| item.selected)
         .map(|(_, e)| e.url.clone())
         .collect();
-    if full
-        && !template_selected(TEMPLATE_READONLY)
-        && !template_selected(TEMPLATE_WRITE)
-        && !chosen.iter().any(|s| s == PLATFORM_SCOPE)
-    {
-        chosen.push(PLATFORM_SCOPE.to_string());
-    }
     scopes::dedup_hierarchical(&chosen)
 }
 
@@ -297,6 +371,10 @@ pub(crate) fn scopes_from_doc(
 mod tests {
     use super::*;
 
+    const TEMPLATE_READONLY: usize = 0;
+    const TEMPLATE_WRITE: usize = 1;
+    const TEMPLATE_FULL: usize = 2;
+
     fn entry(short: &str) -> DiscoveredScope {
         let url = format!("{}{short}", scopes::SCOPE_PREFIX);
         DiscoveredScope {
@@ -319,7 +397,7 @@ mod tests {
             entry("admin.directory.user"),
         ];
         let refs: Vec<&DiscoveredScope> = entries.iter().collect();
-        let t = templates(&refs);
+        let t = templates(&refs, &HashSet::new());
         assert_eq!(t.readonly, vec!["drive.readonly", "gmail.readonly"]);
         assert_eq!(t.write, vec!["drive", "gmail.modify"]);
         assert_eq!(t.full, vec!["drive", "gmail.modify", "gmail.readonly"]);
@@ -351,10 +429,121 @@ mod tests {
         let chosen = selected_from_items(&items, &refs);
         assert_eq!(
             chosen,
+            vec![format!("{}drive", scopes::SCOPE_PREFIX)],
+            "only ticked rows are requested; nothing is added behind the user's back"
+        );
+    }
+
+    fn set(v: &[&str]) -> HashSet<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    fn people_scopes() -> Vec<DiscoveredScope> {
+        vec![
+            entry("contacts"),
+            entry("contacts.readonly"),
+            entry("directory.readonly"),
+        ]
+    }
+
+    #[tokio::test]
+    async fn services_missing_from_the_list_are_offered() {
+        // `gwsr auth login -s gmail,people` with the basic list (no project).
+        let mut entries = static_entries();
+        let services = set(&["gmail", "people"]);
+        let looked_up = std::sync::Mutex::new(Vec::new());
+        let added = add_service_entries(&mut entries, &services, |svc| {
+            looked_up.lock().unwrap().push(svc);
+            async { Ok(people_scopes()) }
+        })
+        .await;
+        assert_eq!(
+            *looked_up.lock().unwrap(),
+            vec!["people".to_string()],
+            "only services without an entry are looked up"
+        );
+        let (items, rows) =
+            picker_items(&entries, Some(&services), &added).expect("the picker has rows");
+        let shorts: Vec<&str> = rows.iter().map(|e| e.short.as_str()).collect();
+        assert!(
+            shorts.contains(&"contacts") && shorts.contains(&"contacts.readonly"),
+            "People scopes must be listed for -s people: {shorts:?}"
+        );
+        assert!(shorts.contains(&"gmail.readonly"), "{shorts:?}");
+        let readonly = &items[TEMPLATE_READONLY].template_selects;
+        assert!(
+            readonly.contains(&"contacts.readonly".to_string()),
+            "{readonly:?}"
+        );
+        assert!(
+            readonly.contains(&"gmail.readonly".to_string()),
+            "{readonly:?}"
+        );
+        assert!(
+            !readonly.contains(&"directory.readonly".to_string()),
+            "admin-only scopes stay out of templates"
+        );
+        let write = &items[TEMPLATE_WRITE].template_selects;
+        assert!(write.contains(&"contacts".to_string()), "{write:?}");
+    }
+
+    #[tokio::test]
+    async fn only_the_service_is_listed_for_s_people() {
+        // Before the fix, `-s people` showed only cloud-platform.
+        let mut entries = static_entries();
+        let services = set(&["people"]);
+        let added =
+            add_service_entries(&mut entries, &services, |_| async { Ok(people_scopes()) }).await;
+        let (_, rows) = picker_items(&entries, Some(&services), &added).expect("rows");
+        let shorts: Vec<&str> = rows.iter().map(|e| e.short.as_str()).collect();
+        assert_eq!(
+            shorts,
             vec![
-                format!("{}drive", scopes::SCOPE_PREFIX),
-                PLATFORM_SCOPE.to_string()
+                "cloud-platform",
+                "contacts",
+                "contacts.readonly",
+                "directory.readonly"
             ]
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_service_lookup_leaves_the_list_unchanged() {
+        let mut entries = static_entries();
+        let before = entries.clone();
+        let added = add_service_entries(&mut entries, &set(&["people"]), |_| async {
+            Err(anyhow::anyhow!("offline"))
+        })
+        .await;
+        assert!(added.is_empty());
+        assert_eq!(entries, before);
+    }
+
+    #[test]
+    fn full_template_selects_only_listed_scopes() {
+        // A project whose enabled APIs do not declare cloud-platform.
+        let mut entries = vec![entry("drive"), entry("gmail.modify")];
+        ensure_platform_entry(&mut entries);
+        ensure_platform_entry(&mut entries);
+        let (mut items, rows) = picker_items(&entries, None, &HashSet::new()).expect("rows");
+        let platform_rows = rows.iter().filter(|e| e.url == PLATFORM_SCOPE).count();
+        assert_eq!(platform_rows, 1, "cloud-platform is listed exactly once");
+        assert!(
+            items[TEMPLATE_FULL]
+                .template_selects
+                .contains(&"cloud-platform".to_string())
+        );
+        // "Full access" chosen but the cloud-platform row is unticked: it must
+        // not be requested anyway.
+        items[TEMPLATE_READONLY].selected = false;
+        items[TEMPLATE_FULL].selected = true;
+        for (item, e) in items.iter_mut().skip(TEMPLATE_COUNT).zip(&rows) {
+            item.selected = e.url != PLATFORM_SCOPE;
+        }
+        let chosen = selected_from_items(&items, &rows);
+        assert!(
+            !chosen.iter().any(|s| s == PLATFORM_SCOPE),
+            "cloud-platform was requested without being selected: {chosen:?}"
         );
     }
 
