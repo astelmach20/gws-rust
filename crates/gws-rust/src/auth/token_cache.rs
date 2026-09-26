@@ -111,14 +111,7 @@ impl TokenCache {
         F: FnOnce() -> Fut,
         Fut: Future<Output = Result<AccessToken, AuthError>>,
     {
-        let _lock = crate::fs_util::FileLock::acquire_async(&self.lock_path, LOCK_TIMEOUT)
-            .await
-            .map_err(|e| {
-                AuthError::Storage(format!(
-                    "cannot lock token cache '{}': {e}",
-                    self.lock_path.display()
-                ))
-            })?;
+        let _lock = self.lock().await?;
 
         let mut cache = self.read_blocking().await?;
         let now = chrono::Utc::now().timestamp();
@@ -146,6 +139,40 @@ impl TokenCache {
             None => tracing::debug!(key, "token has no expiry; not caching it"),
         }
         Ok(fresh.token)
+    }
+
+    /// Delete the cache file while holding the cross-process lock, so a
+    /// concurrent `get_or_fetch` cannot write a token back between our delete
+    /// and its own read-modify-write. Returns whether a file was removed; a
+    /// missing cache is not an error.
+    ///
+    /// # Errors
+    ///
+    /// Lock timeouts and any IO error other than the file not existing.
+    pub async fn clear(&self) -> Result<bool, AuthError> {
+        let _lock = self.lock().await?;
+        let path = self.path.clone();
+        tokio::task::spawn_blocking(move || match std::fs::remove_file(&path) {
+            Ok(()) => Ok(true),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(e) => Err(AuthError::Storage(format!(
+                "cannot clear the token cache '{}': {e}",
+                path.display()
+            ))),
+        })
+        .await
+        .map_err(|e| AuthError::Storage(format!("token cache task failed: {e}")))?
+    }
+
+    async fn lock(&self) -> Result<crate::fs_util::FileLock, AuthError> {
+        crate::fs_util::FileLock::acquire_async(&self.lock_path, LOCK_TIMEOUT)
+            .await
+            .map_err(|e| {
+                AuthError::Storage(format!(
+                    "cannot lock token cache '{}': {e}",
+                    self.lock_path.display()
+                ))
+            })
     }
 
     async fn read_blocking(&self) -> Result<CacheFile, AuthError> {
@@ -377,6 +404,108 @@ mod tests {
         assert_eq!(
             std::fs::read(dir.path().join(&quarantined[0])).unwrap(),
             b"garbage"
+        );
+    }
+
+    #[tokio::test]
+    async fn clear_waits_for_the_lock_holder() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = cache_in(dir.path());
+        cache
+            .get_or_fetch("k", Freshness::Cached, || async {
+                Ok(token("ya29.old", 3600))
+            })
+            .await
+            .unwrap();
+        let cache_path = dir.path().join("token_cache.enc");
+        let held = crate::fs_util::FileLock::acquire(
+            &dir.path().join("token_cache.lock"),
+            Duration::from_secs(1),
+        )
+        .unwrap();
+
+        let clearing = tokio::spawn(async move { cache.clear().await });
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(
+            !clearing.is_finished(),
+            "clear must wait while another process holds the lock"
+        );
+        assert!(cache_path.exists());
+
+        drop(held);
+        assert!(clearing.await.unwrap().unwrap(), "the file was removed");
+        assert!(!cache_path.exists());
+    }
+
+    #[tokio::test]
+    async fn clear_after_an_in_flight_refresh_leaves_no_stale_token() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ks, _) = memory_keystore(dir.path());
+        let ks = Arc::new(ks);
+        let new_cache = || {
+            TokenCache::new(
+                &dir.path().join("token_cache.enc"),
+                &dir.path().join("token_cache.lock"),
+                Arc::clone(&ks),
+            )
+        };
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let refresher = new_cache();
+        let refresh = tokio::spawn(async move {
+            refresher
+                .get_or_fetch("user:client|*", Freshness::Cached, || async move {
+                    started_tx.send(()).unwrap();
+                    tokio::time::sleep(Duration::from_millis(300)).await;
+                    Ok(token("ya29.previous-grant", 3600))
+                })
+                .await
+        });
+        // The refresh holds the lock and is mid-fetch when login clears.
+        started_rx.await.unwrap();
+        new_cache().clear().await.unwrap();
+        refresh.await.unwrap().unwrap();
+        assert!(
+            !dir.path().join("token_cache.enc").exists(),
+            "the previous grant's token was written back after the clear"
+        );
+    }
+
+    #[tokio::test]
+    async fn clear_of_a_missing_cache_is_ok() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = cache_in(dir.path());
+        assert!(!cache.clear().await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn clear_reports_io_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = cache_in(dir.path());
+        // A directory where the cache file should be cannot be removed as a file.
+        std::fs::create_dir(dir.path().join("token_cache.enc")).unwrap();
+        std::fs::write(dir.path().join("token_cache.enc").join("x"), b"x").unwrap();
+        let err = cache.clear().await.unwrap_err();
+        assert!(
+            matches!(&err, AuthError::Storage(m) if m.contains("cannot clear the token cache")),
+            "{err}"
+        );
+        assert!(dir.path().join("token_cache.enc").exists());
+    }
+
+    #[tokio::test]
+    async fn clear_reports_lock_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ks, _) = memory_keystore(dir.path());
+        let missing = dir.path().join("no-such-profile");
+        let cache = TokenCache::new(
+            &missing.join("token_cache.enc"),
+            &missing.join("token_cache.lock"),
+            Arc::new(ks),
+        );
+        let err = cache.clear().await.unwrap_err();
+        assert!(
+            matches!(&err, AuthError::Storage(m) if m.contains("cannot lock token cache")),
+            "{err}"
         );
     }
 
