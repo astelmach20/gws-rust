@@ -19,9 +19,12 @@ use super::prelude::*;
 use super::sender::resolve_sender;
 
 /// Handle the `+send` subcommand.
-pub(super) async fn handle_send(matches: &ArgMatches) -> Result<(), GwsError> {
+pub(super) async fn handle_send(
+    matches: &ArgMatches,
+    sanitize: &crate::helpers::modelarmor::SanitizeConfig,
+) -> Result<(), GwsError> {
     let mut config = parse_send_args(matches)?;
-    let delivery = Delivery::from_matches(matches)?;
+    let delivery = Delivery::from_matches(matches, sanitize)?;
     delivery.confirm(
         matches,
         &format!("send an email to {}", describe(&config.to)),

@@ -18,21 +18,28 @@ use super::api::GMAIL_UPLOAD_BASE;
 use super::prelude::*;
 use crate::confirm::{self, Impact};
 use crate::formatter::{OutputFormat, format_value};
+use crate::helpers::modelarmor::SanitizeConfig;
 
 /// Whether the message is sent or saved as a draft, and whether this is a dry run.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub(super) struct Delivery {
     pub draft: bool,
     pub dry_run: bool,
     pub format: OutputFormat,
+    /// Model Armor screening of the API response (`--sanitize`).
+    pub sanitize: SanitizeConfig,
 }
 
 impl Delivery {
-    pub(super) fn from_matches(matches: &ArgMatches) -> Result<Self, GwsError> {
+    pub(super) fn from_matches(
+        matches: &ArgMatches,
+        sanitize: &SanitizeConfig,
+    ) -> Result<Self, GwsError> {
         Ok(Self {
             draft: crate::args::flag(matches, "draft")?,
             dry_run: crate::args::dry_run(matches)?,
             format: crate::helpers::http::output_format(matches)?,
+            sanitize: sanitize.clone(),
         })
     }
 
@@ -94,7 +101,7 @@ pub(super) async fn deliver(
     let response = api
         .upload_raw(raw_message.as_bytes(), &metadata, delivery.draft)
         .await?;
-    crate::output::emit(&format_value(&response, &delivery.format)?)?;
+    super::emit_screened(&delivery.sanitize, &delivery.format, response.clone()).await?;
 
     if delivery.draft {
         let id = response
@@ -156,8 +163,34 @@ mod tests {
             draft: false,
             dry_run: false,
             format: OutputFormat::Json,
+            sanitize: SanitizeConfig::default(),
         };
         assert!(deliver(Some(&api), delivery, "raw", None).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_deliver_screens_the_response_with_sanitize() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/upload/gmail/v1/users/me/messages/send"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "id": "m1" })))
+            .mount(&server)
+            .await;
+        let api = mock_api(&server);
+        let delivery = Delivery {
+            draft: false,
+            dry_run: false,
+            format: OutputFormat::Json,
+            // An invalid template makes screening fail without network access.
+            sanitize: SanitizeConfig {
+                template: Some("projects/p/locations/evil.com#/templates/t".into()),
+                mode: crate::helpers::modelarmor::SanitizeMode::Block,
+            },
+        };
+        let err = deliver(Some(&api), delivery, "raw", None)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("Model Armor template"), "{err}");
     }
 
     #[tokio::test]
@@ -173,6 +206,7 @@ mod tests {
             draft: true,
             dry_run: false,
             format: OutputFormat::Json,
+            sanitize: SanitizeConfig::default(),
         };
         let err = deliver(Some(&api), delivery, "raw", None)
             .await

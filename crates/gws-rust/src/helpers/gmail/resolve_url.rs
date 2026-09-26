@@ -179,7 +179,10 @@ pub(super) fn thread_id_from_input(input: &str) -> Result<String, GwsError> {
 }
 
 /// Handle the `+resolve-url` subcommand.
-pub(super) async fn handle_resolve_url(matches: &ArgMatches) -> Result<(), GwsError> {
+pub(super) async fn handle_resolve_url(
+    matches: &ArgMatches,
+    sanitize: &crate::helpers::modelarmor::SanitizeConfig,
+) -> Result<(), GwsError> {
     let resolved = resolve(&required_str(matches, "url")?)?;
     let verify = !crate::args::flag(matches, "no-verify")? && !crate::args::dry_run(matches)?;
     let mut output = serde_json::to_value(&resolved)
@@ -198,8 +201,7 @@ pub(super) async fn handle_resolve_url(matches: &ArgMatches) -> Result<(), GwsEr
         output["verified"] = json!(false);
     }
     let format = crate::helpers::http::output_format(matches)?;
-    crate::output::emit(&crate::formatter::format_value(&output, &format)?)?;
-    Ok(())
+    super::emit_screened(sanitize, &format, output).await
 }
 
 #[cfg(test)]

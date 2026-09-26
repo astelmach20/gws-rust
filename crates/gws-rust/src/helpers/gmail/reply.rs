@@ -19,9 +19,13 @@ use super::prelude::*;
 use super::sender::resolve_sender;
 
 /// Handle the `+reply` and `+reply-all` subcommands.
-pub(super) async fn handle_reply(matches: &ArgMatches, reply_all: bool) -> Result<(), GwsError> {
+pub(super) async fn handle_reply(
+    matches: &ArgMatches,
+    reply_all: bool,
+    sanitize: &crate::helpers::modelarmor::SanitizeConfig,
+) -> Result<(), GwsError> {
     let mut config = parse_reply_args(matches)?;
-    let delivery = Delivery::from_matches(matches)?;
+    let delivery = Delivery::from_matches(matches, sanitize)?;
     delivery.confirm(
         matches,
         &format!("send a reply to message {}", config.message_id),
