@@ -92,6 +92,13 @@ pub enum AuthError {
     /// The token endpoint returned an error.
     #[error("token request failed: {0}")]
     TokenEndpoint(String),
+    /// The token endpoint answered 429 or 5xx: a transient failure on
+    /// Google's side. The credential itself was not rejected.
+    #[error(
+        "Google's OAuth token endpoint is temporarily unavailable (HTTP {status}): {detail}. \
+         The credentials were not rejected; retry later"
+    )]
+    TokenEndpointUnavailable { status: u16, detail: String },
     /// Network failure talking to Google's OAuth endpoints.
     #[error("{0}")]
     Network(String),
@@ -114,6 +121,8 @@ enum Category {
     Config,
     Store,
     Network,
+    /// A retryable HTTP status from the token endpoint.
+    Unavailable(u16),
     Input,
     Internal,
 }
@@ -131,6 +140,7 @@ impl Category {
             AuthError::Keystore(_) => Category::Store,
             AuthError::Storage(_) => Category::Store,
             AuthError::Network(_) => Category::Network,
+            AuthError::TokenEndpointUnavailable { status, .. } => Category::Unavailable(*status),
             AuthError::Input(_) => Category::Input,
             AuthError::Internal(_) => Category::Internal,
         }
@@ -142,6 +152,12 @@ impl Category {
             Category::Config => GwsError::Config(message),
             Category::Store => GwsError::CredentialStore(message),
             Category::Network => GwsError::Network(message.into()),
+            Category::Unavailable(code) => GwsError::Api {
+                code,
+                message,
+                reason: "tokenEndpointUnavailable".to_string(),
+                enable_url: None,
+            },
             Category::Input => GwsError::Validation(message),
             Category::Internal => GwsError::other(message),
         }
@@ -590,7 +606,19 @@ mod tests {
                 2,
                 "authError",
             ),
-            (AuthError::TokenEndpoint("HTTP 500".into()), 2, "authError"),
+            (
+                AuthError::TokenEndpoint("unauthorized_client: nope".into()),
+                2,
+                "authError",
+            ),
+            (
+                AuthError::TokenEndpointUnavailable {
+                    status: 503,
+                    detail: "Service Unavailable".into(),
+                },
+                6,
+                "tokenEndpointUnavailable",
+            ),
             (AuthError::Denied("access_denied".into()), 2, "authError"),
             (AuthError::Config("bad file".into()), 8, "configError"),
             (
