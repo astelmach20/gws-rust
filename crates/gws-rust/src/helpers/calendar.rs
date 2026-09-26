@@ -679,6 +679,7 @@ async fn agenda(api: &Api, args: &AgendaArgs, tz: &TzInfo) -> Result<Value, GwsE
             )
             .await?;
         let mut cals = Vec::new();
+        let mut found_ids = std::collections::HashSet::new();
         for cal in list.items {
             let id = cal
                 .get("id")
@@ -689,10 +690,15 @@ async fn agenda(api: &Api, args: &AgendaArgs, tz: &TzInfo) -> Result<Value, GwsE
                 .or_else(|| cal.get("summary"))
                 .and_then(Value::as_str)
                 .unwrap_or(id);
-            let id_ok = args.calendar_ids.is_empty()
-                || args.calendar_ids.iter().any(|c| {
-                    c == id || (c == "primary" && cal.get("primary") == Some(&json!(true)))
-                });
+            let requested: Vec<&String> = args
+                .calendar_ids
+                .iter()
+                .filter(|c| {
+                    *c == id || (*c == "primary" && cal.get("primary") == Some(&json!(true)))
+                })
+                .collect();
+            let id_ok = args.calendar_ids.is_empty() || !requested.is_empty();
+            found_ids.extend(requested);
             let name_ok = args
                 .calendar_name
                 .as_deref()
@@ -700,6 +706,20 @@ async fn agenda(api: &Api, args: &AgendaArgs, tz: &TzInfo) -> Result<Value, GwsE
             if id_ok && name_ok {
                 cals.push((id.to_string(), name.to_string()));
             }
+        }
+        // Every requested ID must exist: a partial agenda that silently omits
+        // a calendar the caller asked for would look complete.
+        let missing: Vec<&str> = args
+            .calendar_ids
+            .iter()
+            .filter(|c| !found_ids.contains(c))
+            .map(String::as_str)
+            .collect();
+        if !missing.is_empty() {
+            return Err(GwsError::Validation(format!(
+                "--calendar-id not found in your calendar list: {}",
+                missing.join(", ")
+            )));
         }
         if cals.is_empty() && (!args.calendar_ids.is_empty() || args.calendar_name.is_some()) {
             return Err(GwsError::Validation(
@@ -1282,6 +1302,47 @@ mod tests {
         };
         assert_eq!(
             agenda(&api, &only_home, &tz("UTC", false)).await.unwrap()["count"],
+            1
+        );
+    }
+
+    /// A requested `--calendar-id` that is not in the calendar list must fail
+    /// the command, not silently shrink the agenda to the calendars that matched.
+    #[tokio::test]
+    async fn agenda_rejects_calendar_ids_missing_from_the_list() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/users/me/calendarList"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"items": [
+                {"id": "me@x", "summary": "Me", "primary": true}
+            ]})))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/calendars/me@x/events"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"items": [
+                {"id": "1", "summary": "Mine", "start": {"dateTime": "2030-01-01T09:00:00Z"}}
+            ]})))
+            .mount(&server)
+            .await;
+        let api = api(&server.uri(), "");
+        let args = AgendaArgs {
+            window: Window::Days(3),
+            calendar_ids: vec!["primary".into(), "team@x".into()],
+            calendar_name: None,
+        };
+        let err = agenda(&api, &args, &tz("UTC", false)).await.unwrap_err();
+        assert!(matches!(err, GwsError::Validation(_)), "{err:?}");
+        assert!(err.to_string().contains("team@x"), "{err}");
+        assert!(!err.to_string().contains("primary"), "{err}");
+
+        let found = AgendaArgs {
+            window: Window::Days(3),
+            calendar_ids: vec!["primary".into(), "me@x".into()],
+            calendar_name: None,
+        };
+        assert_eq!(
+            agenda(&api, &found, &tz("UTC", false)).await.unwrap()["count"],
             1
         );
     }
