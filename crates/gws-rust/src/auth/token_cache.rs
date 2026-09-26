@@ -192,6 +192,25 @@ impl TokenCache {
     }
 }
 
+/// A short, non-reversible fingerprint of the secret behind a grant (a
+/// user's refresh token), for use in cache keys.
+///
+/// Cache keys must identify the grant, not just the OAuth client: after a
+/// re-login, a command that loaded the previous refresh token before the
+/// cache was cleared can still cache that grant's access token. With the
+/// fingerprint in the key, that entry is never served to the new grant.
+/// The secret itself never appears in the key.
+pub fn grant_fingerprint(secret: &SecretString) -> String {
+    let mut ctx = aws_lc_rs::digest::Context::new(&aws_lc_rs::digest::SHA256);
+    ctx.update(b"gwsr token-cache grant v1\0");
+    ctx.update(secret.expose_secret().as_bytes());
+    let digest = ctx.finish();
+    digest.as_ref()[..12]
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
 fn read_cache(path: &Path, keystore: &Keystore) -> Result<CacheFile, AuthError> {
     let data = match std::fs::read(path) {
         Ok(d) => d,
@@ -405,6 +424,18 @@ mod tests {
             std::fs::read(dir.path().join(&quarantined[0])).unwrap(),
             b"garbage"
         );
+    }
+
+    #[test]
+    fn grant_fingerprint_is_stable_distinct_and_hides_the_secret() {
+        let a = SecretString::from("1//refresh-a".to_string());
+        let b = SecretString::from("1//refresh-b".to_string());
+        let fa = grant_fingerprint(&a);
+        assert_eq!(fa, grant_fingerprint(&a));
+        assert_ne!(fa, grant_fingerprint(&b));
+        assert_eq!(fa.len(), 24);
+        assert!(fa.bytes().all(|c| c.is_ascii_hexdigit()));
+        assert!(!fa.contains("refresh"));
     }
 
     #[tokio::test]
