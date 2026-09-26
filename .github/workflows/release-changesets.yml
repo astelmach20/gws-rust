@@ -76,4 +76,5 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           # With an App token the tag push itself triggers release.yml; only dispatch without one.
-          GWSR_DISPATCH_RELEASE: ${{ steps.app-token.outputs.token == '' && '1' || '0' }}
+          # Not GWSR_-prefixed: gwsr rejects unknown GWSR_* variables, and version-sync runs gwsr.
+          RELEASE_DISPATCH: ${{ steps.app-token.outputs.token == '' && '1' || '0' }}
