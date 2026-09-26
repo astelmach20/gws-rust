@@ -16,37 +16,75 @@
 //!
 //! Resolves the authenticated user's timezone with the following priority:
 //! 1. Explicit `--timezone` CLI flag (hard error if invalid)
-//! 2. Cached value in the gwsr cache directory (24h TTL)
+//! 2. Cached value in the gwsr cache directory (24h TTL), one file per
+//!    credential identity (see [`crate::auth::identity_cache_key`]); nothing
+//!    is cached for a raw access token, whose account is unknown
 //! 3. Google Calendar Settings API (`users/me/settings/timezone`)
 //! 4. Machine-local timezone (fallback with warning)
 
 use crate::error::GwsError;
 use crate::transport::Transport;
 use chrono_tz::Tz;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-/// Cache filename stored in the gwsr cache directory.
-const CACHE_FILENAME: &str = "account_timezone";
+/// Prefix of the per-identity cache files in the gwsr cache directory.
+const CACHE_FILENAME_PREFIX: &str = "account_timezone";
 
 /// Cache TTL in seconds (24 hours).
 const CACHE_TTL_SECS: u64 = 86400;
 
-/// Returns the path to the timezone cache file.
-fn cache_path() -> Result<PathBuf, GwsError> {
-    Ok(crate::discovery::gwsr_cache_root()?.join(CACHE_FILENAME))
+/// The cache file under `root` for the account `identity`, or `None` when
+/// the identity is unknown (then nothing is cached). The identity is hashed
+/// into the file name, so each account has its own file.
+fn cache_file(root: &Path, identity: Option<&str>) -> Option<PathBuf> {
+    identity.map(|id| {
+        let hash = uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_OID, id.as_bytes());
+        root.join(format!("{CACHE_FILENAME_PREFIX}-{}", hash.simple()))
+    })
 }
 
-/// Remove the cached timezone file. Called on auth login/logout to
-/// invalidate stale values when the account changes.
+/// The cache file for the credential this invocation uses.
+fn cache_path() -> Result<Option<PathBuf>, GwsError> {
+    let identity = crate::auth::identity_cache_key().map_err(crate::auth::to_gws_error)?;
+    Ok(cache_file(
+        &crate::discovery::gwsr_cache_root()?,
+        identity.as_deref(),
+    ))
+}
+
+/// Remove every cached timezone. Called on auth login/logout to invalidate
+/// stale values when the account changes.
 pub fn invalidate_cache() -> Result<(), GwsError> {
-    let path = cache_path()?;
-    if let Err(e) = std::fs::remove_file(&path)
-        && e.kind() != std::io::ErrorKind::NotFound
-    {
-        return Err(GwsError::other(anyhow::Error::new(e).context(format!(
+    invalidate_cache_in(&crate::discovery::gwsr_cache_root()?)
+}
+
+fn invalidate_cache_in(root: &Path) -> Result<(), GwsError> {
+    let failed = |path: &Path, e: std::io::Error| {
+        GwsError::other(anyhow::Error::new(e).context(format!(
             "failed to remove the timezone cache {}",
             path.display()
-        ))));
+        )))
+    };
+    let entries = match std::fs::read_dir(root) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(failed(root, e)),
+    };
+    for entry in entries {
+        let entry = entry.map_err(|e| failed(root, e))?;
+        if !entry
+            .file_name()
+            .to_string_lossy()
+            .starts_with(CACHE_FILENAME_PREFIX)
+        {
+            continue;
+        }
+        let path = entry.path();
+        if let Err(e) = std::fs::remove_file(&path)
+            && e.kind() != std::io::ErrorKind::NotFound
+        {
+            return Err(failed(&path, e));
+        }
     }
     Ok(())
 }
@@ -115,8 +153,12 @@ fn settings_url(transport: &Transport) -> String {
     format!("{base}calendar/v3/users/me/settings/timezone")
 }
 
-/// Fetch the account timezone from the Google Calendar Settings API.
-async fn fetch_account_timezone(transport: &Transport) -> Result<Tz, GwsError> {
+/// Fetch the account timezone from the Google Calendar Settings API,
+/// caching it in `cache` (if any).
+async fn fetch_account_timezone(
+    transport: &Transport,
+    cache: Option<&Path>,
+) -> Result<Tz, GwsError> {
     let url = settings_url(transport);
     let json = transport
         .get_json(&url, &[], "Failed to fetch account timezone")
@@ -138,8 +180,9 @@ async fn fetch_account_timezone(transport: &Transport) -> Result<Tz, GwsError> {
         ))
     })?;
 
-    // Cache for future use
-    write_cache(&cache_path()?, tz_name);
+    if let Some(path) = cache {
+        write_cache(path, tz_name);
+    }
     tracing::info!(
         timezone = tz_name,
         source = "calendar_api",
@@ -177,15 +220,20 @@ pub(crate) async fn resolve_account_timezone(
         );
         return Ok(tz);
     }
+    resolve_with(transport, cache_path()?.as_deref()).await
+}
 
-    // 2. Check cache
-    if let Some(tz) = read_cache(&cache_path()?) {
+/// Steps 2-4 of [`resolve_account_timezone`], with the identity's cache file
+/// (`None`: do not cache) passed in.
+async fn resolve_with(transport: &Transport, cache: Option<&Path>) -> Result<Tz, GwsError> {
+    // 2. Check this identity's cache
+    if let Some(tz) = cache.and_then(read_cache) {
         tracing::debug!(timezone = %tz, source = "cache", "using cached timezone");
         return Ok(tz);
     }
 
     // 3. Fetch from Calendar Settings API
-    let api_error = match fetch_account_timezone(transport).await {
+    let api_error = match fetch_account_timezone(transport, cache).await {
         Ok(tz) => return Ok(tz),
         Err(e) => e,
     };
@@ -286,7 +334,7 @@ mod tests {
     #[test]
     fn cache_roundtrip() {
         let dir = tempfile::tempdir().unwrap();
-        let cache_file = dir.path().join(CACHE_FILENAME);
+        let cache_file = cache_file(dir.path(), Some("profile:/c:default")).unwrap();
         std::fs::write(&cache_file, "America/New_York\n").unwrap();
         assert_eq!(read_cache(&cache_file), Some(chrono_tz::America::New_York));
     }
@@ -294,10 +342,71 @@ mod tests {
     #[test]
     fn missing_or_corrupt_cache_is_a_miss() {
         let dir = tempfile::tempdir().unwrap();
-        let cache_file = dir.path().join(CACHE_FILENAME);
+        let cache_file = cache_file(dir.path(), Some("profile:/c:default")).unwrap();
         assert_eq!(read_cache(&cache_file), None);
         std::fs::write(&cache_file, "Not/A/Zone").unwrap();
         assert_eq!(read_cache(&cache_file), None);
+    }
+
+    async fn settings_server(tz: &str) -> wiremock::MockServer {
+        use wiremock::matchers::{method, path};
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(method("GET"))
+            .and(path("/calendar/v3/users/me/settings/timezone"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({ "value": tz })),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        server
+    }
+
+    async fn resolve_from(server: &wiremock::MockServer, cache: Option<&Path>) -> Tz {
+        resolve_with(&Transport::for_test(&server.uri()), cache)
+            .await
+            .unwrap()
+    }
+
+    /// Two identities (here two profiles) never share a cached time zone:
+    /// switching profile, credentials file or `--impersonate` subject must
+    /// not reuse the previous account's zone.
+    #[tokio::test]
+    async fn cached_timezone_is_never_shared_between_identities() {
+        let dir = tempfile::tempdir().unwrap();
+        let tokyo = settings_server("Asia/Tokyo").await;
+        let new_york = settings_server("America/New_York").await;
+        let work = cache_file(dir.path(), Some("profile:/c:work"));
+        let personal = cache_file(dir.path(), Some("profile:/c:personal"));
+
+        assert_eq!(
+            resolve_from(&tokyo, work.as_deref()).await,
+            chrono_tz::Asia::Tokyo
+        );
+        assert_eq!(
+            resolve_from(&new_york, personal.as_deref()).await,
+            chrono_tz::America::New_York,
+            "the second account must not get the first account's cached zone"
+        );
+        // Each identity's value is cached (each server expects one call).
+        assert_eq!(
+            resolve_from(&tokyo, work.as_deref()).await,
+            chrono_tz::Asia::Tokyo
+        );
+
+        invalidate_cache_in(dir.path()).unwrap();
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+    }
+
+    /// A raw access token has no known account: its zone is never cached.
+    #[tokio::test]
+    async fn unknown_identity_is_not_cached() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(cache_file(dir.path(), None), None);
+        let server = settings_server("Asia/Tokyo").await;
+        assert_eq!(resolve_from(&server, None).await, chrono_tz::Asia::Tokyo);
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
     }
 
     #[test]
