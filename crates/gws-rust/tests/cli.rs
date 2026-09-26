@@ -922,6 +922,47 @@ fn dynamic_completion_uses_cached_discovery_documents() {
 }
 
 #[test]
+fn dynamic_completion_follows_the_selected_api_version() {
+    let env = Env::new();
+    env.seed_drive("v3 only");
+    let doc = json!({
+        "name": "drive",
+        "version": "v2",
+        "rootUrl": "https://www.googleapis.com/",
+        "servicePath": "drive/v2/",
+        "resources": {"revisionsV2": {"methods": {"get": {
+            "id": "drive.revisionsV2.get", "httpMethod": "GET", "path": "revisions"
+        }}}}
+    });
+    let v2 = env.cache_dir().join("discovery").join("drive+v2.json");
+    std::fs::write(&v2, serde_json::to_string(&doc).unwrap()).unwrap();
+    let complete = |args: &[&str]| {
+        let index = (args.len() - 1).to_string();
+        let mut argv = vec!["--"];
+        argv.extend_from_slice(args);
+        let out = env
+            .cmd()
+            .env("GWSR_COMPLETE", "bash")
+            .env("_CLAP_COMPLETE_INDEX", index)
+            .env("_CLAP_COMPLETE_COMP_TYPE", "9")
+            .env("_CLAP_COMPLETE_SPACE", "true")
+            .args(&argv)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{}", stderr_of(&out));
+        stdout_of(&out)
+    };
+    assert_eq!(
+        complete(&["gwsr", "drive", "--api-version", "v2", "rev"]),
+        "revisionsV2"
+    );
+    assert_eq!(complete(&["gwsr", "drive:v2", "rev"]), "revisionsV2");
+    // The default version still completes from its own document.
+    assert_eq!(complete(&["gwsr", "drive", "rev"]), "");
+    assert_eq!(complete(&["gwsr", "drive", "fi"]), "files");
+}
+
+#[test]
 fn cache_clear_reports_removed_documents() {
     let env = Env::new();
     env.seed_drive("x");
