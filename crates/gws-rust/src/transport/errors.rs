@@ -127,13 +127,23 @@ pub(crate) fn error_from_response(
             .and_then(Value::as_str)
             .map(str::to_string)
             .unwrap_or_else(|| format!("HTTP {status} with no error message"));
-        // Reason can appear in "errors[0].reason" or at the top-level "reason" field.
+        // Reason can appear in "errors[0].reason", in a `google.rpc.ErrorInfo`
+        // entry of "details" (the current error model, whose "status" is only
+        // the coarse canonical code), or at the top-level "reason" field.
         let reason = err_obj
             .get("errors")
             .and_then(Value::as_array)
             .and_then(|arr| arr.first())
             .and_then(|e| e.get("reason"))
             .and_then(Value::as_str)
+            .or_else(|| {
+                err_obj
+                    .get("details")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .find_map(|d| d.get("reason").and_then(Value::as_str))
+            })
             .or_else(|| err_obj.get("reason").and_then(Value::as_str))
             .or_else(|| err_obj.get("status").and_then(Value::as_str))
             .unwrap_or("unknown")
@@ -332,6 +342,48 @@ mod tests {
             oauth(403, body).3.as_deref(),
             Some("https://console.developers.google.com/apis/api/x")
         );
+    }
+
+    /// Google's current error model (AIP-193) carries the machine-readable
+    /// reason in a `google.rpc.ErrorInfo` entry of `details`, while `status`
+    /// is only the coarse canonical code (`PERMISSION_DENIED`).
+    #[test]
+    fn error_info_reason_in_details_is_used() {
+        let body = json!({"error": {"code": 403,
+            "message": "Google Chat API has not been used in project 12345 before or it is disabled. Enable it by visiting https://console.developers.google.com/apis/api/chat.googleapis.com/overview?project=12345 then retry.",
+            "status": "PERMISSION_DENIED",
+            "details": [
+                {"@type": "type.googleapis.com/google.rpc.ErrorInfo",
+                 "reason": "SERVICE_DISABLED", "domain": "googleapis.com",
+                 "metadata": {"service": "chat.googleapis.com", "consumer": "projects/12345"}},
+                {"@type": "type.googleapis.com/google.rpc.Help", "links": []}
+            ]}})
+        .to_string();
+        let (_, _, reason, url) = oauth(403, &body);
+        assert_eq!(reason, "SERVICE_DISABLED");
+        assert!(url.unwrap().contains("chat.googleapis.com"));
+    }
+
+    /// The transport retries a 403 whose `details` name `RATE_LIMIT_EXCEEDED`
+    /// (see `gws_rust_core::client::is_rate_limit_body`); the final error must
+    /// then be the retryable exit code 6, not 1.
+    #[test]
+    fn rate_limit_reason_in_details_is_retryable() {
+        let body = json!({"error": {"code": 403,
+            "message": "Quota exceeded for quota metric 'Read requests' and limit 'Read requests per minute per user'.",
+            "status": "PERMISSION_DENIED",
+            "details": [{"@type": "type.googleapis.com/google.rpc.ErrorInfo",
+                         "reason": "RATE_LIMIT_EXCEEDED", "domain": "googleapis.com"}]}})
+        .to_string();
+        assert!(gws_rust_core::client::is_rate_limit_body(body.as_bytes()));
+        let err = error_from_response(
+            reqwest::StatusCode::FORBIDDEN,
+            &body,
+            &AuthMethod::OAuth,
+            None,
+        );
+        assert!(err.is_retryable(), "{err:?}");
+        assert_eq!(err.exit_code(), GwsError::EXIT_CODE_API_RETRYABLE);
     }
 
     #[test]
