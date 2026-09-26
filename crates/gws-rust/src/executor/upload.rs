@@ -152,33 +152,57 @@ impl MultipartFrame {
         self.preamble.len() as u64 + data.len() + self.postamble.len() as u64
     }
 
+    /// The body streams exactly the `data.size` bytes counted in
+    /// [`Self::content_length`]. If the file no longer has that size the
+    /// stream fails before the closing boundary, so the request is aborted
+    /// rather than sent cut off at `Content-Length` or short of it.
     pub(crate) fn body(&self, data: &UploadData) -> reqwest::Body {
-        {
-            {
-                let path = &data.path;
-                // Stream the file so memory stays O(64 KiB) regardless of size.
-                let path = path.clone();
-                let file_stream = futures_util::stream::once(async move {
-                    tokio::fs::File::open(&path).await.map_err(|e| {
-                        std::io::Error::new(
-                            e.kind(),
-                            format!("failed to open upload file '{path}': {e}"),
-                        )
-                    })
-                })
-                .map_ok(tokio_util::io::ReaderStream::new)
-                .try_flatten();
-                let pre = bytes::Bytes::from(self.preamble.clone().into_bytes());
-                let post = bytes::Bytes::from(self.postamble.clone().into_bytes());
-                let stream = futures_util::stream::once(async { Ok::<_, std::io::Error>(pre) })
-                    .chain(file_stream)
-                    .chain(futures_util::stream::once(async {
-                        Ok::<_, std::io::Error>(post)
-                    }));
-                reqwest::Body::wrap_stream(stream)
+        let size = data.size;
+        // Stream the file so memory stays O(64 KiB) regardless of size.
+        let path = data.path.clone();
+        let file_stream = futures_util::stream::once(async move {
+            tokio::fs::File::open(&path).await.map_err(|e| {
+                std::io::Error::new(
+                    e.kind(),
+                    format!("failed to open upload file '{path}': {e}"),
+                )
+            })
+        })
+        .map_ok(move |file| tokio_util::io::ReaderStream::new(file.take(size)))
+        .try_flatten();
+        let path = data.path.clone();
+        let size_check = futures_util::stream::once(async move {
+            let now = current_size(&path).await?;
+            if now == size {
+                Ok(())
+            } else {
+                Err(std::io::Error::other(size_changed(&path, size, now)))
             }
-        }
+        })
+        .filter_map(|checked| async move { checked.err().map(Err) });
+        let pre = bytes::Bytes::from(self.preamble.clone().into_bytes());
+        let post = bytes::Bytes::from(self.postamble.clone().into_bytes());
+        let stream = futures_util::stream::once(async { Ok::<_, std::io::Error>(pre) })
+            .chain(file_stream)
+            .chain(size_check)
+            .chain(futures_util::stream::once(async {
+                Ok::<_, std::io::Error>(post)
+            }));
+        reqwest::Body::wrap_stream(stream)
     }
+}
+
+async fn current_size(path: &str) -> std::io::Result<u64> {
+    tokio::fs::metadata(path)
+        .await
+        .map(|m| m.len())
+        .map_err(|e| std::io::Error::new(e.kind(), format!("failed to stat '{path}': {e}")))
+}
+
+fn size_changed(path: &str, expected: u64, now: u64) -> String {
+    format!(
+        "upload file '{path}' changed size during upload ({expected} bytes when the upload started, {now} now); nothing was uploaded, rerun the command"
+    )
 }
 
 /// Send a multipart upload. `query` must already contain `uploadType=multipart`.
@@ -198,14 +222,25 @@ pub(crate) async fn send_multipart(
         response_timeout: upload_timeout(transport.retry.response_timeout, data.len()),
         ..transport.retry.clone()
     };
-    transport
+    let result = transport
         .send_with_policy(&policy, method, url, idempotency, |rb| {
             rb.query(query)
                 .header(CONTENT_TYPE, frame.content_type.as_str())
                 .header(CONTENT_LENGTH, frame.content_length(data))
                 .body(frame.body(data))
         })
-        .await
+        .await;
+    // The transport's error names only the request; when the body stream
+    // was aborted because the file changed, say so.
+    match result {
+        Err(err) => match current_size(&data.path).await {
+            Ok(now) if now != data.size => Err(GwsError::Validation(size_changed(
+                &data.path, data.size, now,
+            ))),
+            _ => Err(err),
+        },
+        ok => ok,
+    }
 }
 
 /// Parse a resumable-upload `Range: bytes=0-N` header into the next offset.
