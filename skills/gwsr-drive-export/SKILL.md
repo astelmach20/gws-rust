@@ -2,7 +2,7 @@
 name: gwsr-drive-export
 description: "Google Drive: Export a Google Doc/Sheet/Slides/Drawing to another format."
 metadata:
-  version: 0.23.0
+  version: 0.23.1
   openclaw:
     category: "productivity"
     requires:

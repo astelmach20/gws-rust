@@ -1,6 +1,6 @@
 {
   "name": "gws-rust",
-  "version": "0.23.0",
+  "version": "0.23.1",
   "description": "Google Workspace CLI (gwsr) — dynamic command surface from the Google Discovery Service",
   "license": "Apache-2.0",
   "author": "The gws-rust Authors",
@@ -25,11 +25,11 @@
     "node": ">=22"
   },
   "optionalDependencies": {
-    "gws-rust-darwin-arm64": "0.23.0",
-    "gws-rust-darwin-x64": "0.23.0",
-    "gws-rust-linux-arm64": "0.23.0",
-    "gws-rust-linux-x64": "0.23.0",
-    "gws-rust-win32-x64": "0.23.0"
+    "gws-rust-darwin-arm64": "0.23.1",
+    "gws-rust-darwin-x64": "0.23.1",
+    "gws-rust-linux-arm64": "0.23.1",
+    "gws-rust-linux-x64": "0.23.1",
+    "gws-rust-win32-x64": "0.23.1"
   },
   "keywords": [
     "cli",

@@ -2,7 +2,7 @@
 name: gwsr-postmaster
 description: "Gmail Postmaster Tools: Gmail sender reputation and delivery metrics (Postmaster Tools)."
 metadata:
-  version: 0.23.0
+  version: 0.23.1
   openclaw:
     category: "productivity"
     requires:

@@ -2,7 +2,7 @@
 name: gwsr-classroom-courses
 description: "Google Classroom: List your courses."
 metadata:
-  version: 0.23.0
+  version: 0.23.1
   openclaw:
     category: "productivity"
     requires:

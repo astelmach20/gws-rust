@@ -2,7 +2,7 @@
 name: gwsr-drive-sync
 description: "Google Drive: Mirror a Drive folder into a local directory (one-way, download only)."
 metadata:
-  version: 0.23.0
+  version: 0.23.1
   openclaw:
     category: "productivity"
     requires:

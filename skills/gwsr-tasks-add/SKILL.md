@@ -2,7 +2,7 @@
 name: gwsr-tasks-add
 description: "Google Tasks: Add a task."
 metadata:
-  version: 0.23.0
+  version: 0.23.1
   openclaw:
     category: "productivity"
     requires:

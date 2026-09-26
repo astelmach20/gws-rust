@@ -2,7 +2,7 @@
 name: gwsr-gmail-unsubscribe
 description: "Gmail: Unsubscribe from a mailing list via RFC 8058 one-click (List-Unsubscribe)."
 metadata:
-  version: 0.23.0
+  version: 0.23.1
   openclaw:
     category: "productivity"
     requires:

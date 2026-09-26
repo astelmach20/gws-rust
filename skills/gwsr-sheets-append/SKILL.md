@@ -2,7 +2,7 @@
 name: gwsr-sheets-append
 description: "Google Sheets: Append rows after the last row of a table."
 metadata:
-  version: 0.23.0
+  version: 0.23.1
   openclaw:
     category: "productivity"
     requires:

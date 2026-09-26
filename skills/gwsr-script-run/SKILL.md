@@ -2,7 +2,7 @@
 name: gwsr-script-run
 description: "Google Apps Script: Run a function in a deployed Apps Script project."
 metadata:
-  version: 0.23.0
+  version: 0.23.1
   openclaw:
     category: "productivity"
     requires:
