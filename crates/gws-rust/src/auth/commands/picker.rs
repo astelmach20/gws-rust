@@ -17,14 +17,11 @@
 
 use std::collections::HashSet;
 
-use crate::auth::scopes::{self, PLATFORM_SCOPE};
+use crate::auth::scopes;
 use crate::auth::setup::apis::{DiscoveredScope, ScopeClassification};
 use crate::auth::setup::tui::{PickerResult, SelectItem};
 use crate::error::GwsError;
 
-const TEMPLATE_READONLY: usize = 0;
-const TEMPLATE_WRITE: usize = 1;
-const TEMPLATE_FULL: usize = 2;
 const TEMPLATE_COUNT: usize = 3;
 const MANY_SCOPES_WARNING: usize = 25;
 
@@ -110,16 +107,9 @@ fn run_picker(
     entries: &[DiscoveredScope],
     services: Option<&HashSet<String>>,
 ) -> Result<Option<Vec<String>>, GwsError> {
-    let filtered: Vec<&DiscoveredScope> = entries
-        .iter()
-        .filter(|e| !scopes::is_app_only_scope(&e.url))
-        .filter(|e| {
-            services.is_none_or(|s| s.is_empty() || scopes::scope_matches_service(&e.url, s))
-        })
-        .collect();
-    if filtered.is_empty() {
+    let Some(filtered) = picker_entries(entries, services) else {
         return Ok(None);
-    }
+    };
     let t = templates(&filtered);
     let mut items = vec![
         template_item(
@@ -192,6 +182,42 @@ fn run_picker(
     Ok(Some(chosen))
 }
 
+/// The scope rows to offer, or `None` when the picker should not be shown:
+/// nothing to pick, or `--services` names a service with no listed scope (the
+/// basic list has no Chat scopes, for example). Showing the picker then would
+/// offer only unrelated rows and silently drop that service; the caller falls
+/// back to the presets plus Discovery-derived scopes instead.
+pub(super) fn picker_entries<'a>(
+    entries: &'a [DiscoveredScope],
+    services: Option<&HashSet<String>>,
+) -> Option<Vec<&'a DiscoveredScope>> {
+    let services = services.filter(|s| !s.is_empty());
+    let filtered: Vec<&DiscoveredScope> = entries
+        .iter()
+        .filter(|e| !scopes::is_app_only_scope(&e.url))
+        .filter(|e| services.is_none_or(|s| scopes::scope_matches_service(&e.url, s)))
+        .collect();
+    if filtered.is_empty() {
+        return None;
+    }
+    if let Some(services) = services {
+        let urls: Vec<String> = filtered.iter().map(|e| e.url.clone()).collect();
+        let mut unlisted: Vec<String> = scopes::find_unmatched_services(&urls, services)
+            .into_iter()
+            .collect();
+        if !unlisted.is_empty() {
+            unlisted.sort();
+            tracing::info!(
+                "the scope picker lists no scopes for {}; using the preset scopes plus the \
+                 services' Discovery scopes instead",
+                unlisted.join(", ")
+            );
+            return None;
+        }
+    }
+    Some(filtered)
+}
+
 fn template_item(label: &str, desc: &str, selected: bool, selects: Vec<String>) -> SelectItem {
     SelectItem {
         label: label.to_string(),
@@ -204,54 +230,67 @@ fn template_item(label: &str, desc: &str, selected: bool, selects: Vec<String>) 
 }
 
 /// Map confirmed picker items back to scope URLs.
+///
+/// Only checked rows are returned: the authorization request must match what
+/// the picker showed, so no scope is added that the user did not see checked.
 pub(super) fn selected_from_items(
     items: &[SelectItem],
     entries: &[&DiscoveredScope],
 ) -> Vec<String> {
-    let template_selected = |i: usize| items.get(i).is_some_and(|it| it.selected);
-    let full = template_selected(TEMPLATE_FULL);
-    let mut chosen: Vec<String> = items
+    let chosen: Vec<String> = items
         .iter()
         .skip(TEMPLATE_COUNT)
         .zip(entries.iter())
         .filter(|(item, _)| item.selected)
         .map(|(_, e)| e.url.clone())
         .collect();
-    if full
-        && !template_selected(TEMPLATE_READONLY)
-        && !template_selected(TEMPLATE_WRITE)
-        && !chosen.iter().any(|s| s == PLATFORM_SCOPE)
-    {
-        chosen.push(PLATFORM_SCOPE.to_string());
-    }
     scopes::dedup_hierarchical(&chosen)
 }
 
 /// For services with no preset scope, add their scopes from Discovery.
 ///
-/// Services whose Discovery document cannot be fetched are reported on
-/// stderr; the login continues with the scopes that are known.
+/// # Errors
+///
+/// A requested service whose Discovery document cannot be fetched, or that
+/// declares no usable scope, is an error: logging in without it would grant
+/// less than was asked for.
 pub(crate) async fn augment_with_discovery_scopes(
     result: &mut Vec<String>,
     services: &HashSet<String>,
     readonly_only: bool,
-) {
-    let missing = scopes::find_unmatched_services(result, services);
+) -> Result<(), GwsError> {
+    augment_with(result, services, readonly_only, |svc| async move {
+        let (api, version) =
+            crate::services::resolve_service(&svc).map_err(|e| anyhow::anyhow!("{e}"))?;
+        let doc = crate::discovery::fetch_discovery_document(&api, &version).await?;
+        anyhow::Ok(scopes_from_doc(&doc, readonly_only))
+    })
+    .await
+}
+
+/// [`augment_with_discovery_scopes`] with the Discovery lookup injected.
+pub(super) async fn augment_with<F, Fut>(
+    result: &mut Vec<String>,
+    services: &HashSet<String>,
+    readonly_only: bool,
+    lookup: F,
+) -> Result<(), GwsError>
+where
+    F: Fn(String) -> Fut,
+    Fut: std::future::Future<Output = anyhow::Result<Vec<String>>>,
+{
+    let mut missing: Vec<String> = scopes::find_unmatched_services(result, services)
+        .into_iter()
+        .collect();
     if missing.is_empty() {
-        return;
+        return Ok(());
     }
-    let mut names: Vec<&String> = missing.iter().collect();
-    names.sort();
-    let lookups = names.into_iter().map(|svc| async move {
-        let found = async {
-            let (api, version) =
-                crate::services::resolve_service(svc).map_err(|e| anyhow::anyhow!("{e}"))?;
-            let doc = crate::discovery::fetch_discovery_document(&api, &version).await?;
-            anyhow::Ok(scopes_from_doc(&doc, readonly_only))
-        }
-        .await;
-        (svc, found)
+    missing.sort();
+    let lookups = missing.into_iter().map(|svc| {
+        let found = lookup(svc.clone());
+        async move { (svc, found.await) }
     });
+    let mut failures = Vec::new();
     for (svc, found) in futures_util::future::join_all(lookups).await {
         match found {
             Ok(list) if !list.is_empty() => {
@@ -261,12 +300,20 @@ pub(crate) async fn augment_with_discovery_scopes(
                     }
                 }
             }
-            Ok(_) => tracing::warn!(
-                "service '{svc}' has no {}OAuth scopes usable for a user login",
+            Ok(_) => failures.push(format!(
+                "'{svc}' has no {}OAuth scopes usable for a user login",
                 if readonly_only { "read-only " } else { "" }
-            ),
-            Err(e) => tracing::warn!("no scopes added for service '{svc}': {e:#}"),
+            )),
+            Err(e) => failures.push(format!("cannot look up the scopes of '{svc}': {e:#}")),
         }
+    }
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(GwsError::Validation(format!(
+            "--services: {}. Remove the service, or pass exact scopes with --scopes",
+            failures.join("; ")
+        )))
     }
 }
 
@@ -296,6 +343,7 @@ pub(crate) fn scopes_from_doc(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::auth::scopes::PLATFORM_SCOPE;
 
     fn entry(short: &str) -> DiscoveredScope {
         let url = format!("{}{short}", scopes::SCOPE_PREFIX);
@@ -348,14 +396,72 @@ mod tests {
                 template_selects: vec![],
             });
         }
+        // The "Full access" template is selected but cloud-platform is not a
+        // listed (and checked) row: it must not be added behind the user's back.
         let chosen = selected_from_items(&items, &refs);
-        assert_eq!(
-            chosen,
-            vec![
-                format!("{}drive", scopes::SCOPE_PREFIX),
-                PLATFORM_SCOPE.to_string()
-            ]
+        assert_eq!(chosen, vec![format!("{}drive", scopes::SCOPE_PREFIX)]);
+        assert!(!chosen.iter().any(|s| s == PLATFORM_SCOPE));
+    }
+
+    fn set(v: &[&str]) -> HashSet<String> {
+        v.iter().map(|x| x.to_string()).collect()
+    }
+
+    #[test]
+    fn service_filtered_picker_omits_cloud_platform() {
+        let entries = static_entries();
+        assert!(entries.iter().any(|e| e.url == PLATFORM_SCOPE));
+        let listed = picker_entries(&entries, Some(&set(&["gmail"]))).expect("gmail rows");
+        assert!(!listed.is_empty());
+        assert!(
+            listed.iter().all(|e| e.short.starts_with("gmail")),
+            "{:?}",
+            listed.iter().map(|e| &e.short).collect::<Vec<_>>()
         );
+        // Without --services every entry is offered.
+        assert_eq!(picker_entries(&entries, None).unwrap().len(), entries.len());
+    }
+
+    #[test]
+    fn picker_is_skipped_when_a_service_has_no_rows() {
+        // The basic list has no Chat scopes; showing it for `-s chat` would
+        // offer only unrelated rows and silently drop Chat.
+        let entries = static_entries();
+        assert!(picker_entries(&entries, Some(&set(&["chat"]))).is_none());
+        assert!(picker_entries(&entries, Some(&set(&["gmail", "chat"]))).is_none());
+    }
+
+    #[tokio::test]
+    async fn services_without_scopes_are_errors() {
+        let lookup = |svc: String| async move {
+            match svc.as_str() {
+                "chat" => Ok(vec![format!(
+                    "{}chat.messages.readonly",
+                    scopes::SCOPE_PREFIX
+                )]),
+                "keep" => Ok(Vec::new()),
+                _ => Err(anyhow::anyhow!("offline")),
+            }
+        };
+        let mut result = vec![format!("{}gmail.readonly", scopes::SCOPE_PREFIX)];
+        augment_with(&mut result, &set(&["gmail", "chat"]), true, lookup)
+            .await
+            .unwrap();
+        assert_eq!(result.len(), 2, "{result:?}");
+
+        let mut result = Vec::new();
+        let err = augment_with(&mut result, &set(&["keep"]), true, lookup)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("keep"), "{err}");
+
+        let mut result = Vec::new();
+        let err = augment_with(&mut result, &set(&["meet"]), true, lookup)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("meet") && err.contains("offline"), "{err}");
     }
 
     #[test]
