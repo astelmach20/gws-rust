@@ -1569,6 +1569,7 @@ dependencies = [
  "pulldown-cmark",
  "rand 0.10.3",
  "ratatui",
+ "regex",
  "reqwest",
  "rustix",
  "secrecy",

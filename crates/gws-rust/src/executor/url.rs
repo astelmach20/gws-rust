@@ -59,7 +59,7 @@ fn scalar_to_string(value: &Value) -> String {
 /// parameters. Some documents (Slides `presentations.get`) have `flatPath`
 /// placeholders that don't match parameter names; fall back to `path`,
 /// whose RFC 6570 `{+var}` operators are handled below.
-fn path_template(method: &RestMethod) -> &str {
+pub(crate) fn path_template(method: &RestMethod) -> &str {
     match method.flat_path.as_deref() {
         Some(fp) => {
             let all_match = method
