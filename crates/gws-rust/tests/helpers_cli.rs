@@ -388,3 +388,104 @@ async fn text_responses_of_generated_methods_are_screened_by_model_armor() {
     );
     assert!(!out.status.success());
 }
+
+// ── Dot-segment path parameters ─────────────────────────────────────────
+
+/// A path parameter of `.` or `..` must never reach the server: URL parsing
+/// (WHATWG, as in reqwest) treats `%2E%2E` exactly like `..` and removes the
+/// segment, so `events/..` would DELETE the calendar, and a generated
+/// method's `files/..` would address the service root.
+#[tokio::test(flavor = "multi_thread")]
+async fn dot_segment_path_parameters_are_rejected_before_sending() {
+    use wiremock::{Mock, MockServer, ResponseTemplate, matchers::any};
+
+    let server = MockServer::start().await;
+    Mock::given(any())
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+        .mount(&server)
+        .await;
+
+    let dir = setup();
+    let cache = dir.path().join("cache").join("discovery");
+    let doc = json!({
+        "name": "drive", "version": "v3",
+        "rootUrl": "https://www.googleapis.com/", "servicePath": "drive/v3/",
+        "resources": {"permissions": {"methods": {
+            "delete": {"id": "drive.permissions.delete", "httpMethod": "DELETE",
+                       "path": "files/{fileId}/permissions/{permissionId}",
+                       "parameters": {
+                           "fileId": {"type": "string", "location": "path", "required": true},
+                           "permissionId": {"type": "string", "location": "path", "required": true}
+                       },
+                       "parameterOrder": ["fileId", "permissionId"],
+                       "scopes": ["https://www.googleapis.com/auth/drive"]}
+        }}}
+    });
+    std::fs::write(
+        cache.join("drive+v3.json"),
+        serde_json::to_vec(&doc).unwrap(),
+    )
+    .unwrap();
+
+    let run = |args: &[&str]| {
+        gwsr(dir.path())
+            .env("GWSR_TOKEN", "test-token")
+            .env("GWSR_API_BASE_URL", server.uri())
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    let cases: [&[&str]; 4] = [
+        &[
+            "drive",
+            "permissions",
+            "delete",
+            "--yes",
+            "--params",
+            r#"{"fileId":"F1","permissionId":".."}"#,
+        ],
+        &[
+            "drive",
+            "permissions",
+            "delete",
+            "--dry-run",
+            "--params",
+            r#"{"fileId":".","permissionId":"P1"}"#,
+        ],
+        &[
+            "calendar",
+            "+delete",
+            "--calendar-id",
+            "work@group.calendar.google.com",
+            "--event-id",
+            "..",
+            "--yes",
+        ],
+        &[
+            "calendar",
+            "+delete",
+            "--calendar-id",
+            "work@group.calendar.google.com",
+            "--event-id",
+            ".",
+            "--dry-run",
+        ],
+    ];
+    for args in cases {
+        let out = run(args);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(
+            out.status.code(),
+            Some(3),
+            "{args:?} was not rejected: stdout={} stderr={stderr}",
+            String::from_utf8_lossy(&out.stdout)
+        );
+        assert!(stderr.contains("dot segment"), "{args:?}: {stderr}");
+    }
+    let received = server.received_requests().await.unwrap();
+    let sent: Vec<String> = received
+        .iter()
+        .map(|r| format!("{} {}", r.method, r.url.path()))
+        .collect();
+    assert!(sent.is_empty(), "requests reached the server: {sent:?}");
+}
