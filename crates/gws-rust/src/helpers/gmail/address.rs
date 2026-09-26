@@ -76,7 +76,18 @@ impl Mailbox {
     /// Parse a comma-separated address list, respecting quoted strings.
     /// Empty-email entries (e.g. from trailing commas) are filtered out.
     pub fn parse_list(raw: &str) -> Vec<Self> {
-        split_raw_mailbox_list(raw)
+        Self::collect(split_raw_mailbox_list(raw))
+    }
+
+    /// Parse an address-list header value from a received message (To, Cc,
+    /// Reply-To). Unlike `parse_list`, RFC 5322 groups are flattened to their
+    /// members, so `undisclosed-recipients:;` yields no recipients.
+    pub fn parse_header_list(raw: &str) -> Vec<Self> {
+        Self::collect(split_address_list(raw, true))
+    }
+
+    fn collect(tokens: Vec<&str>) -> Vec<Self> {
+        tokens
             .into_iter()
             .map(Mailbox::parse)
             .filter(|m| !m.email.is_empty())
@@ -251,8 +262,21 @@ fn strip_comments(raw: &str) -> (String, Option<String>) {
 /// its neighbour and dropped.
 /// Returns raw string slices — use `Mailbox::parse_list` for structured parsing.
 pub(super) fn split_raw_mailbox_list(header: &str) -> Vec<&str> {
+    split_address_list(header, false)
+}
+
+/// Split an address list on commas, respecting quoted strings and comments
+/// (see `split_raw_mailbox_list`).
+///
+/// With `flatten_groups`, RFC 5322 groups (`display-name ":" [mailbox-list] ";"`)
+/// are flattened: the group name is dropped and its members are returned as
+/// ordinary mailboxes, so the empty group `undisclosed-recipients:;` yields
+/// nothing. `:` and `;` inside quoted strings or angle brackets are not group
+/// delimiters.
+fn split_address_list(header: &str, flatten_groups: bool) -> Vec<&str> {
     let mut result = Vec::new();
     let mut in_quotes = false;
+    let mut in_angle = false;
     let mut start = 0;
     let mut prev_backslash = false;
     let mut comment_depth = 0usize;
@@ -293,7 +317,17 @@ pub(super) fn split_raw_mailbox_list(header: &str) -> Vec<&str> {
                 prev_backslash = false;
                 continue;
             }
-            ',' if !in_quotes && comment_depth == 0 => {
+            '<' if !in_quotes => in_angle = true,
+            '>' if !in_quotes => in_angle = false,
+            // Start of a group: discard the group's display name.
+            ':' if flatten_groups && !in_quotes && !in_angle && comment_depth == 0 => start = next,
+            // A comma separates mailboxes; the end of a group terminates its
+            // last member the same way.
+            ',' | ';'
+                if !in_quotes
+                    && comment_depth == 0
+                    && (ch == ',' || (flatten_groups && !in_angle)) =>
+            {
                 let token = header[start..i].trim();
                 if !token.is_empty() {
                     result.push(token);
@@ -498,6 +532,38 @@ mod tests {
         let list = Mailbox::parse_list("Alice <>, bob@example.com");
         assert_eq!(list.len(), 1);
         assert_eq!(list[0].email, "bob@example.com");
+    }
+
+    #[test]
+    fn test_mailbox_parse_header_list_group_syntax() {
+        // Empty group (Bcc-only messages): no recipients at all.
+        assert!(Mailbox::parse_header_list("undisclosed-recipients:;").is_empty());
+        assert!(Mailbox::parse_header_list("undisclosed-recipients: ;").is_empty());
+
+        // Named group: the group name is dropped, members are kept intact.
+        let list = Mailbox::parse_header_list(
+            r#"Team: bob@example.com, "Doe, J" <j@example.com>;, dave@example.com"#,
+        );
+        let emails: Vec<&str> = list.iter().map(|m| m.email.as_str()).collect();
+        assert_eq!(
+            emails,
+            vec!["bob@example.com", "j@example.com", "dave@example.com"]
+        );
+        assert_eq!(list[1].name.as_deref(), Some("Doe, J"));
+
+        // ':' and ';' inside quotes or angle brackets are not group delimiters.
+        let list = Mailbox::parse_header_list(r#""Re: a; b" <x@example.com>"#);
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].email, "x@example.com");
+        assert_eq!(list[0].name.as_deref(), Some("Re: a; b"));
+
+        // ':' and ';' inside comments are not group delimiters, and comments
+        // inside a group are handled like anywhere else.
+        let list = Mailbox::parse_header_list(
+            "Team (a: b; c): bob@example.com (Smith; Bob), carol@example.com;",
+        );
+        let emails: Vec<&str> = list.iter().map(|m| m.email.as_str()).collect();
+        assert_eq!(emails, vec!["bob@example.com", "carol@example.com"]);
     }
 
     #[test]
