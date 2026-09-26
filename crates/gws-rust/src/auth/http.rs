@@ -52,6 +52,31 @@ pub enum HttpError {
     Request(#[from] reqwest::Error),
     #[error("invalid HTTP response: {0}")]
     Response(#[from] oauth2::http::Error),
+    /// The endpoint answered 429 or 5xx: a transient server-side failure,
+    /// never a verdict on the credential.
+    #[error("HTTP {status}: {detail}")]
+    Unavailable { status: u16, detail: String },
+}
+
+/// Longest excerpt of an unavailable endpoint's body kept in the error.
+const DETAIL_MAX_CHARS: usize = 200;
+
+/// Whether `status` is a transient server-side failure (429 or 5xx).
+pub fn is_unavailable(status: reqwest::StatusCode) -> bool {
+    status == reqwest::StatusCode::TOO_MANY_REQUESTS || status.is_server_error()
+}
+
+/// A short, terminal-safe excerpt of an error body (an HTML error page can be
+/// large).
+pub fn body_excerpt(body: &[u8]) -> String {
+    let text = crate::output::sanitize_for_terminal(&String::from_utf8_lossy(body));
+    let text = text.trim();
+    if text.chars().count() > DETAIL_MAX_CHARS {
+        let cut: String = text.chars().take(DETAIL_MAX_CHARS).collect();
+        format!("{cut}...")
+    } else {
+        text.to_string()
+    }
 }
 
 /// The shared OAuth HTTP client.
@@ -79,14 +104,23 @@ pub fn client() -> anyhow::Result<reqwest::Client> {
 ///
 /// # Errors
 ///
-/// Network, timeout or response-conversion errors.
+/// Network, timeout or response-conversion errors, and
+/// [`HttpError::Unavailable`] for a 429 or 5xx response.
 pub async fn execute(
     client: reqwest::Client,
     request: oauth2::HttpRequest,
 ) -> Result<oauth2::HttpResponse, HttpError> {
     let request = reqwest::Request::try_from(request)?;
     let response = client.execute(request).await?;
-    let mut builder = oauth2::http::Response::builder().status(response.status());
+    let status = response.status();
+    if is_unavailable(status) {
+        let body = response.bytes().await?;
+        return Err(HttpError::Unavailable {
+            status: status.as_u16(),
+            detail: body_excerpt(&body),
+        });
+    }
+    let mut builder = oauth2::http::Response::builder().status(status);
     for (name, value) in response.headers() {
         builder = builder.header(name, value);
     }

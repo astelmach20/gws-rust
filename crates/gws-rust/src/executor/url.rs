@@ -180,6 +180,13 @@ pub(crate) fn render_path_template(
         match params.get(key) {
             Some(value) => {
                 let val_str = scalar_to_string(value);
+                // An empty segment would silently address a different
+                // resource (`files/` is the collection, not a file).
+                if val_str.is_empty() {
+                    return Err(GwsError::Validation(format!(
+                        "Path parameter '{key}' must not be empty (URL template '{path_template}')"
+                    )));
+                }
                 let encoded = if is_plus {
                     let validated = crate::validate::validate_resource_name(&val_str)?;
                     crate::validate::encode_path_preserving_slashes(validated)
@@ -394,6 +401,26 @@ mod tests {
             err.to_string()
                 .contains("Missing value for path parameter 'fileId'")
         );
+    }
+
+    /// An empty ID must not collapse `files/{fileId}` into the collection
+    /// URL `files/` (or `users//messages`), which addresses a different
+    /// resource than the one the caller named.
+    #[test]
+    fn empty_path_value_is_rejected() {
+        let doc = doc_with_base("https://api.googleapis.com/");
+        for template in ["files/{fileId}", "users/{fileId}/messages", "v1/{+fileId}"] {
+            let m = method(template, path_params(&["fileId"]));
+            let mut params = Map::new();
+            params.insert("fileId".into(), json!(""));
+            let result = build_url(&doc, &m, &params, UrlTarget::Method, &google());
+            let err = match result {
+                Ok(u) => panic!("{template}: empty fileId was accepted as {}", u.url),
+                Err(e) => e.to_string(),
+            };
+            assert!(err.contains("fileId"), "{template}: {err}");
+            assert!(err.contains("empty"), "{template}: {err}");
+        }
     }
 
     #[test]
