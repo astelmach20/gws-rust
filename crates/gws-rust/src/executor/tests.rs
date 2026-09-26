@@ -504,6 +504,41 @@ async fn page_limit_truncation_is_marked() {
 }
 
 #[tokio::test]
+async fn page_all_repeated_token_is_an_error_not_an_infinite_loop() {
+    let server = MockServer::start().await;
+    // A misbehaving API that hands back the same page token forever.
+    let (responder, calls) = seq(vec![
+        ResponseTemplate::new(200)
+            .set_body_json(json!({"files": [{"id": "1"}], "nextPageToken": "p2"})),
+        ResponseTemplate::new(200)
+            .set_body_json(json!({"files": [{"id": "2"}], "nextPageToken": "p2"})),
+    ]);
+    Mock::given(method("GET"))
+        .and(path("/drive/v3/files"))
+        .respond_with(responder)
+        .mount(&server)
+        .await;
+    let d = doc(&server.uri());
+    let mut call = Call::new(&d, "list", &server);
+    call.pagination = PaginationConfig {
+        page_all: true,
+        page_limit: 0,
+        page_delay_ms: 0,
+    };
+    let em = Emitter::capturing();
+    let result = tokio::time::timeout(Duration::from_secs(5), call.run(&em)).await;
+    let n = calls.load(Ordering::SeqCst);
+    let Ok(result) = result else {
+        panic!("--page-all did not terminate: {n} requests sent for a repeated nextPageToken");
+    };
+    let err = result.unwrap_err();
+    assert!(err.to_string().contains("repeated nextPageToken"), "{err}");
+    assert_eq!(n, 2, "stops as soon as the token repeats");
+    // The pages that were fetched before the repeat were still emitted.
+    assert_eq!(lines(&em).len(), 2);
+}
+
+#[tokio::test]
 async fn page_items_emits_one_line_per_item() {
     let server = MockServer::start().await;
     mount_pages(&server).await;
@@ -1166,9 +1201,16 @@ async fn batch_round_trip_reports_partial_failure() {
     )
     .unwrap();
     let em = Emitter::capturing();
-    let err = batch::run_batch(&d, &calls, Credentials::Static("tok".into()), &opts, &em)
-        .await
-        .unwrap_err();
+    let err = batch::run_batch(
+        &d,
+        &calls,
+        Credentials::Static("tok".into()),
+        &opts,
+        &SanitizeConfig::default(),
+        &em,
+    )
+    .await
+    .unwrap_err();
     assert!(err.to_string().contains("1 of 2 batch call(s) failed"));
     let out = lines(&em);
     assert_eq!(
