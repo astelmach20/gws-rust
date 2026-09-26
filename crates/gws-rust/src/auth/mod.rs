@@ -402,6 +402,42 @@ fn granted_scopes_for(env: &AuthEnv) -> anyhow::Result<Option<Vec<String>>> {
     }
 }
 
+/// A stable, non-secret key for the identity requests are made as, used to
+/// keep per-account caches (such as the account time zone) apart.
+///
+/// It names the credential source (profile, credentials file or ADC file)
+/// and the impersonated user, so switching profile, credentials file or
+/// `--impersonate` subject never reuses another identity's cached data.
+/// Returns `Ok(None)` for a raw access token (`GWSR_TOKEN`,
+/// `GWSR_TOKEN_FILE`), whose account is unknown: nothing may be cached for it.
+///
+/// # Errors
+///
+/// Credential-source resolution failures (conflicting or missing sources).
+pub fn identity_cache_key() -> anyhow::Result<Option<String>> {
+    let env = AuthEnv::from_process()?;
+    Ok(identity_cache_key_for(&env)?)
+}
+
+fn identity_cache_key_for(env: &AuthEnv) -> Result<Option<String>, AuthError> {
+    let source = env.source()?;
+    let source = match &source {
+        CredentialSource::TokenEnv | CredentialSource::TokenFile(_) => return Ok(None),
+        CredentialSource::Profile { name, .. } => {
+            format!("profile:{}:{name}", env.base.display())
+        }
+        CredentialSource::CredentialsFile(path)
+        | CredentialSource::AdcEnv(path)
+        | CredentialSource::AdcWellKnown(path) => {
+            format!("{}:{}", source.kind(), path.display())
+        }
+    };
+    Ok(Some(match &env.impersonate {
+        Some(subject) => format!("{source}|impersonate:{subject}"),
+        None => source,
+    }))
+}
+
 /// Choose the scope for a Discovery method call, warning loudly on stderr
 /// when the recorded grant does not cover the method.
 ///
@@ -884,6 +920,47 @@ mod tests {
             "tok"
         );
         assert_eq!(granted_scopes_for(&env).unwrap(), None);
+    }
+
+    #[test]
+    fn identity_cache_key_separates_accounts() {
+        let dir = tempfile::tempdir().unwrap();
+        let mk = |name: &str| {
+            let paths = ProfilePaths::new(dir.path(), name);
+            paths.ensure_dir().unwrap();
+            std::fs::write(&paths.credentials, b"x").unwrap();
+            AuthEnv::new(
+                dir.path().to_path_buf(),
+                ActiveProfile {
+                    name: name.into(),
+                    source: ProfileSource::Flag,
+                },
+                paths,
+            )
+        };
+        let key = |env: &AuthEnv| identity_cache_key_for(env).unwrap();
+        let work = key(&mk("work"));
+        let personal = key(&mk("personal"));
+        assert!(work.is_some());
+        assert_ne!(work, personal, "profiles");
+
+        let sa = dir.path().join("sa.json");
+        std::fs::write(&sa, "{}").unwrap();
+        let mut as_alice = mk("default");
+        as_alice.profile.source = ProfileSource::Default;
+        as_alice.credentials_file = Some(sa);
+        as_alice.impersonate = Some("alice@example.com".into());
+        let mut as_bob = as_alice.clone();
+        as_bob.impersonate = Some("bob@example.com".into());
+        assert_ne!(key(&as_alice), key(&as_bob), "impersonation subjects");
+        assert_ne!(key(&as_alice), key(&mk("default")), "sources");
+
+        let mut token = mk("default");
+        // An explicit --profile conflicts with GWSR_TOKEN, so the token case
+        // uses the default profile.
+        token.profile.source = ProfileSource::Default;
+        token.token = Some(SecretString::from("tok".to_string()));
+        assert_eq!(key(&token), None, "a raw token has no known account");
     }
 
     #[test]
