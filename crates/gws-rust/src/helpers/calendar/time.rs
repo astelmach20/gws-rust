@@ -75,12 +75,14 @@ pub(super) fn parse_duration(s: &str) -> Result<Duration, GwsError> {
         }
         let n: i64 = num.parse().map_err(|_| err())?;
         num.clear();
-        total += match c {
-            'd' => Duration::days(n),
-            'h' => Duration::hours(n),
-            'm' => Duration::minutes(n),
+        let part = match c {
+            'd' => Duration::try_days(n),
+            'h' => Duration::try_hours(n),
+            'm' => Duration::try_minutes(n),
             _ => return Err(err()),
-        };
+        }
+        .ok_or_else(err)?;
+        total = total.checked_add(&part).ok_or_else(err)?;
         any = true;
     }
     if !num.is_empty() || !any || total <= Duration::zero() {
@@ -92,13 +94,22 @@ pub(super) fn parse_duration(s: &str) -> Result<Duration, GwsError> {
 impl When {
     /// Add a duration (not valid for all-day dates).
     pub(super) fn plus(&self, d: Duration) -> Result<When, GwsError> {
-        match self {
-            When::Date(_) => Err(GwsError::Validation(
-                "--duration cannot be used with an all-day --start; pass --end YYYY-MM-DD".into(),
-            )),
-            When::Instant(t) => Ok(When::Instant(*t + d)),
-            When::Local(t) => Ok(When::Local(*t + d)),
-        }
+        let end = match self {
+            When::Date(_) => {
+                return Err(GwsError::Validation(
+                    "--duration cannot be used with an all-day --start; pass --end YYYY-MM-DD"
+                        .into(),
+                ));
+            }
+            When::Instant(t) => t.checked_add_signed(d).map(When::Instant),
+            When::Local(t) => t.checked_add_signed(d).map(When::Local),
+        };
+        end.ok_or_else(|| {
+            GwsError::Validation(
+                "--duration is too long: the event would end past the latest representable time"
+                    .into(),
+            )
+        })
     }
 
     /// Calendar API `EventDateTime` JSON. `tz` is the event time zone; it is
@@ -282,6 +293,29 @@ mod tests {
         for bad in ["", "30", "m", "1x", "0m"] {
             assert!(parse_duration(bad).is_err(), "{bad}");
         }
+    }
+
+    #[test]
+    fn huge_durations_are_rejected_not_panics() {
+        for bad in [
+            // Beyond chrono's TimeDelta range for one unit.
+            "99999999999999999d",
+            "9999999999999999h",
+            "999999999999999999m",
+            // Each part in range, the sum is not.
+            "106751991167d106751991167d",
+        ] {
+            let err = parse_duration(bad).unwrap_err();
+            assert!(err.to_string().contains("Invalid duration"), "{bad}: {err}");
+        }
+        // A representable duration that runs past the last representable time.
+        let start = parse_when("2026-06-17T09:00", "--start").unwrap();
+        let err = start
+            .plus(parse_duration("100000000d").unwrap())
+            .unwrap_err();
+        assert!(err.to_string().contains("--duration"), "{err}");
+        let start = parse_when("2026-06-17T09:00:00Z", "--start").unwrap();
+        assert!(start.plus(parse_duration("100000000d").unwrap()).is_err());
     }
 
     #[test]
