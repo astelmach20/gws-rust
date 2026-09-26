@@ -677,22 +677,14 @@ async fn agenda(api: &Api, args: &AgendaArgs, tz: &TzInfo) -> Result<Value, GwsE
     let (min, max) = agenda_bounds(&args.window, tz.tz)?;
     let (time_min, time_max) = (min.to_rfc3339(), max.to_rfc3339());
 
+    // One request for both paths, so the dry-run plan shows what is sent.
+    let calendar_list =
+        || ApiRequest::get(api.url("users/me/calendarList")).query("maxResults", "250");
     let calendars: Vec<(String, String)> = if api.is_dry_run() {
-        api.paginate(
-            ApiRequest::get(api.url("users/me/calendarList")),
-            "items",
-            None,
-        )
-        .await?;
+        api.paginate(calendar_list(), "items", None).await?;
         vec![("<each calendar>".into(), String::new())]
     } else {
-        let list = api
-            .paginate(
-                ApiRequest::get(api.url("users/me/calendarList")).query("maxResults", "250"),
-                "items",
-                None,
-            )
-            .await?;
+        let list = api.paginate(calendar_list(), "items", None).await?;
         let mut cals = Vec::new();
         let mut found_ids = std::collections::HashSet::new();
         for cal in list.items {

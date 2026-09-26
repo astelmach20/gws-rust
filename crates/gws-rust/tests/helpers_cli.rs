@@ -239,6 +239,38 @@ fn outbound_helper_is_gated_only_under_policy() {
 }
 
 #[test]
+fn agenda_dry_run_shows_calendar_list_page_size() {
+    let dir = setup();
+    let out = gwsr(dir.path())
+        .args([
+            "calendar",
+            "+agenda",
+            "--today",
+            "--timezone",
+            "UTC",
+            "--dry-run",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let v = stdout_json(&out);
+    let list = &v["requests"][0];
+    assert!(
+        list["url"]
+            .as_str()
+            .unwrap()
+            .ends_with("/users/me/calendarList"),
+        "{v}"
+    );
+    // The real request asks for 250 calendars per page; the plan must too.
+    assert_eq!(list["query_params"]["maxResults"], "250", "{v}");
+}
+
+#[test]
 fn dry_run_bypasses_gate_and_prints_json() {
     let dir = setup();
     let out = gwsr(dir.path())
