@@ -1,5 +1,5 @@
 {
- "_note": "Stripped Discovery document used only by the registry validation test. Regenerate from https://www.googleapis.com/discovery/v1/apis/forms/v1/rest",
+ "_note": "Stripped Discovery document used by the registry validation test and tests/doc_examples.rs. Regenerate from https://www.googleapis.com/discovery/v1/apis/forms/v1/rest",
  "name": "forms",
  "parameters": {
   "$.xgafv": {

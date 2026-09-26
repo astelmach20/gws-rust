@@ -35,7 +35,7 @@ gwsr modelarmor +sanitize-prompt --template <NAME>
 ## Examples
 
 ```bash
-gwsr modelarmor +sanitize-prompt --template projects/P/locations/L/templates/T --text 'user input'
+gwsr modelarmor +sanitize-prompt --template projects/my-project/locations/us-central1/templates/my-tmpl --text 'user input'
 echo 'prompt' | gwsr modelarmor +sanitize-prompt --template ...
 ```
 
