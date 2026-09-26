@@ -91,17 +91,16 @@ impl std::error::Error for Context {
 ///
 /// `retry_note` (from [`gws_rust_core::client::Sent::retry_note`]) is appended
 /// to the message so users can see that the request was already retried.
+///
+/// A 401 on an authenticated request is [`GwsError::Auth`] (exit code 2): the
+/// transport has already minted a fresh token once, so the credential itself
+/// is expired, revoked or invalid.
 pub(crate) fn error_from_response(
     status: reqwest::StatusCode,
     error_body: &str,
     auth_method: &AuthMethod,
     retry_note: Option<&str>,
 ) -> GwsError {
-    let with_note = |message: String| match retry_note {
-        Some(note) => format!("{message} ({note})"),
-        None => message,
-    };
-
     if matches!(status.as_u16(), 401 | 403) && *auth_method == AuthMethod::None {
         return GwsError::Auth(
             "Access denied. No credentials provided. Run `gwsr auth login` or set \
@@ -109,6 +108,21 @@ pub(crate) fn error_from_response(
                 .to_string(),
         );
     }
+    match api_error(status, error_body, retry_note) {
+        GwsError::Api {
+            message, reason, ..
+        } if status == reqwest::StatusCode::UNAUTHORIZED => GwsError::Auth(format!(
+            "the API rejected the access token (HTTP 401, {reason}): {message}"
+        )),
+        err => err,
+    }
+}
+
+fn api_error(status: reqwest::StatusCode, error_body: &str, retry_note: Option<&str>) -> GwsError {
+    let with_note = |message: String| match retry_note {
+        Some(note) => format!("{message} ({note})"),
+        None => message,
+    };
 
     // A body that is not a Google JSON error (an HTML proxy page, plain text)
     // is not lost: it falls through to the raw-text error below.
@@ -200,15 +214,23 @@ mod tests {
         let body = json!({"error": {"code": 401, "message": "Request had invalid authentication credentials.",
                                     "errors": [{"reason": "authError"}]}})
         .to_string();
-        let (code, message, reason, _) = api_parts(error_from_response(
+        let err = error_from_response(
             reqwest::StatusCode::UNAUTHORIZED,
             &body,
             &AuthMethod::OAuth,
             None,
-        ));
-        assert_eq!(code, 401);
-        assert!(message.contains("invalid authentication credentials"));
-        assert_eq!(reason, "authError");
+        );
+        assert_eq!(err.exit_code(), GwsError::EXIT_CODE_AUTH);
+        match err {
+            GwsError::Auth(message) => {
+                assert!(
+                    message.contains("invalid authentication credentials"),
+                    "{message}"
+                );
+                assert!(message.contains("authError"), "{message}");
+            }
+            other => panic!("expected Auth error, got {other:?}"),
+        }
     }
 
     #[test]
