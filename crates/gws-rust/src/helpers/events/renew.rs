@@ -20,7 +20,7 @@
 //! subscriptions. Every failure is reported; the command exits non-zero if
 //! any subscription could not be renewed.
 
-use super::{WORKSPACE_EVENTS_API_BASE, parse_event_types, scopes_for_event_types};
+use super::{parse_event_types, scopes_for_event_types, workspace_events_api_base};
 use crate::error::GwsError;
 use crate::transport::Transport;
 use clap::ArgMatches;
@@ -256,9 +256,10 @@ pub(super) async fn handle_renew(matches: &ArgMatches) -> Result<(), GwsError> {
     } else {
         scopes_for_event_types(&config.event_types)?
     };
+    let rest = Transport::for_scopes(&scopes).await?;
     let api = EventsApi {
-        rest: Transport::for_scopes(&scopes).await?,
-        base: WORKSPACE_EVENTS_API_BASE.to_string(),
+        base: workspace_events_api_base(rest.endpoints()),
+        rest,
     };
     let out = run(&api, &config, chrono::Utc::now().timestamp()).await?;
     crate::helpers::http::print_value(matches, &out)
