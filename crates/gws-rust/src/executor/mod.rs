@@ -250,13 +250,16 @@ fn apply_param_defaults(
                 "--fields conflicts with \"fields\" in --params; use only one".to_string(),
             ));
         }
-        // A mask that drops nextPageToken silently stops pagination.
-        let mask = if paginating && !mask.contains("nextPageToken") {
-            format!("nextPageToken,{mask}")
-        } else {
-            mask.to_string()
-        };
-        params.insert("fields".to_string(), Value::String(mask));
+        params.insert("fields".to_string(), Value::String(mask.to_string()));
+    }
+    // A mask that drops nextPageToken silently stops pagination, whether it
+    // came from --fields or from "fields" in --params.
+    if paginating
+        && let Some(Value::String(mask)) = params.get_mut("fields")
+        && !mask.is_empty()
+        && !mask.contains("nextPageToken")
+    {
+        *mask = format!("nextPageToken,{mask}");
     }
     // Drive rejects items in shared drives unless supportsAllDrives is set.
     if method.parameters.contains_key("supportsAllDrives")

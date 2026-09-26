@@ -613,6 +613,62 @@ async fn fields_flag_keeps_next_page_token() {
     call.run(&Emitter::capturing()).await.unwrap();
 }
 
+/// Mimics Google's partial responses: `nextPageToken` is only returned when
+/// the `fields` mask asks for it.
+struct FieldsMaskedPages;
+
+impl Respond for FieldsMaskedPages {
+    fn respond(&self, req: &Request) -> ResponseTemplate {
+        let query: HashMap<_, _> = req.url.query_pairs().into_owned().collect();
+        let fields = query.get("fields").cloned().unwrap_or_default();
+        let page = match query.get("pageToken").map(String::as_str) {
+            None => json!({"files": [{"id": "1"}], "nextPageToken": "p2"}),
+            Some("p2") => json!({"files": [{"id": "2"}]}),
+            Some(other) => return ResponseTemplate::new(400).set_body_string(other.to_string()),
+        };
+        let mut page = page;
+        if !fields.is_empty() && !fields.contains("nextPageToken") {
+            page.as_object_mut().unwrap().remove("nextPageToken");
+        }
+        ResponseTemplate::new(200).set_body_json(page)
+    }
+}
+
+/// `"fields"` given in `--params` must not silently stop `--page-all` after
+/// the first page (the `--fields` flag already adds `nextPageToken`).
+#[tokio::test]
+async fn params_fields_keeps_next_page_token() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/drive/v3/files"))
+        .respond_with(FieldsMaskedPages)
+        .mount(&server)
+        .await;
+    let d = doc(&server.uri());
+    let mut call = Call::new(&d, "list", &server);
+    call.params = json!({"fields": "files(id)"});
+    call.pagination = PaginationConfig {
+        page_all: true,
+        page_limit: 0,
+        page_delay_ms: 0,
+    };
+    let em = Emitter::capturing();
+    call.run(&em).await.unwrap();
+    let out = lines(&em);
+    assert_eq!(out.len(), 2, "expected both pages, got {out:?}");
+    let sent: Vec<String> = server
+        .received_requests()
+        .await
+        .unwrap()
+        .iter()
+        .map(|r| r.url.query().unwrap_or_default().to_string())
+        .collect();
+    assert!(
+        sent[0].contains("fields=nextPageToken%2Cfiles%28id%29"),
+        "{sent:?}"
+    );
+}
+
 // ── Validation ──────────────────────────────────────────────────────────
 
 #[tokio::test]
