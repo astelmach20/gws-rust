@@ -105,11 +105,21 @@ fn write_cache(path: &std::path::Path, tz_name: &str) {
     }
 }
 
+/// The Calendar Settings URL for the account time zone, under the
+/// `GWSR_API_BASE_URL` override when the transport has one.
+fn settings_url(transport: &Transport) -> String {
+    let base = transport
+        .endpoints()
+        .override_base()
+        .map_or("https://www.googleapis.com/", |b| b.as_str());
+    format!("{base}calendar/v3/users/me/settings/timezone")
+}
+
 /// Fetch the account timezone from the Google Calendar Settings API.
 async fn fetch_account_timezone(transport: &Transport) -> Result<Tz, GwsError> {
-    let url = "https://www.googleapis.com/calendar/v3/users/me/settings/timezone";
+    let url = settings_url(transport);
     let json = transport
-        .get_json(url, &[], "Failed to fetch account timezone")
+        .get_json(&url, &[], "Failed to fetch account timezone")
         .await?;
 
     let tz_name = json
@@ -267,6 +277,15 @@ mod tests {
         assert_eq!(read_cache(&cache_file), None);
         std::fs::write(&cache_file, "Not/A/Zone").unwrap();
         assert_eq!(read_cache(&cache_file), None);
+    }
+
+    #[test]
+    fn settings_url_honours_api_base_override() {
+        let t = Transport::for_test("http://127.0.0.1:9/");
+        assert_eq!(
+            settings_url(&t),
+            "http://127.0.0.1:9/calendar/v3/users/me/settings/timezone"
+        );
     }
 
     #[test]

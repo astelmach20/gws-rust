@@ -308,3 +308,55 @@ fn upload_rejects_paths_outside_cwd() {
         .unwrap();
     assert_eq!(out.status.code(), Some(3));
 }
+
+/// `GWSR_API_BASE_URL` routes workflow requests to the configured endpoint,
+/// exactly like generated methods and the app helpers.
+#[test]
+fn workflow_requests_honour_api_base_override() {
+    let dir = setup();
+    let base = "http://127.0.0.1:9/";
+    let cases: [(&[&str], &[&str]); 3] = [
+        (
+            &["workflow", "+standup-report", "--dry-run"],
+            &[
+                "calendar/v3/calendars/primary/events",
+                "tasks/v1/lists/@default/tasks",
+            ],
+        ),
+        (
+            &["workflow", "+weekly-digest", "--dry-run"],
+            &[
+                "calendar/v3/calendars/primary/events",
+                "gmail/v1/users/me/messages",
+            ],
+        ),
+        (
+            &[
+                "workflow",
+                "+file-announce",
+                "--file-id",
+                "F",
+                "--space-id",
+                "S",
+                "--dry-run",
+            ],
+            &["drive/v3/files/F", "v1/spaces/S/messages"],
+        ),
+    ];
+    for (args, paths) in cases {
+        let out = gwsr(dir.path())
+            .env("GWSR_API_BASE_URL", base)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{args:?}: {out:?}");
+        let urls: Vec<String> = stdout_json(&out)["requests"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["url"].as_str().unwrap().to_string())
+            .collect();
+        let expected: Vec<String> = paths.iter().map(|p| format!("{base}{p}")).collect();
+        assert_eq!(urls, expected, "{args:?}");
+    }
+}
