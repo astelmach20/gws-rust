@@ -238,15 +238,37 @@ pub(crate) fn parse_or_help(
     }
 }
 
-/// Handle `gwsr auth <subcommand>`.
+/// Refuse a global `--dry-run` (`gwsr --dry-run auth ...`) for an auth
+/// subcommand without a dry-run mode, instead of silently running it for
+/// real. Only `setup` can preview its changes; it gets the flag forwarded.
+fn check_dry_run(subcommand: Option<&str>) -> Result<(), GwsError> {
+    match subcommand {
+        None | Some("setup") => Ok(()),
+        Some(sub) => Err(GwsError::Validation(format!(
+            "--dry-run is not supported by `gwsr auth {sub}`; nothing was done. Run it \
+             without --dry-run"
+        ))),
+    }
+}
+
+/// Handle `gwsr auth <subcommand>`. `dry_run` is the global `--dry-run`
+/// given before `auth`.
 ///
 /// # Errors
 ///
-/// Argument errors and the subcommand's own failures.
-pub async fn handle_auth_command(args: &[String], before: GlobalOverrides) -> Result<(), GwsError> {
+/// Argument errors, `--dry-run` for a subcommand without a dry-run mode, and
+/// the subcommand's own failures.
+pub async fn handle_auth_command(
+    args: &[String],
+    before: GlobalOverrides,
+    dry_run: bool,
+) -> Result<(), GwsError> {
     let Some(matches) = parse_or_help(auth_command(), "auth", args)? else {
         return Ok(());
     };
+    if dry_run {
+        check_dry_run(matches.subcommand_name())?;
+    }
     let leaf = leaf_matches(&matches);
     super::profiles::set_global_overrides(GlobalOverrides {
         profile: merge_flag(
@@ -263,9 +285,12 @@ pub async fn handle_auth_command(args: &[String], before: GlobalOverrides) -> Re
     match matches.subcommand() {
         Some(("login", m)) => login::handle(m).await,
         Some(("setup", m)) => {
-            let setup_args: Vec<String> = crate::args::values(m, "args")?
+            let mut setup_args: Vec<String> = crate::args::values(m, "args")?
                 .map(|vals| vals.cloned().collect())
                 .unwrap_or_default();
+            if dry_run && !setup_args.iter().any(|a| a == "--dry-run") {
+                setup_args.insert(0, "--dry-run".to_string());
+            }
             super::setup::run_setup(&setup_args).await
         }
         Some(("status", m)) => status::handle(crate::args::flag(m, "offline")?).await,
@@ -310,15 +335,16 @@ mod tests {
 
     #[tokio::test]
     async fn help_and_empty_args_succeed() {
-        handle_auth_command(&[], GlobalOverrides::default())
+        handle_auth_command(&[], GlobalOverrides::default(), false)
             .await
             .unwrap();
-        handle_auth_command(&["--help".into()], GlobalOverrides::default())
+        handle_auth_command(&["--help".into()], GlobalOverrides::default(), false)
             .await
             .unwrap();
         handle_auth_command(
             &["login".into(), "--help".into()],
             GlobalOverrides::default(),
+            false,
         )
         .await
         .unwrap();
@@ -326,10 +352,21 @@ mod tests {
 
     #[tokio::test]
     async fn unknown_subcommand_is_validation_error() {
-        let err = handle_auth_command(&["frobnicate".into()], GlobalOverrides::default())
+        let err = handle_auth_command(&["frobnicate".into()], GlobalOverrides::default(), false)
             .await
             .unwrap_err();
         assert!(matches!(err, GwsError::Validation(_)));
+    }
+
+    #[test]
+    fn global_dry_run_is_refused_except_for_setup() {
+        for sub in ["login", "status", "export", "logout", "list", "use"] {
+            let err = check_dry_run(Some(sub)).unwrap_err();
+            assert!(matches!(err, GwsError::Validation(_)), "{sub}: {err:?}");
+            assert!(err.to_string().contains("--dry-run"), "{sub}: {err}");
+        }
+        check_dry_run(Some("setup")).unwrap();
+        check_dry_run(None).unwrap();
     }
 
     #[test]

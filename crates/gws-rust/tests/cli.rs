@@ -1742,3 +1742,53 @@ async fn batch_results_are_screened_by_model_armor() {
     );
     assert!(!out.status.success());
 }
+
+/// `--dry-run` before `auth` must not be silently dropped: `gwsr --dry-run
+/// auth logout` used to delete the profile's credentials (and revoke the
+/// refresh token) for real.
+#[test]
+fn global_dry_run_is_not_ignored_by_auth_commands() {
+    let env = Env::new();
+    let profile = env.config_dir().join("profiles").join("default");
+    std::fs::create_dir_all(&profile).unwrap();
+    let creds = profile.join("credentials.enc");
+    let meta = profile.join("profile.json");
+    std::fs::write(&creds, b"GWSR\x01not-really-encrypted").unwrap();
+    std::fs::write(&meta, b"{}").unwrap();
+
+    for args in [
+        &["--dry-run", "auth", "logout", "--no-revoke"][..],
+        &["--dry-run", "auth", "status", "--offline"][..],
+        &["--dry-run", "auth", "use", "default"][..],
+    ] {
+        let out = env.cmd().args(args).output().unwrap();
+        assert_eq!(out.status.code(), Some(3), "{args:?}: {out:?}");
+        assert!(out.stdout.is_empty(), "{args:?}: {out:?}");
+        let err: Value = serde_json::from_slice(&out.stderr).unwrap();
+        assert!(
+            err["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("--dry-run"),
+            "{args:?}: {err}"
+        );
+    }
+    assert!(
+        creds.exists(),
+        "--dry-run auth logout deleted the credentials"
+    );
+    assert!(meta.exists(), "--dry-run auth logout deleted profile.json");
+
+    // `auth setup` has a dry-run mode: the global flag reaches it (gcloud is
+    // kept off PATH so nothing can run).
+    let out = env
+        .cmd()
+        .env("PATH", env.work_dir())
+        .args(["--dry-run", "auth", "setup", "--non-interactive"])
+        .output()
+        .unwrap();
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("DRY RUN"),
+        "{out:?}"
+    );
+}
