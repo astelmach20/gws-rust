@@ -1003,6 +1003,192 @@ async fn upload_session_uri_on_foreign_host_is_refused() {
     );
 }
 
+/// A copy of [`doc`] whose `files.create` declares Gmail's `messages.send`
+/// upload limits (live Discovery: `"maxSize": "36700160"`, `"accept": ["message/*"]`).
+fn gmail_like_doc(server: &MockServer, max_size: &str) -> RestDescription {
+    let mut d = doc(&server.uri());
+    let create = d
+        .resources
+        .get_mut("files")
+        .unwrap()
+        .methods
+        .get_mut("create")
+        .unwrap();
+    let media = create.media_upload.as_mut().unwrap();
+    media.max_size = Some(max_size.into());
+    media.accept = Some(vec!["message/*".into()]);
+    d
+}
+
+/// Mounts a server that accepts every upload, so a test fails on what the
+/// client *sent* rather than on a missing mock.
+async fn accept_everything(server: &MockServer) {
+    Mock::given(method("POST"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("location", format!("{}/session/s", server.uri()).as_str())
+                .set_body_json(json!({"id": "sent"})),
+        )
+        .mount(server)
+        .await;
+    Mock::given(method("PUT"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id": "sent"})))
+        .mount(server)
+        .await;
+}
+
+#[tokio::test]
+async fn upload_over_discovery_max_size_is_rejected_before_sending() {
+    let server = MockServer::start().await;
+    accept_everything(&server).await;
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("big.eml");
+    // 35 MiB + 1 byte, sparse: Gmail's documented limit is 36700160 bytes.
+    std::fs::File::create(&file)
+        .unwrap()
+        .set_len(36_700_160 + 1)
+        .unwrap();
+    let file_path = file.to_str().unwrap().to_string();
+    let d = gmail_like_doc(&server, "36700160");
+    let mut call = Call::new(&d, "create", &server);
+    call.upload = Some(UploadSource {
+        path: &file_path,
+        content_type: None,
+    });
+    let err = call.run(&Emitter::capturing()).await.unwrap_err();
+    assert!(matches!(err, GwsError::Validation(_)), "{err:?}");
+    assert_eq!(err.exit_code(), 3);
+    assert!(err.to_string().contains("36700160"), "{err}");
+    assert!(
+        server.received_requests().await.unwrap().is_empty(),
+        "nothing may be sent for an oversized upload"
+    );
+}
+
+#[tokio::test]
+async fn upload_at_exactly_max_size_is_allowed_and_units_are_binary() {
+    let server = MockServer::start().await;
+    accept_everything(&server).await;
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("m.eml");
+    std::fs::write(&file, vec![b'x'; 1024]).unwrap();
+    let file_path = file.to_str().unwrap().to_string();
+    // "1KB" is 1024 bytes (Google's client libraries use binary units).
+    let d = gmail_like_doc(&server, "1KB");
+    let mut call = Call::new(&d, "create", &server);
+    call.upload = Some(UploadSource {
+        path: &file_path,
+        content_type: None,
+    });
+    call.run(&Emitter::capturing()).await.unwrap();
+    assert_eq!(server.received_requests().await.unwrap().len(), 1);
+
+    std::fs::write(&file, vec![b'x'; 1025]).unwrap();
+    let mut call = Call::new(&d, "create", &server);
+    call.upload = Some(UploadSource {
+        path: &file_path,
+        content_type: None,
+    });
+    let err = call.run(&Emitter::capturing()).await.unwrap_err();
+    assert!(matches!(err, GwsError::Validation(_)), "{err:?}");
+    assert_eq!(server.received_requests().await.unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn upload_with_unaccepted_media_type_is_rejected_before_sending() {
+    let server = MockServer::start().await;
+    accept_everything(&server).await;
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("note.txt");
+    std::fs::write(&file, b"Subject: hi\r\n\r\nbody").unwrap();
+    let file_path = file.to_str().unwrap().to_string();
+    let d = gmail_like_doc(&server, "36700160");
+
+    // Detected from the extension: text/plain is not message/*.
+    let mut call = Call::new(&d, "create", &server);
+    call.upload = Some(UploadSource {
+        path: &file_path,
+        content_type: None,
+    });
+    let err = call.run(&Emitter::capturing()).await.unwrap_err();
+    assert!(matches!(err, GwsError::Validation(_)), "{err:?}");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("text/plain") && msg.contains("message/*"),
+        "{msg}"
+    );
+    assert!(msg.contains("--upload-content-type"), "{msg}");
+
+    // An explicit type that is not accepted is rejected too.
+    let mut call = Call::new(&d, "create", &server);
+    call.upload = Some(UploadSource {
+        path: &file_path,
+        content_type: Some("application/octet-stream"),
+    });
+    assert!(matches!(
+        call.run(&Emitter::capturing()).await.unwrap_err(),
+        GwsError::Validation(_)
+    ));
+    // Dry runs report the problem as well.
+    let mut call = Call::new(&d, "create", &server);
+    call.options.dry_run = true;
+    call.upload = Some(UploadSource {
+        path: &file_path,
+        content_type: None,
+    });
+    assert!(matches!(
+        call.run(&Emitter::capturing()).await.unwrap_err(),
+        GwsError::Validation(_)
+    ));
+    assert!(server.received_requests().await.unwrap().is_empty());
+
+    // --upload-content-type overrides detection; wildcards, case and
+    // parameters are matched like the server does.
+    for explicit in [
+        "message/rfc822",
+        "Message/RFC822",
+        "message/rfc822; charset=utf-8",
+    ] {
+        let mut call = Call::new(&d, "create", &server);
+        call.upload = Some(UploadSource {
+            path: &file_path,
+            content_type: Some(explicit),
+        });
+        call.run(&Emitter::capturing()).await.unwrap();
+    }
+    assert_eq!(server.received_requests().await.unwrap().len(), 3);
+
+    // A .eml file is detected as message/rfc822 and needs no override.
+    let eml = dir.path().join("m.eml");
+    std::fs::write(&eml, b"Subject: hi\r\n\r\nbody").unwrap();
+    let eml_path = eml.to_str().unwrap().to_string();
+    let mut call = Call::new(&d, "create", &server);
+    call.upload = Some(UploadSource {
+        path: &eml_path,
+        content_type: None,
+    });
+    call.run(&Emitter::capturing()).await.unwrap();
+}
+
+#[tokio::test]
+async fn unparseable_discovery_max_size_fails_loudly() {
+    let server = MockServer::start().await;
+    accept_everything(&server).await;
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("m.eml");
+    std::fs::write(&file, b"x").unwrap();
+    let file_path = file.to_str().unwrap().to_string();
+    let d = gmail_like_doc(&server, "lots");
+    let mut call = Call::new(&d, "create", &server);
+    call.upload = Some(UploadSource {
+        path: &file_path,
+        content_type: None,
+    });
+    let err = call.run(&Emitter::capturing()).await.unwrap_err();
+    assert!(matches!(err, GwsError::Discovery(_)), "{err:?}");
+    assert!(server.received_requests().await.unwrap().is_empty());
+}
+
 // ── Downloads ───────────────────────────────────────────────────────────
 
 #[tokio::test]

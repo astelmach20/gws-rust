@@ -24,6 +24,9 @@ use reqwest::Method;
 
 pub(super) const GMAIL_API_BASE: &str = "https://gmail.googleapis.com/gmail/v1";
 pub(super) const GMAIL_UPLOAD_BASE: &str = "https://gmail.googleapis.com/upload/gmail/v1";
+/// `mediaUpload.maxSize` of `users.messages.send` and `users.drafts.create`
+/// in the Gmail Discovery document (35 MiB), for the whole raw message.
+pub(super) const MAX_UPLOAD_BYTES: u64 = 36_700_160;
 
 /// Gmail API client bound to the authenticated user (`users/me`).
 #[derive(Clone)]
@@ -354,6 +357,7 @@ impl GmailApi {
         metadata: &Value,
         draft: bool,
     ) -> Result<Value, GwsError> {
+        check_raw_size(raw.len())?;
         let boundary = format!("gwsr_{:032x}", rand::random::<u128>());
         let body = build_related_upload(&boundary, metadata, raw)?;
         let context = if draft {
@@ -397,6 +401,18 @@ impl TargetKind {
             TargetKind::Thread => "thread",
         }
     }
+}
+
+/// Refuse a raw message over Gmail's upload limit before sending any of it.
+/// The attachment limit alone does not bound it: base64 and the message's
+/// own text and headers come on top.
+pub(super) fn check_raw_size(len: usize) -> Result<(), GwsError> {
+    if len as u64 > MAX_UPLOAD_BYTES {
+        return Err(GwsError::Validation(format!(
+            "the encoded message is {len} bytes; Gmail accepts at most {MAX_UPLOAD_BYTES} bytes (35 MiB) including attachments, base64 encoding and headers"
+        )));
+    }
+    Ok(())
 }
 
 /// Build a `multipart/related` body: JSON metadata part + `message/rfc822` part.
@@ -565,6 +581,23 @@ mod tests {
             GwsError::Api { code, .. } => assert_eq!(code, 503),
             other => panic!("unexpected {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn upload_raw_over_the_send_limit_is_rejected_before_sending() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id": "m"})))
+            .mount(&server)
+            .await;
+        let api = mock_api(&server);
+        let raw = vec![b'x'; MAX_UPLOAD_BYTES as usize + 1];
+        for draft in [false, true] {
+            let err = api.upload_raw(&raw, &json!({}), draft).await.unwrap_err();
+            assert!(matches!(err, GwsError::Validation(_)), "{err:?}");
+        }
+        assert!(server.received_requests().await.unwrap().is_empty());
+        api.upload_raw(&raw[1..], &json!({}), false).await.unwrap();
     }
 
     #[tokio::test]

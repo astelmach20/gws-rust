@@ -25,6 +25,7 @@ use tokio::io::{AsyncReadExt, AsyncSeekExt};
 
 use gws_rust_core::client::{Idempotency, RetryPolicy, Sent};
 
+use crate::discovery::RestMethod;
 use crate::error::GwsError;
 use crate::transport::{Transport, upload_timeout};
 
@@ -115,6 +116,66 @@ pub(crate) fn resolve_upload_mime(
     } else {
         sanitized
     }
+}
+
+/// Whether `mime` matches a Discovery `mediaUpload.accept` pattern such as
+/// `*/*`, `message/*` or `image/png`. Parameters (`; charset=...`) are
+/// ignored and the comparison is case-insensitive, as for any media type.
+fn accepts(pattern: &str, mime: &str) -> bool {
+    let essence = |s: &str| {
+        s.split(';')
+            .next()
+            .unwrap_or_default()
+            .trim()
+            .to_ascii_lowercase()
+    };
+    let (pattern, mime) = (essence(pattern), essence(mime));
+    if pattern == "*/*" || pattern == "*" {
+        return true;
+    }
+    match pattern.strip_suffix("/*") {
+        Some(kind) => mime
+            .split_once('/')
+            .is_some_and(|(mime_kind, _)| mime_kind == kind),
+        None => mime == pattern,
+    }
+}
+
+/// Enforce the method's Discovery upload limits (`mediaUpload.maxSize` and
+/// `mediaUpload.accept`) before any bytes are sent: the server rejects such
+/// an upload anyway, but only after receiving all of it.
+pub(crate) fn check_limits(
+    method: &RestMethod,
+    path: &str,
+    size: u64,
+    mime: &str,
+    explicit_mime: bool,
+) -> Result<(), GwsError> {
+    let method_id = method.id.as_deref().unwrap_or("this method");
+    if let Some(max) = method.max_upload_size_bytes()?
+        && size > max
+    {
+        return Err(GwsError::Validation(format!(
+            "upload file '{path}' is {size} bytes; {method_id} accepts at most {max} bytes (Discovery mediaUpload.maxSize)"
+        )));
+    }
+    let accept = method
+        .media_upload
+        .as_ref()
+        .and_then(|m| m.accept.as_deref())
+        .unwrap_or_default();
+    if !accept.is_empty() && !accept.iter().any(|pattern| accepts(pattern, mime)) {
+        let hint = if explicit_mime {
+            ""
+        } else {
+            " (detected from the file; set it with --upload-content-type)"
+        };
+        return Err(GwsError::Validation(format!(
+            "media type '{mime}'{hint} is not accepted by {method_id}, which accepts: {}",
+            accept.join(", ")
+        )));
+    }
+    Ok(())
 }
 
 fn metadata_json(metadata: &Option<Value>) -> Result<String, GwsError> {
@@ -501,6 +562,18 @@ mod tests {
             resolve_upload_mime(Some("text/plain\r\nX: y"), None, &None),
             "text/plainX: y"
         );
+    }
+
+    #[test]
+    fn accept_patterns() {
+        assert!(accepts("*/*", "text/plain"));
+        assert!(accepts("message/*", "message/rfc822"));
+        assert!(accepts("message/*", "Message/RFC822; charset=utf-8"));
+        assert!(accepts("image/png", "IMAGE/PNG"));
+        assert!(!accepts("message/*", "text/plain"));
+        assert!(!accepts("message/*", "messages/rfc822"));
+        assert!(!accepts("message/*", "message"));
+        assert!(!accepts("image/png", "image/jpeg"));
     }
 
     #[test]

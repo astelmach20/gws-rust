@@ -219,6 +219,7 @@ async fn plan_upload(
         path: (*path).to_string(),
         size: meta.len(),
     };
+    upload::check_limits(method, path, data.len(), &mime, content_type.is_some())?;
     let supports_resumable = method.resumable_upload_path().is_some();
     let resumable = match mode {
         UploadMode::Resumable if supports_resumable => true,
