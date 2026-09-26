@@ -25,7 +25,7 @@
 //! json_style = "auto"       # auto | compact | pretty            (GWSR_JSON_STYLE)
 //! page_limit = 50           # default --page-limit               (GWSR_PAGE_LIMIT)
 //! page_delay_ms = 100       # default --page-delay               (GWSR_PAGE_DELAY_MS)
-//! sanitize_template = "projects/p/locations/l/templates/t"     # (GWSR_SANITIZE_TEMPLATE)
+//! sanitize_template = "projects/my-project/locations/us-central1/templates/t1"  # (GWSR_SANITIZE_TEMPLATE)
 //! sanitize_mode = "warn"    # warn | block                       (GWSR_SANITIZE_MODE)
 //! profile = "work"          # default credential profile, written by `gwsr auth use`;
 //!                           # --profile and GWSR_PROFILE take precedence (read by auth)
@@ -134,6 +134,29 @@ fn parse_sanitize_mode(value: &str, source: &str) -> Result<SanitizeMode, GwsErr
         .ok_or_else(|| invalid(source, "sanitize_mode", value, "warn | block"))
 }
 
+/// `log_file` must be an absolute path without control characters, like
+/// `GWSR_LOG_FILE`; a relative one would follow the working directory.
+fn check_log_dir(dir: &Path, source: &str) -> Result<(), GwsError> {
+    let shown = dir.display().to_string();
+    gws_rust_core::validate::reject_dangerous_chars(&shown, "log_file").map_err(|e| {
+        invalid(
+            source,
+            "log_file",
+            &shown,
+            &format!("an absolute directory path ({e})"),
+        )
+    })?;
+    if !dir.is_absolute() {
+        return Err(invalid(
+            source,
+            "log_file",
+            &shown,
+            "an absolute directory path",
+        ));
+    }
+    Ok(())
+}
+
 /// Parse the text of a config file. `origin` names it in error messages.
 pub fn parse_config(text: &str, origin: &Path) -> Result<ConfigFile, GwsError> {
     toml::from_str(text).map_err(|e| {
@@ -166,21 +189,44 @@ pub fn resolve(file: Option<&ConfigFile>, origin: &Path, env: &Env) -> Result<Se
     let file = file.unwrap_or(&default_file);
     let origin = origin.display().to_string();
 
-    let format = match (env.format, &file.format) {
-        (Some(v), _) => v,
-        (None, Some(v)) => parse_format(v, &origin)?,
-        (None, None) => OutputFormat::default(),
-    };
-    let json_style = match (env.json_style, &file.json_style) {
-        (Some(v), _) => v,
-        (None, Some(v)) => parse_json_style(v, &origin)?,
-        (None, None) => JsonStylePref::default(),
-    };
-    let sanitize_mode = match (&env.sanitize_mode, &file.sanitize_mode) {
-        (Some(v), _) => v.clone(),
-        (None, Some(v)) => parse_sanitize_mode(v, &origin)?,
-        (None, None) => SanitizeMode::default(),
-    };
+    // Every file value is validated first, whether or not the environment
+    // overrides it, so a broken file never loads only while an override is set.
+    let file_format = file
+        .format
+        .as_deref()
+        .map(|v| parse_format(v, &origin))
+        .transpose()?;
+    let file_json_style = file
+        .json_style
+        .as_deref()
+        .map(|v| parse_json_style(v, &origin))
+        .transpose()?;
+    let file_sanitize_mode = file
+        .sanitize_mode
+        .as_deref()
+        .map(|v| parse_sanitize_mode(v, &origin))
+        .transpose()?;
+    if let Some(template) = &file.sanitize_template {
+        crate::helpers::modelarmor::ModelArmorTemplate::parse(template).map_err(|e| {
+            invalid(
+                &origin,
+                "sanitize_template",
+                template,
+                &format!("projects/P/locations/L/templates/T ({e})"),
+            )
+        })?;
+    }
+    if let Some(dir) = &file.log_file {
+        check_log_dir(dir, &origin)?;
+    }
+
+    let format = env.format.or(file_format).unwrap_or_default();
+    let json_style = env.json_style.or(file_json_style).unwrap_or_default();
+    let sanitize_mode = env
+        .sanitize_mode
+        .clone()
+        .or(file_sanitize_mode)
+        .unwrap_or_default();
     let request_timeout = match (env.timeout, file.timeout_secs) {
         (Some(v), _) => v,
         (None, Some(secs)) => (secs > 0).then(|| Duration::from_secs(secs)),
@@ -292,19 +338,22 @@ mod tests {
 
     #[test]
     fn file_values_are_used() {
+        // A TOML literal string keeps Windows backslashes as they are.
         let file = parse_config(
-            r#"
+            &format!(
+                r#"
 format = "table"
 json_style = "compact"
 page_limit = 50
 page_delay_ms = 0
-sanitize_template = "projects/p/locations/l/templates/t"
+sanitize_template = "projects/my-project/locations/us-central1/templates/t1"
 sanitize_mode = "block"
 profile = "work"
 timeout_secs = 30
 log = "gwsr=info"
-log_file = "/tmp/logs"
-"#,
+log_file = '{ABS_LOG_DIR}'
+"#
+            ),
             &origin(),
         )
         .unwrap();
@@ -315,7 +364,7 @@ log_file = "/tmp/logs"
         assert_eq!(s.page_delay_ms, Some(0));
         assert_eq!(s.sanitize_mode, SanitizeMode::Block);
         assert_eq!(s.log.as_deref(), Some("gwsr=info"));
-        assert_eq!(s.log_file, Some(PathBuf::from("/tmp/logs")));
+        assert_eq!(s.log_file, Some(PathBuf::from(ABS_LOG_DIR)));
     }
 
     #[test]
@@ -404,6 +453,48 @@ log_file = "/tmp/logs"
             assert!(matches!(err, GwsError::Config(_)), "{bad}: {err:?}");
         }
     }
+
+    /// Every value in the file is validated, like its environment variable,
+    /// whether or not a variable overrides it: a broken file must not load
+    /// only while the override happens to be set.
+    #[test]
+    fn file_values_are_validated_even_when_overridden_or_unused() {
+        let cases: &[(&str, &[(&str, &str)])] = &[
+            ("format = \"xml\"", &[("GWSR_FORMAT", "json")]),
+            ("json_style = \"fancy\"", &[("GWSR_JSON_STYLE", "compact")]),
+            (
+                "sanitize_mode = \"loud\"",
+                &[("GWSR_SANITIZE_MODE", "warn")],
+            ),
+            ("sanitize_template = \"bogus\"", &[]),
+            (
+                "sanitize_template = \"bogus\"",
+                &[(
+                    "GWSR_SANITIZE_TEMPLATE",
+                    "projects/my-project/locations/us-central1/templates/t1",
+                )],
+            ),
+            // GWSR_LOG_FILE must be absolute; so must its config key, or the
+            // log directory would follow the working directory.
+            ("log_file = \"logs\"", &[]),
+            ("log_file = \"logs\"", &[("GWSR_LOG_FILE", ABS_LOG_DIR)]),
+        ];
+        for (text, env) in cases {
+            let file = parse_config(&format!("{text}\n"), &origin()).unwrap();
+            let result = resolve(Some(&file), &origin(), &env_of(env));
+            match result {
+                Err(GwsError::Config(msg)) => {
+                    assert!(msg.contains("/cfg/config.toml"), "{text}: {msg}")
+                }
+                other => panic!("{text} with {env:?}: expected a config error, got {other:?}"),
+            }
+        }
+    }
+
+    #[cfg(not(windows))]
+    const ABS_LOG_DIR: &str = "/var/log/gwsr";
+    #[cfg(windows)]
+    const ABS_LOG_DIR: &str = r"C:\ProgramData\gwsr\logs";
 
     #[test]
     fn missing_file_is_not_an_error_but_unreadable_is() {
