@@ -365,8 +365,8 @@ async fn handle_standup_report(matches: &ArgMatches) -> Result<(), GwsError> {
     }
     let rest = authenticated(&[CALENDAR_READONLY, TASKS_READONLY]).await?;
     let tz = crate::timezone::resolve_account_timezone(&rest, None).await?;
-    let start = crate::timezone::start_of_today(tz)?;
-    let end = start + chrono::Duration::days(1);
+    let today = chrono::Utc::now().with_timezone(&tz).date_naive();
+    let (start, end) = crate::timezone::day_bounds(today, tz)?;
     let report = standup_report(
         &rest,
         &bases,
