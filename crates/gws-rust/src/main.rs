@@ -532,6 +532,13 @@ fn resolve_method_from_matches<'a>(
         ));
     }
 
+    // A method declared outside any resource: ["tokeninfo"]
+    if let [method_name] = path.as_slice()
+        && let Some(method) = doc.methods.get(*method_name)
+    {
+        return Ok((method, current_matches));
+    }
+
     // path looks like ["files", "list"] or ["files", "permissions", "list"]
     // Walk the Discovery Document resources to find the method
     let resource_name = path[0];
