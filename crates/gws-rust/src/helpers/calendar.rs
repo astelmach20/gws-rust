@@ -679,6 +679,8 @@ async fn agenda(api: &Api, args: &AgendaArgs, tz: &TzInfo) -> Result<Value, GwsE
             )
             .await?;
         let mut cals = Vec::new();
+        // Which requested --calendar-id values matched a calendar-list entry.
+        let mut id_found = vec![false; args.calendar_ids.len()];
         for cal in list.items {
             let id = cal
                 .get("id")
@@ -689,10 +691,13 @@ async fn agenda(api: &Api, args: &AgendaArgs, tz: &TzInfo) -> Result<Value, GwsE
                 .or_else(|| cal.get("summary"))
                 .and_then(Value::as_str)
                 .unwrap_or(id);
-            let id_ok = args.calendar_ids.is_empty()
-                || args.calendar_ids.iter().any(|c| {
-                    c == id || (c == "primary" && cal.get("primary") == Some(&json!(true)))
-                });
+            let mut id_ok = args.calendar_ids.is_empty();
+            for (c, found) in args.calendar_ids.iter().zip(id_found.iter_mut()) {
+                if c == id || (c == "primary" && cal.get("primary") == Some(&json!(true))) {
+                    *found = true;
+                    id_ok = true;
+                }
+            }
             let name_ok = args
                 .calendar_name
                 .as_deref()
@@ -700,6 +705,20 @@ async fn agenda(api: &Api, args: &AgendaArgs, tz: &TzInfo) -> Result<Value, GwsE
             if id_ok && name_ok {
                 cals.push((id.to_string(), name.to_string()));
             }
+        }
+        // A typo in one of several IDs must not silently shrink the agenda.
+        let missing: Vec<&str> = args
+            .calendar_ids
+            .iter()
+            .zip(&id_found)
+            .filter(|(_, found)| !**found)
+            .map(|(c, _)| c.as_str())
+            .collect();
+        if !missing.is_empty() {
+            return Err(GwsError::Validation(format!(
+                "--calendar-id not found in your calendar list: {}",
+                missing.join(", ")
+            )));
         }
         if cals.is_empty() && (!args.calendar_ids.is_empty() || args.calendar_name.is_some()) {
             return Err(GwsError::Validation(
@@ -1046,7 +1065,7 @@ async fn rsvp(
 mod tests {
     use super::super::http::test_support::{api, dry_api};
     use super::*;
-    use wiremock::matchers::{body_partial_json, method, path, query_param};
+    use wiremock::matchers::{body_partial_json, method, path, path_regex, query_param};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     fn parse(args: &[&str]) -> ArgMatches {
@@ -1313,6 +1332,44 @@ mod tests {
         };
         let err = agenda(&api, &args, &tz("UTC", false)).await.unwrap_err();
         assert!(err.to_string().contains("Work"), "{err}");
+    }
+
+    /// Every requested --calendar-id must be found: a typo next to a valid ID
+    /// fails the command instead of silently shrinking the agenda.
+    #[tokio::test]
+    async fn agenda_rejects_each_unmatched_calendar_id() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/users/me/calendarList"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"items": [
+                {"id": "me@x", "summary": "Me", "primary": true},
+                {"id": "a@x", "summary": "Work"}
+            ]})))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path_regex(r"^/calendars/[^/]+/events$"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"items": []})))
+            .mount(&server)
+            .await;
+        let api = api(&server.uri(), "");
+        let run = |ids: &[&str]| AgendaArgs {
+            window: Window::Today,
+            calendar_ids: ids.iter().map(|s| (*s).to_string()).collect(),
+            calendar_name: None,
+        };
+
+        // All IDs match (including the "primary" alias): fine.
+        agenda(&api, &run(&["primary", "a@x"]), &tz("UTC", false))
+            .await
+            .unwrap();
+
+        // One valid ID plus one typo: must fail and name the typo.
+        let err = agenda(&api, &run(&["a@x", "typo@x"]), &tz("UTC", false))
+            .await
+            .expect_err("an unmatched --calendar-id must not be silently ignored");
+        assert_eq!(err.exit_code(), GwsError::EXIT_CODE_VALIDATION, "{err}");
+        assert!(err.to_string().contains("typo@x"), "{err}");
     }
 
     #[tokio::test]
