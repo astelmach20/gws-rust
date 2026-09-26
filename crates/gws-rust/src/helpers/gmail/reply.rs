@@ -766,6 +766,35 @@ mod tests {
         assert_eq!(cc[0].email, "joann@example.com");
     }
 
+    /// A message sent with only Bcc recipients carries the RFC 5322 empty group
+    /// `To: undisclosed-recipients:;`. Reply-all must not turn the group name
+    /// into a Cc recipient, and members of a named group must keep their
+    /// addresses intact.
+    #[test]
+    fn test_reply_all_ignores_rfc5322_group_syntax() {
+        let msg = json!({
+            "threadId": "t1",
+            "payload": {
+                "headers": [
+                    { "name": "From", "value": "alice@example.com" },
+                    { "name": "To", "value": "undisclosed-recipients:;" },
+                    { "name": "Cc", "value": "Team: bob@example.com, Carol <carol@example.com>;" },
+                    { "name": "Subject", "value": "Hello" },
+                    { "name": "Message-ID", "value": "<m1@example.com>" }
+                ]
+            }
+        });
+        let original = parse_original_message(&msg).unwrap();
+        let recipients = build_reply_all_recipients(&original, None, None, None, None).unwrap();
+
+        let emails = |list: &[Mailbox]| list.iter().map(|m| m.email.clone()).collect::<Vec<_>>();
+        assert_eq!(emails(&recipients.to), vec!["alice@example.com"]);
+        assert_eq!(
+            emails(&recipients.cc.unwrap_or_default()),
+            vec!["bob@example.com", "carol@example.com"]
+        );
+    }
+
     #[test]
     fn test_reply_all_uses_reply_to_for_to() {
         let original = OriginalMessage {
