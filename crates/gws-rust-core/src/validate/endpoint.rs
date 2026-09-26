@@ -170,6 +170,8 @@ impl EndpointPolicy {
 
     /// Validate that `url` may receive a bearer token. Returns the parsed URL.
     pub fn check(&self, url: &str) -> Result<Url, GwsError> {
+        // Parsing would silently drop `.`/`..` segments and retarget the call.
+        super::reject_dot_segments(url)?;
         let parsed = Url::parse(url).map_err(|e| {
             GwsError::Validation(format!(
                 "Refusing to send credentials to invalid URL {url:?}: {e}"
@@ -202,6 +204,20 @@ impl EndpointPolicy {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dot_segment_urls_are_refused() {
+        let policy = EndpointPolicy::default();
+        let err = policy
+            .check("https://www.googleapis.com/drive/v3/files/F1/permissions/%2E%2E")
+            .unwrap_err();
+        assert!(err.to_string().contains("dot segment"), "{err}");
+        assert!(
+            policy
+                .check("https://www.googleapis.com/drive/v3/files/F1")
+                .is_ok()
+        );
+    }
 
     #[test]
     fn google_hosts_are_trusted() {

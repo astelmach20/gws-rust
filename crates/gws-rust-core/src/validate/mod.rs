@@ -98,13 +98,43 @@ const PATH_SEGMENT: &percent_encoding::AsciiSet = &percent_encoding::NON_ALPHANU
 ///
 /// Unreserved characters stay literal: Google IDs routinely contain `-` and
 /// `_`, and some endpoints (e.g. `scripts.run`, upstream #842) reject them as
-/// `%2D`/`%5F`. The dot-segments `.` and `..` are always escaped so they can
-/// never climb the path.
+/// `%2D`/`%5F`. The dot-segments `.` and `..` are escaped, but URL parsers
+/// (WHATWG, as used by `reqwest`) still treat `%2E`/`%2E%2E` as dot segments,
+/// so every URL built from these must pass [`reject_dot_segments`].
 pub fn encode_path_segment(s: &str) -> String {
     if s == "." || s == ".." {
         return s.replace('.', "%2E");
     }
     percent_encoding::utf8_percent_encode(s, PATH_SEGMENT).to_string()
+}
+
+/// Reject a URL whose path contains a `.` or `..` segment, literal or
+/// percent-encoded (`%2E`, `%2e`, `.%2E`, ...).
+///
+/// URL parsing removes such segments (`files/F1/permissions/..` becomes
+/// `files/F1/`), so the request would address a different resource than the
+/// one named, e.g. a whole calendar instead of one of its events.
+pub fn reject_dot_segments(url: &str) -> Result<(), GwsError> {
+    let after_scheme = url.split_once("://").map_or(url, |(_, rest)| rest);
+    let path_and_rest = after_scheme
+        .find('/')
+        .map_or("", |start| &after_scheme[start..]);
+    let path = path_and_rest
+        .split(['?', '#'])
+        .next()
+        .unwrap_or(path_and_rest);
+    let is_dot_segment = |segment: &str| {
+        let decoded = segment.replace("%2E", ".").replace("%2e", ".");
+        decoded == "." || decoded == ".."
+    };
+    if path.split('/').any(is_dot_segment) {
+        return Err(GwsError::Validation(format!(
+            "Refusing to send a request whose URL path has a '.' or '..' dot segment \
+             (an ID or resource name of '.' or '..'), which would address a different \
+             resource: {url}"
+        )));
+    }
+    Ok(())
 }
 
 /// Percent-encode a value for use in URI path templates where `/` should stay
@@ -258,6 +288,42 @@ mod tests {
         assert_eq!(encode_path_segment("."), "%2E");
         assert_eq!(encode_path_segment(".."), "%2E%2E");
         assert_eq!(encode_path_segment("..."), "...");
+    }
+
+    #[test]
+    fn reject_dot_segments_catches_literal_and_encoded_dots() {
+        for bad in [
+            "https://www.googleapis.com/drive/v3/files/..",
+            "https://www.googleapis.com/drive/v3/files/%2E%2E/x",
+            "https://www.googleapis.com/drive/v3/files/%2e/permissions/p",
+            "https://www.googleapis.com/drive/v3/files/.%2E?alt=media",
+            "http://127.0.0.1:8080/calendar/v3/calendars/c/events/.",
+        ] {
+            let err = reject_dot_segments(bad).unwrap_err();
+            assert!(err.to_string().contains("dot segment"), "{bad}: {err}");
+        }
+        for ok in [
+            "https://www.googleapis.com/drive/v3/files/...",
+            "https://www.googleapis.com/drive/v3/files/a.b",
+            "https://www.googleapis.com/drive/v3/files/.hidden",
+            "https://www.googleapis.com/drive/v3/files?q=..",
+            "https://www.googleapis.com/",
+        ] {
+            assert!(reject_dot_segments(ok).is_ok(), "{ok}");
+        }
+    }
+
+    #[test]
+    fn encoded_dot_segments_are_still_removed_by_url_parsing() {
+        // Why escaping alone is not enough: the WHATWG parser (url/reqwest)
+        // treats %2E%2E as `..`.
+        let url = format!(
+            "https://www.googleapis.com/drive/v3/files/{}",
+            encode_path_segment("..")
+        );
+        let parsed = url::Url::parse(&url).unwrap();
+        assert_eq!(parsed.path(), "/drive/v3/");
+        assert!(reject_dot_segments(&url).is_err());
     }
 
     #[test]
