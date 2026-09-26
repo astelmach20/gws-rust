@@ -228,7 +228,7 @@ pub fn method_args(doc: &RestDescription, method: &RestMethod) -> Vec<Arg> {
         );
     }
 
-    if crate::executor::is_destructive(method) {
+    if crate::executor::is_gated(method) {
         args.push(crate::confirm::yes_arg().help_heading(HEADING_REQUEST));
     }
 
@@ -252,7 +252,7 @@ fn summary(desc: Option<&str>) -> String {
 }
 
 /// The "Parameters" block appended to a method's help.
-pub fn parameters_help(method: &RestMethod) -> Option<String> {
+pub fn parameters_help(doc: &RestDescription, method: &RestMethod) -> Option<String> {
     let mut params: Vec<(&String, &crate::discovery::MethodParameter)> = method
         .parameters
         .iter()
@@ -290,8 +290,10 @@ pub fn parameters_help(method: &RestMethod) -> Option<String> {
         text.push_str(line.trim_end());
         text.push('\n');
     }
-    if let Some(id) = &method.id {
-        text.push_str(&format!("\nFull request/response schema: gwsr schema {id}"));
+    if let Some(path) = crate::schema::method_schema_path(doc, method) {
+        text.push_str(&format!(
+            "\nFull request/response schema: gwsr schema {path}"
+        ));
     }
     Some(text)
 }
@@ -307,7 +309,7 @@ fn build_method_command(doc: &RestDescription, name: &str, method: &RestMethod) 
         .about(about)
         .hide(is_deprecated(method))
         .args(method_args(doc, method));
-    if let Some(help) = parameters_help(method) {
+    if let Some(help) = parameters_help(doc, method) {
         cmd = cmd.after_help(help);
     }
     cmd
@@ -550,12 +552,17 @@ mod tests {
                 ..Default::default()
             },
         );
-        let m = RestMethod {
-            id: Some("drive.files.get".into()),
-            parameters: p,
-            ..Default::default()
-        };
-        let help = parameters_help(&m).unwrap();
+        let mut doc = make_doc();
+        doc.resources.get_mut("files").unwrap().methods.insert(
+            "get".into(),
+            RestMethod {
+                id: Some("drive.files.get".into()),
+                parameters: p,
+                ..Default::default()
+            },
+        );
+        let m = &doc.resources["files"].methods["get"];
+        let help = parameters_help(&doc, m).unwrap();
         assert!(help.contains("fileId"));
         assert!(help.contains("(required, path)"));
         assert!(help.contains("The ID of the file"));
