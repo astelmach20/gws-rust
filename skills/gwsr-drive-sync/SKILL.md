@@ -45,6 +45,9 @@ gwsr drive +sync --folder-id FOLDER_ID --dir ./mirror --dry-run
 - Local files are replaced only when the Drive copy is newer; local files
 - that are not in Drive are left untouched (nothing is ever deleted).
 - Other Google-native types (Forms, Sites, shortcuts...) are reported as skipped.
+- A file the API refuses (download restricted, export too large) is listed
+- under "failed" and the rest are still mirrored; the report is printed and
+- the command then exits 1 with reason syncPartialFailure.
 
 ## See Also
 

@@ -276,7 +276,10 @@ TIPS:
   Docs/Sheets/Slides/Drawings are exported as docx/xlsx/pptx/pdf.
   Local files are replaced only when the Drive copy is newer; local files
   that are not in Drive are left untouched (nothing is ever deleted).
-  Other Google-native types (Forms, Sites, shortcuts...) are reported as skipped.",
+  Other Google-native types (Forms, Sites, shortcuts...) are reported as skipped.
+  A file the API refuses (download restricted, export too large) is listed
+  under \"failed\" and the rest are still mirrored; the report is printed and
+  the command then exits 1 with reason syncPartialFailure.",
                 ),
         )
     }
@@ -340,7 +343,11 @@ TIPS:
                     let dir = crate::validate::validate_safe_output_dir(required(m, "dir")?)?;
                     let api = Api::new(doc, &[SCOPE_DRIVE_READONLY], dry, sanitize).await?;
                     let v = sync(&api, required(m, "folder-id")?, &dir).await?;
-                    (api, v)
+                    api.emit(m, &v).await?;
+                    return match sync_failure(&v) {
+                        Some(err) => Err(err),
+                        None => Ok(true),
+                    };
                 }
                 _ => return Ok(false),
             };
@@ -986,10 +993,29 @@ fn disambiguate(children: &[(&str, &str)]) -> Result<Vec<String>, GwsError> {
     Ok(out)
 }
 
+/// The error `+sync` exits with after printing its report, when any file
+/// failed. Like `gwsr batch`'s `batchPartialFailure`: the report on stdout
+/// says what was mirrored and what failed, and the exit code is still `1`.
+fn sync_failure(report: &Value) -> Option<GwsError> {
+    let failed = report
+        .get("failed")
+        .and_then(Value::as_array)
+        .map_or(0, Vec::len);
+    (failed > 0).then(|| GwsError::Api {
+        code: 207,
+        message: format!(
+            "{failed} file(s) could not be synced; see \"failed\" in the report on stdout"
+        ),
+        reason: "syncPartialFailure".to_string(),
+        enable_url: None,
+    })
+}
+
 async fn sync(api: &Api, folder_id: &str, dir: &Path) -> Result<Value, GwsError> {
     let mut downloaded = Vec::new();
     let mut unchanged = Vec::new();
     let mut skipped = Vec::new();
+    let mut failed = Vec::new();
     let mut stack: Vec<(String, PathBuf)> = vec![(folder_id.to_string(), dir.to_path_buf())];
     let mut visited = std::collections::HashSet::new();
 
@@ -1067,15 +1093,28 @@ async fn sync(api: &Api, folder_id: &str, dir: &Path) -> Result<Value, GwsError>
                         .query("supportsAllDrives", "true")
                 }
             };
-            let bytes = api.download(req, &target).await?;
-            downloaded
-                .push(json!({"id": child_id, "path": path.display().to_string(), "bytes": bytes}));
+            match api.download(req, &target).await {
+                Ok(bytes) => downloaded.push(
+                    json!({"id": child_id, "path": path.display().to_string(), "bytes": bytes}),
+                ),
+                // The API refused this one file (restricted download, export
+                // size limit...): record it and mirror the rest. Anything
+                // else (auth, network, local I/O) affects every file, so it
+                // aborts the sync.
+                Err(err @ GwsError::Api { .. }) => failed.push(json!({
+                    "id": child_id,
+                    "path": path.display().to_string(),
+                    "error": err.to_json()["error"],
+                })),
+                Err(err) => return Err(err),
+            }
         }
     }
     Ok(json!({
         "downloaded": downloaded,
         "unchanged": unchanged,
         "skipped": skipped,
+        "failed": failed,
     }))
 }
 
@@ -1473,6 +1512,110 @@ mod tests {
         // Second run: local copies are newer than the 2020 remote timestamps.
         let v = sync(&api, "ROOT", dir.path()).await.unwrap();
         assert_eq!(v["unchanged"].as_array().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn sync_reports_a_failed_file_and_still_mirrors_the_rest() {
+        let server = MockServer::start().await;
+        // A restricted file the owner blocked from download, listed first.
+        Mock::given(method("GET"))
+            .and(path("/drive/v3/files/R"))
+            .and(query_param("alt", "media"))
+            .respond_with(ResponseTemplate::new(403).set_body_json(json!({"error": {
+                "code": 403,
+                "message": "The user does not have sufficient permissions to download this file.",
+                "errors": [{"reason": "cannotDownloadFile"}]
+            }})))
+            .mount(&server)
+            .await;
+        // A Doc too large to export.
+        Mock::given(method("GET"))
+            .and(path("/drive/v3/files/BIG/export"))
+            .respond_with(ResponseTemplate::new(403).set_body_json(json!({"error": {
+                "code": 403,
+                "message": "This file is too large to be exported.",
+                "errors": [{"reason": "exportSizeLimitExceeded"}]
+            }})))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/drive/v3/files/OK"))
+            .and(query_param("alt", "media"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(b"OK".to_vec()))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/drive/v3/files"))
+            .and(query_param("q", "'ROOT' in parents and trashed = false"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"files": [
+                {"id": "R", "name": "restricted.pdf", "mimeType": "application/pdf"},
+                {"id": "BIG", "name": "Huge", "mimeType": DOC},
+                {"id": "OK", "name": "ok.txt", "mimeType": "text/plain"}
+            ]})))
+            .mount(&server)
+            .await;
+        let api = api(&server.uri(), "drive/v3/");
+        let dir = tempfile::tempdir().unwrap();
+        let v = sync(&api, "ROOT", dir.path()).await.unwrap();
+
+        // The good file is mirrored and reported despite the failures.
+        assert_eq!(std::fs::read(dir.path().join("ok.txt")).unwrap(), b"OK");
+        let downloaded = v["downloaded"].as_array().unwrap();
+        assert_eq!(downloaded.len(), 1);
+        assert_eq!(downloaded[0]["id"], "OK");
+        // Each failure names the item and the API's reason.
+        let failed = v["failed"].as_array().unwrap();
+        let mut reasons: Vec<(&str, &str)> = failed
+            .iter()
+            .map(|f| {
+                (
+                    f["id"].as_str().unwrap(),
+                    f["error"]["reason"].as_str().unwrap(),
+                )
+            })
+            .collect();
+        reasons.sort_unstable();
+        assert_eq!(
+            reasons,
+            [
+                ("BIG", "exportSizeLimitExceeded"),
+                ("R", "cannotDownloadFile")
+            ]
+        );
+        assert!(!dir.path().join("restricted.pdf").exists());
+        assert!(!dir.path().join("Huge.docx").exists());
+
+        // The command still fails loudly, like `gwsr batch`, after the report.
+        let err = sync_failure(&v).unwrap();
+        assert_eq!(err.exit_code(), GwsError::EXIT_CODE_API);
+        assert_eq!(err.to_json()["error"]["reason"], "syncPartialFailure");
+        assert!(err.to_string().contains("2 file(s)"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn sync_aborts_on_errors_that_are_not_per_file() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/drive/v3/files"))
+            .and(query_param("q", "'ROOT' in parents and trashed = false"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"files": [
+                {"id": "A", "name": "a.txt", "mimeType": "text/plain"}
+            ]})))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/drive/v3/files/A"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(b"A".to_vec()))
+            .mount(&server)
+            .await;
+        let api = api(&server.uri(), "drive/v3/");
+        let dir = tempfile::tempdir().unwrap();
+        // The local target can't be written: a directory sits at its path.
+        std::fs::create_dir(dir.path().join("a.txt")).unwrap();
+        assert!(sync(&api, "ROOT", dir.path()).await.is_err());
+
+        // A clean run is not a partial failure.
+        assert!(sync_failure(&json!({"failed": []})).is_none());
     }
 
     /// Mounts a `files.list` response for `parent` and an `alt=media`
