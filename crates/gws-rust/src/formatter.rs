@@ -544,10 +544,10 @@ fn table_cell(value: &Value) -> String {
 
 /// Neutralise spreadsheet formula injection (OWASP): a text cell starting with
 /// `=`, `+`, `-`, `@`, TAB or CR is prefixed with `'`. Control sequences are
-/// stripped.
+/// stripped first, so a stripped leading character cannot hide a formula.
 fn csv_text(s: &str) -> String {
     let clean = sanitize_for_terminal(s);
-    if s.starts_with(['=', '+', '-', '@', '\t', '\r']) {
+    if s.starts_with('\r') || clean.starts_with(['=', '+', '-', '@', '\t']) {
         format!("'{clean}")
     } else {
         clean
@@ -866,6 +866,25 @@ mod tests {
     fn csv_strips_control_sequences() {
         let out = fmt(&json!([{"a": "x\u{1b}[2Jy"}]), OutputFormat::Csv);
         assert!(!out.contains('\u{1b}'), "{out:?}");
+    }
+
+    #[test]
+    fn csv_formula_guard_applies_after_stripping_control_chars() {
+        // A leading character that sanitization removes must not smuggle a
+        // formula past the guard.
+        let val = json!([{
+            "a": "\u{7}=HYPERLINK(\"http://x\")",
+            "b": "\u{200b}@SUM(A1)",
+            "c": "\u{1b}+1",
+            "d": "\r-2",
+        }]);
+        let out = fmt(&val, OutputFormat::Csv);
+        let row = out.lines().nth(1).unwrap();
+        assert_eq!(row, "\"'=HYPERLINK(\"\"http://x\"\")\",'@SUM(A1),'+1,'-2");
+        let rows = fmt(&json!({"values": [["\u{7}=1+1"]]}), OutputFormat::Csv);
+        assert_eq!(rows, "'=1+1");
+        let header = fmt(&json!([{"\u{7}=cmd": "x"}]), OutputFormat::Csv);
+        assert_eq!(header.lines().next().unwrap(), "'=cmd");
     }
 
     #[test]

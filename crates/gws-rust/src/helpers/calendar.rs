@@ -452,8 +452,11 @@ impl TzInfo {
         }
     }
 
-    fn for_event(&self, start: &When) -> Option<&str> {
-        (self.explicit || start.is_local()).then_some(self.name.as_str())
+    /// The zone to attach to both ends of an event: whenever either end is a
+    /// local time (it was validated in this zone and means nothing without
+    /// it), or when --timezone was given.
+    fn for_event(&self, start: &When, end: &When) -> Option<&str> {
+        (self.explicit || start.is_local() || end.is_local()).then_some(self.name.as_str())
     }
 }
 
@@ -518,8 +521,8 @@ impl InsertArgs {
         let mut attendees = many(m, "attendee")?;
         let mut body = json!({
             "summary": summary,
-            "start": start.to_event_time(tz.for_event(&start)),
-            "end": end.to_event_time(tz.for_event(&start)),
+            "start": start.to_event_time(tz.for_event(&start, &end)),
+            "end": end.to_event_time(tz.for_event(&start, &end)),
         });
         if let Some(loc) = optional(m, "location")? {
             body["location"] = json!(loc);
@@ -679,6 +682,7 @@ async fn agenda(api: &Api, args: &AgendaArgs, tz: &TzInfo) -> Result<Value, GwsE
             )
             .await?;
         let mut cals = Vec::new();
+        let mut found_ids = std::collections::HashSet::new();
         for cal in list.items {
             let id = cal
                 .get("id")
@@ -689,10 +693,15 @@ async fn agenda(api: &Api, args: &AgendaArgs, tz: &TzInfo) -> Result<Value, GwsE
                 .or_else(|| cal.get("summary"))
                 .and_then(Value::as_str)
                 .unwrap_or(id);
-            let id_ok = args.calendar_ids.is_empty()
-                || args.calendar_ids.iter().any(|c| {
-                    c == id || (c == "primary" && cal.get("primary") == Some(&json!(true)))
-                });
+            let requested: Vec<&String> = args
+                .calendar_ids
+                .iter()
+                .filter(|c| {
+                    *c == id || (*c == "primary" && cal.get("primary") == Some(&json!(true)))
+                })
+                .collect();
+            let id_ok = args.calendar_ids.is_empty() || !requested.is_empty();
+            found_ids.extend(requested);
             let name_ok = args
                 .calendar_name
                 .as_deref()
@@ -700,6 +709,20 @@ async fn agenda(api: &Api, args: &AgendaArgs, tz: &TzInfo) -> Result<Value, GwsE
             if id_ok && name_ok {
                 cals.push((id.to_string(), name.to_string()));
             }
+        }
+        // Every requested ID must exist: a partial agenda that silently omits
+        // a calendar the caller asked for would look complete.
+        let missing: Vec<&str> = args
+            .calendar_ids
+            .iter()
+            .filter(|c| !found_ids.contains(c))
+            .map(String::as_str)
+            .collect();
+        if !missing.is_empty() {
+            return Err(GwsError::Validation(format!(
+                "--calendar-id not found in your calendar list: {}",
+                missing.join(", ")
+            )));
         }
         if cals.is_empty() && (!args.calendar_ids.is_empty() || args.calendar_name.is_some()) {
             return Err(GwsError::Validation(
@@ -722,10 +745,13 @@ async fn agenda(api: &Api, args: &AgendaArgs, tz: &TzInfo) -> Result<Value, GwsE
                     .query("singleEvents", "true")
                     .query("orderBy", "startTime")
                     .query("maxResults", "250");
+                // Keep the error's class (and so its exit code): only the
+                // calendar name is added.
                 let page = api.paginate(req, "items", None).await.map_err(|e| {
-                    http::other_err(anyhow::anyhow!(
-                        "Failed to read calendar '{name}' ({id}): {e}"
-                    ))
+                    crate::transport::errors::with_context(
+                        e,
+                        &format!("Failed to read calendar '{name}' ({id})"),
+                    )
                 })?;
                 Ok::<_, GwsError>(
                     page.items
@@ -932,8 +958,11 @@ async fn update(api: &Api, m: &ArgMatches, tz: &TzInfo) -> Result<Value, GwsErro
         } else {
             resolve_range(&start_s, end_opt, dur_opt, tz.tz)?
         };
-        patch.insert("start".into(), start.to_event_time(tz.for_event(&start)));
-        patch.insert("end".into(), end.to_event_time(tz.for_event(&start)));
+        patch.insert(
+            "start".into(),
+            start.to_event_time(tz.for_event(&start, &end)),
+        );
+        patch.insert("end".into(), end.to_event_time(tz.for_event(&start, &end)));
     }
 
     if !add.is_empty() || !remove.is_empty() {
@@ -1286,6 +1315,47 @@ mod tests {
         );
     }
 
+    /// A requested `--calendar-id` that is not in the calendar list must fail
+    /// the command, not silently shrink the agenda to the calendars that matched.
+    #[tokio::test]
+    async fn agenda_rejects_calendar_ids_missing_from_the_list() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/users/me/calendarList"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"items": [
+                {"id": "me@x", "summary": "Me", "primary": true}
+            ]})))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/calendars/me@x/events"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"items": [
+                {"id": "1", "summary": "Mine", "start": {"dateTime": "2030-01-01T09:00:00Z"}}
+            ]})))
+            .mount(&server)
+            .await;
+        let api = api(&server.uri(), "");
+        let args = AgendaArgs {
+            window: Window::Days(3),
+            calendar_ids: vec!["primary".into(), "team@x".into()],
+            calendar_name: None,
+        };
+        let err = agenda(&api, &args, &tz("UTC", false)).await.unwrap_err();
+        assert!(matches!(err, GwsError::Validation(_)), "{err:?}");
+        assert!(err.to_string().contains("team@x"), "{err}");
+        assert!(!err.to_string().contains("primary"), "{err}");
+
+        let found = AgendaArgs {
+            window: Window::Days(3),
+            calendar_ids: vec!["primary".into(), "me@x".into()],
+            calendar_name: None,
+        };
+        assert_eq!(
+            agenda(&api, &found, &tz("UTC", false)).await.unwrap()["count"],
+            1
+        );
+    }
+
     #[tokio::test]
     async fn agenda_surfaces_calendar_errors() {
         let server = MockServer::start().await;
@@ -1313,6 +1383,43 @@ mod tests {
         };
         let err = agenda(&api, &args, &tz("UTC", false)).await.unwrap_err();
         assert!(err.to_string().contains("Work"), "{err}");
+    }
+
+    /// A per-calendar failure keeps its error class, so the documented exit
+    /// code (1 API, 2 auth, 6 retryable, 10 network) survives the added
+    /// calendar name instead of collapsing into exit 5 (internal error).
+    #[tokio::test]
+    async fn agenda_calendar_errors_keep_their_exit_code() {
+        for (status, reason, expected) in [
+            (404, "notFound", GwsError::EXIT_CODE_API),
+            (429, "rateLimitExceeded", GwsError::EXIT_CODE_API_RETRYABLE),
+        ] {
+            let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .and(path("/users/me/calendarList"))
+                .respond_with(
+                    ResponseTemplate::new(200)
+                        .set_body_json(json!({"items": [{"id": "a@x", "summary": "Work"}]})),
+                )
+                .mount(&server)
+                .await;
+            Mock::given(method("GET"))
+                .and(path("/calendars/a@x/events"))
+                .respond_with(ResponseTemplate::new(status).set_body_json(json!({
+                    "error": {"code": status, "message": "nope", "errors": [{"reason": reason}]}
+                })))
+                .mount(&server)
+                .await;
+            let api = api(&server.uri(), "");
+            let args = AgendaArgs {
+                window: Window::Today,
+                calendar_ids: vec![],
+                calendar_name: None,
+            };
+            let err = agenda(&api, &args, &tz("UTC", false)).await.unwrap_err();
+            assert!(err.to_string().contains("Work"), "{err}");
+            assert_eq!(err.exit_code(), expected, "HTTP {status}: {err}");
+        }
     }
 
     #[tokio::test]
@@ -1417,6 +1524,75 @@ mod tests {
         )
         .await
         .unwrap();
+    }
+
+    /// `--end` alone reuses the event's current start, which the API returns
+    /// with an offset. A local `--end` must still carry the time zone it was
+    /// validated in; `"timeZone": null` is the #912 HTTP 400 again.
+    #[tokio::test]
+    async fn update_local_end_with_offset_start_keeps_time_zone() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/calendars/primary/events/E1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "start": {"dateTime": "2026-03-18T14:00:00-06:00", "timeZone": "America/Denver"},
+                "end": {"dateTime": "2026-03-18T15:00:00-06:00", "timeZone": "America/Denver"}
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("PATCH"))
+            .and(path("/calendars/primary/events/E1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id": "E1"})))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let api = api(&server.uri(), "");
+        let m = parse(&[
+            "gwsr",
+            "+update",
+            "--event-id",
+            "E1",
+            "--end",
+            "2026-03-18T15:30",
+        ]);
+        update(
+            &api,
+            m.subcommand_matches("+update").unwrap(),
+            &tz("America/Denver", false),
+        )
+        .await
+        .unwrap();
+        let reqs = server.received_requests().await.unwrap();
+        let patch = reqs.iter().find(|r| r.method.as_str() == "PATCH").unwrap();
+        let body: Value = serde_json::from_slice(&patch.body).unwrap();
+        assert_eq!(
+            body["end"],
+            json!({"dateTime": "2026-03-18T15:30:00", "timeZone": "America/Denver"}),
+            "{body}"
+        );
+    }
+
+    #[test]
+    fn insert_mixed_offset_and_local_times_carry_time_zone() {
+        let a = insert_args(
+            &[
+                "gwsr",
+                "+insert",
+                "--summary",
+                "S",
+                "--start",
+                "2026-03-18T14:00:00-06:00",
+                "--end",
+                "2026-03-18T15:00",
+            ],
+            &tz("America/Denver", false),
+        )
+        .unwrap();
+        assert_eq!(
+            a.body["end"],
+            json!({"dateTime": "2026-03-18T15:00:00", "timeZone": "America/Denver"})
+        );
+        assert_eq!(a.body["start"]["timeZone"], "America/Denver");
     }
 
     #[tokio::test]
