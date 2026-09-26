@@ -222,7 +222,7 @@ Checked in this order:
 4. `GOOGLE_APPLICATION_CREDENTIALS`
 5. `~/.config/gcloud/application_default_credentials.json`
 
-Once a source exists, it is used or the command fails. A damaged or undecryptable credentials file is never deleted or silently skipped. A profile you selected explicitly never falls back to Application Default Credentials. `--dry-run` loads no credentials at all.
+Once a source exists, it is used or the command fails. A damaged or undecryptable credentials file is never deleted or silently skipped. A profile you selected explicitly never falls back to Application Default Credentials, and `--profile` together with `GWSR_TOKEN`, `GWSR_TOKEN_FILE` or `GWSR_CREDENTIALS_FILE` is a configuration error instead of silently using the other identity. `--dry-run` loads no credentials at all.
 
 ### Storage and key backends
 
