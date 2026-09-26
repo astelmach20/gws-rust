@@ -1050,9 +1050,21 @@ async fn rsvp(
     send_updates: &str,
 ) -> Result<Value, GwsError> {
     let url = event_url(api, calendar_id, event_id);
+    // Your entry gets the response, and the comment only when one is given
+    // (otherwise an existing comment is kept).
+    let respond = |me: &mut Value| {
+        me["responseStatus"] = json!(response);
+        if let Some(c) = comment {
+            me["comment"] = json!(c);
+        }
+    };
     let attendees = if api.is_dry_run() {
         api.send(ApiRequest::get(url.clone())).await?;
-        json!([{ "self": true, "responseStatus": response, "comment": comment }])
+        // The real PATCH carries the event's whole guest list, fetched by the
+        // GET above; only your entry changes.
+        let mut me = json!({ "self": true });
+        respond(&mut me);
+        json!(["<every other attendee of the event, unchanged>", me])
     } else {
         let event = api.send(ApiRequest::get(url.clone())).await?;
         let mut attendees = event
@@ -1068,10 +1080,7 @@ async fn rsvp(
                     "You are not on the guest list of event {event_id}; nothing to respond to"
                 ))
             })?;
-        me["responseStatus"] = json!(response);
-        if let Some(c) = comment {
-            me["comment"] = json!(c);
-        }
+        respond(me);
         Value::Array(attendees)
     };
     api.send(
@@ -1645,6 +1654,37 @@ mod tests {
         rsvp(&api, "primary", "E1", "declined", Some("busy"), "all")
             .await
             .unwrap();
+    }
+
+    /// The plan's PATCH body matches what a real run sends: the event's whole
+    /// guest list (not just your entry, which would drop every other guest),
+    /// and no `comment` unless `--comment` was given (a real run keeps an
+    /// existing comment; `"comment": null` would clear it).
+    #[tokio::test]
+    async fn rsvp_plan_keeps_other_guests_and_existing_comment() {
+        let api = dry_api("");
+        rsvp(&api, "primary", "E1", "accepted", None, "all")
+            .await
+            .unwrap();
+        let plan = api.planned();
+        assert_eq!(plan[0]["method"], "GET");
+        assert_eq!(plan[1]["method"], "PATCH");
+        assert_eq!(
+            plan[1]["body"],
+            json!({"attendees": [
+                "<every other attendee of the event, unchanged>",
+                {"self": true, "responseStatus": "accepted"}
+            ]})
+        );
+
+        let api = dry_api("");
+        rsvp(&api, "primary", "E1", "declined", Some("busy"), "all")
+            .await
+            .unwrap();
+        assert_eq!(
+            api.planned()[1]["body"]["attendees"][1],
+            json!({"self": true, "responseStatus": "declined", "comment": "busy"})
+        );
     }
 
     #[tokio::test]
