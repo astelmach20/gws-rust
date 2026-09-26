@@ -306,7 +306,7 @@ The fields are `code`, `message`, `reason` and `retryable`, plus `hint` when the
 | `8` | Configuration error (`configError`): an invalid environment variable, `config.toml`, profile name or OAuth client file |
 | `9` | Credential store error (`credentialStoreError`): the OS keyring, key file or stored credentials can't be read, written or decrypted |
 | `10` | Network error (`networkError`): no response (connection, DNS, TLS, timeout). Not marked retryable, because a non-idempotent call may already have been applied; check before retrying |
-| `11` | Blocked by Model Armor (`sanitizationBlocked`): `--sanitize` in `block` mode matched the output, which was withheld. The API request itself succeeded |
+| `11` | Blocked by Model Armor (`sanitizationBlocked`): `--sanitize` in `block` mode matched. Usually the output matched and was withheld after the API request succeeded; for `gmail` helpers that send or create something (`+send`, `+reply`, `+reply-all`, `+forward`, `+filter create`, `+unsubscribe`) the outgoing content matched and nothing was sent |
 
 Exit code 5 also covers internal programming errors, such as a command reading an argument it doesn't define.
 
@@ -476,7 +476,13 @@ gwsr gmail users messages get --params '{"userId":"me","id":"MSG"}' \
 - **`block`:** fails closed. A match prints nothing on stdout and exits `11` (`sanitizationBlocked`). If Model Armor can't be reached, the output is still withheld and the exit code is the cause's own (auth `2`, network `10`, API `1` or `6`).
 - The template name is parsed strictly, and the request always goes to `modelarmor.<location>.rep.googleapis.com`.
 
-`--sanitize` applies to generated methods and to the helpers that return user content (for example `gmail +read`, `+search`, `+triage`, `+watch`, `events +subscribe`, and the app helpers). Every `gmail` helper screens its printed result, except `+attachments`, which rejects `--sanitize` because binary files cannot be scanned. `gwsr modelarmor +create-template --preset jailbreak` creates a template from the built-in preset.
+`--sanitize` applies to generated methods and to the helpers that return user content (for example `gmail +read`, `+search`, `+triage`, `+watch`, `events +subscribe`, and the app helpers). Every `gmail` helper screens its printed result, except `+attachments`, which rejects `--sanitize` because binary files cannot be scanned, and the helpers that send or create something:
+
+- `gmail +send`, `+reply`, `+reply-all` and `+forward` (including `--draft`) screen the outgoing subject and body, quoted or forwarded text included, **before** sending. `+filter create` screens the new filter before creating it, and `+unsubscribe` screens the unsubscribe URL before the one-click POST.
+- In `block` mode a match (exit `11`) or a Model Armor failure (the cause's exit code) sends or creates nothing. In `warn` mode the action goes ahead after a warning on stderr, and the printed result carries the `_sanitization` annotation.
+- `--dry-run` never calls Model Armor; it prints the planned request unscreened.
+
+`gwsr modelarmor +create-template --preset jailbreak` creates a template from the built-in preset.
 
 ## Configuration
 

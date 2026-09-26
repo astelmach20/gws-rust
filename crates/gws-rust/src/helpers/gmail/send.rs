@@ -14,7 +14,7 @@
 
 //! `gmail +send`: compose and send (or draft) a new message.
 
-use super::dispatch::{Delivery, deliver};
+use super::dispatch::{Delivery, deliver, outgoing_content};
 use super::prelude::*;
 use super::sender::resolve_sender;
 
@@ -39,7 +39,8 @@ pub(super) async fn handle_send(
     };
 
     let raw = create_send_raw_message(&config)?;
-    deliver(api.as_ref(), delivery, &raw, None).await
+    let outgoing = outgoing_content(&config.subject, &config.body);
+    deliver(api.as_ref(), delivery, &outgoing, &raw, None).await
 }
 
 /// Comma-separated recipient list for confirmation prompts.

@@ -57,6 +57,8 @@ gwsr gmail +send --to alice@example.com --subject 'Hello' --body 'Hi!' --draft
 - Total attachment size limit: 25MB.
 - Sends are never retried automatically: a timeout may still have delivered the message.
 - With GWSR_REQUIRE_CONFIRM=1, sending requires --yes (drafts do not).
+- --sanitize screens the subject and body before sending; in block mode a match or
+- a Model Armor failure sends nothing. --dry-run does not call Model Armor.
 
 > [!CAUTION]
 > This is a **write** command — confirm with the user before executing.
