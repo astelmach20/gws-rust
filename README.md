@@ -167,7 +167,7 @@ Signs in with the OAuth authorization-code flow: PKCE (S256), a random `state` t
 
 | Flag | Effect |
 |---|---|
-| `-s, --services drive,gmail` | Limit the request to these services (other services' scopes come from their Discovery documents) |
+| `-s, --services drive,gmail` | Limit the request to these services (other services' scopes come from their Discovery documents). An unknown service name is an error, and `cloud-platform` is never included (it belongs to no single service); pass it with `--scopes` if you need it |
 | `--write` | Read-write scopes for the core services |
 | `--full` | Read-write core scopes plus `gmail.settings.basic`, Pub/Sub and `cloud-platform` |
 | `--scopes a,b` | Exact scopes; short names such as `gmail.modify` expand to `https://www.googleapis.com/auth/gmail.modify` |

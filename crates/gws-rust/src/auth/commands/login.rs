@@ -102,6 +102,9 @@ pub(crate) fn parse_args(m: &clap::ArgMatches) -> Result<LoginArgs, GwsError> {
             .filter(|s| !s.is_empty())
             .collect::<HashSet<String>>()
     });
+    if let Some(services) = &services {
+        scopes::validate_service_names(services)?;
+    }
     let timeout = crate::args::value::<u64>(m, "timeout")?
         .copied()
         .ok_or_else(|| GwsError::Validation("--timeout is required".into()))?;
@@ -156,7 +159,7 @@ async fn resolve_scopes(
     };
     let mut result = scopes::filter_scopes_by_services(base, services);
     if let Some(services) = services {
-        super::picker::augment_with_discovery_scopes(&mut result, services, readonly_only).await;
+        super::picker::augment_with_discovery_scopes(&mut result, services, readonly_only).await?;
     }
     if result.is_empty() {
         return Err(GwsError::Validation(
@@ -409,6 +412,32 @@ mod tests {
             .await
             .unwrap();
         assert!(s.contains(&"https://www.googleapis.com/auth/gmail.settings.basic".to_string()));
+    }
+
+    #[tokio::test]
+    async fn services_filter_drops_cloud_platform() {
+        let services: HashSet<String> = ["gmail".to_string()].into_iter().collect();
+        let s = resolve_scopes(ScopeMode::Full, None, Some(&services), false)
+            .await
+            .unwrap();
+        assert!(
+            !s.iter().any(|x| x == scopes::PLATFORM_SCOPE),
+            "`--full -s gmail` must not request cloud-platform: {s:?}"
+        );
+        let s = resolve_scopes(ScopeMode::Full, None, None, false)
+            .await
+            .unwrap();
+        assert!(s.iter().any(|x| x == scopes::PLATFORM_SCOPE));
+    }
+
+    #[test]
+    fn unknown_service_names_are_rejected() {
+        let err = parse_args(&matches(&["-s", "gmail,contacts.other.readonly"]))
+            .err()
+            .expect("unknown service must be an error")
+            .to_string();
+        assert!(err.contains("contacts.other.readonly"), "{err}");
+        assert!(parse_args(&matches(&["-s", "gmail,drive,chat"])).is_ok());
     }
 
     #[tokio::test]
