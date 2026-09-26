@@ -1268,3 +1268,51 @@ async fn batch_results_are_screened_by_model_armor() {
     );
     assert!(!out.status.success());
 }
+
+// ── batch output honours the global output options ─────────────────────
+
+#[tokio::test(flavor = "multi_thread")]
+async fn batch_results_honour_jq_and_format() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    let parts = "--b\r\nContent-Type: application/http\r\nContent-ID: <response-item-a>\r\n\r\n\
+         HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{\"snippet\":\"first\"}\r\n\
+         --b\r\nContent-Type: application/http\r\nContent-ID: <response-item-b>\r\n\r\n\
+         HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{\"snippet\":\"second\"}\r\n--b--\r\n";
+    Mock::given(method("POST"))
+        .and(path("/batch/gmail/v1"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_raw(parts.as_bytes().to_vec(), "multipart/mixed; boundary=b"),
+        )
+        .mount(&server)
+        .await;
+    let env = Env::new();
+    seed_gmail_get(&env);
+    let input = "{\"id\":\"a\",\"method\":\"users.messages.get\",\"params\":{\"userId\":\"me\",\"id\":\"m1\"}}\n\
+                 {\"id\":\"b\",\"method\":\"users.messages.get\",\"params\":{\"userId\":\"me\",\"id\":\"m2\"}}\n";
+    let run = |extra: &[&str]| {
+        let mut c = env.cmd();
+        c.env("GWSR_TOKEN", "test-token")
+            .env("GWSR_API_BASE_URL", server.uri())
+            .args(["batch", "gmail"])
+            .args(extra)
+            .write_stdin(input);
+        c.output().unwrap()
+    };
+
+    // --jq is applied to every result line, as for any other command.
+    let out = run(&["--jq", ".body.snippet"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert_eq!(stdout_of(&out), "first\nsecond\n");
+
+    // --format csv prints one header, then one row per call.
+    let out = run(&["--format", "csv", "--columns", "id,status,body.snippet"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert_eq!(
+        stdout_of(&out),
+        "id,status,body.snippet\na,200,first\nb,200,second\n"
+    );
+}
