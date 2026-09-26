@@ -90,14 +90,25 @@ pub(super) fn parse_duration(s: &str) -> Result<Duration, GwsError> {
 }
 
 impl When {
-    /// Add a duration (not valid for all-day dates).
-    pub(super) fn plus(&self, d: Duration) -> Result<When, GwsError> {
+    /// Add an elapsed duration (not valid for all-day dates). A local time is
+    /// advanced in `tz`, so a span across a DST change keeps its real length
+    /// instead of its wall-clock length.
+    pub(super) fn plus(&self, d: Duration, tz: Tz) -> Result<When, GwsError> {
         match self {
             When::Date(_) => Err(GwsError::Validation(
                 "--duration cannot be used with an all-day --start; pass --end YYYY-MM-DD".into(),
             )),
             When::Instant(t) => Ok(When::Instant(*t + d)),
-            When::Local(t) => Ok(When::Local(*t + d)),
+            When::Local(_) => {
+                let end = (self.to_utc(tz)? + d).with_timezone(&tz);
+                let naive = end.naive_local();
+                // Keep the wall-clock form unless it is ambiguous (the
+                // repeated hour of a fall-back change); then pin the offset.
+                Ok(match tz.from_local_datetime(&naive) {
+                    chrono::LocalResult::Single(_) => When::Local(naive),
+                    _ => When::Instant(end.fixed_offset()),
+                })
+            }
         }
     }
 
@@ -282,6 +293,33 @@ mod tests {
         for bad in ["", "30", "m", "1x", "0m"] {
             assert!(parse_duration(bad).is_err(), "{bad}");
         }
+    }
+
+    #[test]
+    fn plus_advances_local_times_by_elapsed_time() {
+        let ny: Tz = "America/New_York".parse().unwrap();
+        let local = |s: &str| parse_when(s, "--start").unwrap();
+        // Ordinary day: the wall-clock form is kept.
+        assert_eq!(
+            local("2026-06-17T09:00")
+                .plus(Duration::hours(1), ny)
+                .unwrap(),
+            local("2026-06-17T10:00")
+        );
+        // Landing in the repeated fall-back hour pins the offset (EDT here).
+        assert_eq!(
+            local("2026-11-01T00:30")
+                .plus(Duration::hours(1), ny)
+                .unwrap(),
+            parse_when("2026-11-01T01:30:00-04:00", "e").unwrap()
+        );
+        // A start inside the spring-forward gap is still rejected.
+        assert!(
+            local("2026-03-08T02:30")
+                .plus(Duration::hours(1), ny)
+                .is_err()
+        );
+        assert!(local("2026-03-08").plus(Duration::hours(1), ny).is_err());
     }
 
     #[test]
