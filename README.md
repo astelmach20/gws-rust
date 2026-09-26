@@ -49,7 +49,7 @@ Drive, Gmail, Calendar, Sheets, Docs, Admin and any other Discovery API. JSON on
 
 Every method installs a single binary named `gwsr`.
 
-- **npm** installs one prebuilt binary through a per-platform package (`gws-rust-darwin-arm64`, `gws-rust-darwin-x64`, `gws-rust-linux-arm64`, `gws-rust-linux-x64`, `gws-rust-win32-x64`) listed as an optional dependency. Nothing is downloaded and no install script runs. Installing with `--omit=optional` leaves the launcher without a binary, and it exits with an error saying so. The Linux packages carry static musl binaries that run on any distribution.
+- **npm** installs one prebuilt binary through a per-platform package (`gws-rust-darwin-arm64`, `gws-rust-darwin-x64`, `gws-rust-linux-arm64`, `gws-rust-linux-x64`) listed as an optional dependency. There is no npm package for Windows yet: use the `.zip` release archive or `cargo install gws-rust`. Nothing is downloaded and no install script runs. Installing with `--omit=optional` leaves the launcher without a binary, and it exits with an error saying so. The Linux packages carry static musl binaries that run on any distribution.
 - **Cargo** builds from source. The minimum supported Rust version is 1.89.
 - **From a checkout:** `cargo install --path crates/gws-rust --locked`.
 

@@ -64,7 +64,7 @@ function resolveBinary(opts = {}) {
     throw new ResolveError(
       `gwsr does not ship a prebuilt binary for ${osName}-${cpu}.\n` +
         `Supported platforms: ${supportedList()}.\n` +
-        `Build from source with \`cargo install ${mainName}\` (see ${RELEASES_URL}).`,
+        `Download a release archive from ${RELEASES_URL} or build from source with \`cargo install ${mainName}\`.`,
     );
   }
 

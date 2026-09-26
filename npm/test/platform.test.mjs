@@ -37,11 +37,11 @@ describe("findPlatform", () => {
     assert.equal(findPlatform("darwin", "x64").package, "gws-rust-darwin-x64");
     assert.equal(findPlatform("linux", "arm64").package, "gws-rust-linux-arm64");
     assert.equal(findPlatform("linux", "x64").package, "gws-rust-linux-x64");
-    assert.equal(findPlatform("win32", "x64").package, "gws-rust-win32-x64");
   });
 
-  it("runs the x64 Windows binary on Windows on Arm (emulated)", () => {
-    assert.equal(findPlatform("win32", "arm64").package, "gws-rust-win32-x64");
+  it("has no npm package for Windows (use the release archive or cargo install)", () => {
+    assert.equal(findPlatform("win32", "x64"), undefined);
+    assert.equal(findPlatform("win32", "arm64"), undefined);
   });
 
   it("returns undefined for unsupported hosts", () => {
