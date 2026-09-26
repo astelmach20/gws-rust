@@ -16,6 +16,9 @@
 
 use serde_json::Value;
 
+/// Deepest list `nestingLevel` the Docs API produces.
+const MAX_NESTING_LEVEL: u64 = 8;
+
 /// Render the document body. `markdown` selects Markdown vs plain text.
 pub(super) fn render(document: &Value, markdown: bool) -> String {
     let mut out = String::new();
@@ -100,15 +103,21 @@ fn render_paragraph(p: &Value, document: &Value, markdown: bool, out: &mut Strin
             .and_then(Value::as_u64)
             .unwrap_or(0);
         let list_id = bullet.get("listId").and_then(Value::as_str).unwrap_or("");
-        // `nestingLevel` is 0..=8 per the Docs API; a value beyond usize (only
-        // possible on 32-bit targets) renders unindented rather than failing.
-        let indent = "  ".repeat(usize::try_from(level).unwrap_or(0));
-        let marker = if is_ordered(document, list_id, level) {
-            "1."
-        } else {
-            "-"
+        let marker = |level: u64| {
+            if is_ordered(document, list_id, level) {
+                "1."
+            } else {
+                "-"
+            }
         };
-        out.push_str(&format!("{indent}{marker} {line}\n"));
+        // CommonMark nests an item only when it is indented to its parent's
+        // content column: 2 under "- ", 3 under "1. ". `nestingLevel` is
+        // 0..=8 per the Docs API; the bound keeps a malformed value from
+        // producing an unbounded indent.
+        let indent: String = (0..level.min(MAX_NESTING_LEVEL))
+            .map(|parent| " ".repeat(marker(parent).len() + 1))
+            .collect();
+        out.push_str(&format!("{indent}{} {line}\n", marker(level)));
         return;
     }
     if markdown {
@@ -265,6 +274,61 @@ mod tests {
         assert!(md.contains("- item\n"));
         assert!(md.contains("1. first\n"));
         assert!(md.contains("| A | B\\|C |\n| --- | --- |"));
+    }
+
+    /// Maximum list nesting depth CommonMark sees in `md`.
+    fn list_depth(md: &str) -> usize {
+        use pulldown_cmark::{Event, Parser, Tag, TagEnd};
+        let (mut depth, mut max) = (0usize, 0usize);
+        for event in Parser::new(md) {
+            match event {
+                Event::Start(Tag::List(_)) => {
+                    depth += 1;
+                    max = max.max(depth);
+                }
+                Event::End(TagEnd::List(_)) => depth -= 1,
+                _ => {}
+            }
+        }
+        max
+    }
+
+    #[test]
+    fn nested_list_items_stay_nested_in_markdown() {
+        let item = |list: &str, level: u64, text: &str| {
+            json!({"paragraph": {"bullet": {"listId": list, "nestingLevel": level},
+                "elements": [{"textRun": {"content": format!("{text}\n")}}]}})
+        };
+        let document = json!({
+            "lists": {
+                "N": {"listProperties": {"nestingLevels": [
+                    {"glyphType": "DECIMAL"}, {"glyphSymbol": "○"}, {"glyphType": "DECIMAL"}
+                ]}},
+                "B": {"listProperties": {"nestingLevels": [
+                    {"glyphSymbol": "●"}, {"glyphType": "DECIMAL"}, {"glyphSymbol": "■"}
+                ]}}
+            },
+            "body": {"content": [
+                item("N", 0, "numbered"),
+                item("N", 1, "bullet under number"),
+                item("N", 2, "number under bullet"),
+            ]}
+        });
+        let md = render(&document, true);
+        assert_eq!(list_depth(&md), 3, "nesting lost in:\n{md}");
+
+        let document = json!({
+            "lists": document["lists"].clone(),
+            "body": {"content": [
+                item("B", 0, "bullet"),
+                item("B", 1, "number under bullet"),
+                item("B", 2, "bullet under number"),
+            ]}
+        });
+        let md = render(&document, true);
+        assert_eq!(list_depth(&md), 3, "nesting lost in:\n{md}");
+        // Bullet parents keep the two-space indent.
+        assert!(md.contains("\n  1. number under bullet\n"), "{md}");
     }
 
     #[test]
