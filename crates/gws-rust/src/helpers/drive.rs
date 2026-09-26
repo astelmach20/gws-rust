@@ -274,8 +274,11 @@ EXAMPLES:
 TIPS:
   Recurses into sub-folders. Regular files are downloaded; Google
   Docs/Sheets/Slides/Drawings are exported as docx/xlsx/pptx/pdf.
-  Local files are replaced only when the Drive copy is newer; local files
-  that are not in Drive are left untouched (nothing is ever deleted).
+  Downloaded files carry the Drive modification time. A local file is
+  replaced whenever its modification time or size differs from the Drive
+  copy, so a mirrored file edited locally is overwritten on the next run.
+  Local files that are not in Drive are left untouched (nothing is ever
+  deleted).
   Other Google-native types (Forms, Sites, shortcuts...) are reported as skipped.",
                 ),
         )
@@ -917,13 +920,48 @@ async fn list_children(api: &Api, folder_id: &str) -> Result<Vec<Value>, GwsErro
     Ok(page.items)
 }
 
-/// Whether the local copy is at least as new as the Drive item. A missing
-/// local file or a missing/unparseable remote `modifiedTime` means "download
-/// it" (the safe answer); a local file that exists but cannot be inspected is
-/// an error rather than a silent re-download over it.
-fn is_up_to_date(local: &Path, remote_modified: Option<&str>) -> Result<bool, GwsError> {
-    let Some(remote) = remote_modified.and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
-    else {
+/// Tolerance when comparing a local mtime with Drive's `modifiedTime`, for
+/// file systems that store coarse timestamps (HFS+: 1 s, FAT: 2 s).
+const MTIME_TOLERANCE: chrono::TimeDelta = chrono::TimeDelta::seconds(2);
+
+/// Parse a Drive `modifiedTime`. A missing or unparseable value is `None`,
+/// which means "always download" (the safe answer).
+fn remote_mtime(child: &Value) -> Option<chrono::DateTime<chrono::Utc>> {
+    child
+        .get("modifiedTime")
+        .and_then(Value::as_str)
+        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+        .map(|t| t.with_timezone(&chrono::Utc))
+}
+
+/// Parse a Drive `size` (an int64 string). Google-native files have none.
+fn remote_size(child: &Value) -> Result<Option<u64>, GwsError> {
+    match child.get("size") {
+        None | Some(Value::Null) => Ok(None),
+        Some(v) => v
+            .as_str()
+            .and_then(|s| s.parse().ok())
+            .or_else(|| v.as_u64())
+            .map(Some)
+            .ok_or_else(|| GwsError::other(anyhow::anyhow!("Drive returned an invalid size {v}"))),
+    }
+}
+
+/// Whether the local copy matches the Drive item. `+sync` stamps every
+/// download with the item's `modifiedTime`, so a local file matches when its
+/// mtime equals that time (within [`MTIME_TOLERANCE`]) and, for items with a
+/// size, its length is the same. Any difference (the Drive file was edited,
+/// replaced by another file of the same name, or restored with an older
+/// timestamp; or the local copy was edited) means "download it". A missing
+/// local file or missing remote `modifiedTime` also means "download it"; a
+/// local file that exists but cannot be inspected is an error rather than a
+/// silent re-download over it.
+fn is_up_to_date(
+    local: &Path,
+    remote_modified: Option<chrono::DateTime<chrono::Utc>>,
+    remote_size: Option<u64>,
+) -> Result<bool, GwsError> {
+    let Some(remote) = remote_modified else {
         return Ok(false);
     };
     let meta = match std::fs::metadata(local) {
@@ -942,7 +980,24 @@ fn is_up_to_date(local: &Path, remote_modified: Option<&str>) -> Result<bool, Gw
             local.display()
         ))
     })?;
-    Ok(chrono::DateTime::<chrono::Utc>::from(modified) >= remote.with_timezone(&chrono::Utc))
+    let local_time = chrono::DateTime::<chrono::Utc>::from(modified);
+    let same_time = (local_time - remote).abs() < MTIME_TOLERANCE;
+    let same_size = remote_size.is_none_or(|n| meta.len() == n);
+    Ok(same_time && same_size)
+}
+
+/// Stamp a downloaded file with the Drive item's `modifiedTime`.
+fn set_local_mtime(path: &Path, time: chrono::DateTime<chrono::Utc>) -> Result<(), GwsError> {
+    std::fs::File::options()
+        .write(true)
+        .open(path)
+        .and_then(|f| f.set_modified(time.into()))
+        .map_err(|e| {
+            GwsError::other(anyhow::anyhow!(
+                "cannot set the modification time of '{}': {e}",
+                path.display()
+            ))
+        })
 }
 
 async fn sync(api: &Api, folder_id: &str, dir: &Path) -> Result<Value, GwsError> {
@@ -970,7 +1025,7 @@ async fn sync(api: &Api, folder_id: &str, dir: &Path) -> Result<Value, GwsError>
             let child_id = str_field(&child, "id")?;
             let name = str_field(&child, "name")?;
             let mime = str_field(&child, "mimeType")?;
-            let modified = child.get("modifiedTime").and_then(Value::as_str);
+            let modified = remote_mtime(&child);
             let mut local_name = safe_filename(name, child_id);
             if mime == FOLDER_MIME {
                 stack.push((child_id.to_string(), local_dir.join(&local_name)));
@@ -996,7 +1051,13 @@ async fn sync(api: &Api, folder_id: &str, dir: &Path) -> Result<Value, GwsError>
                 used_names.insert(local_name.clone());
             }
             let path = local_dir.join(&local_name);
-            if is_up_to_date(&path, modified)? {
+            // Exports have no Drive size; only the timestamp is compared.
+            let size = if export.is_some() {
+                None
+            } else {
+                remote_size(&child)?
+            };
+            if is_up_to_date(&path, modified, size)? {
                 unchanged.push(path.display().to_string());
                 continue;
             }
@@ -1016,6 +1077,9 @@ async fn sync(api: &Api, folder_id: &str, dir: &Path) -> Result<Value, GwsError>
                 }
             };
             let bytes = api.download(req, &target).await?;
+            if let Some(t) = modified {
+                set_local_mtime(&path, t)?;
+            }
             downloaded
                 .push(json!({"id": child_id, "path": path.display().to_string(), "bytes": bytes}));
         }
@@ -1418,9 +1482,55 @@ mod tests {
         );
         assert_eq!(std::fs::read(dir.path().join("sub/b.bin")).unwrap(), b"B");
 
-        // Second run: local copies are newer than the 2020 remote timestamps.
+        // Second run: downloads carry the Drive timestamps, so the two items
+        // with a modifiedTime are unchanged; the one without is fetched again.
         let v = sync(&api, "ROOT", dir.path()).await.unwrap();
         assert_eq!(v["unchanged"].as_array().unwrap().len(), 2);
+        assert_eq!(v["downloaded"].as_array().unwrap().len(), 1);
+    }
+
+    /// A Drive file replaced by a different one with the same name and an
+    /// older modifiedTime (moved in, or uploaded with its original timestamp)
+    /// must be downloaded, not reported as unchanged.
+    #[tokio::test]
+    async fn sync_replaced_file_with_older_mtime_is_downloaded() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/drive/v3/files"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"files": [
+                {"id": "A", "name": "budget.xlsx", "mimeType": "application/octet-stream", "modifiedTime": "2026-01-01T00:00:00Z", "size": "5"}
+            ]})))
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/drive/v3/files"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"files": [
+                {"id": "B", "name": "budget.xlsx", "mimeType": "application/octet-stream", "modifiedTime": "2025-06-01T00:00:00Z", "size": "12"}
+            ]})))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/drive/v3/files/A"))
+            .and(query_param("alt", "media"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(b"old-A".to_vec()))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/drive/v3/files/B"))
+            .and(query_param("alt", "media"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(b"new-B-12byte".to_vec()))
+            .mount(&server)
+            .await;
+        let api = api(&server.uri(), "drive/v3/");
+        let dir = tempfile::tempdir().unwrap();
+        sync(&api, "ROOT", dir.path()).await.unwrap();
+        let v = sync(&api, "ROOT", dir.path()).await.unwrap();
+        assert_eq!(v["downloaded"][0]["id"], "B", "{v}");
+        assert_eq!(
+            std::fs::read(dir.path().join("budget.xlsx")).unwrap(),
+            b"new-B-12byte"
+        );
     }
 
     #[test]
@@ -1443,14 +1553,30 @@ mod tests {
     }
 
     #[test]
-    fn up_to_date_compares_mtimes_and_treats_missing_as_stale() {
+    fn up_to_date_requires_matching_mtime_and_size() {
+        let t = |s: &str| remote_mtime(&json!({ "modifiedTime": s }));
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("f");
-        assert!(!is_up_to_date(&p, Some("2000-01-01T00:00:00Z")).unwrap());
+        assert!(!is_up_to_date(&p, t("2000-01-01T00:00:00Z"), None).unwrap());
         std::fs::write(&p, b"x").unwrap();
-        assert!(is_up_to_date(&p, Some("2000-01-01T00:00:00Z")).unwrap());
-        assert!(!is_up_to_date(&p, Some("2999-01-01T00:00:00Z")).unwrap());
-        assert!(!is_up_to_date(&p, None).unwrap());
+        // Freshly written: its mtime is "now", not the Drive time.
+        assert!(!is_up_to_date(&p, t("2000-01-01T00:00:00Z"), None).unwrap());
+        set_local_mtime(&p, t("2000-01-01T00:00:00.250Z").unwrap()).unwrap();
+        assert!(is_up_to_date(&p, t("2000-01-01T00:00:00.250Z"), None).unwrap());
+        assert!(is_up_to_date(&p, t("2000-01-01T00:00:01Z"), Some(1)).unwrap());
+        // Older or newer Drive time, or a different size: stale.
+        assert!(!is_up_to_date(&p, t("1999-01-01T00:00:00Z"), None).unwrap());
+        assert!(!is_up_to_date(&p, t("2999-01-01T00:00:00Z"), None).unwrap());
+        assert!(!is_up_to_date(&p, t("2000-01-01T00:00:00Z"), Some(2)).unwrap());
+        assert!(!is_up_to_date(&p, None, None).unwrap());
+        assert!(t("not a time").is_none());
+    }
+
+    #[test]
+    fn remote_size_parses_int64_strings() {
+        assert_eq!(remote_size(&json!({})).unwrap(), None);
+        assert_eq!(remote_size(&json!({ "size": "12" })).unwrap(), Some(12));
+        assert!(remote_size(&json!({ "size": "twelve" })).is_err());
     }
 
     #[cfg(unix)]
@@ -1460,7 +1586,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("f");
         std::fs::write(&file, b"x").unwrap();
-        let err = is_up_to_date(&file.join("child"), Some("2000-01-01T00:00:00Z")).unwrap_err();
+        let when = remote_mtime(&json!({ "modifiedTime": "2000-01-01T00:00:00Z" }));
+        let err = is_up_to_date(&file.join("child"), when, None).unwrap_err();
         assert!(err.to_string().contains("cannot inspect"), "{err}");
     }
 }

@@ -42,8 +42,11 @@ gwsr drive +sync --folder-id FOLDER_ID --dir ./mirror --dry-run
 
 - Recurses into sub-folders. Regular files are downloaded; Google
 - Docs/Sheets/Slides/Drawings are exported as docx/xlsx/pptx/pdf.
-- Local files are replaced only when the Drive copy is newer; local files
-- that are not in Drive are left untouched (nothing is ever deleted).
+- Downloaded files carry the Drive modification time. A local file is
+- replaced whenever its modification time or size differs from the Drive
+- copy, so a mirrored file edited locally is overwritten on the next run.
+- Local files that are not in Drive are left untouched (nothing is ever
+- deleted).
 - Other Google-native types (Forms, Sites, shortcuts...) are reported as skipped.
 
 ## See Also
