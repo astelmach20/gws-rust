@@ -361,6 +361,91 @@ fn workflow_requests_honour_api_base_override() {
     }
 }
 
+/// A workflow `--dry-run` plan lists every query parameter the real run
+/// sends; values only known at run time are `<placeholders>`.
+#[test]
+fn workflow_dry_run_plans_list_every_query_parameter() {
+    let dir = setup();
+    let events = json!({
+        "timeMin": "<start of today in the account time zone>",
+        "timeMax": "<start of tomorrow in the account time zone>",
+        "singleEvents": "true",
+        "orderBy": "startTime",
+        "maxResults": "250",
+    });
+    let cases: [(&[&str], Vec<Value>); 4] = [
+        (
+            &["workflow", "+standup-report", "--dry-run"],
+            vec![
+                events.clone(),
+                json!({"showCompleted": "false", "maxResults": "100"}),
+            ],
+        ),
+        (
+            &["workflow", "+weekly-digest", "--dry-run"],
+            vec![
+                json!({
+                    "timeMin": "<now>",
+                    "timeMax": "<now + 7 days>",
+                    "singleEvents": "true",
+                    "orderBy": "startTime",
+                    "maxResults": "250",
+                }),
+                json!({"q": "is:unread", "maxResults": "1"}),
+            ],
+        ),
+        (
+            &[
+                "workflow",
+                "+email-to-task",
+                "--message-id",
+                "M",
+                "--tasklist-id",
+                "T",
+                "--dry-run",
+            ],
+            vec![
+                json!({"format": "metadata", "metadataHeaders": "Subject"}),
+                Value::Null,
+            ],
+        ),
+        (
+            &[
+                "workflow",
+                "+file-announce",
+                "--file-id",
+                "F",
+                "--space-id",
+                "S",
+                "--dry-run",
+            ],
+            vec![
+                json!({"fields": "id,name,webViewLink", "supportsAllDrives": "true"}),
+                json!({"requestId": "<random UUID>"}),
+            ],
+        ),
+    ];
+    for (args, queries) in cases {
+        let out = gwsr(dir.path()).args(args).output().unwrap();
+        assert!(out.status.success(), "{args:?}: {out:?}");
+        let plan = stdout_json(&out);
+        let got: Vec<Value> = plan["requests"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["query_params"].clone())
+            .collect();
+        assert_eq!(got, queries, "{args:?}");
+        if args[1] == "+email-to-task" {
+            // The real task's notes end with the message snippet.
+            assert_eq!(
+                plan["requests"][1]["body"]["notes"],
+                "From email: M\n\n<snippet of the message>"
+            );
+        }
+    }
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn text_responses_of_generated_methods_are_screened_by_model_armor() {
     use wiremock::matchers::{method, path};
