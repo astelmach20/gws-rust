@@ -545,12 +545,6 @@ pub(crate) async fn execute_to(
         };
         pages += 1;
 
-        if sanitize.template.is_some() {
-            value = crate::helpers::modelarmor::require_pass(
-                crate::helpers::modelarmor::sanitize_value(&sanitize, value).await?,
-            )?;
-        }
-
         // Long-running operations.
         let auto_wait = output.is_some() && operation::is_operation(&value);
         if operation::is_operation(&value) && (options.wait.is_some() || auto_wait) {
@@ -594,6 +588,14 @@ pub(crate) async fn execute_to(
                 }
                 break;
             }
+        }
+
+        // Screen what is printed or saved: with --wait that is the finished
+        // operation's result, not the pending operation first returned.
+        if sanitize.template.is_some() {
+            value = crate::helpers::modelarmor::require_pass(
+                crate::helpers::modelarmor::sanitize_value(&sanitize, value).await?,
+            )?;
         }
 
         match &output {
