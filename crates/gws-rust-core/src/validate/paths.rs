@@ -107,10 +107,9 @@ fn resolve_any(path_str: &str, flag_name: &str, cwd: &Path) -> Result<PathBuf, G
     }
     reject_dangerous_chars(path_str, flag_name)?;
     let joined = cwd.join(path_str);
-    let normalized = normalize_existing_prefix(&joined).map_err(|e| {
+    normalize_existing_prefix(&joined).map_err(|e| {
         GwsError::Validation(format!("Failed to resolve {flag_name} '{path_str}': {e}"))
-    })?;
-    Ok(normalize_dotdot(&normalized))
+    })
 }
 
 fn enforce_policy(
@@ -138,49 +137,35 @@ fn enforce_policy(
     }
 }
 
-/// Resolve `.` and `..` components lexically, without touching the filesystem.
-fn normalize_dotdot(path: &Path) -> PathBuf {
-    let mut out = PathBuf::new();
-    for component in path.components() {
-        match component {
-            Component::ParentDir => {
-                out.pop();
-            }
-            Component::CurDir => {}
-            c => out.push(c),
-        }
-    }
-    out
-}
-
-/// Canonicalizes the longest existing prefix of `path` (resolving symlinks)
-/// and appends the remaining, not-yet-existing components.
+/// Resolves `path` component by component, canonicalizing (resolving
+/// symlinks in) every prefix that exists and keeping the rest lexically.
+///
+/// `..` is applied to the already-resolved prefix, never to the raw input,
+/// so `link/missing/../x` becomes `<link target>/x` rather than `link/x`
+/// (which would still follow the link on I/O).
 ///
 /// A path component that is a symlink counts as existing even when it is
 /// dangling, so canonicalization fails loudly instead of letting later I/O
 /// follow the link to an unchecked location.
 fn normalize_existing_prefix(path: &Path) -> std::io::Result<PathBuf> {
-    let mut remaining = Vec::new();
-    let mut current = path.to_path_buf();
-    loop {
-        if current.symlink_metadata().is_ok() {
-            let mut resolved = current.canonicalize()?;
-            for seg in remaining.into_iter().rev() {
-                resolved.push(seg);
+    let mut resolved = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Prefix(_) | Component::RootDir => resolved.push(component),
+            Component::CurDir => {}
+            // `resolved` contains no symlinks, so a lexical pop is exact.
+            Component::ParentDir => {
+                resolved.pop();
             }
-            return Ok(resolved);
-        }
-        match (current.file_name(), current.parent()) {
-            (Some(name), Some(parent)) => {
-                remaining.push(name.to_os_string());
-                current = parent.to_path_buf();
-            }
-            _ => {
-                // `..` or root without an existing prefix: normalize lexically.
-                return Ok(path.to_path_buf());
+            Component::Normal(name) => {
+                resolved.push(name);
+                if resolved.symlink_metadata().is_ok() {
+                    resolved = resolved.canonicalize()?;
+                }
             }
         }
     }
+    Ok(resolved)
 }
 
 #[cfg(test)]
@@ -303,6 +288,42 @@ mod tests {
         // Unrestricted mode follows the link and returns the real target.
         let got = resolve_file_path(
             "escape/secret.txt",
+            "--output",
+            PathPolicy::Unrestricted,
+            &cwd,
+        )
+        .unwrap();
+        assert_eq!(got, outside.join("secret.txt"));
+    }
+
+    /// `link/missing/../x` must not be normalized lexically to `link/x`
+    /// while `link` still points outside the sandbox: I/O on the returned
+    /// path would follow the symlink out of the current directory.
+    #[cfg(unix)]
+    #[test]
+    fn strict_rejects_symlink_escape_behind_dotdot() {
+        let (_d, cwd) = canon_tmp();
+        let (_o, outside) = canon_tmp();
+        std::os::unix::fs::symlink(&outside, cwd.join("escape")).unwrap();
+        for path in [
+            "escape/missing/../secret.txt",
+            "escape/a/b/../../secret.txt",
+        ] {
+            let result = resolve_file_path(path, "--output", PathPolicy::Cwd, &cwd);
+            assert!(
+                result.is_err(),
+                "{path} was accepted as {:?}, which follows the symlink to {}",
+                result,
+                outside.join("secret.txt").display()
+            );
+            assert!(
+                resolve_output_dir(path, PathPolicy::Cwd, &cwd).is_err(),
+                "{path}"
+            );
+        }
+        // Unrestricted mode never returns a path that still contains the link.
+        let got = resolve_file_path(
+            "escape/missing/../secret.txt",
             "--output",
             PathPolicy::Unrestricted,
             &cwd,
