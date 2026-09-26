@@ -2,7 +2,7 @@
 name: gwsr-admin-reports-audit
 description: "Google Workspace Admin SDK: Query audit activity (Reports API)."
 metadata:
-  version: 0.22.5
+  version: 0.23.0
   openclaw:
     category: "productivity"
     requires:

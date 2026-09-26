@@ -2,7 +2,7 @@
 name: gwsr-chromepolicy
 description: "Google Chrome Policy: Manage Chrome policies for users and devices."
 metadata:
-  version: 0.22.5
+  version: 0.23.0
   openclaw:
     category: "productivity"
     requires:

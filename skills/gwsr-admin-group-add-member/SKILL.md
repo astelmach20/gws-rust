@@ -2,7 +2,7 @@
 name: gwsr-admin-group-add-member
 description: "Google Workspace Admin SDK: Add a user or group to a group."
 metadata:
-  version: 0.22.5
+  version: 0.23.0
   openclaw:
     category: "productivity"
     requires:

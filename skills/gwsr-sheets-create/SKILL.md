@@ -2,7 +2,7 @@
 name: gwsr-sheets-create
 description: "Google Sheets: Create a new spreadsheet."
 metadata:
-  version: 0.22.5
+  version: 0.23.0
   openclaw:
     category: "productivity"
     requires:

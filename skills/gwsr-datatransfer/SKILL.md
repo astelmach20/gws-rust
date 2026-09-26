@@ -2,7 +2,7 @@
 name: gwsr-datatransfer
 description: "Google Workspace Admin SDK: Transfer user data between accounts (Admin SDK Data Transfer)."
 metadata:
-  version: 0.22.5
+  version: 0.23.0
   openclaw:
     category: "productivity"
     requires:
