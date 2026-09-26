@@ -209,21 +209,34 @@ pub(crate) async fn send_multipart(
 }
 
 /// Parse a resumable-upload `Range: bytes=0-N` header into the next offset.
-pub(crate) fn next_offset(headers: &reqwest::header::HeaderMap) -> Result<u64, GwsError> {
+///
+/// An offset past the end of the `total`-byte file is an error: the server
+/// is describing some other upload.
+pub(crate) fn next_offset(
+    headers: &reqwest::header::HeaderMap,
+    total: u64,
+) -> Result<u64, GwsError> {
+    let offset = parse_range_end(headers)?;
+    if offset > total {
+        return Err(GwsError::other(anyhow::anyhow!(
+            "upload server reports {offset} bytes persisted, but the file has only {total}"
+        )));
+    }
+    Ok(offset)
+}
+
+fn parse_range_end(headers: &reqwest::header::HeaderMap) -> Result<u64, GwsError> {
     let Some(value) = headers.get(RANGE) else {
         return Ok(0);
     };
     let text = value
         .to_str()
         .map_err(|_| GwsError::other(anyhow::anyhow!("non-ASCII Range header in upload status")))?;
-    let last = text
-        .strip_prefix("bytes=")
+    text.strip_prefix("bytes=")
         .and_then(|r| r.split_once('-'))
         .and_then(|(_, end)| end.trim().parse::<u64>().ok())
-        .ok_or_else(|| {
-            GwsError::other(anyhow::anyhow!("unparseable upload Range header {text:?}"))
-        })?;
-    Ok(last + 1)
+        .and_then(|last| last.checked_add(1))
+        .ok_or_else(|| GwsError::other(anyhow::anyhow!("unparseable upload Range header {text:?}")))
 }
 
 struct Progress {
@@ -369,8 +382,10 @@ pub(crate) async fn resumable_upload(
         let len = usize::try_from((total - offset).min(req.chunk_size as u64))
             .map_err(|_| GwsError::other(anyhow::anyhow!("chunk length overflow")))?;
         let chunk = req.data.read_range(offset, len).await?;
-        let range = if total == 0 {
-            "bytes */0".to_string()
+        // Nothing left to send (an empty file, or a 308 acknowledging every
+        // byte): ask the server to finish the upload.
+        let range = if len == 0 {
+            format!("bytes */{total}")
         } else {
             format!("bytes {offset}-{}/{total}", offset + len as u64 - 1)
         };
@@ -396,10 +411,17 @@ pub(crate) async fn resumable_upload(
                     return Ok(sent);
                 }
                 StatusCode::PERMANENT_REDIRECT => {
-                    offset = next_offset(sent.response.headers())?;
-                    failures = 0;
-                    progress.update(offset);
-                    continue;
+                    let next = next_offset(sent.response.headers(), total)?;
+                    if next > offset {
+                        offset = next;
+                        failures = 0;
+                        progress.update(offset);
+                        continue;
+                    }
+                    // Nothing of the chunk was persisted: resend it, but as a
+                    // failure, so a session that never advances ends.
+                    offset = next;
+                    format!("HTTP 308 with no progress at byte {offset}")
                 }
                 StatusCode::NOT_FOUND | StatusCode::GONE => {
                     progress.finish();
@@ -448,7 +470,7 @@ pub(crate) async fn resumable_upload(
                 return Ok(sent);
             }
             Ok(sent) if sent.response.status() == StatusCode::PERMANENT_REDIRECT => {
-                offset = next_offset(sent.response.headers())?;
+                offset = next_offset(sent.response.headers(), total)?;
             }
             Ok(sent) => {
                 tracing::debug!(status = %sent.response.status(), "upload status query failed; retrying chunk");
@@ -578,11 +600,16 @@ mod tests {
     #[test]
     fn range_header_parsing() {
         let mut h = reqwest::header::HeaderMap::new();
-        assert_eq!(next_offset(&h).unwrap(), 0);
+        assert_eq!(next_offset(&h, u64::MAX).unwrap(), 0);
         h.insert(RANGE, "bytes=0-262143".parse().unwrap());
-        assert_eq!(next_offset(&h).unwrap(), 262_144);
+        assert_eq!(next_offset(&h, u64::MAX).unwrap(), 262_144);
         h.insert(RANGE, "garbage".parse().unwrap());
-        assert!(next_offset(&h).is_err());
+        assert!(next_offset(&h, u64::MAX).is_err());
+        h.insert(RANGE, "bytes=0-99".parse().unwrap());
+        assert_eq!(next_offset(&h, 100).unwrap(), 100);
+        assert!(next_offset(&h, 99).is_err(), "past the end of the file");
+        h.insert(RANGE, format!("bytes=0-{}", u64::MAX).parse().unwrap());
+        assert!(next_offset(&h, u64::MAX).is_err(), "must not overflow");
     }
 
     #[test]
