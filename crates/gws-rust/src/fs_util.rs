@@ -155,32 +155,41 @@ impl FileLock {
             use std::os::unix::fs::OpenOptionsExt;
             opts.mode(0o600);
         }
-        let file = opts.open(path)?;
         let start = Instant::now();
-        loop {
-            match file.try_lock() {
-                Ok(()) => {
-                    return Ok(Self {
-                        file,
-                        path: path.to_path_buf(),
-                    });
-                }
-                Err(std::fs::TryLockError::WouldBlock) => {
-                    if start.elapsed() >= timeout {
-                        return Err(io::Error::new(
-                            io::ErrorKind::TimedOut,
-                            format!(
-                                "timed out after {}s waiting for lock '{}' (another gwsr process \
-                                 may be stuck; if not, the lock is released automatically when \
-                                 that process exits)",
-                                timeout.as_secs(),
-                                path.display()
-                            ),
-                        ));
+        'open: loop {
+            let file = opts.open(path)?;
+            loop {
+                match file.try_lock() {
+                    Ok(()) => {
+                        // A peer (e.g. `auth logout`) may have deleted or
+                        // replaced the lock file while we waited; the lock we
+                        // hold is then on an orphaned file and excludes
+                        // nobody. Reopen the path and lock again.
+                        if !still_at_path(&file, path)? {
+                            continue 'open;
+                        }
+                        return Ok(Self {
+                            file,
+                            path: path.to_path_buf(),
+                        });
                     }
-                    std::thread::sleep(Duration::from_millis(25));
+                    Err(std::fs::TryLockError::WouldBlock) => {
+                        if start.elapsed() >= timeout {
+                            return Err(io::Error::new(
+                                io::ErrorKind::TimedOut,
+                                format!(
+                                    "timed out after {}s waiting for lock '{}' (another gwsr \
+                                     process may be stuck; if not, the lock is released \
+                                     automatically when that process exits)",
+                                    timeout.as_secs(),
+                                    path.display()
+                                ),
+                            ));
+                        }
+                        std::thread::sleep(Duration::from_millis(25));
+                    }
+                    Err(std::fs::TryLockError::Error(e)) => return Err(e),
                 }
-                Err(std::fs::TryLockError::Error(e)) => return Err(e),
             }
         }
     }
@@ -192,6 +201,27 @@ impl FileLock {
             .await
             .map_err(io::Error::other)?
     }
+}
+
+/// Whether `path` still names the file `file` has open (same device and
+/// inode). A missing path means the file was deleted.
+#[cfg(unix)]
+fn still_at_path(file: &File, path: &Path) -> io::Result<bool> {
+    use std::os::unix::fs::MetadataExt;
+    let open = file.metadata()?;
+    match std::fs::metadata(path) {
+        Ok(named) => Ok(open.dev() == named.dev() && open.ino() == named.ino()),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(e),
+    }
+}
+
+/// Windows exposes no stable file identity to compare. Deleting a lock file
+/// another process holds open only marks it delete-pending there, and a
+/// later open of the path fails loudly instead of locking an orphan.
+#[cfg(not(unix))]
+fn still_at_path(_file: &File, _path: &Path) -> io::Result<bool> {
+    Ok(true)
 }
 
 impl Drop for FileLock {
@@ -209,6 +239,47 @@ impl Drop for FileLock {
 mod tests {
     use super::*;
     use std::fs;
+
+    #[cfg(unix)]
+    #[test]
+    fn lock_waiter_does_not_keep_a_lock_on_a_deleted_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("token_cache.lock");
+        let holder = FileLock::acquire(&path, Duration::from_secs(1)).unwrap();
+        let waiter_path = path.clone();
+        let waiter =
+            std::thread::spawn(move || FileLock::acquire(&waiter_path, Duration::from_secs(5)));
+        std::thread::sleep(Duration::from_millis(200));
+        // The holder deletes the lock file (as `auth logout` does), then
+        // releases it. The waiter must lock the file now at the path, so a
+        // third process locking the path is excluded.
+        fs::remove_file(&path).unwrap();
+        drop(holder);
+        let waiter = waiter.join().unwrap().unwrap();
+        assert!(path.exists(), "the waiter recreated the lock file");
+        let third = FileLock::acquire(&path, Duration::from_millis(200)).unwrap_err();
+        assert_eq!(third.kind(), io::ErrorKind::TimedOut, "{third}");
+        drop(waiter);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn lock_waiter_fails_loudly_when_the_directory_is_gone() {
+        let dir = tempfile::tempdir().unwrap();
+        let profile = dir.path().join("profile");
+        fs::create_dir(&profile).unwrap();
+        let path = profile.join("token_cache.lock");
+        let holder = FileLock::acquire(&path, Duration::from_secs(1)).unwrap();
+        let waiter_path = path.clone();
+        let waiter =
+            std::thread::spawn(move || FileLock::acquire(&waiter_path, Duration::from_secs(5)));
+        std::thread::sleep(Duration::from_millis(200));
+        fs::remove_file(&path).unwrap();
+        fs::remove_dir(&profile).unwrap();
+        drop(holder);
+        let err = waiter.join().unwrap().unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::NotFound, "{err}");
+    }
 
     #[test]
     fn atomic_write_creates_private_file() {
