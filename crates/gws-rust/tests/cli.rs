@@ -1107,6 +1107,48 @@ fn auth_subcommands_complete_and_get_man_pages() {
     }
 }
 
+/// `auth setup` parses its own flags too: completion and its man page must
+/// show them, not the passthrough `ARGS`.
+#[test]
+fn auth_setup_flags_complete_and_get_documented() {
+    let env = Env::new();
+    let complete = |words: &[&str]| {
+        let out = env
+            .cmd()
+            .env("GWSR_COMPLETE", "bash")
+            .env("_CLAP_COMPLETE_INDEX", (words.len() - 1).to_string())
+            .env("_CLAP_COMPLETE_COMP_TYPE", "9")
+            .env("_CLAP_COMPLETE_SPACE", "true")
+            .arg("--")
+            .args(words)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{out:?}");
+        String::from_utf8(out.stdout).unwrap()
+    };
+    assert_eq!(
+        complete(&["gwsr", "auth", "setup", "--non"]),
+        "--non-interactive"
+    );
+    // `--profile` is a global `auth` flag, which setup accepts too.
+    assert_eq!(
+        complete(&["gwsr", "auth", "setup", "--pro"]),
+        "--project\n--profile"
+    );
+    let flags = complete(&["gwsr", "auth", "setup", "--"]);
+    for flag in ["--project", "--login", "--dry-run", "--non-interactive"] {
+        assert!(flags.lines().any(|l| l == flag), "{flag} missing: {flags}");
+    }
+
+    env.cmd()
+        .args(["dev", "man", "--output-dir", "man"])
+        .assert()
+        .success();
+    let page = std::fs::read_to_string(env.work_dir().join("man/gwsr-auth-setup.1")).unwrap();
+    assert!(page.contains("non\\-interactive"), "{page}");
+    assert!(!page.contains("ARGS"), "{page}");
+}
+
 // ── generate-skills ─────────────────────────────────────────────────────
 
 #[test]

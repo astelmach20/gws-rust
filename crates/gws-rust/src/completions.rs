@@ -97,12 +97,16 @@ pub fn complete_if_requested() -> Result<bool, clap::Error> {
 /// Replace the top-level `auth` passthrough argument with the real `gwsr auth`
 /// tree, which `auth` parses on its own, so completion and man pages cover its
 /// subcommands and flags. The top-level description is kept.
+///
+/// `auth setup` is a passthrough inside that tree as well (it parses its own
+/// flags), so it is replaced by the command `setup` actually parses with.
 fn with_auth_tree(root: Command) -> Command {
     root.mut_subcommands(|sub| {
         if sub.get_name() != "auth" {
             return sub;
         }
-        let auth = crate::auth::commands::auth_command();
+        let auth = crate::auth::commands::auth_command()
+            .mut_subcommand("setup", |_| crate::auth::setup::setup_command());
         match sub.get_about() {
             Some(about) => auth.about(about.clone()),
             None => auth,
@@ -233,6 +237,17 @@ mod tests {
             auth.get_arguments().all(|a| a.get_id() != "args"),
             "the passthrough argument is gone"
         );
+        let setup = auth.find_subcommand("setup").unwrap();
+        assert!(
+            setup.get_arguments().all(|a| a.get_id() != "args"),
+            "setup's passthrough argument is gone"
+        );
+        for flag in ["project", "login", "dry-run", "non-interactive"] {
+            assert!(
+                setup.get_arguments().any(|a| a.get_long() == Some(flag)),
+                "{flag}"
+            );
+        }
         let top = crate::cli_args::command();
         assert_eq!(
             auth.get_about().map(ToString::to_string),
