@@ -906,6 +906,42 @@ mod tests {
         assert_eq!(cc[0].email, "joann@example.com");
     }
 
+    /// RFC 5322 allows comments in address headers, and the legacy
+    /// `addr (Display Name)` form is still sent by some mailers. The comment
+    /// must not end up inside the reply's address, and a comma inside a
+    /// comment must not split the mailbox in two.
+    #[test]
+    fn test_reply_recipients_ignore_rfc5322_comments() {
+        let msg = json!({
+            "threadId": "t1",
+            "payload": {
+                "headers": [
+                    { "name": "From", "value": "alice@example.com (Alice Smith)" },
+                    { "name": "To", "value": "me@example.com" },
+                    { "name": "Cc", "value": "bob@example.com (Smith, Bob), carol@example.com" },
+                    { "name": "Subject", "value": "Hello" },
+                    { "name": "Message-ID", "value": "<m1@example.com>" }
+                ]
+            }
+        });
+        let original = parse_original_message(&msg).unwrap();
+
+        // Plain reply goes to the bare address.
+        let to = extract_reply_to_address(&original);
+        assert_eq!(to.len(), 1);
+        assert_eq!(to[0].email, "alice@example.com");
+
+        let recipients =
+            build_reply_all_recipients(&original, None, None, Some("me@example.com"), None)
+                .unwrap();
+        let emails = |list: &[Mailbox]| list.iter().map(|m| m.email.clone()).collect::<Vec<_>>();
+        assert_eq!(emails(&recipients.to), vec!["alice@example.com"]);
+        assert_eq!(
+            emails(&recipients.cc.unwrap_or_default()),
+            vec!["bob@example.com", "carol@example.com"]
+        );
+    }
+
     #[test]
     fn test_reply_all_uses_reply_to_for_to() {
         let original = OriginalMessage {
