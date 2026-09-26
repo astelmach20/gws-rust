@@ -30,7 +30,8 @@ use crate::services::resolve_service_spec;
 /// Handles the `gwsr schema <dotted.path>` command and returns the schema as
 /// JSON (the caller formats and prints it).
 ///
-/// Path format: `service.resource[.subresource].method` or `service.Type`,
+/// Path format: `service.resource[.subresource].method`, `service.Type`, or
+/// `service.method` for a method declared outside any resource,
 /// where `service` is a registered alias, `alias:version`, or any Discovery
 /// API as `<api>:<version>`.
 /// Examples: `drive.files.list`, `drive.File`, `admin:directory_v1.users.list`.
@@ -55,6 +56,15 @@ pub async fn handle_schema_command(path: &str, resolve_refs: bool) -> Result<Val
                 let mut seen = std::collections::HashSet::new();
                 // Add self to seen to prevent immediate recursion
                 seen.insert(schema_name.to_string());
+                resolve_schema_refs(&mut output, &doc, &mut seen);
+            }
+            return Ok(output);
+        }
+        // A method declared outside any resource (e.g. `oauth2:v2.tokeninfo`).
+        if let Some(method) = doc.methods.get(schema_name) {
+            let mut output = build_schema_output(&doc, method);
+            if resolve_refs {
+                let mut seen = std::collections::HashSet::new();
                 resolve_schema_refs(&mut output, &doc, &mut seen);
             }
             return Ok(output);
@@ -118,7 +128,10 @@ pub fn method_schema_path(doc: &RestDescription, method: &RestMethod) -> Option<
     }
 
     let mut path = Vec::new();
-    if !walk(&doc.resources, method, &mut path) {
+    // A method declared outside any resource (e.g. `oauth2:v2.tokeninfo`).
+    if let Some((method_name, _)) = doc.methods.iter().find(|(_, m)| std::ptr::eq(*m, method)) {
+        path.push(method_name.clone());
+    } else if !walk(&doc.resources, method, &mut path) {
         return None;
     }
     let service = crate::services::SERVICES
@@ -424,6 +437,23 @@ mod tests {
             let m = &doc.resources["spaces"].resources["messages"].methods["create"];
             assert_eq!(method_schema_path(&doc, m).as_deref(), Some(expected));
         }
+    }
+
+    #[test]
+    fn method_schema_path_names_top_level_methods() {
+        let mut doc = doc_with_nested_method("oauth2", "v2");
+        doc.methods.insert(
+            "tokeninfo".into(),
+            RestMethod {
+                id: Some("oauth2.tokeninfo".into()),
+                ..Default::default()
+            },
+        );
+        let m = &doc.methods["tokeninfo"];
+        assert_eq!(
+            method_schema_path(&doc, m).as_deref(),
+            Some("oauth2:v2.tokeninfo")
+        );
     }
 
     #[test]
