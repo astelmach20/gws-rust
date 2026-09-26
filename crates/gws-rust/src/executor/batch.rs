@@ -25,7 +25,8 @@
 //! optional). Output is NDJSON, one line per call, in input order:
 //! `{"id": ..., "status": 200, "body": ...}`. Calls are grouped into batches
 //! of at most 100 (Google's limit). The command fails (exit 1) when any call
-//! failed, after printing every result.
+//! failed, after printing every result. With `--sanitize`, every result body
+//! is screened by Model Armor before it is printed, as for a single call.
 
 use std::io::IsTerminal;
 
@@ -41,6 +42,7 @@ use super::url::{UrlTarget, build_url};
 use super::{ExecOptions, body_schema, input};
 use crate::discovery::{RestDescription, RestMethod, RestResource};
 use crate::error::GwsError;
+use crate::helpers::modelarmor::SanitizeConfig;
 use crate::transport::errors::error_from_response;
 use crate::transport::{Credentials, Transport, read_body};
 
@@ -90,6 +92,8 @@ pub struct BatchContext {
     pub dry_run: bool,
     /// `--api-version`: overrides the `:VERSION` suffix.
     pub api_version: Option<String>,
+    /// `--sanitize` / `GWSR_SANITIZE_TEMPLATE`: screen every result body.
+    pub sanitize: SanitizeConfig,
 }
 
 /// Entry point for `gwsr batch ...`.
@@ -133,7 +137,15 @@ pub async fn handle_batch_command(args: &BatchArgs, ctx: &BatchContext) -> Resul
     } else {
         batch_credentials(&calls).await?
     };
-    run_batch(&doc, &calls, credentials, &options, &Emitter::stdout()).await
+    run_batch(
+        &doc,
+        &calls,
+        credentials,
+        &options,
+        &ctx.sanitize,
+        &Emitter::stdout(),
+    )
+    .await
 }
 
 async fn batch_credentials(calls: &[BatchCall<'_>]) -> Result<Credentials, GwsError> {
@@ -388,6 +400,7 @@ pub(crate) async fn run_batch(
     calls: &[BatchCall<'_>],
     credentials: Credentials,
     options: &ExecOptions,
+    sanitize: &SanitizeConfig,
     emitter: &Emitter,
 ) -> Result<(), GwsError> {
     let destructive: Vec<&str> = calls
@@ -487,8 +500,10 @@ pub(crate) async fn run_batch(
             if !(200..300).contains(&part.status) {
                 failures += 1;
             }
-            emitter
-                .line(&json!({"id": id, "status": part.status, "body": part.body}).to_string())?;
+            let body = crate::helpers::modelarmor::require_pass(
+                crate::helpers::modelarmor::sanitize_value(sanitize, part.body).await?,
+            )?;
+            emitter.line(&json!({"id": id, "status": part.status, "body": body}).to_string())?;
         }
     }
     if failures > 0 {
