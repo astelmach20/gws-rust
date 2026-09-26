@@ -313,6 +313,25 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn show_completed_also_shows_hidden() {
+        // Upstream googleworkspace/cli#509: tasks completed in Google's apps are
+        // hidden, so showCompleted alone returned nothing.
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/tasks/v1/lists/L1/tasks"))
+            .and(query_param("showCompleted", "true"))
+            .and(query_param("showHidden", "true"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(
+                json!({"items": [{"id": "a", "status": "completed", "hidden": true}]}),
+            ))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let api = api(&server.uri(), "");
+        assert_eq!(list(&api, "L1", true, None).await.unwrap()["count"], 1);
+    }
+
+    #[tokio::test]
     async fn add_plan_in_dry_run() {
         let api = dry_api("");
         add(&api, "@default", "T", Some("n"), None).await.unwrap();
