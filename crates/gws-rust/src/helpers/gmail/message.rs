@@ -228,8 +228,8 @@ pub(super) fn parse_original_message(msg: &Value) -> Result<OriginalMessage, Gws
         .filter(|id| !id.is_empty())
         .collect();
 
-    let reply_to = non_empty_then(&parsed_headers.reply_to, Mailbox::parse_list);
-    let cc = non_empty_then(&parsed_headers.cc, Mailbox::parse_list);
+    let reply_to = non_empty_then(&parsed_headers.reply_to, Mailbox::parse_header_list);
+    let cc = non_empty_then(&parsed_headers.cc, Mailbox::parse_header_list);
     let date = Some(parsed_headers.date).filter(|s| !s.is_empty());
 
     Ok(OriginalMessage {
@@ -238,7 +238,7 @@ pub(super) fn parse_original_message(msg: &Value) -> Result<OriginalMessage, Gws
         references,
         from: Mailbox::parse(&parsed_headers.from),
         reply_to,
-        to: Mailbox::parse_list(&parsed_headers.to),
+        to: Mailbox::parse_header_list(&parsed_headers.to),
         cc,
         subject: parsed_headers.subject,
         date,
