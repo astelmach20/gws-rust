@@ -1618,6 +1618,46 @@ mod tests {
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
     }
 
+    /// File systems cap a name at 255 bytes, not characters: a long non-ASCII
+    /// Drive name (plus the export extension) must still be writable.
+    #[tokio::test]
+    async fn sync_fits_long_multibyte_names_in_the_file_system_limit() {
+        // 150 chars: 300 UTF-16 units (APFS limit 255) and 600 UTF-8 bytes
+        // (ext4 limit 255).
+        let long_name = "\u{1F4C4}".repeat(150);
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/drive/v3/files"))
+            .and(query_param("q", "'ROOT' in parents and trashed = false"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"files": [
+                {"id": "D", "name": long_name, "mimeType": DOC},
+                {"id": "A", "name": "a.txt", "mimeType": "text/plain"}
+            ]})))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/drive/v3/files/A"))
+            .and(query_param("alt", "media"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(b"A".to_vec()))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/drive/v3/files/D/export"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(b"DOCX".to_vec()))
+            .mount(&server)
+            .await;
+        let api = api(&server.uri(), "drive/v3/");
+        let dir = tempfile::tempdir().unwrap();
+        let v = sync(&api, "ROOT", dir.path()).await.unwrap();
+        assert_eq!(v["downloaded"].as_array().unwrap().len(), 2, "{v}");
+        let doc = PathBuf::from(v["downloaded"][0]["path"].as_str().unwrap());
+        let file_name = doc.file_name().unwrap().to_str().unwrap();
+        assert!(file_name.len() <= 255, "{file_name}");
+        assert!(file_name.starts_with('\u{1F4C4}'), "{file_name}");
+        assert!(file_name.ends_with(".docx"), "{file_name}");
+        assert_eq!(std::fs::read(&doc).unwrap(), b"DOCX");
+    }
+
     #[test]
     fn inject_commands_registers_all() {
         let cmd = DriveHelper.inject_commands(
