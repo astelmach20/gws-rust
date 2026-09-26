@@ -526,6 +526,24 @@ async fn fields_flag_keeps_next_page_token() {
     call.run(&Emitter::capturing()).await.unwrap();
 }
 
+#[tokio::test]
+async fn empty_fields_mask_is_rejected_before_sending() {
+    let server = MockServer::start().await;
+    let d = doc(&server.uri());
+    for (mask, page_all) in [("", false), ("", true), ("  ", true)] {
+        let mut call = Call::new(&d, "list", &server);
+        call.options.fields = Some(mask.into());
+        call.pagination.page_all = page_all;
+        // Paginating turned "" into the malformed mask "nextPageToken,".
+        let err = call.run(&Emitter::capturing()).await.unwrap_err();
+        assert!(
+            matches!(err, GwsError::Validation(ref m) if m.contains("--fields")),
+            "{mask:?} page_all={page_all}: {err:?}"
+        );
+    }
+    assert!(server.received_requests().await.unwrap().is_empty());
+}
+
 // ── Validation ──────────────────────────────────────────────────────────
 
 #[tokio::test]

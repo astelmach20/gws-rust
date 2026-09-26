@@ -240,6 +240,14 @@ fn apply_param_defaults(
     paginating: bool,
 ) -> Result<(), GwsError> {
     if let Some(mask) = fields {
+        // An empty mask is never what was meant: sent as is it is ignored or
+        // rejected by the API, and pagination below would turn it into the
+        // malformed mask "nextPageToken,".
+        if mask.trim().is_empty() {
+            return Err(GwsError::Validation(
+                "--fields must not be empty; omit it for the full response".to_string(),
+            ));
+        }
         if params.contains_key("fields") {
             return Err(GwsError::Validation(
                 "--fields conflicts with \"fields\" in --params; use only one".to_string(),
