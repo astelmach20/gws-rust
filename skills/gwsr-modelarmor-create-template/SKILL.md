@@ -37,8 +37,8 @@ gwsr modelarmor +create-template --project <PROJECT> --location <LOCATION> --tem
 ## Examples
 
 ```bash
-gwsr modelarmor +create-template --project P --location us-central1 --template-id my-tmpl --preset jailbreak
-gwsr modelarmor +create-template --project P --location us-central1 --template-id my-tmpl --json '{...}'
+gwsr modelarmor +create-template --project my-project --location us-central1 --template-id my-tmpl --preset jailbreak
+gwsr modelarmor +create-template --project my-project --location us-central1 --template-id my-tmpl --json '{...}'
 ```
 
 ## Tips

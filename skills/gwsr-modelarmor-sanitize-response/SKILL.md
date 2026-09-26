@@ -35,7 +35,7 @@ gwsr modelarmor +sanitize-response --template <NAME>
 ## Examples
 
 ```bash
-gwsr modelarmor +sanitize-response --template projects/P/locations/L/templates/T --text 'model output'
+gwsr modelarmor +sanitize-response --template projects/my-project/locations/us-central1/templates/my-tmpl --text 'model output'
 model_cmd | gwsr modelarmor +sanitize-response --template ...
 ```
 
