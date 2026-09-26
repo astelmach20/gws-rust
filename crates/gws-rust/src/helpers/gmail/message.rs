@@ -148,15 +148,16 @@ fn parse_message_headers(headers: &[Value]) -> ParsedMessageHeaders {
         let name = header.get("name").and_then(|v| v.as_str()).unwrap_or("");
         let value = header.get("value").and_then(|v| v.as_str()).unwrap_or("");
 
-        match name {
-            "From" => parsed.from = value.to_string(),
-            "Reply-To" => append_address_list_header_value(&mut parsed.reply_to, value),
-            "To" => append_address_list_header_value(&mut parsed.to, value),
-            "Cc" => append_address_list_header_value(&mut parsed.cc, value),
-            "Subject" => parsed.subject = value.to_string(),
-            "Date" => parsed.date = value.to_string(),
-            "Message-ID" | "Message-Id" => parsed.message_id = value.to_string(),
-            "References" => append_header_value(&mut parsed.references, value),
+        // RFC 5322 §1.2.2: header field names are case-insensitive.
+        match name.to_ascii_lowercase().as_str() {
+            "from" => parsed.from = value.to_string(),
+            "reply-to" => append_address_list_header_value(&mut parsed.reply_to, value),
+            "to" => append_address_list_header_value(&mut parsed.to, value),
+            "cc" => append_address_list_header_value(&mut parsed.cc, value),
+            "subject" => parsed.subject = value.to_string(),
+            "date" => parsed.date = value.to_string(),
+            "message-id" => parsed.message_id = value.to_string(),
+            "references" => append_header_value(&mut parsed.references, value),
             _ => {}
         }
     }
@@ -740,6 +741,83 @@ mod tests {
         append_address_list_header_value(&mut header_value, "");
 
         assert_eq!(header_value, "alice@example.com, bob@example.com");
+    }
+
+    #[test]
+    fn test_parse_original_message_header_names_are_case_insensitive() {
+        // RFC 5322 header field names are case-insensitive; senders emit `CC`,
+        // `Reply-to`, `Message-id` and so on.
+        let msg = json!({
+            "threadId": "thread-case",
+            "payload": {
+                "mimeType": "text/plain",
+                "headers": [
+                    { "name": "FROM", "value": "alice@example.com" },
+                    { "name": "Reply-to", "value": "team@example.com" },
+                    { "name": "to", "value": "bob@example.com" },
+                    { "name": "CC", "value": "dave@example.com" },
+                    { "name": "cc", "value": "erin@example.com" },
+                    { "name": "subject", "value": "Hello" },
+                    { "name": "DATE", "value": "Fri, 6 Mar 2026 12:00:00 +0000" },
+                    { "name": "Message-id", "value": "<msg@example.com>" },
+                    { "name": "REFERENCES", "value": "<ref-1@example.com>" },
+                    { "name": "X-Cc", "value": "notcc@example.com" }
+                ],
+                "body": { "data": URL_SAFE.encode("Body") }
+            }
+        });
+
+        let original = parse_original_message(&msg).unwrap();
+
+        assert_eq!(original.from.email, "alice@example.com");
+        let reply_to = original.reply_to.unwrap();
+        assert_eq!(reply_to.len(), 1);
+        assert_eq!(reply_to[0].email, "team@example.com");
+        assert_eq!(original.to.len(), 1);
+        assert_eq!(original.to[0].email, "bob@example.com");
+        let cc = original.cc.unwrap();
+        assert_eq!(cc.len(), 2);
+        assert_eq!(cc[0].email, "dave@example.com");
+        assert_eq!(cc[1].email, "erin@example.com");
+        assert_eq!(original.subject, "Hello");
+        assert_eq!(
+            original.date.as_deref(),
+            Some("Fri, 6 Mar 2026 12:00:00 +0000")
+        );
+        assert_eq!(original.message_id, "msg@example.com");
+        assert_eq!(original.references, vec!["ref-1@example.com"]);
+    }
+
+    #[test]
+    fn test_parse_original_message_rejects_lookalike_header_names() {
+        // Case-insensitive matching must not turn a different header into a
+        // required one: `X-From` / `Message-ID-Old` are not `From` / `Message-ID`.
+        let msg = json!({
+            "payload": {
+                "mimeType": "text/plain",
+                "headers": [
+                    { "name": "X-From", "value": "alice@example.com" },
+                    { "name": "message-id", "value": "<msg@example.com>" }
+                ]
+            }
+        });
+        let err = parse_original_message(&msg).err().unwrap();
+        assert!(err.to_string().contains("missing From header"), "{err}");
+
+        let msg = json!({
+            "payload": {
+                "mimeType": "text/plain",
+                "headers": [
+                    { "name": "from", "value": "alice@example.com" },
+                    { "name": "Message-ID-Old", "value": "<msg@example.com>" }
+                ]
+            }
+        });
+        let err = parse_original_message(&msg).err().unwrap();
+        assert!(
+            err.to_string().contains("missing Message-ID header"),
+            "{err}"
+        );
     }
 
     #[test]
