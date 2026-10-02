@@ -28,7 +28,7 @@ gws classroom <resource> <method> [flags]
   - `getGradingPeriodSettings` — Returns the grading period settings in a course. This method returns the following error codes: * `PERMISSION_DENIED` if the requesting user isn't permitted to access the grading period settings in th
   - `list` — Returns a list of courses that the requesting user is permitted to view, restricted to those that match the request. Returned courses are ordered by creation time, with the most recently created comin
   - `patch` — Updates one or more fields in a course. This method returns the following error codes: * `PERMISSION_DENIED` if the requesting user is not permitted to modify the requested course or for access errors
-  - `update` — Updates a course. This method returns the following error codes: * `PERMISSION_DENIED` if the requesting user is not permitted to modify the requested course or for access errors. * `NOT_FOUND` if no 
+  - `update` — Updates a course. Note: Unlike other fields, `levels` is not cleared if omitted from the request. The `UpdateCourse` method only modifies `levels` if it is explicitly provided; otherwise, the existing
   - `updateGradingPeriodSettings` — Updates grading period settings of a course. Individual grading periods can be added, removed, or modified using this method. The requesting user and course owner must be eligible to modify Grading Pe
   - `aliases` — Operations on the 'aliases' resource
   - `announcements` — Operations on the 'announcements' resource

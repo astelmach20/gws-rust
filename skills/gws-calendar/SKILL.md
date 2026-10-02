@@ -57,6 +57,7 @@ The authenticated user for the request is made the data owner of the new calenda
 
 Note: We recommend to authenticate as the intended data owner of the calendar. You can
   - `patch` — Updates metadata for a calendar. This method supports patch semantics.
+  - `transferOwnership` — Transfers a secondary calendar between users within a Google Workspace organization. Requires user authentication with Manage Calendars administrator privilege, and one of the following authorization 
   - `update` — Updates metadata for a calendar.
 
 ### channels
