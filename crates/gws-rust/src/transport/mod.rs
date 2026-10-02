@@ -512,8 +512,9 @@ where
 
 /// Timeout for a request that uploads `bytes`: the base response timeout plus
 /// one second per 64 KiB, so slow links are not cut off mid-upload.
+/// Saturating: a huge `--timeout` clamps instead of overflowing.
 pub(crate) fn upload_timeout(base: Option<Duration>, bytes: u64) -> Option<Duration> {
-    base.map(|b| b + Duration::from_secs(bytes / (64 * 1024)))
+    base.map(|b| b.saturating_add(Duration::from_secs(bytes / (64 * 1024))))
 }
 
 #[cfg(test)]
