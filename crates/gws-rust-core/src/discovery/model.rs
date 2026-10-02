@@ -97,6 +97,9 @@ pub struct RestMethod {
     #[serde(default)]
     pub supports_media_upload: bool,
     pub media_upload: Option<MediaUpload>,
+    /// Discovery's method-level `deprecated: true`.
+    #[serde(default)]
+    pub deprecated: bool,
 }
 
 /// Media upload metadata from the Discovery Document.

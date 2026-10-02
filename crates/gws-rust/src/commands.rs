@@ -65,13 +65,14 @@ const HEADING_PAGINATION: &str = "Pagination options";
 const HEADING_UPLOAD: &str = "Upload options";
 
 /// Whether a method is marked deprecated. Discovery marks some methods with
-/// `deprecated: true` (not modelled yet) and many only in the description.
+/// `deprecated: true` and many only in the description.
 fn is_deprecated(method: &RestMethod) -> bool {
-    method.description.as_deref().is_some_and(|d| {
-        d.trim_start()
-            .to_ascii_lowercase()
-            .starts_with("deprecated")
-    })
+    method.deprecated
+        || method.description.as_deref().is_some_and(|d| {
+            d.trim_start()
+                .to_ascii_lowercase()
+                .starts_with("deprecated")
+        })
 }
 
 /// The response schema looks like a long-running Operation.
@@ -381,6 +382,7 @@ mod tests {
                 supports_media_download: false,
                 supports_media_upload: false,
                 media_upload: None,
+                deprecated: false,
             },
         );
 
@@ -400,6 +402,7 @@ mod tests {
                 supports_media_download: false,
                 supports_media_upload: false,
                 media_upload: None,
+                deprecated: false,
             },
         );
 
@@ -569,6 +572,37 @@ mod tests {
         assert!(!help.contains("More text"));
         assert!(!help.contains("oldFlag"));
         assert!(help.contains("gwsr schema drive.files.get"));
+    }
+
+    #[test]
+    fn test_methods_flagged_deprecated_in_discovery_are_hidden() {
+        // Shape of admin directory_v1 `chromeosdevices`: `action` carries
+        // `deprecated: true` but its description doesn't say so.
+        let doc: RestDescription = serde_json::from_value(serde_json::json!({
+            "name": "admin",
+            "version": "directory_v1",
+            "rootUrl": "https://admin.googleapis.com/",
+            "servicePath": "",
+            "resources": {"chromeosdevices": {"methods": {
+                "action": {
+                    "httpMethod": "POST",
+                    "path": "admin/directory/v1/customer/{customerId}/devices/chromeos/{resourceId}/action",
+                    "description": "Use BatchChangeChromeOsDeviceStatus instead.",
+                    "deprecated": true
+                },
+                "get": {
+                    "httpMethod": "GET",
+                    "path": "admin/directory/v1/customer/{customerId}/devices/chromeos/{deviceId}",
+                    "description": "Retrieves a Chrome OS device's properties."
+                }
+            }}}
+        }))
+        .unwrap();
+        let cmd = build_cli(&doc);
+        let devices = cmd.find_subcommand("chromeosdevices").unwrap();
+        assert!(devices.find_subcommand("action").unwrap().is_hide_set());
+        assert!(!devices.find_subcommand("get").unwrap().is_hide_set());
+        assert!(!devices.is_hide_set());
     }
 
     #[test]
