@@ -2,7 +2,7 @@
 name: gwsr-sheets-read
 description: "Google Sheets: Read values from a range, optionally exporting CSV."
 metadata:
-  version: 0.23.0
+  version: 0.23.1
   openclaw:
     category: "productivity"
     requires:

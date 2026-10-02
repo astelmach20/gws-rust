@@ -2,7 +2,7 @@
 name: gwsr-slides-create
 description: "Google Slides: Create a new presentation."
 metadata:
-  version: 0.23.0
+  version: 0.23.1
   openclaw:
     category: "productivity"
     requires:

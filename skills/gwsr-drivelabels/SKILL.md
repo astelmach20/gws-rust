@@ -2,7 +2,7 @@
 name: gwsr-drivelabels
 description: "Google Drive Labels: Manage Drive labels and classification."
 metadata:
-  version: 0.23.0
+  version: 0.23.1
   openclaw:
     category: "productivity"
     requires:

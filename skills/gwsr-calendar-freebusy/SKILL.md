@@ -2,7 +2,7 @@
 name: gwsr-calendar-freebusy
 description: "Google Calendar: Show busy times and find free slots."
 metadata:
-  version: 0.23.0
+  version: 0.23.1
   openclaw:
     category: "productivity"
     requires:

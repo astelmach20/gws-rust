@@ -1,6 +1,6 @@
 {
   "name": "gws-rust",
-  "version": "0.23.0",
+  "version": "0.23.1",
   "private": true,
   "description": "Development tooling for gws-rust (versioning, git hooks). The published npm package lives in npm/.",
   "license": "Apache-2.0",

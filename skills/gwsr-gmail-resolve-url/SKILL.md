@@ -2,7 +2,7 @@
 name: gwsr-gmail-resolve-url
 description: "Gmail: Resolve a Gmail web URL (or its FMfcg... token) to an API thread or message ID."
 metadata:
-  version: 0.23.0
+  version: 0.23.1
   openclaw:
     category: "productivity"
     requires:
