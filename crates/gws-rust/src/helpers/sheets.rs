@@ -322,17 +322,63 @@ fn parse_json_rows(s: &str) -> Result<Vec<Vec<Value>>, GwsError> {
         .collect()
 }
 
+/// Number of blank lines at the start of `raw`.
+fn leading_blank_lines(raw: &str) -> usize {
+    let mut rest = raw;
+    let mut n = 0;
+    loop {
+        if let Some(r) = rest.strip_prefix("\r\n") {
+            rest = r;
+        } else if let Some(r) = rest.strip_prefix(['\n', '\r']) {
+            rest = r;
+        } else {
+            return n;
+        }
+        n += 1;
+    }
+}
+
 /// Parse CSV text into rows of string cells.
+///
+/// A blank line between records is an empty row (`[]`, which leaves that
+/// sheet row untouched), so later rows keep their positions. The `csv`
+/// crate skips blank lines; they are recovered from the byte span each
+/// record was read from. Blank lines at the end of the input are ignored.
 fn parse_csv(text: &str, what: &str) -> Result<Vec<Vec<Value>>, GwsError> {
     let mut reader = csv::ReaderBuilder::new()
         .has_headers(false)
         .flexible(true)
         .from_reader(text.as_bytes());
-    let mut rows = Vec::new();
-    for (i, record) in reader.records().enumerate() {
-        let record = record.map_err(|e| {
-            GwsError::Validation(format!("{what}: invalid CSV at record {}: {e}", i + 1))
-        })?;
+    let mut rows: Vec<Vec<Value>> = Vec::new();
+    let mut record = csv::StringRecord::new();
+    let mut n = 0;
+    loop {
+        n += 1;
+        let start = reader.position().byte();
+        let more = reader
+            .read_record(&mut record)
+            .map_err(|e| GwsError::Validation(format!("{what}: invalid CSV at record {n}: {e}")))?;
+        if !more {
+            break;
+        }
+        let end = reader.position().byte();
+        let (before, raw) = usize::try_from(start)
+            .ok()
+            .zip(usize::try_from(end).ok())
+            .and_then(|(s, e)| Some((text.get(..s)?, text.get(s..e)?)))
+            .ok_or_else(|| {
+                GwsError::Validation(format!(
+                    "{what}: cannot locate CSV record {n} (bytes {start}..{end})"
+                ))
+            })?;
+        let raw = raw.strip_prefix('\u{feff}').unwrap_or(raw);
+        // The reader stops after the '\r' of a "\r\n" terminator, leaving
+        // its '\n' at the start of the next record's span.
+        let raw = match raw.strip_prefix('\n') {
+            Some(r) if before.ends_with('\r') => r,
+            _ => raw,
+        };
+        rows.extend(std::iter::repeat_n(Vec::new(), leading_blank_lines(raw)));
         rows.push(
             record
                 .iter()
@@ -563,6 +609,47 @@ mod tests {
     fn csv_parsing_multi_row_and_empty() {
         assert_eq!(parse_csv("a,b\nc,d\n", "x").unwrap().len(), 2);
         assert!(parse_csv("", "x").is_err());
+    }
+
+    #[test]
+    fn csv_blank_lines_keep_row_positions() {
+        // A blank line is an empty row: dropping it would shift every later
+        // row up by one in +write / +append.
+        let rows = parse_csv("a,b\n\nc,d\n", "x").unwrap();
+        assert_eq!(
+            rows,
+            vec![
+                vec![json!("a"), json!("b")],
+                vec![],
+                vec![json!("c"), json!("d")]
+            ]
+        );
+        // CRLF, a BOM, leading blank lines, a quoted field spanning lines
+        // and trailing blank lines at the end of the file.
+        let rows = parse_csv("\u{feff}\r\nh\r\n\r\n\r\n\"x\ny\",z\r\n\r\n\r\n", "x").unwrap();
+        assert_eq!(
+            rows,
+            vec![
+                vec![],
+                vec![json!("h")],
+                vec![],
+                vec![],
+                vec![json!("x\ny"), json!("z")]
+            ]
+        );
+    }
+
+    #[test]
+    fn csv_blank_lines_with_bare_cr_terminators() {
+        let rows = parse_csv("a\r\rb\r", "x").unwrap();
+        assert_eq!(rows, vec![vec![json!("a")], vec![], vec![json!("b")]]);
+        let rows = parse_csv("a\r\nb\r\n", "x").unwrap();
+        assert_eq!(rows, vec![vec![json!("a")], vec![json!("b")]]);
+    }
+
+    #[test]
+    fn csv_only_blank_lines_is_empty() {
+        assert!(parse_csv("\n\n\r\n", "x").is_err());
     }
 
     #[test]
