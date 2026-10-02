@@ -2,7 +2,7 @@
 name: gwsr-calendar-agenda
 description: "Google Calendar: Show upcoming events across calendars."
 metadata:
-  version: 0.23.0
+  version: 0.23.1
   openclaw:
     category: "productivity"
     requires:

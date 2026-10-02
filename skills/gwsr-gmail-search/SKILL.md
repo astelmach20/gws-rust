@@ -2,7 +2,7 @@
 name: gwsr-gmail-search
 description: "Gmail: Search messages and return full metadata, with pagination."
 metadata:
-  version: 0.23.0
+  version: 0.23.1
   openclaw:
     category: "productivity"
     requires:

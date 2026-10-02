@@ -2,7 +2,7 @@
 name: gwsr-calendar-delete
 description: "Google Calendar: Delete an event."
 metadata:
-  version: 0.23.0
+  version: 0.23.1
   openclaw:
     category: "productivity"
     requires:

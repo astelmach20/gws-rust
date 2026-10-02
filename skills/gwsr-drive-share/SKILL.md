@@ -2,7 +2,7 @@
 name: gwsr-drive-share
 description: "Google Drive: Grant access to a file or folder."
 metadata:
-  version: 0.23.0
+  version: 0.23.1
   openclaw:
     category: "productivity"
     requires:

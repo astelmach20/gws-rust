@@ -31,7 +31,7 @@ name = "gwsr"
 path = "src/main.rs"
 
 [dependencies]
-gws-rust-core = { version = "0.23.0", path = "../gws-rust-core", features = ["anyhow"] }
+gws-rust-core = { version = "0.23.1", path = "../gws-rust-core", features = ["anyhow"] }
 aes-gcm = { version = "0.11", features = ["getrandom", "zeroize"] }
 anyhow.workspace = true
 async-trait = "0.1.92"

@@ -2,7 +2,7 @@
 name: gwsr-gmail-reply-all
 description: "Gmail: Reply to all recipients of a message (handles threading automatically)."
 metadata:
-  version: 0.23.0
+  version: 0.23.1
   openclaw:
     category: "productivity"
     requires:

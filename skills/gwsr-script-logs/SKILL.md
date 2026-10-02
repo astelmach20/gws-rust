@@ -2,7 +2,7 @@
 name: gwsr-script-logs
 description: "Google Apps Script: List recent executions of a project."
 metadata:
-  version: 0.23.0
+  version: 0.23.1
   openclaw:
     category: "productivity"
     requires:

@@ -2,7 +2,7 @@
 name: gwsr-tasks-lists
 description: "Google Tasks: List your task lists."
 metadata:
-  version: 0.23.0
+  version: 0.23.1
   openclaw:
     category: "productivity"
     requires:

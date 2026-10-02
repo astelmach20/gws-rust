@@ -2,7 +2,7 @@
 name: gwsr-drive-download
 description: "Google Drive: Download a (non-Google-native) file's content."
 metadata:
-  version: 0.23.0
+  version: 0.23.1
   openclaw:
     category: "productivity"
     requires:

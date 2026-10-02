@@ -2,7 +2,7 @@
 name: gwsr-calendar-rsvp
 description: "Google Calendar: Respond to an event invitation."
 metadata:
-  version: 0.23.0
+  version: 0.23.1
   openclaw:
     category: "productivity"
     requires:
