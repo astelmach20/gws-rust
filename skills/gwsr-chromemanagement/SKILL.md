@@ -28,7 +28,9 @@ gwsr chromemanagement <resource> <method> [flags]
 
   - `apps` — Operations on the 'apps' resource
   - `certificateProvisioningProcesses` — Operations on the 'certificateProvisioningProcesses' resource
+  - `chromeBrowsers` — Operations on the 'chromeBrowsers' resource
   - `connectorConfigs` — Operations on the 'connectorConfigs' resource
+  - `enrollmentTokens` — Operations on the 'enrollmentTokens' resource
   - `enterprise` — Operations on the 'enterprise' resource
   - `profiles` — Operations on the 'profiles' resource
   - `reports` — Operations on the 'reports' resource
