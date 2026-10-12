@@ -26,7 +26,7 @@ pub mod batch;
 mod body_schema;
 pub(crate) mod download;
 mod input;
-mod operation;
+pub(crate) mod operation;
 pub mod options;
 mod output;
 mod pagination;
@@ -69,6 +69,11 @@ pub struct UploadSource<'a> {
 /// Whether `method` is destructive (see [`crate::confirm`]).
 pub fn is_destructive(method: &RestMethod) -> bool {
     crate::confirm::is_destructive_method(method)
+}
+
+/// Whether `method` is behind the confirmation gate and so takes `--yes`.
+pub fn is_gated(method: &RestMethod) -> bool {
+    crate::confirm::may_be_gated(method)
 }
 
 /// Configuration for auto-pagination.
@@ -245,13 +250,16 @@ fn apply_param_defaults(
                 "--fields conflicts with \"fields\" in --params; use only one".to_string(),
             ));
         }
-        // A mask that drops nextPageToken silently stops pagination.
-        let mask = if paginating && !mask.contains("nextPageToken") {
-            format!("nextPageToken,{mask}")
-        } else {
-            mask.to_string()
-        };
-        params.insert("fields".to_string(), Value::String(mask));
+        params.insert("fields".to_string(), Value::String(mask.to_string()));
+    }
+    // A mask that drops nextPageToken silently stops pagination, whether it
+    // came from --fields or from "fields" in --params.
+    if paginating
+        && let Some(Value::String(mask)) = params.get_mut("fields")
+        && !mask.is_empty()
+        && !mask.contains("nextPageToken")
+    {
+        *mask = format!("nextPageToken,{mask}");
     }
     // Drive rejects items in shared drives unless supportsAllDrives is set.
     if method.parameters.contains_key("supportsAllDrives")
@@ -411,11 +419,14 @@ pub(crate) async fn execute_to(
         return Ok(None);
     }
 
-    if is_destructive(method) {
-        options.gate().check(
-            crate::confirm::Impact::Destructive,
-            &format!("run destructive method {method_id}"),
-        )?;
+    match crate::confirm::method_impact(method, &params) {
+        Some(impact @ crate::confirm::Impact::Destructive) => options
+            .gate()
+            .check(impact, &format!("run destructive method {method_id}"))?,
+        Some(impact @ crate::confirm::Impact::Outbound) => options
+            .gate()
+            .check(impact, &format!("run outbound method {method_id}"))?,
+        None => {}
     }
 
     let quota_project = if options.quota_project {
@@ -438,6 +449,10 @@ pub(crate) async fn execute_to(
         captured: Vec::new(),
         pages: PageStream::default(),
     };
+    // `--decode-field` asks for a field of a JSON document, so it keeps the
+    // JSON path even with `alt=media`.
+    let media_download = options.decode_field.is_none()
+        && params.get("alt").and_then(Value::as_str) == Some("media");
     let mut query = request_url.query.clone();
     let mut pages: u32 = 0;
     let mut item_field: Option<String> = None;
@@ -495,6 +510,29 @@ pub(crate) async fn execute_to(
         let empty_success = json!({"status": "success", "httpStatus": status.as_u16()});
         if status == reqwest::StatusCode::NO_CONTENT {
             out.single(empty_success)?;
+            break;
+        }
+
+        // `alt=media` returns the stored file itself. Saved or streamed, it
+        // is delivered byte for byte, whatever its Content-Type: a JSON file
+        // must not be re-serialized or mistaken for an API response.
+        if let (true, Some(target)) = (media_download, output.as_ref()) {
+            let mime = if content_type.is_empty() {
+                "application/octet-stream"
+            } else {
+                content_type.as_str()
+            };
+            if let Some(summary) = download::stream_binary(
+                sent.response,
+                mime,
+                target,
+                options.idle_timeout(),
+                emitter,
+            )
+            .await?
+            {
+                out.single(summary)?;
+            }
             break;
         }
 
