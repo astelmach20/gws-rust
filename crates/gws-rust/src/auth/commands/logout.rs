@@ -25,6 +25,7 @@ use serde_json::json;
 use super::print_json;
 use crate::auth::credentials::{AuthEnv, Credential, CredentialSource, Resolved};
 use crate::auth::http::Endpoints;
+use crate::auth::token_cache::TokenCache;
 use crate::error::GwsError;
 
 pub(super) async fn handle(no_revoke: bool) -> Result<(), GwsError> {
@@ -164,10 +165,33 @@ pub(super) async fn logout(env: &AuthEnv, no_revoke: bool) -> Result<Outcome, Gw
         report["revoke_note"] = json!("skipped (--no-revoke)");
     }
 
+    // Clear the access-token cache under its lock first, so a concurrent
+    // refresh cannot write a token back into the logged-out profile.
+    let mut removed = Vec::new();
+    let profile_dir_exists = match std::fs::symlink_metadata(&env.paths.dir) {
+        Ok(_) => true,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
+        Err(e) => {
+            return Err(GwsError::CredentialStore(format!(
+                "cannot inspect '{}': {e}",
+                env.paths.dir.display()
+            )));
+        }
+    };
+    if profile_dir_exists {
+        let cache = TokenCache::new(
+            &env.paths.token_cache,
+            &env.paths.token_lock,
+            env.keystore(),
+        );
+        if cache.clear().await? {
+            removed.push(env.paths.token_cache.display().to_string());
+        }
+    }
+
     let files = owned_files(&env.paths.dir).map_err(|e| {
         GwsError::CredentialStore(format!("cannot list '{}': {e}", env.paths.dir.display()))
     })?;
-    let mut removed = Vec::new();
     for path in &files {
         std::fs::remove_file(path).map_err(|e| {
             GwsError::CredentialStore(format!("cannot remove '{}': {e}", path.display()))
@@ -277,7 +301,21 @@ mod tests {
         let out = logout(&env, false).await.unwrap();
         assert!(out.revoke_error.is_none());
         assert_eq!(out.report["revoked"], true);
-        assert_eq!(out.report["removed"].as_array().unwrap().len(), 3);
+        // credentials, metadata, token cache, and the cache lock taken to clear it.
+        let removed: Vec<&str> = out.report["removed"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        assert_eq!(removed.len(), 4, "{removed:?}");
+        for p in [&env.paths.token_cache, &env.paths.token_lock] {
+            assert!(
+                removed.contains(&p.display().to_string().as_str()),
+                "{removed:?}"
+            );
+            assert!(!p.exists());
+        }
         assert!(!env.paths.credentials.exists());
         assert!(stranger.exists(), "unknown files are not deleted");
         assert!(outside.exists(), "GWSR_CREDENTIALS_FILE is never deleted");
@@ -287,6 +325,30 @@ mod tests {
                 .unwrap()
                 .contains("GWSR_CREDENTIALS_FILE")
         );
+    }
+
+    #[tokio::test]
+    async fn waits_for_the_token_cache_lock_before_clearing() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = MockServer::start().await;
+        let env = logged_in_env(dir.path(), &server);
+        let held = crate::fs_util::FileLock::acquire(
+            &env.paths.token_lock,
+            std::time::Duration::from_secs(1),
+        )
+        .unwrap();
+        let task_env = env.clone();
+        let running = tokio::spawn(async move { logout(&task_env, true).await });
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        assert!(
+            !running.is_finished(),
+            "logout must wait for the cache lock"
+        );
+        assert!(env.paths.token_cache.exists());
+        drop(held);
+        running.await.unwrap().unwrap();
+        assert!(!env.paths.token_cache.exists());
+        assert!(!env.paths.credentials.exists());
     }
 
     #[tokio::test]

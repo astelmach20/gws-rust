@@ -16,7 +16,7 @@ metadata:
 
 # Compare Two Google Sheets Tabs
 
-> **PREREQUISITE:** Load the following skills to execute this recipe: `gwsr-sheets`
+> **PREREQUISITE:** Load the following skills to execute this recipe: `gwsr-sheets` (install any that are missing with `npx skills add https://github.com/astelmach20/gws-rust/tree/main/skills/<name>`)
 
 Read data from two tabs in a Google Sheet to compare and identify differences.
 
