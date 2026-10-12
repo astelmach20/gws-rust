@@ -2091,3 +2091,59 @@ async fn truncation_marker_is_not_passed_through_jq() {
         );
     }
 }
+
+/// `GWSR_RESTRICT_PATHS=cwd` confines every file flag, including the ones of
+/// `dev man` and `auth export`, which used to write anywhere.
+#[test]
+fn restrict_paths_confines_dev_man_and_auth_export() {
+    let env = Env::new();
+    let outside = env.root.path().join("outside");
+
+    let out = env
+        .cmd()
+        .env("GWSR_RESTRICT_PATHS", "cwd")
+        .args(["dev", "man", "--output-dir"])
+        .arg(&outside)
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(3), "{out:?}");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("GWSR_RESTRICT_PATHS"),
+        "{out:?}"
+    );
+    assert!(
+        !outside.exists(),
+        "dev man wrote outside the current directory"
+    );
+
+    let secret = outside.join("creds.json");
+    let out = env
+        .cmd()
+        .env("GWSR_RESTRICT_PATHS", "cwd")
+        .args([
+            "auth",
+            "export",
+            "--unmasked",
+            "--yes-i-understand-this-exposes-secrets",
+            "--output",
+        ])
+        .arg(&secret)
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(3), "{out:?}");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("GWSR_RESTRICT_PATHS"),
+        "{out:?}"
+    );
+    assert!(!secret.exists());
+
+    // Inside the current directory `dev man` still works.
+    let out = env
+        .cmd()
+        .env("GWSR_RESTRICT_PATHS", "cwd")
+        .args(["dev", "man", "--output-dir", "man"])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{out:?}");
+    assert!(env.work_dir().join("man").join("gwsr.1").exists());
+}

@@ -416,6 +416,7 @@ async fn dispatch(
             command: DevCommand::Man { output_dir },
         } => {
             let dry_run = cli.global.dry_run;
+            let output_dir = crate::validate::validate_safe_output_dir(&output_dir)?;
             let files = completions::write_man_pages(&output_dir, dry_run)?;
             let names: Vec<String> = files.iter().map(|p| p.display().to_string()).collect();
             let summary = if dry_run {
