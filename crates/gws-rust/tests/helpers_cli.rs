@@ -667,7 +667,15 @@ async fn restrict_paths_confines_files_written_under_an_output_dir() {
     std::fs::create_dir(dir.path().join("src")).unwrap();
     std::os::unix::fs::symlink(outside.path(), dir.path().join("src").join("lib")).unwrap();
 
-    let out = gwsr(dir.path())
+    let mut cmd = gwsr(dir.path());
+    // The request must reach the mock server, so restore what `env_clear`
+    // removed that the TLS setup in a Nix build needs to find its roots.
+    for key in ["SSL_CERT_FILE", "NIX_SSL_CERT_FILE"] {
+        if let Some(value) = std::env::var_os(key) {
+            cmd.env(key, value);
+        }
+    }
+    let out = cmd
         .env("GWSR_TOKEN", "test-token")
         .env("GWSR_API_BASE_URL", server.uri())
         .env("GWSR_RESTRICT_PATHS", "cwd")
