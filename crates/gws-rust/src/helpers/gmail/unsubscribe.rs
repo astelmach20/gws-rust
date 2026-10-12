@@ -183,7 +183,10 @@ async fn post_one_click(url: &reqwest::Url) -> Result<u16, GwsError> {
 }
 
 /// Handle `+unsubscribe`.
-pub(super) async fn handle_unsubscribe(matches: &ArgMatches) -> Result<(), GwsError> {
+pub(super) async fn handle_unsubscribe(
+    matches: &ArgMatches,
+    sanitize: &crate::helpers::modelarmor::SanitizeConfig,
+) -> Result<(), GwsError> {
     let message_id = required_message_id(matches)?;
     let dry_run = crate::args::dry_run(matches)?;
     // Reading the headers is always a real (read-only) request, so --dry-run can
@@ -234,16 +237,26 @@ pub(super) async fn handle_unsubscribe(matches: &ArgMatches) -> Result<(), GwsEr
         Impact::Outbound,
         &format!("unsubscribe via {}", target.host_str().unwrap_or_default()),
     )?;
+    // The target URL comes from the (untrusted) message: screen it before the
+    // POST, since screening the result afterwards could not undo it.
+    let screening = crate::helpers::modelarmor::screen_outgoing(
+        sanitize,
+        &json!({ "messageId": message_id, "url": target.as_str() }),
+        None,
+    )
+    .await?;
     let status = post_one_click(&target).await?;
-    let out = json!({
+    let mut out = json!({
         "unsubscribed": true,
         "messageId": message_id,
         "url": target.as_str(),
         "status": status,
     });
+    if let Some(annotation) = screening {
+        out = crate::helpers::modelarmor::annotate(out, annotation);
+    }
     let format = crate::helpers::http::output_format(matches)?;
-    crate::output::emit(&crate::formatter::format_value(&out, &format)?)?;
-    Ok(())
+    crate::output::emit(&crate::formatter::format_value(&out, &format)?)
 }
 
 #[cfg(test)]
