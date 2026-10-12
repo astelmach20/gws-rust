@@ -66,14 +66,39 @@ pub(crate) fn item_field(
     page: &Value,
     requested: Option<&str>,
 ) -> Result<String, GwsError> {
-    if let Some(field) = requested {
-        return Ok(field.to_string());
-    }
-    let schema_arrays: Vec<String> = method
+    let response_schema = method
         .response
         .as_ref()
         .and_then(|r| r.schema_ref.as_deref())
-        .and_then(|name| doc.schemas.get(name))
+        .and_then(|name| doc.schemas.get(name));
+    if let Some(field) = requested {
+        // APIs omit empty list fields from a page, so a field missing from
+        // the page is only an error when the response schema lacks it too;
+        // otherwise a typo would silently print nothing.
+        let in_page = page.get(field).is_some();
+        if let Some(schema) = response_schema.filter(|s| !s.properties.is_empty())
+            && !in_page
+            && !schema.properties.contains_key(field)
+        {
+            let mut arrays: Vec<&str> = schema
+                .properties
+                .iter()
+                .filter(|(_, p)| p.prop_type.as_deref() == Some("array"))
+                .map(|(k, _)| k.as_str())
+                .collect();
+            arrays.sort_unstable();
+            return Err(GwsError::Validation(format!(
+                "--page-items: the response has no field '{field}'; its list fields are: {}",
+                if arrays.is_empty() {
+                    "(none)".to_string()
+                } else {
+                    arrays.join(", ")
+                }
+            )));
+        }
+        return Ok(field.to_string());
+    }
+    let schema_arrays: Vec<String> = response_schema
         .map(|s| {
             let mut v: Vec<String> = s
                 .properties
@@ -200,6 +225,43 @@ mod tests {
         assert_eq!(
             item_field(&doc, &bare, &json!({"items": [1]}), None).unwrap(),
             "items"
+        );
+    }
+
+    #[test]
+    fn requested_item_field_is_checked_against_the_schema() {
+        let mut schemas = HashMap::new();
+        schemas.insert(
+            "FileList".to_string(),
+            schema(&[("files", "array"), ("nextPageToken", "string")]),
+        );
+        let doc = RestDescription {
+            schemas,
+            ..Default::default()
+        };
+        let files = RestMethod {
+            response: sref("FileList"),
+            ..Default::default()
+        };
+        // An empty page may omit the list field: the schema still knows it.
+        assert_eq!(
+            item_field(&doc, &files, &json!({}), Some("files")).unwrap(),
+            "files"
+        );
+        // A typo is rejected, naming the list fields.
+        let err = item_field(&doc, &files, &json!({}), Some("file")).unwrap_err();
+        assert!(matches!(err, GwsError::Validation(_)), "{err:?}");
+        assert!(err.to_string().contains("files"), "{err}");
+        // A field the page has but the schema lacks is trusted.
+        assert_eq!(
+            item_field(&doc, &files, &json!({"extra": []}), Some("extra")).unwrap(),
+            "extra"
+        );
+        // Without a response schema there is nothing to check against.
+        let bare = RestMethod::default();
+        assert_eq!(
+            item_field(&doc, &bare, &json!({}), Some("anything")).unwrap(),
+            "anything"
         );
     }
 }

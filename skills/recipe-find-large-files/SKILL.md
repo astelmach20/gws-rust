@@ -16,7 +16,7 @@ metadata:
 
 # Find Largest Files in Drive
 
-> **PREREQUISITE:** Load the following skills to execute this recipe: `gwsr-drive`
+> **PREREQUISITE:** Load the following skills to execute this recipe: `gwsr-drive` (install any that are missing with `npx skills add https://github.com/astelmach20/gws-rust/tree/main/skills/<name>`)
 
 Identify large Google Drive files consuming storage quota.
 

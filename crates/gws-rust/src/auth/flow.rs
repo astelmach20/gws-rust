@@ -18,7 +18,9 @@
 //! * redirect to `http://127.0.0.1:<port>/`, the literal loopback address
 //! * the loopback listener accepts only `GET /` with the expected `state`;
 //!   other paths get 404, a wrong/missing state gets 400, and it keeps waiting
-//!   until the right callback arrives or the timeout expires
+//!   until the right callback arrives or the timeout expires; up to 16
+//!   connections are served concurrently, so an idle speculative connection
+//!   from the browser cannot delay the real redirect
 //! * `error=` callbacks (e.g. `access_denied`) end the flow with that error
 //! * a manual mode for SSH/containers: open the URL anywhere, then paste the
 //!   URL the browser was redirected to (it fails to load; that is expected)
@@ -26,6 +28,8 @@
 
 use std::time::Duration;
 
+use futures_util::StreamExt;
+use futures_util::stream::FuturesUnordered;
 use oauth2::url::Url;
 use oauth2::{
     AuthorizationCode, CsrfToken, PkceCodeChallenge, PkceCodeVerifier, RedirectUrl, Scope,
@@ -43,6 +47,8 @@ use super::http::{self, Endpoints};
 pub const CALLBACK_PATH: &str = "/";
 const MAX_REQUEST_BYTES: usize = 16 * 1024;
 const PER_CONNECTION_TIMEOUT: Duration = Duration::from_secs(10);
+/// Loopback connections served at once (browsers open a few speculative ones).
+const MAX_CONCURRENT_CONNECTIONS: usize = 16;
 
 /// How the authorization response reaches us.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -205,7 +211,10 @@ fn page(title: &str, message: &str) -> String {
 /// not HTTP); the caller drops it and keeps waiting for the real redirect,
 /// since browsers open speculative connections and anything local can
 /// connect. The overall login timeout still bounds the wait.
-async fn read_request_target(stream: &mut tokio::net::TcpStream) -> Option<String> {
+async fn read_request_target(
+    stream: &mut tokio::net::TcpStream,
+    timeout: Duration,
+) -> Option<String> {
     let mut buf = Vec::with_capacity(1024);
     let read = async {
         let mut chunk = [0u8; 1024];
@@ -221,9 +230,7 @@ async fn read_request_target(stream: &mut tokio::net::TcpStream) -> Option<Strin
         }
         Some(())
     };
-    tokio::time::timeout(PER_CONNECTION_TIMEOUT, read)
-        .await
-        .ok()??;
+    tokio::time::timeout(timeout, read).await.ok()??;
     let line_end = buf.windows(2).position(|w| w == b"\r\n")?;
     let line = std::str::from_utf8(&buf[..line_end]).ok()?;
     let mut parts = line.split(' ');
@@ -235,7 +242,28 @@ async fn read_request_target(stream: &mut tokio::net::TcpStream) -> Option<Strin
     Some(target.to_string())
 }
 
+/// Limits of the loopback listener.
+#[derive(Debug, Clone, Copy)]
+struct ListenerLimits {
+    /// Connections served at once. Further connections wait in the kernel's
+    /// accept backlog until a slot frees, so a local process cannot make the
+    /// listener hold an unbounded number of connections.
+    max_connections: usize,
+    /// How long one connection may take to send its request line.
+    per_connection: Duration,
+}
+
+const LISTENER_LIMITS: ListenerLimits = ListenerLimits {
+    max_connections: MAX_CONCURRENT_CONNECTIONS,
+    per_connection: PER_CONNECTION_TIMEOUT,
+};
+
 /// Serve the loopback redirect until a valid callback arrives.
+///
+/// Connections are served concurrently (up to a fixed limit), so an idle
+/// speculative connection from the browser cannot hold up the real redirect.
+/// The first connection with a valid callback (or a provider error) decides
+/// the result; connections still in progress are dropped when this returns.
 ///
 /// # Errors
 ///
@@ -245,59 +273,94 @@ pub async fn serve_callback(
     listener: TcpListener,
     expected_state: &str,
 ) -> Result<String, AuthError> {
+    serve_callback_with(listener, expected_state, LISTENER_LIMITS).await
+}
+
+async fn serve_callback_with(
+    listener: TcpListener,
+    expected_state: &str,
+    limits: ListenerLimits,
+) -> Result<String, AuthError> {
+    let mut connections = FuturesUnordered::new();
     loop {
-        let (mut stream, peer) = listener
-            .accept()
-            .await
-            .map_err(|e| AuthError::Network(format!("loopback listener failed: {e}")))?;
-        let Some(target) = read_request_target(&mut stream).await else {
+        tokio::select! {
+            accepted = listener.accept(), if connections.len() < limits.max_connections => {
+                let (stream, peer) = accepted
+                    .map_err(|e| AuthError::Network(format!("loopback listener failed: {e}")))?;
+                connections.push(handle_connection(
+                    stream,
+                    peer,
+                    expected_state,
+                    limits.per_connection,
+                ));
+            }
+            Some(outcome) = connections.next(), if !connections.is_empty() => {
+                if let Some(result) = outcome {
+                    return result;
+                }
+            }
+        }
+    }
+}
+
+/// Serve one loopback connection.
+///
+/// `Some` ends the login (the code, or the provider's error); `None` means the
+/// request was answered and rejected, and the listener keeps waiting.
+async fn handle_connection(
+    mut stream: tokio::net::TcpStream,
+    peer: std::net::SocketAddr,
+    expected_state: &str,
+    timeout: Duration,
+) -> Option<Result<String, AuthError>> {
+    let Some(target) = read_request_target(&mut stream, timeout).await else {
+        respond(
+            &mut stream,
+            "400 Bad Request",
+            "Bad request",
+            "Unsupported request.",
+        )
+        .await;
+        return None;
+    };
+    match parse_callback(&target, expected_state) {
+        Callback::Code(code) => {
+            respond(
+                &mut stream,
+                "200 OK",
+                "Signed in",
+                "gwsr received the authorization. You can close this window.",
+            )
+            .await;
+            Some(Ok(code))
+        }
+        Callback::Denied { error, description } => {
+            respond(
+                &mut stream,
+                "200 OK",
+                "Sign-in was not completed",
+                "gwsr did not receive an authorization. You can close this window.",
+            )
+            .await;
+            Some(Err(denied(&error, description.as_deref())))
+        }
+        Callback::WrongPath => {
+            respond(&mut stream, "404 Not Found", "Not found", "Not found.").await;
+            None
+        }
+        Callback::BadState | Callback::Malformed => {
+            tracing::warn!(
+                "ignored an OAuth callback from {peer} with a missing or wrong \
+                 state parameter"
+            );
             respond(
                 &mut stream,
                 "400 Bad Request",
-                "Bad request",
-                "Unsupported request.",
+                "Invalid request",
+                "This sign-in response does not belong to the running gwsr login.",
             )
             .await;
-            continue;
-        };
-        let outcome = parse_callback(&target, expected_state);
-        match outcome {
-            Callback::Code(code) => {
-                respond(
-                    &mut stream,
-                    "200 OK",
-                    "Signed in",
-                    "gwsr received the authorization. You can close this window.",
-                )
-                .await;
-                return Ok(code);
-            }
-            Callback::Denied { error, description } => {
-                respond(
-                    &mut stream,
-                    "200 OK",
-                    "Sign-in was not completed",
-                    "gwsr did not receive an authorization. You can close this window.",
-                )
-                .await;
-                return Err(denied(&error, description.as_deref()));
-            }
-            Callback::WrongPath => {
-                respond(&mut stream, "404 Not Found", "Not found", "Not found.").await;
-            }
-            Callback::BadState | Callback::Malformed => {
-                tracing::warn!(
-                    "ignored an OAuth callback from {peer} with a missing or wrong \
-                     state parameter"
-                );
-                respond(
-                    &mut stream,
-                    "400 Bad Request",
-                    "Invalid request",
-                    "This sign-in response does not belong to the running gwsr login.",
-                )
-                .await;
-            }
+            None
         }
     }
 }
@@ -692,6 +755,105 @@ mod tests {
         assert!(r.starts_with("HTTP/1.1 200"), "{r}");
 
         assert_eq!(server.await.unwrap().unwrap(), "4/good");
+    }
+
+    #[tokio::test]
+    async fn loopback_idle_connection_does_not_delay_callback() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move { serve_callback(listener, "st4te").await });
+
+        // A browser's speculative pre-connection: opened first, sends nothing.
+        let _idle = tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let started = std::time::Instant::now();
+        let r = send(port, "GET /?state=st4te&code=4%2Fgood HTTP/1.1\r\n\r\n").await;
+        let code = server.await.unwrap().unwrap();
+        let elapsed = started.elapsed();
+        eprintln!("callback behind an idle connection took {elapsed:?}");
+        assert!(r.starts_with("HTTP/1.1 200"), "{r}");
+        assert_eq!(code, "4/good");
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "an idle connection delayed the callback by {elapsed:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn loopback_rejects_wrong_state_while_another_connection_is_idle() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move { serve_callback(listener, "st4te").await });
+
+        let _idle = tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .unwrap();
+        let started = std::time::Instant::now();
+        let r = send(port, "GET /?state=evil&code=attacker HTTP/1.1\r\n\r\n").await;
+        assert!(r.starts_with("HTTP/1.1 400"), "{r}");
+        let r = send(port, "POST /?state=st4te&code=x HTTP/1.1\r\n\r\n").await;
+        assert!(r.starts_with("HTTP/1.1 400"), "{r}");
+        let r = send(port, "GET /other?state=st4te&code=x HTTP/1.1\r\n\r\n").await;
+        assert!(r.starts_with("HTTP/1.1 404"), "{r}");
+        assert!(
+            !server.is_finished(),
+            "a rejected request must not end the login"
+        );
+        let r = send(port, "GET /?state=st4te&code=real HTTP/1.1\r\n\r\n").await;
+        assert!(r.starts_with("HTTP/1.1 200"), "{r}");
+        assert_eq!(server.await.unwrap().unwrap(), "real");
+        assert!(started.elapsed() < Duration::from_secs(2));
+    }
+
+    #[tokio::test]
+    async fn loopback_bounds_concurrent_connections_and_times_out_idle_ones() {
+        let limits = ListenerLimits {
+            max_connections: 2,
+            per_connection: Duration::from_millis(400),
+        };
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server =
+            tokio::spawn(async move { serve_callback_with(listener, "st4te", limits).await });
+
+        // Fill every slot with a connection that sends nothing.
+        let mut idle = Vec::new();
+        for _ in 0..limits.max_connections {
+            idle.push(
+                tokio::net::TcpStream::connect(("127.0.0.1", port))
+                    .await
+                    .unwrap(),
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        // The valid callback waits in the accept backlog: it is not served
+        // while the slots are full...
+        let started = std::time::Instant::now();
+        let client = tokio::spawn(send(port, "GET /?state=st4te&code=late HTTP/1.1\r\n\r\n"));
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(
+            !server.is_finished(),
+            "a connection beyond the limit was served"
+        );
+
+        // ...until the per-connection timeout closes an idle one.
+        let r = client.await.unwrap();
+        assert!(r.starts_with("HTTP/1.1 200"), "{r}");
+        assert_eq!(server.await.unwrap().unwrap(), "late");
+        assert!(
+            started.elapsed() >= Duration::from_millis(300),
+            "served after {:?}, before any slot could free",
+            started.elapsed()
+        );
+
+        // Timed-out connections got a 400 and were closed.
+        let mut out = String::new();
+        idle[0].read_to_string(&mut out).await.unwrap();
+        assert!(out.starts_with("HTTP/1.1 400"), "{out}");
     }
 
     #[tokio::test]

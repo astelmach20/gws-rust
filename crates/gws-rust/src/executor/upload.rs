@@ -25,6 +25,7 @@ use tokio::io::{AsyncReadExt, AsyncSeekExt};
 
 use gws_rust_core::client::{Idempotency, RetryPolicy, Sent};
 
+use crate::discovery::RestMethod;
 use crate::error::GwsError;
 use crate::transport::{Transport, upload_timeout};
 
@@ -117,6 +118,66 @@ pub(crate) fn resolve_upload_mime(
     }
 }
 
+/// Whether `mime` matches a Discovery `mediaUpload.accept` pattern such as
+/// `*/*`, `message/*` or `image/png`. Parameters (`; charset=...`) are
+/// ignored and the comparison is case-insensitive, as for any media type.
+fn accepts(pattern: &str, mime: &str) -> bool {
+    let essence = |s: &str| {
+        s.split(';')
+            .next()
+            .unwrap_or_default()
+            .trim()
+            .to_ascii_lowercase()
+    };
+    let (pattern, mime) = (essence(pattern), essence(mime));
+    if pattern == "*/*" || pattern == "*" {
+        return true;
+    }
+    match pattern.strip_suffix("/*") {
+        Some(kind) => mime
+            .split_once('/')
+            .is_some_and(|(mime_kind, _)| mime_kind == kind),
+        None => mime == pattern,
+    }
+}
+
+/// Enforce the method's Discovery upload limits (`mediaUpload.maxSize` and
+/// `mediaUpload.accept`) before any bytes are sent: the server rejects such
+/// an upload anyway, but only after receiving all of it.
+pub(crate) fn check_limits(
+    method: &RestMethod,
+    path: &str,
+    size: u64,
+    mime: &str,
+    explicit_mime: bool,
+) -> Result<(), GwsError> {
+    let method_id = method.id.as_deref().unwrap_or("this method");
+    if let Some(max) = method.max_upload_size_bytes()?
+        && size > max
+    {
+        return Err(GwsError::Validation(format!(
+            "upload file '{path}' is {size} bytes; {method_id} accepts at most {max} bytes (Discovery mediaUpload.maxSize)"
+        )));
+    }
+    let accept = method
+        .media_upload
+        .as_ref()
+        .and_then(|m| m.accept.as_deref())
+        .unwrap_or_default();
+    if !accept.is_empty() && !accept.iter().any(|pattern| accepts(pattern, mime)) {
+        let hint = if explicit_mime {
+            ""
+        } else {
+            " (detected from the file; set it with --upload-content-type)"
+        };
+        return Err(GwsError::Validation(format!(
+            "media type '{mime}'{hint} is not accepted by {method_id}, which accepts: {}",
+            accept.join(", ")
+        )));
+    }
+    Ok(())
+}
+
 fn metadata_json(metadata: &Option<Value>) -> Result<String, GwsError> {
     match metadata {
         Some(m) => serde_json::to_string(m)
@@ -152,33 +213,57 @@ impl MultipartFrame {
         self.preamble.len() as u64 + data.len() + self.postamble.len() as u64
     }
 
+    /// The body streams exactly the `data.size` bytes counted in
+    /// [`Self::content_length`]. If the file no longer has that size the
+    /// stream fails before the closing boundary, so the request is aborted
+    /// rather than sent cut off at `Content-Length` or short of it.
     pub(crate) fn body(&self, data: &UploadData) -> reqwest::Body {
-        {
-            {
-                let path = &data.path;
-                // Stream the file so memory stays O(64 KiB) regardless of size.
-                let path = path.clone();
-                let file_stream = futures_util::stream::once(async move {
-                    tokio::fs::File::open(&path).await.map_err(|e| {
-                        std::io::Error::new(
-                            e.kind(),
-                            format!("failed to open upload file '{path}': {e}"),
-                        )
-                    })
-                })
-                .map_ok(tokio_util::io::ReaderStream::new)
-                .try_flatten();
-                let pre = bytes::Bytes::from(self.preamble.clone().into_bytes());
-                let post = bytes::Bytes::from(self.postamble.clone().into_bytes());
-                let stream = futures_util::stream::once(async { Ok::<_, std::io::Error>(pre) })
-                    .chain(file_stream)
-                    .chain(futures_util::stream::once(async {
-                        Ok::<_, std::io::Error>(post)
-                    }));
-                reqwest::Body::wrap_stream(stream)
+        let size = data.size;
+        // Stream the file so memory stays O(64 KiB) regardless of size.
+        let path = data.path.clone();
+        let file_stream = futures_util::stream::once(async move {
+            tokio::fs::File::open(&path).await.map_err(|e| {
+                std::io::Error::new(
+                    e.kind(),
+                    format!("failed to open upload file '{path}': {e}"),
+                )
+            })
+        })
+        .map_ok(move |file| tokio_util::io::ReaderStream::new(file.take(size)))
+        .try_flatten();
+        let path = data.path.clone();
+        let size_check = futures_util::stream::once(async move {
+            let now = current_size(&path).await?;
+            if now == size {
+                Ok(())
+            } else {
+                Err(std::io::Error::other(size_changed(&path, size, now)))
             }
-        }
+        })
+        .filter_map(|checked| async move { checked.err().map(Err) });
+        let pre = bytes::Bytes::from(self.preamble.clone().into_bytes());
+        let post = bytes::Bytes::from(self.postamble.clone().into_bytes());
+        let stream = futures_util::stream::once(async { Ok::<_, std::io::Error>(pre) })
+            .chain(file_stream)
+            .chain(size_check)
+            .chain(futures_util::stream::once(async {
+                Ok::<_, std::io::Error>(post)
+            }));
+        reqwest::Body::wrap_stream(stream)
     }
+}
+
+async fn current_size(path: &str) -> std::io::Result<u64> {
+    tokio::fs::metadata(path)
+        .await
+        .map(|m| m.len())
+        .map_err(|e| std::io::Error::new(e.kind(), format!("failed to stat '{path}': {e}")))
+}
+
+fn size_changed(path: &str, expected: u64, now: u64) -> String {
+    format!(
+        "upload file '{path}' changed size during upload ({expected} bytes when the upload started, {now} now); nothing was uploaded, rerun the command"
+    )
 }
 
 /// Send a multipart upload. `query` must already contain `uploadType=multipart`.
@@ -198,32 +283,56 @@ pub(crate) async fn send_multipart(
         response_timeout: upload_timeout(transport.retry.response_timeout, data.len()),
         ..transport.retry.clone()
     };
-    transport
+    let result = transport
         .send_with_policy(&policy, method, url, idempotency, |rb| {
             rb.query(query)
                 .header(CONTENT_TYPE, frame.content_type.as_str())
                 .header(CONTENT_LENGTH, frame.content_length(data))
                 .body(frame.body(data))
         })
-        .await
+        .await;
+    // The transport's error names only the request; when the body stream
+    // was aborted because the file changed, say so.
+    match result {
+        Err(err) => match current_size(&data.path).await {
+            Ok(now) if now != data.size => Err(GwsError::Validation(size_changed(
+                &data.path, data.size, now,
+            ))),
+            _ => Err(err),
+        },
+        ok => ok,
+    }
 }
 
 /// Parse a resumable-upload `Range: bytes=0-N` header into the next offset.
-pub(crate) fn next_offset(headers: &reqwest::header::HeaderMap) -> Result<u64, GwsError> {
+///
+/// An offset past the end of the `total`-byte file is an error: the server
+/// is describing some other upload.
+pub(crate) fn next_offset(
+    headers: &reqwest::header::HeaderMap,
+    total: u64,
+) -> Result<u64, GwsError> {
+    let offset = parse_range_end(headers)?;
+    if offset > total {
+        return Err(GwsError::other(anyhow::anyhow!(
+            "upload server reports {offset} bytes persisted, but the file has only {total}"
+        )));
+    }
+    Ok(offset)
+}
+
+fn parse_range_end(headers: &reqwest::header::HeaderMap) -> Result<u64, GwsError> {
     let Some(value) = headers.get(RANGE) else {
         return Ok(0);
     };
     let text = value
         .to_str()
         .map_err(|_| GwsError::other(anyhow::anyhow!("non-ASCII Range header in upload status")))?;
-    let last = text
-        .strip_prefix("bytes=")
+    text.strip_prefix("bytes=")
         .and_then(|r| r.split_once('-'))
         .and_then(|(_, end)| end.trim().parse::<u64>().ok())
-        .ok_or_else(|| {
-            GwsError::other(anyhow::anyhow!("unparseable upload Range header {text:?}"))
-        })?;
-    Ok(last + 1)
+        .and_then(|last| last.checked_add(1))
+        .ok_or_else(|| GwsError::other(anyhow::anyhow!("unparseable upload Range header {text:?}")))
 }
 
 struct Progress {
@@ -369,8 +478,10 @@ pub(crate) async fn resumable_upload(
         let len = usize::try_from((total - offset).min(req.chunk_size as u64))
             .map_err(|_| GwsError::other(anyhow::anyhow!("chunk length overflow")))?;
         let chunk = req.data.read_range(offset, len).await?;
-        let range = if total == 0 {
-            "bytes */0".to_string()
+        // Nothing left to send (an empty file, or a 308 acknowledging every
+        // byte): ask the server to finish the upload.
+        let range = if len == 0 {
+            format!("bytes */{total}")
         } else {
             format!("bytes {offset}-{}/{total}", offset + len as u64 - 1)
         };
@@ -396,10 +507,17 @@ pub(crate) async fn resumable_upload(
                     return Ok(sent);
                 }
                 StatusCode::PERMANENT_REDIRECT => {
-                    offset = next_offset(sent.response.headers())?;
-                    failures = 0;
-                    progress.update(offset);
-                    continue;
+                    let next = next_offset(sent.response.headers(), total)?;
+                    if next > offset {
+                        offset = next;
+                        failures = 0;
+                        progress.update(offset);
+                        continue;
+                    }
+                    // Nothing of the chunk was persisted: resend it, but as a
+                    // failure, so a session that never advances ends.
+                    offset = next;
+                    format!("HTTP 308 with no progress at byte {offset}")
                 }
                 StatusCode::NOT_FOUND | StatusCode::GONE => {
                     progress.finish();
@@ -448,7 +566,7 @@ pub(crate) async fn resumable_upload(
                 return Ok(sent);
             }
             Ok(sent) if sent.response.status() == StatusCode::PERMANENT_REDIRECT => {
-                offset = next_offset(sent.response.headers())?;
+                offset = next_offset(sent.response.headers(), total)?;
             }
             Ok(sent) => {
                 tracing::debug!(status = %sent.response.status(), "upload status query failed; retrying chunk");
@@ -501,6 +619,18 @@ mod tests {
             resolve_upload_mime(Some("text/plain\r\nX: y"), None, &None),
             "text/plainX: y"
         );
+    }
+
+    #[test]
+    fn accept_patterns() {
+        assert!(accepts("*/*", "text/plain"));
+        assert!(accepts("message/*", "message/rfc822"));
+        assert!(accepts("message/*", "Message/RFC822; charset=utf-8"));
+        assert!(accepts("image/png", "IMAGE/PNG"));
+        assert!(!accepts("message/*", "text/plain"));
+        assert!(!accepts("message/*", "messages/rfc822"));
+        assert!(!accepts("message/*", "message"));
+        assert!(!accepts("image/png", "image/jpeg"));
     }
 
     #[test]
@@ -578,11 +708,16 @@ mod tests {
     #[test]
     fn range_header_parsing() {
         let mut h = reqwest::header::HeaderMap::new();
-        assert_eq!(next_offset(&h).unwrap(), 0);
+        assert_eq!(next_offset(&h, u64::MAX).unwrap(), 0);
         h.insert(RANGE, "bytes=0-262143".parse().unwrap());
-        assert_eq!(next_offset(&h).unwrap(), 262_144);
+        assert_eq!(next_offset(&h, u64::MAX).unwrap(), 262_144);
         h.insert(RANGE, "garbage".parse().unwrap());
-        assert!(next_offset(&h).is_err());
+        assert!(next_offset(&h, u64::MAX).is_err());
+        h.insert(RANGE, "bytes=0-99".parse().unwrap());
+        assert_eq!(next_offset(&h, 100).unwrap(), 100);
+        assert!(next_offset(&h, 99).is_err(), "past the end of the file");
+        h.insert(RANGE, format!("bytes=0-{}", u64::MAX).parse().unwrap());
+        assert!(next_offset(&h, u64::MAX).is_err(), "must not overflow");
     }
 
     #[test]
