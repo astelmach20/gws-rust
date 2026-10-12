@@ -341,6 +341,50 @@ fn upload_rejects_paths_outside_cwd() {
     assert_eq!(out.status.code(), Some(3));
 }
 
+#[test]
+fn gmail_helper_output_honors_sanitize_block_mode() {
+    let dir = setup();
+    seed(dir.path(), "gmail", "v1", "");
+    let args = [
+        "gmail",
+        "+resolve-url",
+        "--no-verify",
+        "--url",
+        "18f1a2b3c4d5e6f7",
+    ];
+    // Without --sanitize the result is printed.
+    let out = gwsr(dir.path()).args(args).output().unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(stdout_json(&out)["id"], "18f1a2b3c4d5e6f7");
+
+    // With --sanitize in block mode the output must be screened. Model Armor
+    // can't be reached here (no credentials), so block mode fails closed and
+    // prints nothing instead of silently skipping the screen.
+    let out = gwsr(dir.path())
+        .args(args)
+        .args([
+            "--sanitize",
+            "projects/my-project/locations/us-central1/templates/t",
+        ])
+        .env("GWSR_SANITIZE_MODE", "block")
+        .output()
+        .unwrap();
+    assert!(
+        !out.status.success(),
+        "block mode printed unscreened output: {}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    assert!(
+        out.stdout.is_empty(),
+        "{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+}
+
 /// `GWSR_API_BASE_URL` routes workflow requests to the configured endpoint,
 /// exactly like generated methods and the app helpers.
 #[test]
@@ -558,6 +602,48 @@ async fn text_responses_of_generated_methods_are_screened_by_model_armor() {
     assert!(!out.status.success());
 }
 
+/// `GWSR_API_BASE_URL` routes Workspace Events requests to the configured
+/// endpoint, like generated methods. The closed-port proxy makes a request
+/// that escapes to Google fail instead of reaching the network.
+#[tokio::test(flavor = "multi_thread")]
+async fn events_helpers_honour_api_base_override() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/subscriptions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let dir = tempfile::tempdir().unwrap();
+    seed(dir.path(), "workspaceevents", "v1", "");
+    let mut cmd = gwsr(dir.path());
+    // This request must succeed, so restore what `env_clear` removed that the
+    // platform needs: Winsock fails to load without `SystemRoot`, and the TLS
+    // setup in a Nix build finds its roots through the certificate variables.
+    for key in ["SystemRoot", "SSL_CERT_FILE", "NIX_SSL_CERT_FILE"] {
+        if let Some(value) = std::env::var_os(key) {
+            cmd.env(key, value);
+        }
+    }
+    let out = cmd
+        .env("GWSR_TOKEN", "test-token")
+        .env("GWSR_API_BASE_URL", format!("{}/", server.uri()))
+        .env("HTTPS_PROXY", "http://127.0.0.1:9")
+        .args([
+            "events",
+            "+renew",
+            "--all",
+            "--event-types",
+            "google.workspace.chat.message.v1.created",
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "events +renew: {out:?}");
+}
+
 // ── Dot-segment path parameters ─────────────────────────────────────────
 
 /// A path parameter of `.` or `..` must never reach the server: URL parsing
@@ -717,6 +803,46 @@ fn dry_run_plan_keeps_repeated_query_keys() {
         ]),
         "{v}"
     );
+}
+
+#[test]
+fn gmail_unsubscribe_dry_run_needs_no_credentials() {
+    // README/CONTEXT: `--dry-run` loads no credentials and sends nothing.
+    // No credential source exists in this isolated environment.
+    let dir = setup();
+    seed(dir.path(), "gmail", "v1", "");
+    let mut cmd = gwsr(dir.path());
+    // The helper builds its HTTP client even in a dry run, so restore what
+    // `env_clear` removed that the platform needs: Winsock fails to load
+    // without `SystemRoot`, and the TLS setup in a Nix build finds its roots
+    // through the certificate variables.
+    for key in ["SystemRoot", "SSL_CERT_FILE", "NIX_SSL_CERT_FILE"] {
+        if let Some(value) = std::env::var_os(key) {
+            cmd.env(key, value);
+        }
+    }
+    let out = cmd
+        .args(["gmail", "+unsubscribe", "--message-id", "M1", "--dry-run"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "exit {:?}: {}",
+        out.status.code(),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let v = stdout_json(&out);
+    assert_eq!(v["dry_run"], true);
+    let reqs = v["requests"].as_array().unwrap();
+    assert_eq!(reqs.len(), 2, "{v}");
+    assert_eq!(reqs[0]["method"], "GET");
+    assert_eq!(
+        reqs[0]["url"],
+        "https://gmail.googleapis.com/gmail/v1/users/me/messages/M1"
+    );
+    assert_eq!(reqs[0]["query_params"]["format"], "metadata");
+    assert_eq!(reqs[1]["method"], "POST");
+    assert_eq!(reqs[1]["body"], "List-Unsubscribe=One-Click");
 }
 
 #[test]

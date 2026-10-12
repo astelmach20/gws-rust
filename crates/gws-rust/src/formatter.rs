@@ -142,6 +142,12 @@ pub fn emit_default(value: &Value) -> Result<(), GwsError> {
     crate::output::emit(&format_value(value, &settings().default_format)?)
 }
 
+/// The process-wide default format (`--format` > `GWSR_FORMAT` > config),
+/// for commands without their own `--format`.
+pub fn default_format() -> OutputFormat {
+    settings().default_format
+}
+
 /// A text cell for a CSV file written by a helper (for example
 /// `forms +responses --output`), with the same formula-injection guard and
 /// control-character stripping as `--format csv`.
