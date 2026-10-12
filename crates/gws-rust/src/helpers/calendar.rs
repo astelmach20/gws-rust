@@ -1264,6 +1264,31 @@ mod tests {
         assert_eq!(insert(&api, &args).await.unwrap()["id"], "E1");
     }
 
+    #[test]
+    fn all_day_dates_are_reported_unshifted_east_of_utc() {
+        // Upstream googleworkspace/cli#579: in Asia/Seoul an all-day event on
+        // 2026-03-23 was shown as starting 2026-03-21.
+        let event = json!({
+            "id": "e1",
+            "summary": "Holiday",
+            "start": {"date": "2026-03-23"},
+            "end": {"date": "2026-03-24"}
+        });
+        let s = summarize_event(&event, "primary", "Me");
+        assert_eq!(s["start"], "2026-03-23");
+        assert_eq!(s["end"], "2026-03-24");
+        assert_eq!(s["allDay"], true);
+        let seoul: Tz = "Asia/Seoul".parse().unwrap();
+        let timed = json!({"start": "2026-03-23T00:30:00+09:00"});
+        assert!(start_key(&s, seoul) < start_key(&timed, seoul));
+        assert_eq!(
+            start_key(&s, seoul),
+            chrono::DateTime::parse_from_rfc3339("2026-03-23T00:00:00+09:00")
+                .unwrap()
+                .timestamp()
+        );
+    }
+
     #[tokio::test]
     async fn agenda_paginates_and_fails_loudly_per_calendar() {
         let server = MockServer::start().await;

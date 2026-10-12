@@ -268,11 +268,12 @@ pub(crate) fn validate_params(
         Ok(())
     } else {
         errors.sort();
+        let schema_path = crate::schema::method_schema_path(doc, method)
+            .unwrap_or_else(|| "<service.resource.method>".to_string());
         Err(GwsError::Validation(format!(
-            "Invalid --params for {}:\n- {}\nRun `gwsr schema {}` to see the accepted parameters.",
+            "Invalid --params for {}:\n- {}\nRun `gwsr schema {schema_path}` to see the accepted parameters.",
             method.id.as_deref().unwrap_or("this method"),
             errors.join("\n- "),
-            method.id.as_deref().unwrap_or("<service.resource.method>"),
         )))
     }
 }
