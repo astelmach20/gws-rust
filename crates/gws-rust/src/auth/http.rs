@@ -88,11 +88,18 @@ pub fn client() -> anyhow::Result<reqwest::Client> {
     static CLIENT: OnceLock<Result<reqwest::Client, String>> = OnceLock::new();
     CLIENT
         .get_or_init(|| {
-            reqwest::Client::builder()
+            let builder = reqwest::Client::builder()
                 .redirect(reqwest::redirect::Policy::none())
                 .timeout(REQUEST_TIMEOUT)
                 .connect_timeout(CONNECT_TIMEOUT)
-                .user_agent(concat!("gwsr/", env!("CARGO_PKG_VERSION")))
+                .user_agent(concat!("gwsr/", env!("CARGO_PKG_VERSION")));
+            // Unit tests share this client across many Tokio runtimes. A pooled
+            // connection belongs to the runtime that opened it and dies with
+            // it, so a later test could pick up a dead connection ("error
+            // sending request"). The CLI runs one runtime and keeps pooling.
+            #[cfg(test)]
+            let builder = builder.pool_max_idle_per_host(0);
+            builder
                 .build()
                 .map_err(|e| format!("cannot build the OAuth HTTP client: {e}"))
         })
