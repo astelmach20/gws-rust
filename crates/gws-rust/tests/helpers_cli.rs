@@ -643,6 +643,49 @@ async fn events_helpers_honour_api_base_override() {
     assert!(out.status.success(), "events +renew: {out:?}");
 }
 
+/// With `GWSR_RESTRICT_PATHS=cwd`, the files a helper writes *under* a
+/// validated `--dir` must stay under the current directory too: a remote file
+/// name that walks through a symlinked sub-directory must not escape it.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn restrict_paths_confines_files_written_under_an_output_dir() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/projects/S/content"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"files": [
+            {"name": "lib/Code", "type": "SERVER_JS", "source": "function f() {}"}
+        ]})))
+        .mount(&server)
+        .await;
+
+    let dir = setup();
+    let outside = tempfile::tempdir().unwrap();
+    std::fs::create_dir(dir.path().join("src")).unwrap();
+    std::os::unix::fs::symlink(outside.path(), dir.path().join("src").join("lib")).unwrap();
+
+    let out = gwsr(dir.path())
+        .env("GWSR_TOKEN", "test-token")
+        .env("GWSR_API_BASE_URL", server.uri())
+        .env("GWSR_RESTRICT_PATHS", "cwd")
+        .args(["script", "+pull", "--script-id", "S", "--dir", "src"])
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let escaped: Vec<_> = std::fs::read_dir(outside.path())
+        .unwrap()
+        .map(|e| e.unwrap().file_name())
+        .collect();
+    assert!(
+        escaped.is_empty(),
+        "+pull wrote outside the current directory despite GWSR_RESTRICT_PATHS=cwd: {escaped:?}; stderr: {stderr}"
+    );
+    assert_eq!(out.status.code(), Some(3), "{stderr}");
+    assert!(stderr.contains("outside the current directory"), "{stderr}");
+}
+
 /// A local HTTP server for `drive +download`: file metadata answers normally,
 /// but the `alt=media` body stalls after its first bytes (it announces 1000
 /// bytes, sends 5, then goes quiet without closing the connection).
