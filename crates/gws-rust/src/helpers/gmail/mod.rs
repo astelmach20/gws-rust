@@ -71,6 +71,19 @@ mod prelude {
     pub(super) use serde_json::{Value, json};
 }
 
+/// Print a helper's (non-dry-run) result in `format`, after Model Armor
+/// screening when `--sanitize` is configured. A block-mode match or failure
+/// prints nothing and returns the error.
+pub(super) async fn emit_screened(
+    sanitize: &crate::helpers::modelarmor::SanitizeConfig,
+    format: &crate::formatter::OutputFormat,
+    value: serde_json::Value,
+) -> Result<(), GwsError> {
+    use crate::helpers::modelarmor::{require_pass, sanitize_value};
+    let value = require_pass(sanitize_value(sanitize, value).await?)?;
+    crate::output::emit(&crate::formatter::format_value(&value, format)?)
+}
+
 pub struct GmailHelper;
 
 /// Read/write scope used for fetching messages and sending/drafting.
@@ -98,19 +111,19 @@ impl Helper for GmailHelper {
                 return Ok(false);
             };
             match name {
-                "+send" => send::handle_send(sub).await?,
-                "+reply" => reply::handle_reply(sub, false).await?,
-                "+reply-all" => reply::handle_reply(sub, true).await?,
-                "+forward" => forward::handle_forward(sub).await?,
+                "+send" => send::handle_send(sub, sanitize_config).await?,
+                "+reply" => reply::handle_reply(sub, false, sanitize_config).await?,
+                "+reply-all" => reply::handle_reply(sub, true, sanitize_config).await?,
+                "+forward" => forward::handle_forward(sub, sanitize_config).await?,
                 "+read" => read::handle_read(sub, sanitize_config).await?,
                 "+triage" => triage::handle_triage(sub, sanitize_config).await?,
                 "+search" => search::handle_search(sub, sanitize_config).await?,
-                "+label" => labels::handle_label(sub).await?,
-                "+archive" => labels::handle_archive(sub).await?,
-                "+trash" => labels::handle_trash(sub).await?,
-                "+filter" => filter::handle_filter(sub).await?,
-                "+unsubscribe" => unsubscribe::handle_unsubscribe(sub).await?,
-                "+resolve-url" => resolve_url::handle_resolve_url(sub).await?,
+                "+label" => labels::handle_label(sub, sanitize_config).await?,
+                "+archive" => labels::handle_archive(sub, sanitize_config).await?,
+                "+trash" => labels::handle_trash(sub, sanitize_config).await?,
+                "+filter" => filter::handle_filter(sub, sanitize_config).await?,
+                "+unsubscribe" => unsubscribe::handle_unsubscribe(sub, sanitize_config).await?,
+                "+resolve-url" => resolve_url::handle_resolve_url(sub, sanitize_config).await?,
                 "+attachments" => download::handle_attachments(sub, sanitize_config).await?,
                 "+watch" => watch::handle_watch(sub, sanitize_config).await?,
                 _ => return Ok(false),
