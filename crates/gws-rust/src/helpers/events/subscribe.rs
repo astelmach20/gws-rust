@@ -19,7 +19,7 @@ use super::stream::{
     PubSubClient, StepError, StreamOptions, StreamStep, cleanup_resources, emit_diagnostic,
     run_stream,
 };
-use super::{PUBSUB_SCOPE, WORKSPACE_EVENTS_API_BASE, parse_event_types, scopes_for_event_types};
+use super::{PUBSUB_SCOPE, parse_event_types, scopes_for_event_types, workspace_events_api_base};
 
 use crate::error::GwsError;
 use crate::helpers::modelarmor::{SanitizeConfig, Sanitized, sanitize_value};
@@ -447,8 +447,8 @@ pub(super) async fn handle_subscribe(
         None => {
             let scopes = scopes_for_event_types(&config.event_types)?;
             let rest = Transport::for_scopes(&scopes).await?;
-            let created =
-                create_resources(&config, &pubsub, &rest, WORKSPACE_EVENTS_API_BASE).await?;
+            let events_base = workspace_events_api_base(rest.endpoints());
+            let created = create_resources(&config, &pubsub, &rest, &events_base).await?;
             (created.subscription.clone(), Some(created))
         }
     };
