@@ -169,7 +169,7 @@ pub(super) fn dry_run_list(matches: &ArgMatches, params: &SearchParams) -> Resul
     if params.include_spam_trash {
         query.push(("includeSpamTrash", "true".to_string()));
     }
-    let url = format!("{}/users/me/messages", super::api::GMAIL_API_BASE);
+    let url = format!("{}/users/me/messages", super::api::api_base()?);
     crate::helpers::http::print_dry_run(
         matches,
         vec![crate::helpers::http::dry_run_request(
