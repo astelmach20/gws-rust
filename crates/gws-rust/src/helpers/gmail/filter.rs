@@ -113,7 +113,7 @@ pub(super) async fn handle_filter(
     sanitize: &crate::helpers::modelarmor::SanitizeConfig,
 ) -> Result<(), GwsError> {
     let dry_run = crate::args::dry_run(matches)?;
-    let base = format!("{}/users/me/settings/filters", super::api::GMAIL_API_BASE);
+    let base = format!("{}/users/me/settings/filters", super::api::api_base()?);
     match matches.subcommand() {
         Some(("list", sub)) => {
             if dry_run {
