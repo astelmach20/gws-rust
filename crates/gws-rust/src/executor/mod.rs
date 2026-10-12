@@ -219,6 +219,7 @@ async fn plan_upload(
         path: (*path).to_string(),
         size: meta.len(),
     };
+    upload::check_limits(method, path, data.len(), &mime, content_type.is_some())?;
     let supports_resumable = method.resumable_upload_path().is_some();
     let resumable = match mode {
         UploadMode::Resumable if supports_resumable => true,
@@ -380,6 +381,13 @@ pub(crate) async fn execute_to(
     }
 
     let upload_plan = match &upload {
+        Some(_) if params.contains_key("uploadType") => {
+            // The upload protocol decides uploadType; sending both would give
+            // the server two conflicting values.
+            return Err(GwsError::Validation(
+                "--upload sets uploadType itself; remove \"uploadType\" from --params".to_string(),
+            ));
+        }
         Some(source) if method.supports_media_upload => {
             Some(plan_upload(source, method, &body, options.upload_mode).await?)
         }
@@ -399,11 +407,21 @@ pub(crate) async fn execute_to(
     let http = http_method(method)?;
 
     if options.dry_run {
+        // Show the query exactly as send_upload will send it.
+        let mut query_params = request_url.query.clone();
+        if let Some(p) = &upload_plan {
+            let protocol = if p.resumable {
+                "resumable"
+            } else {
+                "multipart"
+            };
+            query_params.push(("uploadType".to_string(), protocol.to_string()));
+        }
         let info = json!({
             "dry_run": true,
             "url": request_url.url,
             "method": method.http_method,
-            "query_params": request_url.query,
+            "query_params": query_params,
             "body": body,
             "upload": upload_plan.as_ref().map(|p| json!({
                 "protocol": if p.resumable { "resumable" } else { "multipart" },
