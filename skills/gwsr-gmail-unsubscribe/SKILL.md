@@ -48,6 +48,8 @@ gwsr gmail +unsubscribe --message-id 18f1a2b3c4d --dry-run
 - links are printed and nothing is sent.
 - With --sanitize, the unsubscribe URL is screened before the POST (block mode:
 - a match or a Model Armor failure sends nothing).
+- --dry-run loads no credentials and reads nothing: it shows the metadata
+- read and the one-click POST, with the URL as a placeholder.
 
 ## See Also
 

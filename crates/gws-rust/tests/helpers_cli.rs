@@ -54,6 +54,14 @@ fn gwsr(config: &Path) -> Command {
         .env("GWSR_CACHE_DIR", config.join("cache"))
         .env("HOME", config)
         .current_dir(config);
+    // Keep what the platform needs to build an HTTP client: Winsock fails to
+    // load without `SystemRoot`, and the TLS setup in a Nix build finds its
+    // roots through the certificate variables.
+    for key in ["SystemRoot", "SSL_CERT_FILE", "NIX_SSL_CERT_FILE"] {
+        if let Some(value) = std::env::var_os(key) {
+            cmd.env(key, value);
+        }
+    }
     cmd
 }
 
@@ -602,6 +610,118 @@ async fn text_responses_of_generated_methods_are_screened_by_model_armor() {
     assert!(!out.status.success());
 }
 
+/// `GWSR_API_BASE_URL` routes Workspace Events requests to the configured
+/// endpoint, like generated methods. The closed-port proxy makes a request
+/// that escapes to Google fail instead of reaching the network.
+#[tokio::test(flavor = "multi_thread")]
+async fn events_helpers_honour_api_base_override() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/subscriptions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let dir = tempfile::tempdir().unwrap();
+    seed(dir.path(), "workspaceevents", "v1", "");
+    let out = gwsr(dir.path())
+        .env("GWSR_TOKEN", "test-token")
+        .env("GWSR_API_BASE_URL", format!("{}/", server.uri()))
+        .env("HTTPS_PROXY", "http://127.0.0.1:9")
+        .args([
+            "events",
+            "+renew",
+            "--all",
+            "--event-types",
+            "google.workspace.chat.message.v1.created",
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "events +renew: {out:?}");
+}
+
+/// A local HTTP server for `drive +download`: file metadata answers normally,
+/// but the `alt=media` body stalls after its first bytes (it announces 1000
+/// bytes, sends 5, then goes quiet without closing the connection).
+fn stalling_drive_server() -> String {
+    use std::io::{BufRead, BufReader, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { return };
+            std::thread::spawn(move || {
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut request_line = String::new();
+                if reader.read_line(&mut request_line).is_err() {
+                    return;
+                }
+                loop {
+                    let mut line = String::new();
+                    match reader.read_line(&mut line) {
+                        Ok(0) | Err(_) => return,
+                        Ok(_) if line == "\r\n" => break,
+                        Ok(_) => {}
+                    }
+                }
+                let response = if request_line.contains("alt=media") {
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\n\
+                     Content-Length: 1000\r\n\r\nhello"
+                        .to_string()
+                } else {
+                    let body =
+                        r#"{"id":"F1","name":"f.bin","mimeType":"application/octet-stream"}"#;
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+                         Content-Length: {}\r\n\r\n{body}",
+                        body.len()
+                    )
+                };
+                stream.write_all(response.as_bytes()).unwrap();
+                stream.flush().unwrap();
+                // Keep the connection open (and the media body unfinished).
+                std::thread::sleep(std::time::Duration::from_secs(60));
+            });
+        }
+    });
+    format!("http://{addr}")
+}
+
+/// `--output -` streams the body to stdout; a stalled body must hit the
+/// `--timeout`/`GWSR_TIMEOUT` idle limit and fail as a network error (exit
+/// 10), exactly like a download to a file, instead of hanging forever.
+#[test]
+fn drive_download_to_stdout_honors_the_idle_timeout() {
+    let dir = setup();
+    let base = stalling_drive_server();
+    for output in ["copy.bin", "-"] {
+        let started = std::time::Instant::now();
+        let out = gwsr(dir.path())
+            .env("GWSR_TOKEN", "test-token")
+            .env("GWSR_API_BASE_URL", &base)
+            .env("GWSR_TIMEOUT", "1")
+            .args(["drive", "+download", "--file-id", "F1", "--output", output])
+            .timeout(std::time::Duration::from_secs(20))
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(15),
+            "--output {output}: a stalled download body was never timed out \
+             (killed after {:?}); stderr: {stderr}",
+            started.elapsed()
+        );
+        assert_eq!(out.status.code(), Some(10), "--output {output}: {stderr}");
+        assert!(
+            stderr.contains("no data received"),
+            "--output {output}: {stderr}"
+        );
+    }
+}
+
 /// A helper's `--dry-run` plan must list every query parameter the real
 /// request sends.
 #[test]
@@ -663,6 +783,36 @@ fn dry_run_plan_keeps_repeated_query_keys() {
 }
 
 #[test]
+fn gmail_unsubscribe_dry_run_needs_no_credentials() {
+    // README/CONTEXT: `--dry-run` loads no credentials and sends nothing.
+    // No credential source exists in this isolated environment.
+    let dir = setup();
+    seed(dir.path(), "gmail", "v1", "");
+    let out = gwsr(dir.path())
+        .args(["gmail", "+unsubscribe", "--message-id", "M1", "--dry-run"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "exit {:?}: {}",
+        out.status.code(),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let v = stdout_json(&out);
+    assert_eq!(v["dry_run"], true);
+    let reqs = v["requests"].as_array().unwrap();
+    assert_eq!(reqs.len(), 2, "{v}");
+    assert_eq!(reqs[0]["method"], "GET");
+    assert_eq!(
+        reqs[0]["url"],
+        "https://gmail.googleapis.com/gmail/v1/users/me/messages/M1"
+    );
+    assert_eq!(reqs[0]["query_params"]["format"], "metadata");
+    assert_eq!(reqs[1]["method"], "POST");
+    assert_eq!(reqs[1]["body"], "List-Unsubscribe=One-Click");
+}
+
+#[test]
 fn gmail_threading_helpers_reject_non_api_message_ids() {
     let dir = setup();
     seed(dir.path(), "gmail", "v1", "");
@@ -702,4 +852,60 @@ fn gmail_threading_helpers_reject_non_api_message_ids() {
             "{raw}"
         );
     }
+}
+
+#[test]
+fn gmail_filter_forward_is_gated_under_policy() {
+    let dir = setup();
+    seed(dir.path(), "gmail", "v1", "");
+    let create = |extra: &[&str]| {
+        let mut args = vec!["gmail", "+filter", "create", "--from", "boss@example.com"];
+        args.extend_from_slice(extra);
+        gwsr(dir.path())
+            .env("GWSR_REQUIRE_CONFIRM", "1")
+            .args(args)
+            .output()
+            .unwrap()
+    };
+
+    // A filter that forwards mail sends it to someone else: under the
+    // policy it needs --yes, exactly like `gmail +forward`.
+    let out = create(&["--forward", "fwd@example.com"]);
+    assert_eq!(
+        out.status.code(),
+        Some(7),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(out.stdout.is_empty());
+    let err: Value = serde_json::from_slice(&out.stderr).unwrap();
+    assert_eq!(err["error"]["reason"], "confirmationRequired", "{err}");
+    assert!(
+        err["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("fwd@example.com"),
+        "{err}"
+    );
+
+    // --yes confirms it (shown with --dry-run, which never sends anything).
+    let out = create(&["--forward", "fwd@example.com", "--yes", "--dry-run"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let plan = stdout_json(&out);
+    assert_eq!(
+        plan["requests"][0]["body"]["action"]["forward"],
+        "fwd@example.com"
+    );
+
+    // A filter that only labels or archives mail is not outbound.
+    let out = create(&["--archive", "--dry-run"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 }
