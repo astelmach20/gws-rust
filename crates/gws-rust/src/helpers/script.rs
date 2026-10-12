@@ -360,7 +360,9 @@ fn local_path_for(name: &str, file_type: &str) -> Result<PathBuf, GwsError> {
         }
     };
     let mut path = PathBuf::new();
-    for part in name.split('/') {
+    let parts: Vec<&str> = name.split('/').collect();
+    let last = parts.len() - 1;
+    for (i, part) in parts.into_iter().enumerate() {
         if part.is_empty()
             || part == "."
             || part == ".."
@@ -371,9 +373,25 @@ fn local_path_for(name: &str, file_type: &str) -> Result<PathBuf, GwsError> {
                 "Refusing unsafe Apps Script file name '{name}'"
             )));
         }
-        path.push(part);
+        // The name maps back to the path on +push, so it cannot be renamed
+        // on disk; refuse names Windows would treat as a device (`CON.gs`)
+        // or silently change (a trailing dot or space on a directory).
+        if crate::helpers::http::is_windows_device_name(part)
+            || (i != last && part.ends_with(['.', ' ']))
+        {
+            return Err(GwsError::Validation(format!(
+                "Refusing Apps Script file name '{name}': '{part}' is not a valid file or \
+                 directory name on Windows; rename it in the Apps Script editor"
+            )));
+        }
+        // Append the extension rather than `set_extension`, which would
+        // replace everything after a dot in the name (`a.b` -> `a.gs`).
+        if i == last {
+            path.push(format!("{part}.{ext}"));
+        } else {
+            path.push(part);
+        }
     }
-    path.set_extension(ext);
     Ok(path)
 }
 
@@ -600,9 +618,27 @@ mod tests {
             local_path_for("appsscript", "JSON").unwrap(),
             PathBuf::from("appsscript.json")
         );
+        assert_eq!(
+            local_path_for("v1.2/page.min", "HTML").unwrap(),
+            PathBuf::from("v1.2/page.min.html")
+        );
         assert!(local_path_for("../evil", "HTML").is_err());
         assert!(local_path_for("/abs", "HTML").is_err());
         assert!(local_path_for("x", "WEIRD").is_err());
+    }
+
+    #[test]
+    fn local_paths_refuse_windows_device_names() {
+        // `CON.gs` would open the console on Windows; the file cannot be
+        // renamed on disk because +push maps the path back to the name.
+        for name in [
+            "CON", "con", "lib/nul", "aux/util", "COM1", "lpt9.x", "dir./a", "dir /a",
+        ] {
+            let err = local_path_for(name, "SERVER_JS").unwrap_err().to_string();
+            assert!(err.contains("Windows"), "{name}: {err}");
+        }
+        assert!(local_path_for("CONTRACT", "SERVER_JS").is_ok());
+        assert!(local_path_for("lib/console", "SERVER_JS").is_ok());
     }
 
     #[tokio::test]
@@ -690,6 +726,42 @@ mod tests {
         );
         assert!(pull(&api, "S_1", dir.path(), false).await.is_err());
         pull(&api, "S_1", dir.path(), true).await.unwrap();
+    }
+
+    /// Apps Script file names may contain dots. `a.b` and `a.c` are two
+    /// distinct server files and must land in two local files that `+push`
+    /// maps back to the same names, not both in `a.gs`.
+    #[tokio::test]
+    async fn pull_keeps_dots_in_file_names() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/projects/S_1/content"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"files": [
+                {"name": "appsscript", "type": "JSON", "source": "{}"},
+                {"name": "config.dev", "type": "SERVER_JS", "source": "var env = 'dev';"},
+                {"name": "config.prod", "type": "SERVER_JS", "source": "var env = 'prod';"}
+            ]})))
+            .mount(&server)
+            .await;
+        let api = api(&server.uri(), "");
+        let dir = tempdir().unwrap();
+        pull(&api, "S_1", dir.path(), true).await.unwrap();
+        assert_eq!(
+            fs::read_to_string(dir.path().join("config.dev.gs")).unwrap(),
+            "var env = 'dev';"
+        );
+        assert_eq!(
+            fs::read_to_string(dir.path().join("config.prod.gs")).unwrap(),
+            "var env = 'prod';"
+        );
+        // The pulled directory pushes back under the original names.
+        let mut names: Vec<String> = collect_files(dir.path())
+            .unwrap()
+            .iter()
+            .map(|f| f["name"].as_str().unwrap().to_string())
+            .collect();
+        names.sort();
+        assert_eq!(names, ["appsscript", "config.dev", "config.prod"]);
     }
 
     #[tokio::test]
