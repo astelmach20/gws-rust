@@ -662,6 +662,33 @@ async fn configure_consent_screen(
     )))
 }
 
+/// Manual steps still needed when setup cannot prompt for an OAuth client;
+/// `None` when the saved client already serves `project_id`.
+///
+/// A saved client that records a different project does not count: its
+/// project stays the quota project, so reporting success would leave
+/// requests billed to (and APIs checked in) the old project.
+fn noninteractive_client_steps(
+    client_path: &std::path::Path,
+    project_id: &str,
+) -> Result<Option<String>, GwsError> {
+    let saved =
+        crate::auth::client_config::load_from(client_path).map_err(crate::auth::to_gws_error)?;
+    let instructions = messages::manual_oauth_instructions(project_id, client_path);
+    match saved {
+        None => Ok(Some(instructions)),
+        Some(client) => match client.project_id {
+            Some(saved_project) if saved_project != project_id => Ok(Some(format!(
+                "The saved OAuth client in {} belongs to project '{saved_project}', not \
+                 '{project_id}'; gwsr would keep using '{saved_project}' as the quota \
+                 project. Replace it with a Desktop client from '{project_id}'.\n\n{instructions}",
+                client_path.display()
+            ))),
+            _ => Ok(None),
+        },
+    }
+}
+
 async fn stage_configure_oauth(ctx: &mut Ctx) -> Result<Stage, GwsError> {
     ctx.step(4, StepStatus::InProgress("configuring...".into()))?;
     let token = ctx.gcloud.access_token().await.map_err(gcloud_err)?;
@@ -675,21 +702,15 @@ async fn stage_configure_oauth(ctx: &mut Ctx) -> Result<Stage, GwsError> {
         }
     }
     if !ctx.interactive {
-        let configured = crate::auth::client_config::load_from(&ctx.client_path)
-            .map_err(crate::auth::to_gws_error)?
-            .is_some();
-        if !configured {
-            ctx.manual_steps = Some(messages::manual_oauth_instructions(
-                &ctx.project_id,
-                &ctx.client_path,
-            ));
-        }
+        ctx.manual_steps = noninteractive_client_steps(&ctx.client_path, &ctx.project_id)?;
         return Ok(Stage::Finish);
     }
 
-    let existing_id = crate::auth::client_config::load_from(&ctx.client_path)
-        .map_err(crate::auth::to_gws_error)?
-        .map(|c| c.client_id);
+    let existing_id = client_id_prefill(
+        crate::auth::client_config::load_from(&ctx.client_path)
+            .map_err(crate::auth::to_gws_error)?,
+        &ctx.project_id,
+    );
     let project = ctx.project_id.clone();
     let note = ctx
         .consent_note
@@ -748,6 +769,18 @@ async fn stage_configure_oauth(ctx: &mut Ctx) -> Result<Stage, GwsError> {
     .map_err(crate::auth::to_gws_error)?;
     ctx.step(4, StepStatus::Done("configured".into()))?;
     Ok(Stage::Finish)
+}
+
+/// The client ID to pre-fill in the interactive OAuth client prompt: the
+/// saved client's, unless it records a different project. Pre-filling another
+/// project's client would let a single Enter save it under `project_id`.
+fn client_id_prefill(
+    saved: Option<crate::auth::client_config::ClientConfig>,
+    project_id: &str,
+) -> Option<String> {
+    saved
+        .filter(|c| c.project_id.as_deref().is_none_or(|p| p == project_id))
+        .map(|c| c.client_id)
 }
 
 fn setup_summary(ctx: &Ctx, status: &str, message: &str) -> serde_json::Value {
@@ -937,6 +970,63 @@ mod tests {
         assert!(parse_setup_args(&["--help".into()]).unwrap().is_none());
     }
 
+    fn saved_client(dir: &std::path::Path, project: Option<&str>) -> std::path::PathBuf {
+        let path = dir.join("client_secret.json");
+        crate::auth::client_config::save_client_config(
+            &path,
+            "cid.apps.googleusercontent.com",
+            &SecretString::from("secret".to_string()),
+            project,
+        )
+        .unwrap();
+        path
+    }
+
+    #[test]
+    fn noninteractive_client_steps_accept_a_client_for_the_same_project() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = saved_client(dir.path(), Some("proj-a"));
+        assert_eq!(noninteractive_client_steps(&path, "proj-a").unwrap(), None);
+        // A client without a recorded project cannot be checked; keep it.
+        let dir = tempfile::tempdir().unwrap();
+        let path = saved_client(dir.path(), None);
+        assert_eq!(noninteractive_client_steps(&path, "proj-a").unwrap(), None);
+    }
+
+    #[test]
+    fn noninteractive_client_steps_require_a_client_when_none_is_saved() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("client_secret.json");
+        let steps = noninteractive_client_steps(&path, "proj-a")
+            .unwrap()
+            .expect("manual steps");
+        assert!(
+            steps.contains("?project=proj-a"),
+            "the manual steps must link the Console pages of proj-a"
+        );
+    }
+
+    #[test]
+    fn noninteractive_client_steps_reject_a_client_from_another_project() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = saved_client(dir.path(), Some("proj-a"));
+        let steps = noninteractive_client_steps(&path, "proj-b")
+            .unwrap()
+            .expect("a client from proj-a must not count as configured for proj-b");
+        assert!(
+            steps.contains("proj-a"),
+            "the manual steps must name the saved client's project"
+        );
+        assert!(
+            steps.contains("belongs to project 'proj-a', not 'proj-b'; gwsr would keep"),
+            "the mismatch explanation must read as one sentence, without runs of spaces"
+        );
+        assert!(
+            steps.contains("?project=proj-b"),
+            "the manual steps must link the Console pages of proj-b"
+        );
+    }
+
     /// The project ID reaches `gcloud` as an argument and the consent-screen
     /// URL as a path segment, and is saved as the quota project; anything
     /// that is not a GCP project ID must be refused before any of that.
@@ -1041,5 +1131,43 @@ mod tests {
         );
         let r = simulate(list, &[KeyCode::Char('a'), KeyCode::Enter], true);
         assert_eq!(api_choice(&r).len(), apis::WORKSPACE_APIS.len());
+    }
+
+    fn client_for(project: Option<&str>) -> crate::auth::client_config::ClientConfig {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("client_secret.json");
+        crate::auth::client_config::save_client_config(
+            &path,
+            "old.apps.googleusercontent.com",
+            &SecretString::from("secret".to_string()),
+            project,
+        )
+        .unwrap();
+        crate::auth::client_config::load_from(&path)
+            .unwrap()
+            .unwrap()
+    }
+
+    #[test]
+    fn client_id_prefill_keeps_a_client_for_the_same_project() {
+        assert_eq!(client_id_prefill(None, "proj-a"), None);
+        assert_eq!(
+            client_id_prefill(Some(client_for(Some("proj-a"))), "proj-a").as_deref(),
+            Some("old.apps.googleusercontent.com")
+        );
+        // A client without a recorded project cannot be checked; offer it.
+        assert_eq!(
+            client_id_prefill(Some(client_for(None)), "proj-a").as_deref(),
+            Some("old.apps.googleusercontent.com")
+        );
+    }
+
+    #[test]
+    fn client_id_prefill_drops_a_client_from_another_project() {
+        // Accepting the pre-filled ID would save proj-a's client as proj-b's.
+        assert_eq!(
+            client_id_prefill(Some(client_for(Some("proj-a"))), "proj-b"),
+            None
+        );
     }
 }
