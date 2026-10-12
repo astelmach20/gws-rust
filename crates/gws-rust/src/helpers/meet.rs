@@ -49,7 +49,7 @@ EXAMPLES:
 
 TIPS:
   Prints meetingUri and meetingCode. To attach a Meet link to a calendar
-  event use `gwsr calendar +insert --meet` instead.",
+  event use `gwsr calendar +insert` with `--meet` instead.",
                 ),
         )
     }

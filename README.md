@@ -445,12 +445,12 @@ Helpers are hand-written commands prefixed with `+`, so they never collide with 
 gwsr gmail +send --to alice@example.com --subject 'Hello' --body 'Hi Alice' --attach report.pdf
 gwsr gmail +reply --message-id 18f1a2b3c4d --body 'Thanks!'
 gwsr gmail +search --query 'from:billing newer_than:7d' --max 20
-gwsr drive +upload --file ./report.pdf --folder-id FOLDER_ID --convert
+gwsr drive +upload --file ./report.docx --folder-id FOLDER_ID --convert
 gwsr drive +export --file-id DOC_ID --to pdf --output report.pdf
 gwsr docs +write --document-id DOC_ID --text-file notes.md --markdown
 gwsr sheets +append --spreadsheet-id SHEET_ID --range 'Sheet2!A1' --values 'Alice,95'
 gwsr calendar +insert --summary 'Standup' --start '2026-06-17T09:00' --duration 30m --attendee bob@example.com
-gwsr calendar +freebusy --start 2026-06-17 --duration 5d --slot 30m --working-hours 09:00-17:00
+gwsr calendar +freebusy --start 2026-06-17 --end 2026-06-22 --slot 30m --working-hours 09:00-17:00
 gwsr tasks +add --title 'File taxes' --due 2026-04-15
 gwsr events +subscribe --target //chat.googleapis.com/spaces/SPACE_ID --event-types google.workspace.chat.message.v1.created --project my-project
 ```
@@ -467,12 +467,12 @@ Calendar helpers interpret times without a UTC offset in `--timezone`, falling b
 
 ```bash
 gwsr gmail users messages get --params '{"userId":"me","id":"MSG"}' \
-  --sanitize projects/P/locations/us-central1/templates/T
+  --sanitize projects/my-project/locations/us-central1/templates/my-tmpl
 ```
 
 | Setting | Values |
 |---|---|
-| `--sanitize TEMPLATE` / `GWSR_SANITIZE_TEMPLATE` / `sanitize_template` | `projects/P/locations/L/templates/T` |
+| `--sanitize TEMPLATE` / `GWSR_SANITIZE_TEMPLATE` / `sanitize_template` | `projects/PROJECT/locations/LOCATION/templates/TEMPLATE` |
 | `GWSR_SANITIZE_MODE` / `sanitize_mode` | `warn` (default) or `block`. Any other value is an error |
 
 - **`warn`:** output is printed. A match or a sanitization failure adds a `_sanitization` annotation and a warning on stderr.
@@ -485,7 +485,7 @@ gwsr gmail users messages get --params '{"userId":"me","id":"MSG"}' \
 - In `block` mode a match (exit `11`) or a Model Armor failure (the cause's exit code) sends or creates nothing. In `warn` mode the action goes ahead after a warning on stderr, and the printed result carries the `_sanitization` annotation.
 - `--dry-run` never calls Model Armor; it prints the planned request unscreened.
 
-`gwsr modelarmor +create-template --preset jailbreak` creates a template from the built-in preset.
+`gwsr modelarmor +create-template --project my-project --location us-central1 --template-id my-tmpl --preset jailbreak` creates a template from the built-in preset.
 
 ## Configuration
 

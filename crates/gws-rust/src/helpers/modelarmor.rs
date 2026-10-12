@@ -519,7 +519,7 @@ impl Helper for ModelArmorHelper {
                 .after_help(
                     "\
 EXAMPLES:
-  gwsr modelarmor +sanitize-prompt --template projects/P/locations/L/templates/T --text 'user input'
+  gwsr modelarmor +sanitize-prompt --template projects/my-project/locations/us-central1/templates/my-tmpl --text 'user input'
   echo 'prompt' | gwsr modelarmor +sanitize-prompt --template ...
 
 TIPS:
@@ -547,7 +547,7 @@ TIPS:
                 )
                 .after_help("\
 EXAMPLES:
-  gwsr modelarmor +sanitize-response --template projects/P/locations/L/templates/T --text 'model output'
+  gwsr modelarmor +sanitize-response --template projects/my-project/locations/us-central1/templates/my-tmpl --text 'model output'
   model_cmd | gwsr modelarmor +sanitize-response --template ...
 
 TIPS:
@@ -595,8 +595,8 @@ TIPS:
                 )
                 .after_help("\
 EXAMPLES:
-  gwsr modelarmor +create-template --project P --location us-central1 --template-id my-tmpl --preset jailbreak
-  gwsr modelarmor +create-template --project P --location us-central1 --template-id my-tmpl --json '{...}'
+  gwsr modelarmor +create-template --project my-project --location us-central1 --template-id my-tmpl --preset jailbreak
+  gwsr modelarmor +create-template --project my-project --location us-central1 --template-id my-tmpl --json '{...}'
 
 TIPS:
   Defaults to the built-in jailbreak preset if neither --preset nor --json is given.

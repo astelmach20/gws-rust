@@ -50,9 +50,15 @@ pub(crate) struct AtomicFile {
 
 impl AtomicFile {
     /// Start writing `target`, creating its parent directories. Fails with a
-    /// validation error when the target is a directory, or exists and
-    /// `overwrite` is false.
+    /// validation error when the target is a directory, when it exists and
+    /// `overwrite` is false, or when `GWSR_RESTRICT_PATHS` confines output and
+    /// `target` (resolved through any symlinked directories) lies outside the
+    /// current directory.
     pub(crate) fn create(target: &Path, overwrite: bool) -> Result<Self, GwsError> {
+        // Callers validate the paths given on the command line, but files
+        // under a validated directory get remote names and may pass through
+        // symlinked sub-directories; check before creating anything.
+        crate::validate::check_output_path(target)?;
         // A directory can never be replaced by the rename in `commit`; refuse
         // it before any data is written (and whatever `overwrite` says).
         crate::validate::reject_directory(target, "output path")?;
