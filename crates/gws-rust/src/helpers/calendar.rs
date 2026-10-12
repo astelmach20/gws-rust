@@ -485,7 +485,7 @@ fn resolve_range(
     let start = time::parse_when(start, "--start")?;
     let end = match (end, duration) {
         (Some(e), _) => time::parse_when(e, "--end")?,
-        (None, Some(d)) => start.plus(time::parse_duration(d)?)?,
+        (None, Some(d)) => start.plus(time::parse_duration(d)?, tz)?,
         (None, None) => match &start {
             When::Date(d) => When::Date(*d + chrono::Duration::days(1)),
             _ => {
@@ -677,22 +677,14 @@ async fn agenda(api: &Api, args: &AgendaArgs, tz: &TzInfo) -> Result<Value, GwsE
     let (min, max) = agenda_bounds(&args.window, tz.tz)?;
     let (time_min, time_max) = (min.to_rfc3339(), max.to_rfc3339());
 
+    // One request for both paths, so the dry-run plan shows what is sent.
+    let calendar_list =
+        || ApiRequest::get(api.url("users/me/calendarList")).query("maxResults", "250");
     let calendars: Vec<(String, String)> = if api.is_dry_run() {
-        api.paginate(
-            ApiRequest::get(api.url("users/me/calendarList")),
-            "items",
-            None,
-        )
-        .await?;
+        api.paginate(calendar_list(), "items", None).await?;
         vec![("<each calendar>".into(), String::new())]
     } else {
-        let list = api
-            .paginate(
-                ApiRequest::get(api.url("users/me/calendarList")).query("maxResults", "250"),
-                "items",
-                None,
-            )
-            .await?;
+        let list = api.paginate(calendar_list(), "items", None).await?;
         let mut cals = Vec::new();
         let mut found_ids = std::collections::HashSet::new();
         for cal in list.items {
@@ -963,7 +955,7 @@ async fn update(api: &Api, m: &ArgMatches, tz: &TzInfo) -> Result<Value, GwsErro
                         "Switching between all-day and timed needs an explicit --end".into(),
                     ));
                 }
-                _ => new_start.plus(ce.to_utc(tz.tz)? - cs.to_utc(tz.tz)?)?,
+                _ => new_start.plus(ce.to_utc(tz.tz)? - cs.to_utc(tz.tz)?, tz.tz)?,
             };
             time::check_range(&new_start, &end, tz.tz)?;
             (new_start, end)
@@ -1050,9 +1042,21 @@ async fn rsvp(
     send_updates: &str,
 ) -> Result<Value, GwsError> {
     let url = event_url(api, calendar_id, event_id);
+    // Your entry gets the response, and the comment only when one is given
+    // (otherwise an existing comment is kept).
+    let respond = |me: &mut Value| {
+        me["responseStatus"] = json!(response);
+        if let Some(c) = comment {
+            me["comment"] = json!(c);
+        }
+    };
     let attendees = if api.is_dry_run() {
         api.send(ApiRequest::get(url.clone())).await?;
-        json!([{ "self": true, "responseStatus": response, "comment": comment }])
+        // The real PATCH carries the event's whole guest list, fetched by the
+        // GET above; only your entry changes.
+        let mut me = json!({ "self": true });
+        respond(&mut me);
+        json!(["<every other attendee of the event, unchanged>", me])
     } else {
         let event = api.send(ApiRequest::get(url.clone())).await?;
         let mut attendees = event
@@ -1068,10 +1072,7 @@ async fn rsvp(
                     "You are not on the guest list of event {event_id}; nothing to respond to"
                 ))
             })?;
-        me["responseStatus"] = json!(response);
-        if let Some(c) = comment {
-            me["comment"] = json!(c);
-        }
+        respond(me);
         Value::Array(attendees)
     };
     api.send(
@@ -1138,6 +1139,45 @@ mod tests {
             a.body["end"],
             json!({"dateTime": "2026-03-18T14:30:00", "timeZone": "America/Denver"})
         );
+    }
+
+    #[test]
+    fn insert_duration_is_elapsed_time_across_dst() {
+        let ny = tz("America/New_York", false);
+        let insert = |start: &str, duration: &str| {
+            insert_args(
+                &[
+                    "gwsr",
+                    "+insert",
+                    "--summary",
+                    "S",
+                    "--start",
+                    start,
+                    "--duration",
+                    duration,
+                ],
+                &ny,
+            )
+        };
+        // Fall back (2026-11-01 02:00 EDT -> 01:00 EST): 00:30 EDT plus two
+        // hours is 01:30 EST, not the 02:30 wall-clock time (three hours).
+        let a = insert("2026-11-01T00:30", "2h").unwrap();
+        let end = when_utc(&a.body["end"], ny.tz);
+        let start = when_utc(&a.body["start"], ny.tz);
+        assert_eq!(end - start, chrono::Duration::hours(2), "{}", a.body);
+        // Spring forward (2026-03-08 02:00 EST -> 03:00 EDT): 01:30 EST plus
+        // one hour is 03:30 EDT; 02:30 does not exist and must not be sent.
+        let a = insert("2026-03-08T01:30", "1h").unwrap();
+        let end = when_utc(&a.body["end"], ny.tz);
+        let start = when_utc(&a.body["start"], ny.tz);
+        assert_eq!(end - start, chrono::Duration::hours(1), "{}", a.body);
+    }
+
+    /// The instant a Calendar `EventDateTime` denotes, resolving a local
+    /// `dateTime` in its `timeZone` the way the Calendar API does.
+    fn when_utc(v: &Value, tz: Tz) -> chrono::DateTime<chrono::Utc> {
+        let s = v["dateTime"].as_str().unwrap();
+        time::parse_when(s, "t").unwrap().to_utc(tz).unwrap()
     }
 
     #[test]
@@ -1670,6 +1710,37 @@ mod tests {
         rsvp(&api, "primary", "E1", "declined", Some("busy"), "all")
             .await
             .unwrap();
+    }
+
+    /// The plan's PATCH body matches what a real run sends: the event's whole
+    /// guest list (not just your entry, which would drop every other guest),
+    /// and no `comment` unless `--comment` was given (a real run keeps an
+    /// existing comment; `"comment": null` would clear it).
+    #[tokio::test]
+    async fn rsvp_plan_keeps_other_guests_and_existing_comment() {
+        let api = dry_api("");
+        rsvp(&api, "primary", "E1", "accepted", None, "all")
+            .await
+            .unwrap();
+        let plan = api.planned();
+        assert_eq!(plan[0]["method"], "GET");
+        assert_eq!(plan[1]["method"], "PATCH");
+        assert_eq!(
+            plan[1]["body"],
+            json!({"attendees": [
+                "<every other attendee of the event, unchanged>",
+                {"self": true, "responseStatus": "accepted"}
+            ]})
+        );
+
+        let api = dry_api("");
+        rsvp(&api, "primary", "E1", "declined", Some("busy"), "all")
+            .await
+            .unwrap();
+        assert_eq!(
+            api.planned()[1]["body"]["attendees"][1],
+            json!({"self": true, "responseStatus": "declined", "comment": "busy"})
+        );
     }
 
     #[tokio::test]
