@@ -65,13 +65,14 @@ const HEADING_PAGINATION: &str = "Pagination options";
 const HEADING_UPLOAD: &str = "Upload options";
 
 /// Whether a method is marked deprecated. Discovery marks some methods with
-/// `deprecated: true` (not modelled yet) and many only in the description.
+/// `deprecated: true` and many only in the description.
 fn is_deprecated(method: &RestMethod) -> bool {
-    method.description.as_deref().is_some_and(|d| {
-        d.trim_start()
-            .to_ascii_lowercase()
-            .starts_with("deprecated")
-    })
+    method.deprecated
+        || method.description.as_deref().is_some_and(|d| {
+            d.trim_start()
+                .to_ascii_lowercase()
+                .starts_with("deprecated")
+        })
 }
 
 /// The response schema looks like a long-running Operation.
@@ -228,7 +229,7 @@ pub fn method_args(doc: &RestDescription, method: &RestMethod) -> Vec<Arg> {
         );
     }
 
-    if crate::executor::is_destructive(method) {
+    if crate::executor::is_gated(method) {
         args.push(crate::confirm::yes_arg().help_heading(HEADING_REQUEST));
     }
 
@@ -252,7 +253,7 @@ fn summary(desc: Option<&str>) -> String {
 }
 
 /// The "Parameters" block appended to a method's help.
-pub fn parameters_help(method: &RestMethod) -> Option<String> {
+pub fn parameters_help(doc: &RestDescription, method: &RestMethod) -> Option<String> {
     let mut params: Vec<(&String, &crate::discovery::MethodParameter)> = method
         .parameters
         .iter()
@@ -290,8 +291,10 @@ pub fn parameters_help(method: &RestMethod) -> Option<String> {
         text.push_str(line.trim_end());
         text.push('\n');
     }
-    if let Some(id) = &method.id {
-        text.push_str(&format!("\nFull request/response schema: gwsr schema {id}"));
+    if let Some(path) = crate::schema::method_schema_path(doc, method) {
+        text.push_str(&format!(
+            "\nFull request/response schema: gwsr schema {path}"
+        ));
     }
     Some(text)
 }
@@ -307,7 +310,7 @@ fn build_method_command(doc: &RestDescription, name: &str, method: &RestMethod) 
         .about(about)
         .hide(is_deprecated(method))
         .args(method_args(doc, method));
-    if let Some(help) = parameters_help(method) {
+    if let Some(help) = parameters_help(doc, method) {
         cmd = cmd.after_help(help);
     }
     cmd
@@ -379,6 +382,7 @@ mod tests {
                 supports_media_download: false,
                 supports_media_upload: false,
                 media_upload: None,
+                deprecated: false,
             },
         );
 
@@ -398,6 +402,7 @@ mod tests {
                 supports_media_download: false,
                 supports_media_upload: false,
                 media_upload: None,
+                deprecated: false,
             },
         );
 
@@ -550,18 +555,54 @@ mod tests {
                 ..Default::default()
             },
         );
-        let m = RestMethod {
-            id: Some("drive.files.get".into()),
-            parameters: p,
-            ..Default::default()
-        };
-        let help = parameters_help(&m).unwrap();
+        let mut doc = make_doc();
+        doc.resources.get_mut("files").unwrap().methods.insert(
+            "get".into(),
+            RestMethod {
+                id: Some("drive.files.get".into()),
+                parameters: p,
+                ..Default::default()
+            },
+        );
+        let m = &doc.resources["files"].methods["get"];
+        let help = parameters_help(&doc, m).unwrap();
         assert!(help.contains("fileId"));
         assert!(help.contains("(required, path)"));
         assert!(help.contains("The ID of the file"));
         assert!(!help.contains("More text"));
         assert!(!help.contains("oldFlag"));
         assert!(help.contains("gwsr schema drive.files.get"));
+    }
+
+    #[test]
+    fn test_methods_flagged_deprecated_in_discovery_are_hidden() {
+        // Shape of admin directory_v1 `chromeosdevices`: `action` carries
+        // `deprecated: true` but its description doesn't say so.
+        let doc: RestDescription = serde_json::from_value(serde_json::json!({
+            "name": "admin",
+            "version": "directory_v1",
+            "rootUrl": "https://admin.googleapis.com/",
+            "servicePath": "",
+            "resources": {"chromeosdevices": {"methods": {
+                "action": {
+                    "httpMethod": "POST",
+                    "path": "admin/directory/v1/customer/{customerId}/devices/chromeos/{resourceId}/action",
+                    "description": "Use BatchChangeChromeOsDeviceStatus instead.",
+                    "deprecated": true
+                },
+                "get": {
+                    "httpMethod": "GET",
+                    "path": "admin/directory/v1/customer/{customerId}/devices/chromeos/{deviceId}",
+                    "description": "Retrieves a Chrome OS device's properties."
+                }
+            }}}
+        }))
+        .unwrap();
+        let cmd = build_cli(&doc);
+        let devices = cmd.find_subcommand("chromeosdevices").unwrap();
+        assert!(devices.find_subcommand("action").unwrap().is_hide_set());
+        assert!(!devices.find_subcommand("get").unwrap().is_hide_set());
+        assert!(!devices.is_hide_set());
     }
 
     #[test]

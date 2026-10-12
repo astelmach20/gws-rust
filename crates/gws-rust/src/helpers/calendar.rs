@@ -485,7 +485,7 @@ fn resolve_range(
     let start = time::parse_when(start, "--start")?;
     let end = match (end, duration) {
         (Some(e), _) => time::parse_when(e, "--end")?,
-        (None, Some(d)) => start.plus(time::parse_duration(d)?)?,
+        (None, Some(d)) => start.plus(time::parse_duration(d)?, tz)?,
         (None, None) => match &start {
             When::Date(d) => When::Date(*d + chrono::Duration::days(1)),
             _ => {
@@ -617,14 +617,26 @@ fn agenda_bounds(
     window: &Window,
     tz: Tz,
 ) -> Result<(chrono::DateTime<Tz>, chrono::DateTime<Tz>), GwsError> {
-    let today = crate::timezone::start_of_today(tz)?;
-    let day = chrono::Duration::days(1);
+    agenda_bounds_at(window, tz, chrono::Utc::now())
+}
+
+fn agenda_bounds_at(
+    window: &Window,
+    tz: Tz,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<(chrono::DateTime<Tz>, chrono::DateTime<Tz>), GwsError> {
+    let today = now.with_timezone(&tz).date_naive();
     Ok(match window {
-        Window::Today => (today, today + day),
-        Window::Tomorrow => (today + day, today + day * 2),
+        Window::Today => crate::timezone::day_bounds(today, tz)?,
+        Window::Tomorrow => {
+            let tomorrow = today
+                .succ_opt()
+                .ok_or_else(|| GwsError::Validation(format!("{today} has no following day")))?;
+            crate::timezone::day_bounds(tomorrow, tz)?
+        }
         Window::Days(n) => {
-            let now = chrono::Utc::now().with_timezone(&tz);
-            (now, now + day * i32::try_from(*n).map_err(http::other_err)?)
+            let now = now.with_timezone(&tz);
+            (now, now + chrono::Duration::days(i64::from(*n)))
         }
     })
 }
@@ -665,22 +677,14 @@ async fn agenda(api: &Api, args: &AgendaArgs, tz: &TzInfo) -> Result<Value, GwsE
     let (min, max) = agenda_bounds(&args.window, tz.tz)?;
     let (time_min, time_max) = (min.to_rfc3339(), max.to_rfc3339());
 
+    // One request for both paths, so the dry-run plan shows what is sent.
+    let calendar_list =
+        || ApiRequest::get(api.url("users/me/calendarList")).query("maxResults", "250");
     let calendars: Vec<(String, String)> = if api.is_dry_run() {
-        api.paginate(
-            ApiRequest::get(api.url("users/me/calendarList")),
-            "items",
-            None,
-        )
-        .await?;
+        api.paginate(calendar_list(), "items", None).await?;
         vec![("<each calendar>".into(), String::new())]
     } else {
-        let list = api
-            .paginate(
-                ApiRequest::get(api.url("users/me/calendarList")).query("maxResults", "250"),
-                "items",
-                None,
-            )
-            .await?;
+        let list = api.paginate(calendar_list(), "items", None).await?;
         let mut cals = Vec::new();
         let mut found_ids = std::collections::HashSet::new();
         for cal in list.items {
@@ -951,7 +955,7 @@ async fn update(api: &Api, m: &ArgMatches, tz: &TzInfo) -> Result<Value, GwsErro
                         "Switching between all-day and timed needs an explicit --end".into(),
                     ));
                 }
-                _ => new_start.plus(ce.to_utc(tz.tz)? - cs.to_utc(tz.tz)?)?,
+                _ => new_start.plus(ce.to_utc(tz.tz)? - cs.to_utc(tz.tz)?, tz.tz)?,
             };
             time::check_range(&new_start, &end, tz.tz)?;
             (new_start, end)
@@ -1038,9 +1042,21 @@ async fn rsvp(
     send_updates: &str,
 ) -> Result<Value, GwsError> {
     let url = event_url(api, calendar_id, event_id);
+    // Your entry gets the response, and the comment only when one is given
+    // (otherwise an existing comment is kept).
+    let respond = |me: &mut Value| {
+        me["responseStatus"] = json!(response);
+        if let Some(c) = comment {
+            me["comment"] = json!(c);
+        }
+    };
     let attendees = if api.is_dry_run() {
         api.send(ApiRequest::get(url.clone())).await?;
-        json!([{ "self": true, "responseStatus": response, "comment": comment }])
+        // The real PATCH carries the event's whole guest list, fetched by the
+        // GET above; only your entry changes.
+        let mut me = json!({ "self": true });
+        respond(&mut me);
+        json!(["<every other attendee of the event, unchanged>", me])
     } else {
         let event = api.send(ApiRequest::get(url.clone())).await?;
         let mut attendees = event
@@ -1056,10 +1072,7 @@ async fn rsvp(
                     "You are not on the guest list of event {event_id}; nothing to respond to"
                 ))
             })?;
-        me["responseStatus"] = json!(response);
-        if let Some(c) = comment {
-            me["comment"] = json!(c);
-        }
+        respond(me);
         Value::Array(attendees)
     };
     api.send(
@@ -1126,6 +1139,45 @@ mod tests {
             a.body["end"],
             json!({"dateTime": "2026-03-18T14:30:00", "timeZone": "America/Denver"})
         );
+    }
+
+    #[test]
+    fn insert_duration_is_elapsed_time_across_dst() {
+        let ny = tz("America/New_York", false);
+        let insert = |start: &str, duration: &str| {
+            insert_args(
+                &[
+                    "gwsr",
+                    "+insert",
+                    "--summary",
+                    "S",
+                    "--start",
+                    start,
+                    "--duration",
+                    duration,
+                ],
+                &ny,
+            )
+        };
+        // Fall back (2026-11-01 02:00 EDT -> 01:00 EST): 00:30 EDT plus two
+        // hours is 01:30 EST, not the 02:30 wall-clock time (three hours).
+        let a = insert("2026-11-01T00:30", "2h").unwrap();
+        let end = when_utc(&a.body["end"], ny.tz);
+        let start = when_utc(&a.body["start"], ny.tz);
+        assert_eq!(end - start, chrono::Duration::hours(2), "{}", a.body);
+        // Spring forward (2026-03-08 02:00 EST -> 03:00 EDT): 01:30 EST plus
+        // one hour is 03:30 EDT; 02:30 does not exist and must not be sent.
+        let a = insert("2026-03-08T01:30", "1h").unwrap();
+        let end = when_utc(&a.body["end"], ny.tz);
+        let start = when_utc(&a.body["start"], ny.tz);
+        assert_eq!(end - start, chrono::Duration::hours(1), "{}", a.body);
+    }
+
+    /// The instant a Calendar `EventDateTime` denotes, resolving a local
+    /// `dateTime` in its `timeZone` the way the Calendar API does.
+    fn when_utc(v: &Value, tz: Tz) -> chrono::DateTime<chrono::Utc> {
+        let s = v["dateTime"].as_str().unwrap();
+        time::parse_when(s, "t").unwrap().to_utc(tz).unwrap()
     }
 
     #[test]
@@ -1250,6 +1302,31 @@ mod tests {
         )
         .unwrap();
         assert_eq!(insert(&api, &args).await.unwrap()["id"], "E1");
+    }
+
+    #[test]
+    fn all_day_dates_are_reported_unshifted_east_of_utc() {
+        // Upstream googleworkspace/cli#579: in Asia/Seoul an all-day event on
+        // 2026-03-23 was shown as starting 2026-03-21.
+        let event = json!({
+            "id": "e1",
+            "summary": "Holiday",
+            "start": {"date": "2026-03-23"},
+            "end": {"date": "2026-03-24"}
+        });
+        let s = summarize_event(&event, "primary", "Me");
+        assert_eq!(s["start"], "2026-03-23");
+        assert_eq!(s["end"], "2026-03-24");
+        assert_eq!(s["allDay"], true);
+        let seoul: Tz = "Asia/Seoul".parse().unwrap();
+        let timed = json!({"start": "2026-03-23T00:30:00+09:00"});
+        assert!(start_key(&s, seoul) < start_key(&timed, seoul));
+        assert_eq!(
+            start_key(&s, seoul),
+            chrono::DateTime::parse_from_rfc3339("2026-03-23T00:00:00+09:00")
+                .unwrap()
+                .timestamp()
+        );
     }
 
     #[tokio::test]
@@ -1635,6 +1712,37 @@ mod tests {
             .unwrap();
     }
 
+    /// The plan's PATCH body matches what a real run sends: the event's whole
+    /// guest list (not just your entry, which would drop every other guest),
+    /// and no `comment` unless `--comment` was given (a real run keeps an
+    /// existing comment; `"comment": null` would clear it).
+    #[tokio::test]
+    async fn rsvp_plan_keeps_other_guests_and_existing_comment() {
+        let api = dry_api("");
+        rsvp(&api, "primary", "E1", "accepted", None, "all")
+            .await
+            .unwrap();
+        let plan = api.planned();
+        assert_eq!(plan[0]["method"], "GET");
+        assert_eq!(plan[1]["method"], "PATCH");
+        assert_eq!(
+            plan[1]["body"],
+            json!({"attendees": [
+                "<every other attendee of the event, unchanged>",
+                {"self": true, "responseStatus": "accepted"}
+            ]})
+        );
+
+        let api = dry_api("");
+        rsvp(&api, "primary", "E1", "declined", Some("busy"), "all")
+            .await
+            .unwrap();
+        assert_eq!(
+            api.planned()[1]["body"]["attendees"][1],
+            json!({"self": true, "responseStatus": "declined", "comment": "busy"})
+        );
+    }
+
     #[tokio::test]
     async fn rsvp_not_invited_is_error() {
         let server = MockServer::start().await;
@@ -1678,11 +1786,96 @@ mod tests {
         );
     }
 
+    fn bounds_at(window: &Window, tz: Tz, now: &str) -> (String, String) {
+        let now = chrono::DateTime::parse_from_rfc3339(now)
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let (s, e) = agenda_bounds_at(window, tz, now).unwrap();
+        (s.to_rfc3339(), e.to_rfc3339())
+    }
+
+    #[test]
+    fn agenda_today_and_tomorrow_on_a_normal_day() {
+        let tz = chrono_tz::America::Denver;
+        let now = "2026-06-17T12:00:00-06:00";
+        assert_eq!(
+            bounds_at(&Window::Today, tz, now),
+            (
+                "2026-06-17T00:00:00-06:00".to_string(),
+                "2026-06-18T00:00:00-06:00".to_string()
+            )
+        );
+        assert_eq!(
+            bounds_at(&Window::Tomorrow, tz, now),
+            (
+                "2026-06-18T00:00:00-06:00".to_string(),
+                "2026-06-19T00:00:00-06:00".to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn agenda_today_spans_the_whole_25_hour_fall_back_day() {
+        let tz = chrono_tz::America::Denver;
+        assert_eq!(
+            bounds_at(&Window::Today, tz, "2026-11-01T12:00:00-07:00"),
+            (
+                "2026-11-01T00:00:00-06:00".to_string(),
+                "2026-11-02T00:00:00-07:00".to_string()
+            )
+        );
+        assert_eq!(
+            bounds_at(&Window::Tomorrow, tz, "2026-10-31T12:00:00-06:00"),
+            (
+                "2026-11-01T00:00:00-06:00".to_string(),
+                "2026-11-02T00:00:00-07:00".to_string()
+            )
+        );
+        // The day after the transition is an ordinary 24-hour day again.
+        assert_eq!(
+            bounds_at(&Window::Tomorrow, tz, "2026-11-01T12:00:00-07:00"),
+            (
+                "2026-11-02T00:00:00-07:00".to_string(),
+                "2026-11-03T00:00:00-07:00".to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn agenda_today_stops_at_midnight_on_the_23_hour_spring_forward_day() {
+        let tz = chrono_tz::America::Denver;
+        assert_eq!(
+            bounds_at(&Window::Today, tz, "2026-03-08T12:00:00-06:00"),
+            (
+                "2026-03-08T00:00:00-07:00".to_string(),
+                "2026-03-09T00:00:00-06:00".to_string()
+            )
+        );
+        assert_eq!(
+            bounds_at(&Window::Tomorrow, tz, "2026-03-07T12:00:00-07:00"),
+            (
+                "2026-03-08T00:00:00-07:00".to_string(),
+                "2026-03-09T00:00:00-06:00".to_string()
+            )
+        );
+        assert_eq!(
+            bounds_at(&Window::Tomorrow, tz, "2026-03-08T12:00:00-06:00"),
+            (
+                "2026-03-09T00:00:00-06:00".to_string(),
+                "2026-03-10T00:00:00-06:00".to_string()
+            )
+        );
+    }
+
     #[test]
     fn agenda_bounds_use_time_zone() {
         let (start, end) = agenda_bounds(&Window::Today, chrono_tz::America::Denver).unwrap();
         let s = start.to_rfc3339();
         assert!(s.ends_with("-07:00") || s.ends_with("-06:00"), "{s}");
-        assert_eq!(end - start, chrono::Duration::days(1));
+        use chrono::Timelike;
+        for t in [start, end] {
+            assert_eq!((t.hour(), t.minute(), t.second()), (0, 0, 0), "{t}");
+        }
+        assert_eq!(end.date_naive(), start.date_naive().succ_opt().unwrap());
     }
 }

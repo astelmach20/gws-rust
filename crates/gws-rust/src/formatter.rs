@@ -23,9 +23,12 @@
 //! every call site (executor, helpers) formats consistently without threading
 //! the options through each signature.
 
+use std::borrow::Cow;
 use std::sync::OnceLock;
 
 use serde_json::{Map, Value};
+use unicode_segmentation::UnicodeSegmentation;
+use unicode_width::UnicodeWidthStr;
 
 use crate::error::GwsError;
 use crate::jq::JqFilter;
@@ -139,25 +142,95 @@ pub fn emit_default(value: &Value) -> Result<(), GwsError> {
     crate::output::emit(&format_value(value, &settings().default_format)?)
 }
 
+/// A text cell for a CSV file written by a helper (for example
+/// `forms +responses --output`), with the same formula-injection guard and
+/// control-character stripping as `--format csv`.
+pub(crate) fn csv_text_cell(s: &str) -> String {
+    csv_text(s)
+}
+
+/// State shared by every page of one paginated (`--page-all` /
+/// `--page-items`) stream.
+///
+/// CSV and table output print one header, so the first page that has rows
+/// fixes the columns (the `--columns` selection, or that page's keys in order
+/// of first appearance) and, for tables, their widths. Every later page is
+/// laid out against those columns: a missing key is an empty cell, and a key
+/// that first appears on a later page cannot be added to the header that was
+/// already written. Such keys are omitted from CSV/table output, and a warning
+/// naming them is logged once per key (unless `--columns` chose the columns
+/// explicitly).
+#[derive(Debug, Default)]
+pub struct PageStream {
+    /// Columns fixed by the first page with rows.
+    layout: Option<Layout>,
+    /// A page has been rendered (the empty-table marker is printed once).
+    started: bool,
+    /// Late keys that have already been reported.
+    omitted: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+struct Layout {
+    /// Raw (unsanitized) column keys.
+    columns: Vec<String>,
+    /// Table column widths; empty for CSV.
+    widths: Vec<usize>,
+}
+
+impl PageStream {
+    fn layout(&self) -> Option<Layout> {
+        self.layout.clone()
+    }
+
+    /// Record the layout (first page only) and report late keys.
+    fn record(&mut self, layout: Layout, late: Vec<String>, format: &str) {
+        if self.layout.is_none() {
+            self.layout = Some(layout);
+        }
+        let new: Vec<String> = late
+            .into_iter()
+            .filter(|k| !self.omitted.contains(k))
+            .collect();
+        if new.is_empty() {
+            return;
+        }
+        let names: Vec<String> = new.iter().map(|k| sanitize_for_terminal(k)).collect();
+        tracing::warn!(
+            "paginated {format} output: field(s) {} first appeared after the header was written \
+             and are omitted; choose columns with --columns or use --format json to keep every field",
+            names.join(", ")
+        );
+        self.omitted.extend(new);
+    }
+
+    /// Keys omitted from the output because they appeared after the header.
+    #[cfg(test)]
+    fn omitted(&self) -> &[String] {
+        &self.omitted
+    }
+}
+
 /// Format one page of a `--page-all` stream.
 ///
 /// JSON pages are always compact (one JSON document per line, NDJSON). CSV and
-/// table output only emit column headers on the first page; YAML pages are
-/// prefixed with a `---` document separator.
+/// table output emit column headers once and align every later page to them
+/// (see [`PageStream`]); YAML pages are prefixed with a `---` document
+/// separator.
 pub fn format_value_paginated(
     value: &Value,
     format: &OutputFormat,
-    is_first_page: bool,
+    pages: &mut PageStream,
 ) -> Result<String, GwsError> {
-    render(value, *format, settings(), Some(is_first_page))
+    render(value, *format, settings(), Some(pages))
 }
 
-/// Core renderer. `page` is `Some(is_first_page)` in paginated mode.
+/// Core renderer. `page` is the stream state in paginated mode.
 fn render(
     value: &Value,
     format: OutputFormat,
     settings: &OutputSettings,
-    page: Option<bool>,
+    page: Option<&mut PageStream>,
 ) -> Result<String, GwsError> {
     let style = if page.is_some() {
         JsonStyle::Compact
@@ -193,15 +266,14 @@ fn render_one(
     value: &Value,
     format: OutputFormat,
     settings: &OutputSettings,
-    page: Option<bool>,
+    mut page: Option<&mut PageStream>,
     style: JsonStyle,
 ) -> Result<String, GwsError> {
-    let emit_header = page.unwrap_or(true);
     let columns = settings.columns.as_deref();
     let out = match format {
         OutputFormat::Json => json_string(value, style),
-        OutputFormat::Table => format_table(value, emit_header, columns)?,
-        OutputFormat::Csv => format_csv(value, emit_header, columns)?,
+        OutputFormat::Table => format_table(value, columns, page.as_deref_mut())?,
+        OutputFormat::Csv => format_csv(value, columns, page.as_deref_mut())?,
         OutputFormat::Yaml => {
             let yaml = format_yaml(value)?;
             if page.is_some() {
@@ -211,6 +283,9 @@ fn render_one(
             }
         }
     };
+    if let Some(p) = page {
+        p.started = true;
+    }
     Ok(out.trim_end_matches('\n').to_string())
 }
 
@@ -274,17 +349,37 @@ fn extract_items(value: &Value) -> Option<(&str, &Vec<Value>)> {
     found
 }
 
+/// Escape one object key for use as a segment of a dotted column name: `\`
+/// becomes `\\` and `.` becomes `\.`, so a literal `"a.b"` key (`a\.b`) never
+/// collides with the nested path `{"a": {"b": ..}}` (`a.b`).
+fn escape_key_segment(key: &str) -> Cow<'_, str> {
+    if !key.contains(['.', '\\']) {
+        return Cow::Borrowed(key);
+    }
+    let mut escaped = String::with_capacity(key.len() + 2);
+    for c in key.chars() {
+        if matches!(c, '.' | '\\') {
+            escaped.push('\\');
+        }
+        escaped.push(c);
+    }
+    Cow::Owned(escaped)
+}
+
 /// Recursively flatten a JSON object into `(dot.notation.key, value)` pairs.
+/// Dots and backslashes inside a key are escaped (see [`escape_key_segment`]),
+/// so every flattened name maps to exactly one value.
 fn flatten_object<'a>(
     obj: &'a Map<String, Value>,
     prefix: &str,
     out: &mut Vec<(String, &'a Value)>,
 ) {
     for (key, val) in obj {
+        let segment = escape_key_segment(key);
         let full_key = if prefix.is_empty() {
-            key.clone()
+            segment.into_owned()
         } else {
-            format!("{prefix}.{key}")
+            format!("{prefix}.{segment}")
         };
         match val {
             Value::Object(nested) if !nested.is_empty() => flatten_object(nested, &full_key, out),
@@ -299,17 +394,24 @@ fn flatten(obj: &Map<String, Value>) -> Vec<(String, &Value)> {
     out
 }
 
-/// Rows of an array of objects: `(ordered column names, row maps)`.
+/// Rows of an array of objects: `(ordered column names, row maps, late keys)`.
 ///
 /// With `selected`, only those columns are kept (in the given order); a
 /// selected column that appears in no row is an error so typos are not
 /// silently rendered as empty columns.
+///
+/// With `fixed` (a later page of a paginated stream), the columns are exactly
+/// `fixed`; keys outside it are returned as late keys, except when `selected`
+/// chose the columns (then leaving the others out is what was asked for).
 type Row<'a> = std::collections::HashMap<String, &'a Value>;
+
+type Table<'a> = (Vec<String>, Vec<Row<'a>>, Vec<String>);
 
 fn tabulate<'a>(
     arr: &'a [Value],
     selected: Option<&[String]>,
-) -> Result<(Vec<String>, Vec<Row<'a>>), GwsError> {
+    fixed: Option<&[String]>,
+) -> Result<Table<'a>, GwsError> {
     let mut columns: Vec<String> = Vec::new();
     let mut rows = Vec::with_capacity(arr.len());
     for item in arr {
@@ -323,6 +425,14 @@ fn tabulate<'a>(
             }
         }
         rows.push(pairs.into_iter().collect());
+    }
+    if let Some(fixed) = fixed {
+        let late = if selected.is_some() {
+            Vec::new()
+        } else {
+            columns.into_iter().filter(|c| !fixed.contains(c)).collect()
+        };
+        return Ok((fixed.to_vec(), rows, late));
     }
     if let Some(selected) = selected {
         let missing: Vec<&str> = selected
@@ -339,21 +449,25 @@ fn tabulate<'a>(
         }
         columns = selected.to_vec();
     }
-    Ok((columns, rows))
+    Ok((columns, rows, Vec::new()))
 }
 
 const MAX_COLUMN_WIDTH: usize = 60;
 
 fn format_table(
     value: &Value,
-    emit_header: bool,
     columns: Option<&[String]>,
+    page: Option<&mut PageStream>,
 ) -> Result<String, GwsError> {
     if let Some((_key, arr)) = extract_items(value) {
-        return format_array_as_table(arr, emit_header, columns);
+        return format_array_as_table(arr, columns, page);
     }
     match value {
-        Value::Array(arr) => format_array_as_table(arr, emit_header, columns),
+        Value::Array(arr) => format_array_as_table(arr, columns, page),
+        // In a stream, a single object (a `--page-items` item) is one row.
+        Value::Object(_) if page.is_some() => {
+            format_array_as_table(std::slice::from_ref(value), columns, page)
+        }
         Value::Object(obj) => {
             // Single object: key/value table with nested objects flattened.
             let mut flat = flatten(obj);
@@ -373,7 +487,7 @@ fn format_table(
             }
             let width = flat
                 .iter()
-                .map(|(k, _)| k.chars().count())
+                .map(|(k, _)| display_width(&sanitize_for_terminal(k)))
                 .max()
                 .unwrap_or(0);
             let mut out = String::new();
@@ -392,35 +506,62 @@ fn format_table(
     }
 }
 
+/// Columns `s` occupies on a terminal: CJK and most emoji take two, combining
+/// marks none, and an emoji ZWJ sequence or flag counts as one character.
+fn display_width(s: &str) -> usize {
+    s.graphemes(true).map(UnicodeWidthStr::width).sum()
+}
+
 fn pad(s: &str, width: usize) -> String {
-    let len = s.chars().count();
+    let len = display_width(s);
     format!("{s}{}", " ".repeat(width.saturating_sub(len)))
 }
 
+/// Truncate `s` to at most `width` display columns, cutting only between
+/// grapheme clusters and marking the cut with `…`.
 fn truncate_cell(s: &str, width: usize) -> String {
-    if s.chars().count() > width {
-        let head: String = s.chars().take(width.saturating_sub(1)).collect();
-        format!("{head}…")
+    if display_width(s) <= width {
+        return s.to_string();
+    }
+    let budget = width.saturating_sub(1);
+    let mut used = 0;
+    let mut head = String::new();
+    for g in s.graphemes(true) {
+        let w = UnicodeWidthStr::width(g);
+        if used + w > budget {
+            break;
+        }
+        used += w;
+        head.push_str(g);
+    }
+    if width == 0 {
+        head
     } else {
-        s.to_string()
+        format!("{head}…")
     }
 }
 
 fn format_array_as_table(
     arr: &[Value],
-    emit_header: bool,
     selected: Option<&[String]>,
+    page: Option<&mut PageStream>,
 ) -> Result<String, GwsError> {
     if arr.is_empty() {
-        return Ok(if emit_header {
+        let first = page.as_ref().is_none_or(|p| !p.started);
+        return Ok(if first {
             "(empty)".to_string()
         } else {
             String::new()
         });
     }
 
-    let (columns, rows) = tabulate(arr, selected)?;
-    let columns: Vec<String> = columns.iter().map(|c| sanitize_for_terminal(c)).collect();
+    let fixed = page.as_ref().and_then(|p| p.layout());
+    let (raw_columns, rows, late) =
+        tabulate(arr, selected, fixed.as_ref().map(|l| l.columns.as_slice()))?;
+    let columns: Vec<String> = raw_columns
+        .iter()
+        .map(|c| sanitize_for_terminal(c))
+        .collect();
     let rows: Vec<std::collections::HashMap<String, String>> = rows
         .iter()
         .map(|r| {
@@ -429,21 +570,25 @@ fn format_array_as_table(
                 .collect()
         })
         .collect();
-    // Width: char count, capped.
-    let widths: Vec<usize> = columns
-        .iter()
-        .map(|c| {
-            let data = rows
-                .iter()
-                .map(|r| r.get(c).map_or(0, |v| v.chars().count()))
-                .max()
-                .unwrap_or(0);
-            data.max(c.chars().count()).min(MAX_COLUMN_WIDTH)
-        })
-        .collect();
+    // Width: terminal display columns, capped. Later pages of a stream keep the first
+    // page's widths so their rows line up under its header.
+    let widths: Vec<usize> = match &fixed {
+        Some(layout) => layout.widths.clone(),
+        None => columns
+            .iter()
+            .map(|c| {
+                let data = rows
+                    .iter()
+                    .map(|r| r.get(c).map_or(0, |v| display_width(v)))
+                    .max()
+                    .unwrap_or(0);
+                data.max(display_width(c)).min(MAX_COLUMN_WIDTH)
+            })
+            .collect(),
+    };
 
     let mut out = String::new();
-    if emit_header {
+    if fixed.is_none() {
         let header: Vec<String> = columns
             .iter()
             .zip(&widths)
@@ -469,6 +614,16 @@ fn format_array_as_table(
         out.push_str(cells.join("  ").trim_end());
         out.push('\n');
     }
+    if let Some(p) = page {
+        p.record(
+            Layout {
+                columns: raw_columns,
+                widths,
+            },
+            late,
+            "table",
+        );
+    }
     Ok(out)
 }
 
@@ -483,8 +638,8 @@ fn csv_error(e: csv::Error) -> GwsError {
 
 fn format_csv(
     value: &Value,
-    emit_header: bool,
     selected: Option<&[String]>,
+    page: Option<&mut PageStream>,
 ) -> Result<String, GwsError> {
     let arr: &[Value] = if let Some((_key, arr)) = extract_items(value) {
         arr
@@ -494,8 +649,8 @@ fn format_csv(
         // Single object: one header row + one data row.
         return format_csv(
             &Value::Array(vec![Value::Object(obj.clone())]),
-            emit_header,
             selected,
+            page,
         );
     } else {
         return Ok(csv_cell(value));
@@ -515,8 +670,10 @@ fn format_csv(
             writer.write_record(&record).map_err(csv_error)?;
         }
     } else {
-        let (columns, rows) = tabulate(arr, selected)?;
-        if emit_header {
+        let fixed = page.as_ref().and_then(|p| p.layout());
+        let (columns, rows, late) =
+            tabulate(arr, selected, fixed.as_ref().map(|l| l.columns.as_slice()))?;
+        if fixed.is_none() {
             let header: Vec<String> = columns.iter().map(|c| csv_text(c)).collect();
             writer.write_record(&header).map_err(csv_error)?;
         }
@@ -526,6 +683,16 @@ fn format_csv(
                 .map(|c| row.get(c).map_or_else(String::new, |v| csv_cell(v)))
                 .collect();
             writer.write_record(&record).map_err(csv_error)?;
+        }
+        if let Some(p) = page {
+            p.record(
+                Layout {
+                    columns,
+                    widths: Vec::new(),
+                },
+                late,
+                "CSV",
+            );
         }
     }
 
@@ -591,8 +758,18 @@ mod tests {
         render(value, format, settings, None).unwrap()
     }
 
-    fn page(value: &Value, format: OutputFormat, first: bool) -> String {
-        render(value, format, &plain(), Some(first)).unwrap()
+    /// Render `pages` as one paginated stream; returns each page's output.
+    fn stream(
+        pages: &[Value],
+        format: OutputFormat,
+        settings: &OutputSettings,
+    ) -> (Vec<String>, PageStream) {
+        let mut state = PageStream::default();
+        let out = pages
+            .iter()
+            .map(|p| render(p, format, settings, Some(&mut state)).unwrap())
+            .collect();
+        (out, state)
     }
 
     #[test]
@@ -627,10 +804,8 @@ mod tests {
     #[test]
     fn paginated_json_is_always_compact() {
         let val = json!({"files": [{"id": "1"}]});
-        assert_eq!(
-            page(&val, OutputFormat::Json, true),
-            r#"{"files":[{"id":"1"}]}"#
-        );
+        let (out, _) = stream(&[val], OutputFormat::Json, &plain());
+        assert_eq!(out, [r#"{"files":[{"id":"1"}]}"#]);
     }
 
     #[test]
@@ -696,6 +871,82 @@ mod tests {
         assert!(out.contains('…'));
     }
 
+    /// Terminal display width of `s` (the columns it occupies).
+    fn display_width(s: &str) -> usize {
+        unicode_width::UnicodeWidthStr::width(s)
+    }
+
+    /// Display column at which `needle` starts on `line`.
+    fn display_col(line: &str, needle: &str) -> usize {
+        let at = line.find(needle).unwrap();
+        display_width(&line[..at])
+    }
+
+    #[test]
+    fn table_aligns_columns_after_wide_characters() {
+        let val = json!([
+            {"name": "日本語", "id": "1"},
+            {"name": "abc", "id": "2"},
+            {"name": "😀😀", "id": "3"}
+        ]);
+        let out = fmt(&val, OutputFormat::Table);
+        let lines: Vec<&str> = out.lines().collect();
+        let header_col = display_col(lines[0], "name");
+        assert_eq!(display_col(lines[2], "日本語"), header_col, "{out}");
+        assert_eq!(display_col(lines[3], "abc"), header_col, "{out}");
+        assert_eq!(display_col(lines[4], "😀😀"), header_col, "{out}");
+        // Every line (and the separator) spans the same columns.
+        let sep = display_width(lines[1]);
+        assert_eq!(display_width(lines[2]), sep, "{out}");
+    }
+
+    #[test]
+    fn table_single_object_pads_wide_keys() {
+        let val = json!({"名前": "Alice", "id": "1"});
+        let out = fmt(&val, OutputFormat::Table);
+        let cols: Vec<usize> = out
+            .lines()
+            .map(|l| display_col(l, if l.contains("Alice") { "Alice" } else { "1" }))
+            .collect();
+        assert_eq!(cols[0], cols[1], "{out}");
+    }
+
+    #[test]
+    fn table_truncation_caps_display_width() {
+        for cell in ["日".repeat(70), "😀".repeat(70), "a日".repeat(50)] {
+            let val = json!([{"col": cell, "n": "x"}]);
+            let out = fmt(&val, OutputFormat::Table);
+            let lines: Vec<&str> = out.lines().collect();
+            let row = lines[2];
+            let n_col = display_col(row, "x");
+            assert_eq!(display_col(lines[0], "n"), n_col, "{out}");
+            let truncated = row[..row.find('…').unwrap() + '…'.len_utf8()].to_string();
+            assert!(
+                display_width(&truncated) <= MAX_COLUMN_WIDTH,
+                "{} > {MAX_COLUMN_WIDTH}: {out}",
+                display_width(&truncated)
+            );
+        }
+    }
+
+    #[test]
+    fn table_truncation_keeps_grapheme_clusters_whole() {
+        // Skin-tone emoji, emoji presentation selector, flag (regional-
+        // indicator pair) and a combining accent: each is one cluster of
+        // several chars, and truncation must cut between clusters.
+        for (cluster, repeat) in [("👍🏽", 40), ("❤\u{fe0f}", 40), ("🇯🇵", 40), ("e\u{301}", 70)]
+        {
+            let val = json!([{"col": cluster.repeat(repeat)}]);
+            let out = fmt(&val, OutputFormat::Table);
+            let row = out.lines().nth(2).unwrap();
+            let head = row.strip_suffix('…').unwrap_or_else(|| panic!("{out}"));
+            assert!(!head.is_empty(), "{out}");
+            assert_eq!(head.len() % cluster.len(), 0, "split cluster: {out}");
+            assert_eq!(head, cluster.repeat(head.len() / cluster.len()), "{out}");
+            assert!(display_width(row) <= MAX_COLUMN_WIDTH, "{out}");
+        }
+    }
+
     #[test]
     fn table_empty_list() {
         assert_eq!(fmt(&json!({"files": []}), OutputFormat::Table), "(empty)");
@@ -740,6 +991,52 @@ mod tests {
         assert_eq!(
             fmt(&val, OutputFormat::Csv),
             "id,name\n1,hello\n2,\"has,comma\""
+        );
+    }
+
+    #[test]
+    fn csv_literal_dotted_key_does_not_collide_with_nested_path() {
+        // A literal "a.b" key and a nested {"a": {"b": ..}} used to flatten to
+        // the same column, and one of the two values was silently dropped.
+        let val = json!([{"a.b": "literal", "a": {"b": "nested"}}]);
+        let out = fmt(&val, OutputFormat::Csv);
+        assert!(out.contains("literal"), "{out}");
+        assert!(out.contains("nested"), "{out}");
+        assert_eq!(out, "a.b,a\\.b\nnested,literal");
+    }
+
+    #[test]
+    fn table_literal_dotted_key_does_not_collide_with_nested_path() {
+        let val = json!([{"a.b": "literal", "a": {"b": "nested"}}]);
+        let out = fmt(&val, OutputFormat::Table);
+        assert!(out.contains("literal"), "{out}");
+        assert!(out.contains("nested"), "{out}");
+        let single = fmt(
+            &json!({"a.b": "literal", "a": {"b": "nested"}}),
+            OutputFormat::Table,
+        );
+        assert_eq!(single, "a.b   nested\na\\.b  literal");
+    }
+
+    #[test]
+    fn columns_select_escaped_literal_dotted_key() {
+        let val = json!([{"labels": {"app.io/name": "web", "app": {"io/name": "x"}}, "\\": 1}]);
+        let settings = OutputSettings {
+            columns: Some(vec!["labels.app\\.io/name".into(), "\\\\".into()]),
+            ..Default::default()
+        };
+        assert_eq!(
+            fmt_with(&val, OutputFormat::Csv, &settings),
+            "labels.app\\.io/name,\\\\\nweb,1"
+        );
+        // The unescaped spelling names the nested path, not the literal key.
+        let settings = OutputSettings {
+            columns: Some(vec!["labels.app.io/name".into()]),
+            ..Default::default()
+        };
+        assert_eq!(
+            fmt_with(&val, OutputFormat::Csv, &settings),
+            "labels.app.io/name\nx"
         );
     }
 
@@ -793,18 +1090,109 @@ mod tests {
     #[test]
     fn paginated_csv_and_table_headers_only_on_first_page() {
         let val = json!({"files": [{"id": "3", "name": "c.txt"}]});
-        assert_eq!(page(&val, OutputFormat::Csv, true), "id,name\n3,c.txt");
-        assert_eq!(page(&val, OutputFormat::Csv, false), "3,c.txt");
-        assert!(page(&val, OutputFormat::Table, true).contains("──"));
-        let cont = page(&val, OutputFormat::Table, false);
-        assert!(!cont.contains("──") && cont.contains("c.txt"), "{cont}");
+        let pages = [val.clone(), val];
+        let (csv, _) = stream(&pages, OutputFormat::Csv, &plain());
+        assert_eq!(csv, ["id,name\n3,c.txt", "3,c.txt"]);
+        let (table, _) = stream(&pages, OutputFormat::Table, &plain());
+        assert!(table[0].contains("──"));
+        assert!(
+            !table[1].contains("──") && table[1].contains("c.txt"),
+            "{}",
+            table[1]
+        );
+    }
+
+    fn ragged_pages() -> [Value; 2] {
+        [
+            json!({"files": [{"id": "1", "name": "a"}], "nextPageToken": "t"}),
+            // Different order, an extra key, and a missing key.
+            json!({"files": [{"extra": "x", "name": "b", "id": "2"}, {"id": "3"}]}),
+        ]
+    }
+
+    #[test]
+    fn paginated_csv_aligns_later_pages_to_the_first_header() {
+        let (out, state) = stream(&ragged_pages(), OutputFormat::Csv, &plain());
+        assert_eq!(out, ["id,name\n1,a", "2,b\n3,"]);
+        assert_eq!(state.omitted(), ["extra"]);
+    }
+
+    #[test]
+    fn paginated_table_aligns_later_pages_to_the_first_header() {
+        let (out, state) = stream(&ragged_pages(), OutputFormat::Table, &plain());
+        assert_eq!(out, ["id  name\n──  ────\n1   a", "2   b\n3"]);
+        assert_eq!(state.omitted(), ["extra"]);
+    }
+
+    #[test]
+    fn paginated_late_keys_are_reported_once() {
+        let pages = [
+            json!([{"id": "1"}]),
+            json!([{"id": "2", "extra": "x"}]),
+            json!([{"id": "3", "extra": "y", "more": "z"}]),
+        ];
+        let (out, state) = stream(&pages, OutputFormat::Csv, &plain());
+        assert_eq!(out, ["id\n1", "2", "3"]);
+        assert_eq!(state.omitted(), ["extra", "more"]);
+    }
+
+    #[test]
+    fn paginated_columns_selection_is_kept_and_not_reported() {
+        let settings = OutputSettings {
+            columns: Some(vec!["name".into(), "id".into()]),
+            ..OutputSettings::default()
+        };
+        let (out, state) = stream(&ragged_pages(), OutputFormat::Csv, &settings);
+        // Page 2's second row has no `name`: an empty cell, not an error.
+        assert_eq!(out, ["name,id\na,1", "b,2\n,3"]);
+        assert!(state.omitted().is_empty());
+    }
+
+    #[test]
+    fn paginated_unknown_column_on_first_page_is_still_an_error() {
+        let settings = OutputSettings {
+            columns: Some(vec!["nope".into()]),
+            ..OutputSettings::default()
+        };
+        let mut state = PageStream::default();
+        let err = render(
+            &ragged_pages()[0],
+            OutputFormat::Csv,
+            &settings,
+            Some(&mut state),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("no such column"), "{err}");
+    }
+
+    #[test]
+    fn paginated_items_render_as_rows() {
+        let items = [
+            json!({"id": "1", "name": "a"}),
+            json!({"name": "b", "id": "2"}),
+        ];
+        let (csv, _) = stream(&items, OutputFormat::Csv, &plain());
+        assert_eq!(csv, ["id,name\n1,a", "2,b"]);
+        let (table, _) = stream(&items, OutputFormat::Table, &plain());
+        assert_eq!(table, ["id  name\n──  ────\n1   a", "2   b"]);
+    }
+
+    #[test]
+    fn paginated_empty_table_marker_only_before_any_page() {
+        let pages = [
+            json!({"files": []}),
+            json!({"files": [{"id": "1"}]}),
+            json!({"files": []}),
+        ];
+        let (out, _) = stream(&pages, OutputFormat::Table, &plain());
+        assert_eq!(out, ["(empty)", "id\n──\n1", ""]);
     }
 
     #[test]
     fn paginated_yaml_has_document_separator() {
         let val = json!({"files": [{"id": "1"}]});
-        assert!(page(&val, OutputFormat::Yaml, true).starts_with("---\n"));
-        assert!(page(&val, OutputFormat::Yaml, false).starts_with("---\n"));
+        let (out, _) = stream(&[val.clone(), val], OutputFormat::Yaml, &plain());
+        assert!(out.iter().all(|p| p.starts_with("---\n")), "{out:?}");
     }
 
     #[test]

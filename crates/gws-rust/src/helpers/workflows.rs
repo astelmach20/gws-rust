@@ -24,9 +24,11 @@ use crate::args::dry_run;
 use crate::confirm::{self, Impact, with_yes};
 use crate::error::GwsError;
 use crate::helpers::http::{dry_run_request, output_format};
+use crate::helpers::modelarmor::{SanitizeConfig, require_pass, sanitize_value};
 use crate::transport::Transport;
 use clap::{Arg, ArgMatches, Command};
 use gws_rust_core::client::Idempotency;
+use gws_rust_core::validate::EndpointPolicy;
 use serde_json::{Value, json};
 use std::future::Future;
 use std::pin::Pin;
@@ -62,6 +64,29 @@ impl Default for Bases {
     }
 }
 
+impl Bases {
+    /// Google's endpoints, or every API under the `GWSR_API_BASE_URL`
+    /// override (root + the API's service path, as generated methods and the
+    /// app helpers build their URLs).
+    fn for_endpoints(endpoints: &EndpointPolicy) -> Self {
+        match endpoints.override_base() {
+            None => Self::default(),
+            // The override always ends with '/'.
+            Some(base) => Self {
+                calendar: format!("{base}calendar/v3"),
+                tasks: format!("{base}tasks/v1"),
+                gmail: format!("{base}gmail/v1"),
+                drive: format!("{base}drive/v3"),
+                chat: format!("{base}v1"),
+            },
+        }
+    }
+
+    fn from_env() -> Result<Self, GwsError> {
+        Ok(Self::for_endpoints(&crate::env::get()?.endpoint_policy()))
+    }
+}
+
 impl Helper for WorkflowHelper {
     fn inject_commands(&self, cmd: Command, _doc: &crate::discovery::RestDescription) -> Command {
         cmd.subcommand(build_standup_report_cmd())
@@ -75,15 +100,15 @@ impl Helper for WorkflowHelper {
         &'a self,
         _doc: &'a crate::discovery::RestDescription,
         matches: &'a ArgMatches,
-        _sanitize_config: &'a crate::helpers::modelarmor::SanitizeConfig,
+        sanitize: &'a SanitizeConfig,
     ) -> Pin<Box<dyn Future<Output = Result<bool, GwsError>> + Send + 'a>> {
         Box::pin(async move {
             match matches.subcommand() {
-                Some(("+standup-report", m)) => handle_standup_report(m).await?,
-                Some(("+meeting-prep", m)) => handle_meeting_prep(m).await?,
-                Some(("+email-to-task", m)) => handle_email_to_task(m).await?,
-                Some(("+weekly-digest", m)) => handle_weekly_digest(m).await?,
-                Some(("+file-announce", m)) => handle_file_announce(m).await?,
+                Some(("+standup-report", m)) => handle_standup_report(m, sanitize).await?,
+                Some(("+meeting-prep", m)) => handle_meeting_prep(m, sanitize).await?,
+                Some(("+email-to-task", m)) => handle_email_to_task(m, sanitize).await?,
+                Some(("+weekly-digest", m)) => handle_weekly_digest(m, sanitize).await?,
+                Some(("+file-announce", m)) => handle_file_announce(m, sanitize).await?,
                 _ => return Ok(false),
             }
             Ok(true)
@@ -226,9 +251,23 @@ async fn authenticated(scopes: &[&str]) -> Result<Transport, GwsError> {
     Transport::for_scopes(scopes).await
 }
 
-fn print(value: &Value, matches: &ArgMatches) -> Result<(), GwsError> {
+/// Sanitize a workflow result (`--sanitize`) and format it for stdout.
+async fn render(
+    value: Value,
+    matches: &ArgMatches,
+    sanitize: &SanitizeConfig,
+) -> Result<String, GwsError> {
     let fmt = output_format(matches)?;
-    crate::output::emit(&crate::formatter::format_value(value, &fmt)?)?;
+    let value = require_pass(sanitize_value(sanitize, value).await?)?;
+    crate::formatter::format_value(&value, &fmt)
+}
+
+async fn print(
+    value: Value,
+    matches: &ArgMatches,
+    sanitize: &SanitizeConfig,
+) -> Result<(), GwsError> {
+    crate::output::emit(&render(value, matches, sanitize).await?)?;
     Ok(())
 }
 
@@ -286,6 +325,59 @@ fn calendar_events_url(bases: &Bases, calendar_id: &str) -> String {
     )
 }
 
+// Each request's query is built by one function that both the real run and
+// the `--dry-run` plan use, so the plan lists exactly what is sent. Values
+// only known at run time are `<placeholders>` in the plan.
+
+/// Query of `events.list` for the events between two instants, expanded and
+/// ordered by start time.
+fn events_between_query(time_min: &str, time_max: &str) -> Vec<(&'static str, String)> {
+    vec![
+        ("timeMin", time_min.to_string()),
+        ("timeMax", time_max.to_string()),
+        ("singleEvents", "true".to_string()),
+        ("orderBy", "startTime".to_string()),
+        ("maxResults", "250".to_string()),
+    ]
+}
+
+/// Query of `tasks.list` for the open tasks of the default list.
+fn open_tasks_query() -> Vec<(&'static str, String)> {
+    vec![
+        ("showCompleted", "false".to_string()),
+        ("maxResults", "100".to_string()),
+    ]
+}
+
+/// Query of `messages.get` for a message's Subject header and snippet.
+fn message_subject_query() -> Vec<(&'static str, String)> {
+    vec![
+        ("format", "metadata".to_string()),
+        ("metadataHeaders", "Subject".to_string()),
+    ]
+}
+
+/// Query of `messages.list` that estimates the number of unread messages.
+fn unread_count_query() -> Vec<(&'static str, String)> {
+    vec![
+        ("q", "is:unread".to_string()),
+        ("maxResults", "1".to_string()),
+    ]
+}
+
+/// Query of `files.get` for the name and link of a file on any drive.
+fn announced_file_query() -> Vec<(&'static str, String)> {
+    vec![
+        ("fields", "id,name,webViewLink".to_string()),
+        ("supportsAllDrives", "true".to_string()),
+    ]
+}
+
+/// Query of Chat `messages.create`; `requestId` makes it idempotent.
+fn chat_message_query(request_id: &str) -> Vec<(&'static str, String)> {
+    vec![("requestId", request_id.to_string())]
+}
+
 /// Events between two instants, expanded and ordered by start time.
 async fn events_between(
     rest: &Transport,
@@ -296,13 +388,7 @@ async fn events_between(
     get_all_items(
         rest,
         &calendar_events_url(bases, "primary"),
-        &[
-            ("timeMin", time_min.to_string()),
-            ("timeMax", time_max.to_string()),
-            ("singleEvents", "true".to_string()),
-            ("orderBy", "startTime".to_string()),
-            ("maxResults", "250".to_string()),
-        ],
+        &events_between_query(time_min, time_max),
         "Failed to fetch calendar events",
     )
     .await
@@ -327,10 +413,7 @@ async fn standup_report(
     let tasks = get_all_items(
         rest,
         &format!("{}/lists/@default/tasks", bases.tasks),
-        &[
-            ("showCompleted", "false".to_string()),
-            ("maxResults", "100".to_string()),
-        ],
+        &open_tasks_query(),
         "Failed to fetch tasks",
     )
     .await?;
@@ -347,17 +430,28 @@ async fn standup_report(
     }))
 }
 
-async fn handle_standup_report(matches: &ArgMatches) -> Result<(), GwsError> {
-    let bases = Bases::default();
+async fn handle_standup_report(
+    matches: &ArgMatches,
+    sanitize: &SanitizeConfig,
+) -> Result<(), GwsError> {
+    let bases = Bases::from_env()?;
     if dry_run(matches)? {
         return crate::helpers::http::print_dry_run(
             matches,
             vec![
-                dry_run_request("GET", &calendar_events_url(&bases, "primary"), &[], None),
+                dry_run_request(
+                    "GET",
+                    &calendar_events_url(&bases, "primary"),
+                    &events_between_query(
+                        "<start of today in the account time zone>",
+                        "<start of tomorrow in the account time zone>",
+                    ),
+                    None,
+                ),
                 dry_run_request(
                     "GET",
                     &format!("{}/lists/@default/tasks", bases.tasks),
-                    &[],
+                    &open_tasks_query(),
                     None,
                 ),
             ],
@@ -365,8 +459,8 @@ async fn handle_standup_report(matches: &ArgMatches) -> Result<(), GwsError> {
     }
     let rest = authenticated(&[CALENDAR_READONLY, TASKS_READONLY]).await?;
     let tz = crate::timezone::resolve_account_timezone(&rest, None).await?;
-    let start = crate::timezone::start_of_today(tz)?;
-    let end = start + chrono::Duration::days(1);
+    let today = chrono::Utc::now().with_timezone(&tz).date_naive();
+    let (start, end) = crate::timezone::day_bounds(today, tz)?;
     let report = standup_report(
         &rest,
         &bases,
@@ -375,7 +469,7 @@ async fn handle_standup_report(matches: &ArgMatches) -> Result<(), GwsError> {
         &start.format("%Y-%m-%d").to_string(),
     )
     .await?;
-    print(&report, matches)
+    print(report, matches, sanitize).await
 }
 
 // ---------------------------------------------------------------------------
@@ -429,8 +523,11 @@ async fn meeting_prep(
     }))
 }
 
-async fn handle_meeting_prep(matches: &ArgMatches) -> Result<(), GwsError> {
-    let bases = Bases::default();
+async fn handle_meeting_prep(
+    matches: &ArgMatches,
+    sanitize: &SanitizeConfig,
+) -> Result<(), GwsError> {
+    let bases = Bases::from_env()?;
     let calendar_id = required(matches, "calendar-id")?;
     if dry_run(matches)? {
         return crate::helpers::http::print_dry_run(
@@ -446,7 +543,7 @@ async fn handle_meeting_prep(matches: &ArgMatches) -> Result<(), GwsError> {
     let rest = authenticated(&[CALENDAR_READONLY]).await?;
     let now = chrono::Utc::now().to_rfc3339();
     let out = meeting_prep(&rest, &bases, &calendar_id, &now).await?;
-    print(&out, matches)
+    print(out, matches, sanitize).await
 }
 
 // ---------------------------------------------------------------------------
@@ -469,6 +566,18 @@ fn tasks_insert_url(bases: &Bases, tasklist: &str) -> String {
     )
 }
 
+/// Gmail returns a message `snippet` HTML-escaped (`&#39;`, `&amp;`, ...);
+/// decode it to the plain text a task note shows, without re-wrapping it.
+fn snippet_text(snippet: &str) -> Result<String, GwsError> {
+    if snippet.is_empty() {
+        return Ok(String::new());
+    }
+    let text = html2text::config::plain()
+        .string_from_read(snippet.as_bytes(), snippet.len())
+        .map_err(|e| GwsError::other(format!("Failed to decode the message snippet: {e}")))?;
+    Ok(text.trim_end().to_string())
+}
+
 async fn email_to_task(
     rest: &Transport,
     bases: &Bases,
@@ -478,10 +587,7 @@ async fn email_to_task(
     let msg = rest
         .get_json(
             &message_url(bases, message_id),
-            &[
-                ("format", "metadata".to_string()),
-                ("metadataHeaders", "Subject".to_string()),
-            ],
+            &message_subject_query(),
             &format!("Failed to fetch message {message_id}"),
         )
         .await?;
@@ -500,9 +606,10 @@ async fn email_to_task(
         .and_then(Value::as_str)
         .filter(|s| !s.trim().is_empty())
         .unwrap_or("(No subject)");
+    let snippet = snippet_text(str_field(&msg, "snippet"))?;
     let task_body = json!({
         "title": subject,
-        "notes": format!("From email: {message_id}\n\n{}", str_field(&msg, "snippet")),
+        "notes": format!("From email: {message_id}\n\n{snippet}"),
     });
     // Tasks inserts are not idempotent: sent exactly once.
     let task = rest
@@ -527,8 +634,11 @@ async fn email_to_task(
     }))
 }
 
-async fn handle_email_to_task(matches: &ArgMatches) -> Result<(), GwsError> {
-    let bases = Bases::default();
+async fn handle_email_to_task(
+    matches: &ArgMatches,
+    sanitize: &SanitizeConfig,
+) -> Result<(), GwsError> {
+    let bases = Bases::from_env()?;
     let message_id = required(matches, "message-id")?;
     let tasklist = required(matches, "tasklist-id")?;
     if dry_run(matches)? {
@@ -538,7 +648,7 @@ async fn handle_email_to_task(matches: &ArgMatches) -> Result<(), GwsError> {
                 dry_run_request(
                     "GET",
                     &message_url(&bases, &message_id),
-                    &[("format", "metadata".to_string())],
+                    &message_subject_query(),
                     None,
                 ),
                 dry_run_request(
@@ -546,7 +656,7 @@ async fn handle_email_to_task(matches: &ArgMatches) -> Result<(), GwsError> {
                     &tasks_insert_url(&bases, &tasklist),
                     &[],
                     Some(
-                        &json!({ "title": "<subject of the message>", "notes": format!("From email: {message_id}") }),
+                        &json!({ "title": "<subject of the message>", "notes": format!("From email: {message_id}\n\n<snippet of the message>") }),
                     ),
                 ),
             ],
@@ -554,7 +664,7 @@ async fn handle_email_to_task(matches: &ArgMatches) -> Result<(), GwsError> {
     }
     let rest = authenticated(&[GMAIL_READONLY, TASKS]).await?;
     let out = email_to_task(&rest, &bases, &message_id, &tasklist).await?;
-    print(&out, matches)
+    print(out, matches, sanitize).await
 }
 
 // ---------------------------------------------------------------------------
@@ -575,10 +685,7 @@ async fn weekly_digest(
     let unread = rest
         .get_json(
             &format!("{}/users/me/messages", bases.gmail),
-            &[
-                ("q", "is:unread".to_string()),
-                ("maxResults", "1".to_string()),
-            ],
+            &unread_count_query(),
             "Failed to count unread email",
         )
         .await?;
@@ -595,17 +702,25 @@ async fn weekly_digest(
     }))
 }
 
-async fn handle_weekly_digest(matches: &ArgMatches) -> Result<(), GwsError> {
-    let bases = Bases::default();
+async fn handle_weekly_digest(
+    matches: &ArgMatches,
+    sanitize: &SanitizeConfig,
+) -> Result<(), GwsError> {
+    let bases = Bases::from_env()?;
     if dry_run(matches)? {
         return crate::helpers::http::print_dry_run(
             matches,
             vec![
-                dry_run_request("GET", &calendar_events_url(&bases, "primary"), &[], None),
+                dry_run_request(
+                    "GET",
+                    &calendar_events_url(&bases, "primary"),
+                    &events_between_query("<now>", "<now + 7 days>"),
+                    None,
+                ),
                 dry_run_request(
                     "GET",
                     &format!("{}/users/me/messages", bases.gmail),
-                    &[("q", "is:unread".to_string())],
+                    &unread_count_query(),
                     None,
                 ),
             ],
@@ -616,7 +731,7 @@ async fn handle_weekly_digest(matches: &ArgMatches) -> Result<(), GwsError> {
     let now = chrono::Utc::now().with_timezone(&tz);
     let end = now + chrono::Duration::days(7);
     let out = weekly_digest(&rest, &bases, &now.to_rfc3339(), &end.to_rfc3339()).await?;
-    print(&out, matches)
+    print(out, matches, sanitize).await
 }
 
 // ---------------------------------------------------------------------------
@@ -658,10 +773,7 @@ async fn file_announce(
                 bases.drive,
                 crate::validate::encode_path_segment(file_id)
             ),
-            &[
-                ("fields", "id,name,webViewLink".to_string()),
-                ("supportsAllDrives", "true".to_string()),
-            ],
+            &announced_file_query(),
             &format!("Failed to fetch Drive file {file_id}"),
         )
         .await?;
@@ -679,7 +791,7 @@ async fn file_announce(
         .json(
             reqwest::Method::POST,
             &format!("{}/{space}/messages", bases.chat),
-            &[("requestId", request_id.to_string())],
+            &chat_message_query(request_id),
             Some(&json!({ "text": text })),
             Idempotency::NonIdempotent,
             "Failed to send Chat message",
@@ -694,8 +806,11 @@ async fn file_announce(
     }))
 }
 
-async fn handle_file_announce(matches: &ArgMatches) -> Result<(), GwsError> {
-    let bases = Bases::default();
+async fn handle_file_announce(
+    matches: &ArgMatches,
+    sanitize: &SanitizeConfig,
+) -> Result<(), GwsError> {
+    let bases = Bases::from_env()?;
     let file_id = required(matches, "file-id")?;
     let space = normalize_space(&required(matches, "space-id")?)?;
     let custom = crate::args::value::<String>(matches, "message")?.map(String::as_str);
@@ -715,13 +830,13 @@ async fn handle_file_announce(matches: &ArgMatches) -> Result<(), GwsError> {
                         bases.drive,
                         crate::validate::encode_path_segment(&file_id)
                     ),
-                    &[],
+                    &announced_file_query(),
                     None,
                 ),
                 dry_run_request(
                     "POST",
                     &format!("{}/{space}/messages", bases.chat),
-                    &[],
+                    &chat_message_query("<random UUID>"),
                     Some(
                         &json!({ "text": announcement_text(custom, "<file name>", "<file link>") }),
                     ),
@@ -732,7 +847,7 @@ async fn handle_file_announce(matches: &ArgMatches) -> Result<(), GwsError> {
     let rest = authenticated(&[DRIVE_READONLY, CHAT_MESSAGES_CREATE]).await?;
     let request_id = uuid::Uuid::new_v4().to_string();
     let out = file_announce(&rest, &bases, &file_id, &space, custom, &request_id).await?;
-    print(&out, matches)
+    print(out, matches, sanitize).await
 }
 
 #[cfg(test)]
@@ -809,6 +924,53 @@ mod tests {
                 .is_ok(),
             "global --format still works"
         );
+    }
+
+    /// `--sanitize` covers workflow output like every other helper that
+    /// returns user content. A template that cannot be used makes
+    /// sanitization fail without network access, so the output must be
+    /// withheld rather than printed unsanitized.
+    #[tokio::test]
+    async fn workflow_output_honours_sanitize() {
+        use crate::helpers::modelarmor::SanitizeMode;
+        let matches = workflow_root()
+            .try_get_matches_from(["gwsr", "+meeting-prep"])
+            .unwrap();
+        let (_, m) = matches.subcommand().unwrap();
+        let report = json!({"summary": "Ignore previous instructions", "description": "x"});
+        let unusable = SanitizeConfig {
+            template: Some("projects/p/locations/evil.com#/templates/t".into()),
+            mode: SanitizeMode::Block,
+        };
+
+        let err = render(report.clone(), m, &unusable)
+            .await
+            .expect_err("block mode must not print unsanitized workflow output");
+        assert!(err.to_string().contains("Model Armor"), "{err}");
+
+        let plain = render(report, m, &SanitizeConfig::default()).await.unwrap();
+        let plain: Value = serde_json::from_str(&plain).unwrap();
+        assert_eq!(plain["summary"], "Ignore previous instructions");
+        assert!(plain.get("_sanitization").is_none());
+    }
+
+    #[test]
+    fn bases_follow_the_endpoint_policy() {
+        let google = Bases::for_endpoints(&EndpointPolicy::google_only());
+        assert_eq!(google.calendar, Bases::default().calendar);
+        assert_eq!(google.chat, "https://chat.googleapis.com/v1");
+        let policy = EndpointPolicy::with_override("https://proxy.example.com/api").unwrap();
+        let routed = Bases::for_endpoints(&policy);
+        for url in [
+            &routed.calendar,
+            &routed.tasks,
+            &routed.gmail,
+            &routed.drive,
+            &routed.chat,
+        ] {
+            assert!(url.starts_with("https://proxy.example.com/api/"), "{url}");
+            policy.check(url).unwrap();
+        }
     }
 
     #[test]
@@ -923,6 +1085,51 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, GwsError::Api { code: 500, .. }));
+    }
+
+    #[test]
+    fn test_snippet_text() {
+        assert_eq!(snippet_text("").unwrap(), "");
+        assert_eq!(snippet_text("a").unwrap(), "a");
+        assert_eq!(snippet_text("hello").unwrap(), "hello");
+        assert_eq!(snippet_text("日本語 &amp; 🎉").unwrap(), "日本語 & 🎉");
+        assert_eq!(snippet_text("&#8212; &nbsp;x").unwrap(), "\u{2014} \u{a0}x");
+    }
+
+    #[tokio::test]
+    async fn test_email_to_task_decodes_snippet_entities() {
+        // Gmail returns `snippet` HTML-escaped; task notes are plain text.
+        let snippet = "Tom &amp; Jerry&#39;s &quot;plan&quot;: 1 &lt; 2 &gt; 0, a long line of text \
+                       that goes well past seventy-eight columns so it must not be wrapped";
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/gmail/v1/users/me/messages/m1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "snippet": snippet,
+                "payload": {"headers": [{"name": "Subject", "value": "Q&A <draft>"}]}
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/tasks/v1/lists/@default/tasks"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id": "t1"})))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let out = email_to_task(&rest(&server), &bases(&server), "m1", "@default")
+            .await
+            .unwrap();
+        assert_eq!(out["taskId"], "t1");
+        let requests = server.received_requests().await.unwrap();
+        let sent: Value = serde_json::from_slice(&requests[1].body).unwrap();
+        assert_eq!(
+            sent,
+            json!({
+                "title": "Q&A <draft>",
+                "notes": "From email: m1\n\nTom & Jerry's \"plan\": 1 < 2 > 0, a long line of text \
+                          that goes well past seventy-eight columns so it must not be wrapped"
+            })
+        );
     }
 
     #[tokio::test]
