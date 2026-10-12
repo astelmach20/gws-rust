@@ -679,7 +679,9 @@ fn noninteractive_client_steps(
         None => Ok(Some(instructions)),
         Some(client) => match client.project_id {
             Some(saved_project) if saved_project != project_id => Ok(Some(format!(
-                "The saved OAuth client in {} belongs to project '{saved_project}', not                  '{project_id}'; gwsr would keep using '{saved_project}' as the quota project.                  Replace it with a Desktop client from '{project_id}'.\n\n{instructions}",
+                "The saved OAuth client in {} belongs to project '{saved_project}', not \
+                 '{project_id}'; gwsr would keep using '{saved_project}' as the quota \
+                 project. Replace it with a Desktop client from '{project_id}'.\n\n{instructions}",
                 client_path.display()
             ))),
             _ => Ok(None),
@@ -984,7 +986,10 @@ mod tests {
         let steps = noninteractive_client_steps(&path, "proj-a")
             .unwrap()
             .expect("manual steps");
-        assert!(steps.contains("?project=proj-a"), "{steps}");
+        assert!(
+            steps.contains("?project=proj-a"),
+            "the manual steps must link the Console pages of proj-a"
+        );
     }
 
     #[test]
@@ -994,8 +999,18 @@ mod tests {
         let steps = noninteractive_client_steps(&path, "proj-b")
             .unwrap()
             .expect("a client from proj-a must not count as configured for proj-b");
-        assert!(steps.contains("proj-a"), "{steps}");
-        assert!(steps.contains("?project=proj-b"), "{steps}");
+        assert!(
+            steps.contains("proj-a"),
+            "the manual steps must name the saved client's project"
+        );
+        assert!(
+            steps.contains("belongs to project 'proj-a', not 'proj-b'; gwsr would keep"),
+            "the mismatch explanation must read as one sentence, without runs of spaces"
+        );
+        assert!(
+            steps.contains("?project=proj-b"),
+            "the manual steps must link the Console pages of proj-b"
+        );
     }
 
     /// The project ID reaches `gcloud` as an argument and the consent-screen
