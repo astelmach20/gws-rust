@@ -526,7 +526,7 @@ fn parse_dir(value: &str) -> Result<PathBuf, String> {
     }
 }
 
-fn check_email(value: &str) -> Result<(), String> {
+pub(crate) fn check_email(value: &str) -> Result<(), String> {
     let valid = match value.split_once('@') {
         Some((local, domain)) => {
             !local.is_empty()

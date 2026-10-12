@@ -734,6 +734,47 @@ fn auth_configuration_errors_exit_with_the_config_code() {
         .stderr(predicate::str::contains("GWSR_PROFILE"));
 }
 
+/// `--impersonate` takes the same values as `GWSR_IMPERSONATE`: a user email
+/// address. Anything else is rejected before it reaches a JWT `sub` claim, a
+/// cache key or the status report, wherever the flag is given.
+#[test]
+fn impersonate_flag_rejects_values_that_are_not_email_addresses() {
+    let env = Env::new();
+    for bad in [
+        "",
+        "not-an-email",
+        "alice@example.com\nbob@example.com",
+        "a b@example.com",
+    ] {
+        for args in [
+            vec!["--impersonate", bad, "auth", "status", "--offline"],
+            vec!["auth", "status", "--offline", "--impersonate", bad],
+            vec!["--impersonate", bad, "drive", "files", "list", "--dry-run"],
+        ] {
+            env.cmd()
+                .args(&args)
+                .assert()
+                .code(3)
+                .stdout("")
+                .stderr(predicate::str::contains("--impersonate"))
+                .stderr(predicate::str::contains("email address"));
+        }
+    }
+    env.cmd()
+        .args([
+            "--impersonate",
+            "alice@example.com",
+            "auth",
+            "status",
+            "--offline",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "\"impersonate\":\"alice@example.com\"",
+        ));
+}
+
 /// `auth status` must report the OAuth client `auth login` would use: the
 /// GWSR_CLIENT_ID/GWSR_CLIENT_SECRET pair overrides client_secret.json.
 #[test]
