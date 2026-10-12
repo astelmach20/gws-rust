@@ -113,7 +113,7 @@ impl Checker<'_> {
                 format!("{path}.{key}")
             };
             match properties.get(key) {
-                Some(prop) => self.property(val, prop, &current_path),
+                Some(prop) => self.field(val, prop, &current_path),
                 None if self.allow_unknown_fields => self.unknown.push(current_path),
                 None => {
                     let mut valid: Vec<&str> = properties.keys().map(String::as_str).collect();
@@ -127,6 +127,14 @@ impl Checker<'_> {
                     ));
                 }
             }
+        }
+    }
+
+    /// An object field or map entry: `null` clears it whatever its type
+    /// (patch semantics; Drive clears `appProperties` entries set to null).
+    fn field(&mut self, value: &Value, prop: &JsonSchemaProperty, path: &str) {
+        if !value.is_null() {
+            self.property(value, prop, path);
         }
     }
 
@@ -172,7 +180,7 @@ impl Checker<'_> {
                 self.properties(obj, &prop.properties, &[], path);
             } else if let Some(additional) = &prop.additional_properties {
                 for (k, v) in obj {
-                    self.property(v, additional, &format!("{path}.{k}"));
+                    self.field(v, additional, &format!("{path}.{k}"));
                 }
             }
         }
@@ -322,6 +330,23 @@ mod tests {
         check(json!({"name": "f", "previewField": 1}), true).unwrap();
         // Other errors still fail with the escape hatch.
         assert!(check(json!({"name": 1, "previewField": 1}), true).is_err());
+    }
+
+    /// `null` clears a field or map entry (Drive: "Entries with null values
+    /// are cleared in update and copy requests" for `appProperties`;
+    /// patch semantics in general), so it is valid for any field type.
+    #[test]
+    fn null_clears_fields_and_map_entries() {
+        check(
+            json!({"name": "f", "status": null, "count": null, "tags": null,
+                   "labels": {"stale": null, "k": "v"}, "parent": null}),
+            false,
+        )
+        .unwrap();
+        // The body itself and array elements are not clearable fields.
+        for body in [json!(null), json!({"name": "f", "tags": [null]})] {
+            assert!(check(body.clone(), false).is_err(), "{body}");
+        }
     }
 
     #[test]
