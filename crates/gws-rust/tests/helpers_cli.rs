@@ -458,7 +458,16 @@ async fn events_helpers_honour_api_base_override() {
         .await;
     let dir = tempfile::tempdir().unwrap();
     seed(dir.path(), "workspaceevents", "v1", "");
-    let out = gwsr(dir.path())
+    let mut cmd = gwsr(dir.path());
+    // This request must succeed, so restore what `env_clear` removed that the
+    // platform needs: Winsock fails to load without `SystemRoot`, and the TLS
+    // setup in a Nix build finds its roots through the certificate variables.
+    for key in ["SystemRoot", "SSL_CERT_FILE", "NIX_SSL_CERT_FILE"] {
+        if let Some(value) = std::env::var_os(key) {
+            cmd.env(key, value);
+        }
+    }
+    let out = cmd
         .env("GWSR_TOKEN", "test-token")
         .env("GWSR_API_BASE_URL", format!("{}/", server.uri()))
         .env("HTTPS_PROXY", "http://127.0.0.1:9")
