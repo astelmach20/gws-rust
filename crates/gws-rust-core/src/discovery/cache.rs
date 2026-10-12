@@ -38,6 +38,9 @@ pub const DEFAULT_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 
 const DISCOVERY_SUBDIR: &str = "discovery";
 const TEMP_PREFIX: &str = ".tmp-";
+/// How many times [`DiscoveryCache::clear`] relists a directory that other
+/// processes keep writing to before giving up with an error.
+const CLEAR_MAX_ROUNDS: usize = 5;
 
 /// A cache of Discovery Documents rooted at a caller-chosen directory.
 #[derive(Debug, Clone)]
@@ -203,9 +206,12 @@ impl DiscoveryCache {
         for entry in entries {
             let entry = entry.map_err(|e| DiscoveryError::cache("list", &self.dir, e))?;
             let path = entry.path();
-            let file_type = entry
-                .file_type()
-                .map_err(|e| DiscoveryError::cache("inspect", &path, e))?;
+            let file_type = match entry.file_type() {
+                Ok(file_type) => file_type,
+                // Removed (or renamed into place) since the listing.
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(e) => return Err(DiscoveryError::cache("inspect", &path, e)),
+            };
             if file_type.is_dir() {
                 return Err(DiscoveryError::cache(
                     "clear",
@@ -233,16 +239,44 @@ impl DiscoveryCache {
     ///
     /// Only the cache's own `discovery` directory is touched; the root passed
     /// to [`DiscoveryCache::new`] is left in place.
+    ///
+    /// Other `gwsr` processes may use the cache at the same time: a file that
+    /// disappears before it is deleted (a writer persisted its temp file, or
+    /// another clear removed it) is skipped, and documents written while the
+    /// clear runs are removed too. Any other failure is an error.
     pub fn clear(&self) -> Result<usize, DiscoveryError> {
-        let plan = self.clear_plan()?;
-        let Some(dir) = &plan.dir else {
-            return Ok(0);
-        };
-        for path in plan.documents.iter().chain(&plan.temp_files) {
-            std::fs::remove_file(path).map_err(|e| DiscoveryError::cache("remove", path, e))?;
+        self.clear_from(self.clear_plan()?)
+    }
+
+    fn clear_from(&self, mut plan: ClearPlan) -> Result<usize, DiscoveryError> {
+        let mut removed = 0;
+        let mut rounds = 0;
+        loop {
+            let Some(dir) = &plan.dir else {
+                return Ok(removed);
+            };
+            for path in plan.documents.iter().chain(&plan.temp_files) {
+                match std::fs::remove_file(path) {
+                    Ok(()) if !plan.temp_files.contains(path) => removed += 1,
+                    Ok(()) => {}
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(e) => return Err(DiscoveryError::cache("remove", path, e)),
+                }
+            }
+            match std::fs::remove_dir(dir) {
+                Ok(()) => return Ok(removed),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(removed),
+                // A concurrent writer added files after the listing: list again.
+                Err(e)
+                    if e.kind() == std::io::ErrorKind::DirectoryNotEmpty
+                        && rounds < CLEAR_MAX_ROUNDS =>
+                {
+                    rounds += 1;
+                    plan = self.clear_plan()?;
+                }
+                Err(e) => return Err(DiscoveryError::cache("remove", dir, e)),
+            }
         }
-        std::fs::remove_dir(dir).map_err(|e| DiscoveryError::cache("remove", dir, e))?;
-        Ok(plan.documents.len())
     }
 
     fn ensure_dir(&self) -> Result<(), DiscoveryError> {
@@ -445,6 +479,63 @@ mod tests {
         assert_eq!(plan.temp_files, vec![leftover.clone()]);
         assert!(plan.documents[0].exists());
         assert!(leftover.exists());
+    }
+
+    #[test]
+    fn clear_tolerates_files_removed_by_a_concurrent_writer() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cache = DiscoveryCache::new(tmp.path());
+        cache.store("drive", "v3", DOC.as_bytes()).unwrap();
+        cache.store("gmail", "v1", DOC.as_bytes()).unwrap();
+        let temp = cache.dir().join(format!("{TEMP_PREFIX}x.json"));
+        std::fs::write(&temp, "x").unwrap();
+        let plan = cache.clear_plan().unwrap();
+        // Between listing and deleting, a writer persists (renames away) its
+        // temp file and another `cache clear` deletes a document.
+        std::fs::remove_file(&temp).unwrap();
+        std::fs::remove_file(cache.entry_path("gmail", "v1")).unwrap();
+        assert_eq!(cache.clear_from(plan).unwrap(), 1);
+        assert!(!cache.dir().exists());
+    }
+
+    #[test]
+    fn clear_removes_documents_added_during_the_clear() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cache = DiscoveryCache::new(tmp.path());
+        cache.store("drive", "v3", DOC.as_bytes()).unwrap();
+        let plan = cache.clear_plan().unwrap();
+        // A concurrent command caches another document mid-clear.
+        cache.store("gmail", "v1", DOC.as_bytes()).unwrap();
+        assert_eq!(cache.clear_from(plan).unwrap(), 2);
+        assert!(!cache.dir().exists());
+    }
+
+    #[test]
+    fn clear_tolerates_the_directory_vanishing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cache = DiscoveryCache::new(tmp.path());
+        cache.store("drive", "v3", DOC.as_bytes()).unwrap();
+        let plan = cache.clear_plan().unwrap();
+        // A concurrent `cache clear` finished first.
+        std::fs::remove_dir_all(cache.dir()).unwrap();
+        assert_eq!(cache.clear_from(plan).unwrap(), 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn clear_still_reports_real_removal_errors() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let cache = DiscoveryCache::new(tmp.path());
+        cache.store("drive", "v3", DOC.as_bytes()).unwrap();
+        // Without write permission on the directory, unlinking fails with
+        // PermissionDenied, which must not be swallowed.
+        std::fs::set_permissions(cache.dir(), std::fs::Permissions::from_mode(0o500)).unwrap();
+        let result = cache.clear();
+        std::fs::set_permissions(cache.dir(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("remove"), "{err}");
+        assert!(cache.entry_path("drive", "v3").exists());
     }
 
     #[test]
