@@ -2030,3 +2030,64 @@ async fn output_to_an_existing_directory_is_rejected_before_any_request() {
     assert!(dir.is_dir());
     assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0);
 }
+
+// ── --page-limit truncation marker and --jq ─────────────────────────────
+
+/// The `_truncated` marker is not a page or item: `--jq` must not run on it
+/// (`.id` would print `null`). A JSON run still ends with the marker, as
+/// documented, unchanged by the filter.
+#[tokio::test(flavor = "multi_thread")]
+async fn truncation_marker_is_not_passed_through_jq() {
+    use wiremock::matchers::any;
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    Mock::given(any())
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({"files": [{"id": "a"}, {"id": "b"}], "nextPageToken": "p2"})),
+        )
+        .mount(&server)
+        .await;
+    let env = Env::new();
+    std::fs::create_dir_all(env.cache_dir().join("discovery")).unwrap();
+    env.seed_doc(&json!({
+        "name": "drive",
+        "version": "v3",
+        "title": "Google Drive API",
+        "rootUrl": "https://www.googleapis.com/",
+        "servicePath": "drive/v3/",
+        "resources": {"files": {"methods": {"list": {
+            "id": "drive.files.list",
+            "httpMethod": "GET",
+            "path": "files",
+            "parameters": {"pageToken": {"type": "string", "location": "query"}},
+            "scopes": ["https://www.googleapis.com/auth/drive.readonly"]
+        }}}}
+    }));
+    for (mode, jq, expected) in [
+        ("--page-items", ".id", "a\nb\n"),
+        ("--page-all", "[.files[].id]", "[\"a\",\"b\"]\n"),
+    ] {
+        let out = env
+            .cmd()
+            .env("GWSR_TOKEN", "test-token")
+            .env("GWSR_API_BASE_URL", server.uri())
+            .args(["drive", "files", "list", mode, "--page-limit", "1"])
+            .args(["--jq", jq])
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{}", stderr_of(&out));
+        let stdout = stdout_of(&out);
+        let (results, marker) = stdout
+            .trim_end()
+            .rsplit_once('\n')
+            .unwrap_or_else(|| panic!("{mode}: {stdout}"));
+        assert_eq!(format!("{results}\n"), expected, "{mode}: {stdout}");
+        assert_eq!(
+            serde_json::from_str::<Value>(marker).unwrap_or_else(|e| panic!("{e}: {stdout}")),
+            json!({"_truncated": {"pagesFetched": 1, "nextPageToken": "p2"}}),
+            "{mode}"
+        );
+    }
+}
