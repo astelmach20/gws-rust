@@ -106,7 +106,7 @@ pub const REGISTRY: &[EnvVar] = &[
     var(
         "GWSR_PROFILE",
         "Credential profile (same as --profile)",
-        "a profile name: 1-64 letters, digits, '-', '_' or '.', not starting with '.'",
+        "a profile name: 1-64 lowercase letters, digits, '-', '_' or '.', not starting with '.'",
     ),
     var(
         "GWSR_IMPERSONATE",
@@ -503,7 +503,7 @@ fn parse_bool(value: &str) -> Result<bool, String> {
     }
 }
 
-fn check_printable(value: &str) -> Result<(), String> {
+pub(crate) fn check_printable(value: &str) -> Result<(), String> {
     if value.chars().all(|c| c.is_ascii_graphic()) {
         Ok(())
     } else {
