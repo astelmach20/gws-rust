@@ -602,6 +602,48 @@ async fn text_responses_of_generated_methods_are_screened_by_model_armor() {
     assert!(!out.status.success());
 }
 
+/// `GWSR_API_BASE_URL` routes Workspace Events requests to the configured
+/// endpoint, like generated methods. The closed-port proxy makes a request
+/// that escapes to Google fail instead of reaching the network.
+#[tokio::test(flavor = "multi_thread")]
+async fn events_helpers_honour_api_base_override() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/subscriptions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let dir = tempfile::tempdir().unwrap();
+    seed(dir.path(), "workspaceevents", "v1", "");
+    let mut cmd = gwsr(dir.path());
+    // This request must succeed, so restore what `env_clear` removed that the
+    // platform needs: Winsock fails to load without `SystemRoot`, and the TLS
+    // setup in a Nix build finds its roots through the certificate variables.
+    for key in ["SystemRoot", "SSL_CERT_FILE", "NIX_SSL_CERT_FILE"] {
+        if let Some(value) = std::env::var_os(key) {
+            cmd.env(key, value);
+        }
+    }
+    let out = cmd
+        .env("GWSR_TOKEN", "test-token")
+        .env("GWSR_API_BASE_URL", format!("{}/", server.uri()))
+        .env("HTTPS_PROXY", "http://127.0.0.1:9")
+        .args([
+            "events",
+            "+renew",
+            "--all",
+            "--event-types",
+            "google.workspace.chat.message.v1.created",
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "events +renew: {out:?}");
+}
+
 /// A helper's `--dry-run` plan must list every query parameter the real
 /// request sends.
 #[test]
