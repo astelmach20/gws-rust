@@ -16,7 +16,7 @@ metadata:
 
 # Watch for Drive Changes
 
-> **PREREQUISITE:** Load the following skills to execute this recipe: `gwsr-events`
+> **PREREQUISITE:** Load the following skills to execute this recipe: `gwsr-events` (install any that are missing with `npx skills add https://github.com/astelmach20/gws-rust/tree/main/skills/<name>`)
 
 Subscribe to change notifications on a Google Drive file or folder.
 
