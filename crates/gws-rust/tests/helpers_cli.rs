@@ -54,6 +54,14 @@ fn gwsr(config: &Path) -> Command {
         .env("GWSR_CACHE_DIR", config.join("cache"))
         .env("HOME", config)
         .current_dir(config);
+    // Keep what the platform needs to build an HTTP client: Winsock fails to
+    // load without `SystemRoot`, and the TLS setup in a Nix build finds its
+    // roots through the certificate variables.
+    for key in ["SystemRoot", "SSL_CERT_FILE", "NIX_SSL_CERT_FILE"] {
+        if let Some(value) = std::env::var_os(key) {
+            cmd.env(key, value);
+        }
+    }
     cmd
 }
 
@@ -619,16 +627,7 @@ async fn events_helpers_honour_api_base_override() {
         .await;
     let dir = tempfile::tempdir().unwrap();
     seed(dir.path(), "workspaceevents", "v1", "");
-    let mut cmd = gwsr(dir.path());
-    // This request must succeed, so restore what `env_clear` removed that the
-    // platform needs: Winsock fails to load without `SystemRoot`, and the TLS
-    // setup in a Nix build finds its roots through the certificate variables.
-    for key in ["SystemRoot", "SSL_CERT_FILE", "NIX_SSL_CERT_FILE"] {
-        if let Some(value) = std::env::var_os(key) {
-            cmd.env(key, value);
-        }
-    }
-    let out = cmd
+    let out = gwsr(dir.path())
         .env("GWSR_TOKEN", "test-token")
         .env("GWSR_API_BASE_URL", format!("{}/", server.uri()))
         .env("HTTPS_PROXY", "http://127.0.0.1:9")
@@ -789,17 +788,7 @@ fn gmail_unsubscribe_dry_run_needs_no_credentials() {
     // No credential source exists in this isolated environment.
     let dir = setup();
     seed(dir.path(), "gmail", "v1", "");
-    let mut cmd = gwsr(dir.path());
-    // The helper builds its HTTP client even in a dry run, so restore what
-    // `env_clear` removed that the platform needs: Winsock fails to load
-    // without `SystemRoot`, and the TLS setup in a Nix build finds its roots
-    // through the certificate variables.
-    for key in ["SystemRoot", "SSL_CERT_FILE", "NIX_SSL_CERT_FILE"] {
-        if let Some(value) = std::env::var_os(key) {
-            cmd.env(key, value);
-        }
-    }
-    let out = cmd
+    let out = gwsr(dir.path())
         .args(["gmail", "+unsubscribe", "--message-id", "M1", "--dry-run"])
         .output()
         .unwrap();
@@ -863,4 +852,60 @@ fn gmail_threading_helpers_reject_non_api_message_ids() {
             "{raw}"
         );
     }
+}
+
+#[test]
+fn gmail_filter_forward_is_gated_under_policy() {
+    let dir = setup();
+    seed(dir.path(), "gmail", "v1", "");
+    let create = |extra: &[&str]| {
+        let mut args = vec!["gmail", "+filter", "create", "--from", "boss@example.com"];
+        args.extend_from_slice(extra);
+        gwsr(dir.path())
+            .env("GWSR_REQUIRE_CONFIRM", "1")
+            .args(args)
+            .output()
+            .unwrap()
+    };
+
+    // A filter that forwards mail sends it to someone else: under the
+    // policy it needs --yes, exactly like `gmail +forward`.
+    let out = create(&["--forward", "fwd@example.com"]);
+    assert_eq!(
+        out.status.code(),
+        Some(7),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(out.stdout.is_empty());
+    let err: Value = serde_json::from_slice(&out.stderr).unwrap();
+    assert_eq!(err["error"]["reason"], "confirmationRequired", "{err}");
+    assert!(
+        err["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("fwd@example.com"),
+        "{err}"
+    );
+
+    // --yes confirms it (shown with --dry-run, which never sends anything).
+    let out = create(&["--forward", "fwd@example.com", "--yes", "--dry-run"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let plan = stdout_json(&out);
+    assert_eq!(
+        plan["requests"][0]["body"]["action"]["forward"],
+        "fwd@example.com"
+    );
+
+    // A filter that only labels or archives mail is not outbound.
+    let out = create(&["--archive", "--dry-run"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 }
