@@ -8,13 +8,15 @@ metadata:
     requires:
       bins:
         - gwsr
+      skills:
+        - gwsr-shared
     cliHelp: "gwsr gmail +reply --help"
 ---
 <!-- gwsr generated skill: do not edit by hand -->
 
 # gmail +reply
 
-> **PREREQUISITE:** Read `../gwsr-shared/SKILL.md` for auth, global flags, and security rules.
+> **PREREQUISITE:** Read `../gwsr-shared/SKILL.md` for auth, global flags, and security rules. If it is missing, install it with `npx skills add https://github.com/astelmach20/gws-rust/tree/main/skills/gwsr-shared`.
 
 Reply to a message (handles threading automatically)
 
@@ -52,6 +54,7 @@ gwsr gmail +reply --message-id 18f1a2b3c4d --body 'Draft reply' --draft
 
 - Sets In-Reply-To, References, and threadId, and quotes the original message.
 - With --html, inline images in the quoted message are preserved via cid: references.
+- Replying to a message you sent goes to its original To recipients, as in Gmail.
 - For reply-all, use +reply-all instead.
 
 ## See Also
