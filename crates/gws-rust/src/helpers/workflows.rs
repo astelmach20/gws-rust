@@ -281,6 +281,7 @@ async fn get_all_items(
 ) -> Result<Vec<Value>, GwsError> {
     let mut items = Vec::new();
     let mut page_token: Option<String> = None;
+    let mut seen = std::collections::HashSet::new();
     loop {
         let mut q = query.to_vec();
         if let Some(t) = &page_token {
@@ -293,7 +294,18 @@ async fn get_all_items(
                 .ok_or_else(|| GwsError::other(format!("{context}: 'items' is not an array")))?;
             items.extend(arr.iter().cloned());
         }
-        match page.get("nextPageToken").and_then(Value::as_str) {
+        // An empty token means no further page; a token already followed
+        // would request the same pages forever.
+        match page
+            .get("nextPageToken")
+            .and_then(Value::as_str)
+            .filter(|t| !t.is_empty())
+        {
+            Some(t) if !seen.insert(t.to_string()) => {
+                return Err(GwsError::other(format!(
+                    "{context}: the API returned the nextPageToken '{t}' twice; aborting pagination"
+                )));
+            }
             Some(t) => page_token = Some(t.to_string()),
             None => return Ok(items),
         }
@@ -1076,6 +1088,49 @@ mod tests {
             matches!(err, GwsError::Api { code: 503, .. }),
             "task failure must not be swallowed: {err:?}"
         );
+    }
+
+    /// A page token the API repeats (or an empty one) must not make the
+    /// workflow page loop request the same page forever.
+    #[tokio::test]
+    async fn get_all_items_stops_on_repeated_or_empty_page_token() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/repeat"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({"items": [1], "nextPageToken": "same"})),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/empty"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({"items": [1], "nextPageToken": ""})),
+            )
+            .mount(&server)
+            .await;
+        let rest = rest(&server);
+        let limit = std::time::Duration::from_secs(10);
+
+        let repeated = tokio::time::timeout(
+            limit,
+            get_all_items(&rest, &format!("{}/repeat", server.uri()), &[], "ctx"),
+        )
+        .await
+        .expect("a repeated nextPageToken must end pagination");
+        let err = repeated.expect_err("a repeated nextPageToken is an error");
+        assert!(err.to_string().contains("same"), "{err}");
+
+        let empty = tokio::time::timeout(
+            limit,
+            get_all_items(&rest, &format!("{}/empty", server.uri()), &[], "ctx"),
+        )
+        .await
+        .expect("an empty nextPageToken must end pagination")
+        .unwrap();
+        assert_eq!(empty, vec![json!(1)]);
     }
 
     #[tokio::test]
