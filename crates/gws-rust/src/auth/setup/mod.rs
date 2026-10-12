@@ -82,12 +82,41 @@ pub fn parse_setup_args(args: &[String]) -> Result<Option<SetupOptions>, GwsErro
     let Some(m) = crate::auth::commands::parse_or_help(setup_command(), "setup", args)? else {
         return Ok(None);
     };
+    let project = crate::args::value::<String>(&m, "project")?.cloned();
+    if let Some(p) = &project {
+        check_project_id(p).map_err(|e| GwsError::Validation(format!("--project: {e}")))?;
+    }
     Ok(Some(SetupOptions {
-        project: crate::args::value::<String>(&m, "project")?.cloned(),
+        project,
         dry_run: crate::args::flag(&m, "dry-run")?,
         login: crate::args::flag(&m, "login")?,
         non_interactive: crate::args::flag(&m, "non-interactive")?,
     }))
+}
+
+/// Refuse anything that is not a GCP project ID or number. The value becomes
+/// a `gcloud` argument (where `-x` would be read as a flag), a path segment
+/// of the consent-screen URL and the saved quota project.
+fn check_project_id(project: &str) -> Result<(), String> {
+    if crate::env::is_gcp_project(project) {
+        Ok(())
+    } else {
+        Err(format!(
+            "'{}' is not a GCP project ID (6-30 lowercase letters, digits or '-', starting \
+             with a letter, optionally prefixed by 'domain:') or project number",
+            crate::output::sanitize_for_terminal(project)
+        ))
+    }
+}
+
+/// A project ID typed into the wizard: trimmed, non-empty and valid.
+fn typed_project_id(input: &str) -> Result<String, String> {
+    let project = input.trim();
+    if project.is_empty() {
+        return Err("Project ID cannot be empty.".to_string());
+    }
+    check_project_id(project)?;
+    Ok(project.to_string())
 }
 
 const STEP_LABELS: [&str; 5] = [
@@ -341,11 +370,16 @@ async fn create_project_loop(ctx: &mut Ctx) -> Result<Stage, GwsError> {
             )
             .map_err(tui_err)?;
         let project = match input {
-            InputResult::Confirmed(v) if v.trim().is_empty() => {
-                ctx.message("Project ID cannot be empty. Enter an ID, press Up to go back, or Esc to cancel.")?;
-                continue;
-            }
-            InputResult::Confirmed(v) => v.trim().to_string(),
+            InputResult::Confirmed(v) => match typed_project_id(&v) {
+                Ok(p) => p,
+                Err(e) => {
+                    ctx.message(&format!(
+                        "{e} Enter an ID, press Up to go back, or Esc to cancel."
+                    ))?;
+                    last = Some(v.trim().to_string());
+                    continue;
+                }
+            },
             InputResult::GoBack => return Ok(Stage::Project),
             InputResult::Cancelled => return Err(ctx.cancelled()),
         };
@@ -387,6 +421,11 @@ async fn stage_project(ctx: &mut Ctx) -> Result<Stage, GwsError> {
                 "no GCP project configured; pass --project <id> or run `gcloud config set project <id>`"
                     .into(),
             )
+        })?;
+        check_project_id(&p).map_err(|e| {
+            GwsError::Validation(format!(
+                "the current gcloud project: {e}; pass --project <id>"
+            ))
         })?;
         crate::output::eprint_line(&format!("Step 3/5: using the current project {p}"));
         ctx.project_id = p;
@@ -437,12 +476,25 @@ async fn stage_project(ctx: &mut Ctx) -> Result<Stage, GwsError> {
                 )
                 .map_err(tui_err)?
             {
-                InputResult::Confirmed(v) if !v.trim().is_empty() => v.trim().to_string(),
-                InputResult::Confirmed(_) | InputResult::GoBack => return Ok(Stage::Project),
+                InputResult::Confirmed(v) if v.trim().is_empty() => return Ok(Stage::Project),
+                InputResult::Confirmed(v) => match typed_project_id(&v) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        ctx.message(&format!("{e} Choose or enter another project."))?;
+                        return Ok(Stage::Project);
+                    }
+                },
+                InputResult::GoBack => return Ok(Stage::Project),
                 InputResult::Cancelled => return Err(ctx.cancelled()),
             }
         }
-        ProjectChoice::Existing(p) => p,
+        ProjectChoice::Existing(p) => {
+            if let Err(e) = check_project_id(&p) {
+                ctx.message(&format!("{e} Choose another project."))?;
+                return Ok(Stage::Project);
+            }
+            p
+        }
         ProjectChoice::None => {
             ctx.finish_wizard()?;
             return Err(GwsError::Validation(
@@ -868,10 +920,14 @@ mod tests {
                 non_interactive: false,
             }
         );
-        let o = parse_setup_args(&["--project=p".into(), "--dry-run".into(), "--login".into()])
-            .unwrap()
-            .unwrap();
-        assert_eq!(o.project.as_deref(), Some("p"));
+        let o = parse_setup_args(&[
+            "--project=my-proj".into(),
+            "--dry-run".into(),
+            "--login".into(),
+        ])
+        .unwrap()
+        .unwrap();
+        assert_eq!(o.project.as_deref(), Some("my-proj"));
         assert!(o.dry_run && o.login);
         let o = parse_setup_args(&["--non-interactive".into()])
             .unwrap()
@@ -879,6 +935,45 @@ mod tests {
         assert!(o.non_interactive);
         assert!(parse_setup_args(&["--verbose".into()]).is_err());
         assert!(parse_setup_args(&["--help".into()]).unwrap().is_none());
+    }
+
+    /// The project ID reaches `gcloud` as an argument and the consent-screen
+    /// URL as a path segment, and is saved as the quota project; anything
+    /// that is not a GCP project ID must be refused before any of that.
+    #[test]
+    fn rejects_values_that_are_not_project_ids() {
+        for bad in [
+            "--impersonate-service-account=sa@evil.iam.gserviceaccount.com",
+            "-q",
+            "my-project/../../v1/projects/other",
+            "my-project?x=1",
+            "My-Project",
+            "proj\nx",
+            "short",
+        ] {
+            assert!(
+                parse_setup_args(&[format!("--project={bad}")]).is_err(),
+                "--project {bad:?} was accepted"
+            );
+        }
+        for ok in ["my-project", "example.com:my-project", "123456789012"] {
+            let o = parse_setup_args(&[format!("--project={ok}")])
+                .unwrap()
+                .unwrap();
+            assert_eq!(o.project.as_deref(), Some(ok));
+        }
+    }
+
+    #[test]
+    fn typed_project_ids_are_validated() {
+        assert_eq!(typed_project_id("  my-project \n").unwrap(), "my-project");
+        assert!(
+            typed_project_id("   ")
+                .unwrap_err()
+                .contains("cannot be empty")
+        );
+        assert!(typed_project_id("--help").unwrap_err().contains("--help"));
+        assert!(typed_project_id("a/b").is_err());
     }
 
     #[test]
