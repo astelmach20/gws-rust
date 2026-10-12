@@ -49,6 +49,9 @@ use crate::transport::{Credentials, Transport, read_body};
 /// Google's maximum number of calls per batch request.
 pub(crate) const MAX_BATCH: usize = 100;
 
+/// The keys an input line may carry.
+const LINE_KEYS: &[&str] = &["id", "method", "params", "json"];
+
 /// One parsed input line.
 #[derive(Debug)]
 pub(crate) struct BatchCall<'a> {
@@ -58,6 +61,8 @@ pub(crate) struct BatchCall<'a> {
     /// Path and query relative to the API host, e.g. `/drive/v3/files/1?fields=id`.
     pub path_and_query: String,
     pub body: Option<Value>,
+    /// The confirmation gate this call needs, from its method and params.
+    pub impact: Option<crate::confirm::Impact>,
 }
 
 /// `gwsr batch` arguments. `--dry-run` and `--api-version` are global
@@ -203,23 +208,36 @@ pub(crate) fn parse_calls<'a>(
         let obj = entry
             .as_object()
             .ok_or_else(|| at("expected a JSON object".to_string()))?;
+        if obj.contains_key("upload") {
+            return Err(at(
+                "media uploads are not supported in batch requests".to_string()
+            ));
+        }
+        // A misspelled key ("body", "param") would otherwise be dropped and
+        // the call sent without it.
+        if let Some(key) = obj.keys().find(|k| !LINE_KEYS.contains(&k.as_str())) {
+            return Err(at(format!(
+                "unknown key \"{key}\"; expected {}",
+                LINE_KEYS.join(", ")
+            )));
+        }
         let name = obj
             .get("method")
             .and_then(Value::as_str)
             .ok_or_else(|| at("missing string field \"method\"".to_string()))?;
         let method = find_method(doc, name)
             .ok_or_else(|| at(format!("unknown method '{name}' in the {} API", doc.name)))?;
-        if method.supports_media_upload && obj.contains_key("upload") {
-            return Err(at(
-                "media uploads are not supported in batch requests".to_string()
-            ));
-        }
         let params: Map<String, Value> = match obj.get("params") {
             None | Some(Value::Null) => Map::new(),
             Some(Value::Object(m)) => m.clone(),
             Some(_) => return Err(at("\"params\" must be an object".to_string())),
         };
         let body = obj.get("json").filter(|v| !v.is_null()).cloned();
+        if body.is_some() && method.request.is_none() {
+            return Err(at(format!(
+                "{name} does not take a request body; remove \"json\""
+            )));
+        }
         input::validate_params(doc, method, &params, options.allow_unknown_params)
             .map_err(|e| at(e.to_string()))?;
         if let (Some(b), Some(schema)) = (
@@ -245,12 +263,21 @@ pub(crate) fn parse_calls<'a>(
         if id.contains(['\r', '\n', '<', '>']) {
             return Err(at("\"id\" must not contain CR, LF, '<' or '>'".to_string()));
         }
+        // Results are matched to calls by id; a repeated one (explicit, or a
+        // generated line number that equals an explicit id) is ambiguous.
+        if calls.iter().any(|c: &BatchCall<'_>| c.id == id) {
+            return Err(at(format!(
+                "duplicate id \"{id}\"; every call needs a unique id (lines without one get their position)"
+            )));
+        }
+        let impact = crate::confirm::method_impact(method, &params);
         calls.push(BatchCall {
             id,
             method,
             http,
             path_and_query,
             body,
+            impact,
         });
     }
     if calls.is_empty() {
@@ -399,6 +426,50 @@ pub(crate) fn parse_batch_response(
     Ok(parts)
 }
 
+/// Order response parts like `chunk`. Parts carry `response-item-<id>`
+/// Content-IDs and may arrive in any order; a part without a Content-ID
+/// stands for the call at its position.
+fn in_call_order(
+    chunk: &[BatchCall<'_>],
+    parts: Vec<PartResponse>,
+) -> Result<Vec<PartResponse>, GwsError> {
+    let mut slots: Vec<Option<PartResponse>> = chunk.iter().map(|_| None).collect();
+    for (position, part) in parts.into_iter().enumerate() {
+        let index = match part.content_id.as_deref() {
+            None => position,
+            Some(cid) => cid
+                .strip_prefix("response-item-")
+                .and_then(|id| chunk.iter().position(|c| c.id == id))
+                .ok_or_else(|| {
+                    GwsError::other(anyhow::anyhow!(
+                        "batch response part has Content-ID {cid:?}, which matches no call"
+                    ))
+                })?,
+        };
+        let slot = slots.get_mut(index).ok_or_else(|| {
+            GwsError::other(anyhow::anyhow!("batch response has more parts than calls"))
+        })?;
+        if slot.replace(part).is_some() {
+            return Err(GwsError::other(anyhow::anyhow!(
+                "batch response has two parts for call {:?}",
+                chunk[index].id
+            )));
+        }
+    }
+    slots
+        .into_iter()
+        .zip(chunk)
+        .map(|(slot, call)| {
+            slot.ok_or_else(|| {
+                GwsError::other(anyhow::anyhow!(
+                    "batch response has no part for call {:?}",
+                    call.id
+                ))
+            })
+        })
+        .collect()
+}
+
 pub(crate) async fn run_batch(
     doc: &RestDescription,
     calls: &[BatchCall<'_>],
@@ -410,6 +481,11 @@ pub(crate) async fn run_batch(
     let destructive: Vec<&str> = calls
         .iter()
         .filter(|c| super::is_destructive(c.method))
+        .map(|c| c.id.as_str())
+        .collect();
+    let outbound: Vec<&str> = calls
+        .iter()
+        .filter(|c| c.impact == Some(crate::confirm::Impact::Outbound))
         .map(|c| c.id.as_str())
         .collect();
     let batch_url = format!(
@@ -436,6 +512,16 @@ pub(crate) async fn run_batch(
                 "run a batch with {} destructive call(s): {}",
                 destructive.len(),
                 destructive.join(", ")
+            ),
+        )?;
+    }
+    if !outbound.is_empty() {
+        options.gate().check(
+            crate::confirm::Impact::Outbound,
+            &format!(
+                "run a batch with {} outbound call(s): {}",
+                outbound.len(),
+                outbound.join(", ")
             ),
         )?;
     }
@@ -493,21 +579,15 @@ pub(crate) async fn run_batch(
                 chunk.len()
             )));
         }
-        for (i, part) in parts.into_iter().enumerate() {
-            // Responses carry `response-item-<id>`; fall back to position.
-            let id = part
-                .content_id
-                .as_deref()
-                .and_then(|c| c.strip_prefix("response-item-"))
-                .map(str::to_string)
-                .unwrap_or_else(|| chunk[i].id.clone());
+        for (call, part) in chunk.iter().zip(in_call_order(chunk, parts)?) {
             if !(200..300).contains(&part.status) {
                 failures += 1;
             }
             let body = crate::helpers::modelarmor::require_pass(
                 crate::helpers::modelarmor::sanitize_value(sanitize, part.body).await?,
             )?;
-            emitter.line(&json!({"id": id, "status": part.status, "body": body}).to_string())?;
+            emitter
+                .line(&json!({"id": call.id, "status": part.status, "body": body}).to_string())?;
         }
     }
     if failures > 0 {
@@ -649,6 +729,43 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
+    fn rejects_keys_a_call_cannot_use() {
+        let doc = drive_doc("https://www.googleapis.com/");
+        let mut wrong = Vec::new();
+        for (line, needle) in [
+            // A misspelled or misplaced key must not be silently dropped: the
+            // call would go out without the body or parameters it was given.
+            (
+                "{\"method\":\"files.get\",\"params\":{\"fileId\":\"1\"},\"body\":{\"x\":1}}",
+                "unknown key \"body\"",
+            ),
+            (
+                "{\"method\":\"files.get\",\"parms\":{\"fileId\":\"1\"},\"params\":{\"fileId\":\"1\"}}",
+                "unknown key \"parms\"",
+            ),
+            // `upload` is never supported, not only on media methods.
+            (
+                "{\"method\":\"files.get\",\"params\":{\"fileId\":\"1\"},\"upload\":\"f.txt\"}",
+                "media uploads are not supported",
+            ),
+            // Like a normal command, a method without a request body takes no `json`.
+            (
+                "{\"method\":\"files.get\",\"params\":{\"fileId\":\"1\"},\"json\":{\"name\":\"x\"}}",
+                "does not take a request body",
+            ),
+        ] {
+            let err = parse_calls(&doc, line, &opts())
+                .map(|calls| format!("accepted, body = {:?}", calls[0].body))
+                .unwrap_or_else(|e| e.to_string());
+            if !err.contains(needle) {
+                wrong.push(format!("{line}\n  expected {needle}, got: {err}"));
+            }
+        }
+        assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+    }
+
+    #[test]
     fn parses_multipart_response() {
         let body = "--resp\r\nContent-Type: application/http\r\nContent-ID: <response-item-a>\r\n\r\n\
                     HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{\"id\":\"1\"}\r\n\
@@ -663,5 +780,52 @@ mod tests {
         assert_eq!(parts[2].status, 204);
         assert_eq!(parts[2].body, Value::Null);
         assert!(parse_batch_response("application/json", "").is_err());
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn parts_are_matched_to_calls_by_content_id() {
+        let doc = drive_doc("https://www.googleapis.com/");
+        let calls = parse_calls(
+            &doc,
+            "{\"id\":\"a\",\"method\":\"files.get\",\"params\":{\"fileId\":\"1\"}}\n\
+             {\"id\":\"b\",\"method\":\"files.get\",\"params\":{\"fileId\":\"2\"}}",
+            &opts(),
+        )
+        .unwrap();
+        let part = |cid: Option<&str>, status| PartResponse {
+            content_id: cid.map(str::to_string),
+            status,
+            body: Value::Null,
+        };
+        let statuses = |parts| {
+            in_call_order(&calls, parts).map(|p| p.iter().map(|p| p.status).collect::<Vec<_>>())
+        };
+        assert_eq!(
+            statuses(vec![
+                part(Some("response-item-b"), 404),
+                part(Some("response-item-a"), 200)
+            ])
+            .unwrap(),
+            vec![200, 404]
+        );
+        // Without Content-IDs, position decides.
+        assert_eq!(
+            statuses(vec![part(None, 200), part(None, 404)]).unwrap(),
+            vec![200, 404]
+        );
+        for bad in [
+            vec![
+                part(Some("response-item-a"), 200),
+                part(Some("response-item-zz"), 200),
+            ],
+            vec![
+                part(Some("response-item-a"), 200),
+                part(Some("response-item-a"), 200),
+            ],
+            vec![part(Some("response-item-a"), 200)],
+        ] {
+            assert!(statuses(bad).is_err());
+        }
     }
 }

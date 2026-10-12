@@ -80,6 +80,7 @@ pub(crate) fn login_subcommand() -> clap::Command {
                 .short('s')
                 .long("services")
                 .value_name("SERVICES")
+                .conflicts_with("scopes")
                 .help("Limit scopes to these services, comma-separated (e.g. drive,gmail,sheets)"),
         )
         .arg(
@@ -100,7 +101,7 @@ pub(crate) fn login_subcommand() -> clap::Command {
             clap::Arg::new("scopes")
                 .long("scopes")
                 .value_name("SCOPES")
-                .conflicts_with_all(["write", "full"])
+                .conflicts_with_all(["write", "full", "services"])
                 .help(
                     "Exact scopes, comma-separated; short names like gmail.modify are expanded \
                      to https://www.googleapis.com/auth/gmail.modify",
@@ -382,5 +383,20 @@ mod tests {
             "--no-browser",
         ]);
         assert!(r.is_ok());
+    }
+
+    #[test]
+    fn login_services_cannot_be_combined_with_exact_scopes() {
+        // -s filters presets; with --scopes it would be silently ignored.
+        for services in ["-s", "--services"] {
+            let r = auth_command()
+                .try_get_matches_from(["auth", "login", services, "gmail", "--scopes", "contacts"]);
+            let err = r.expect_err("-s with --scopes must be rejected");
+            assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
+        }
+        for preset in ["--write", "--full"] {
+            let r = auth_command().try_get_matches_from(["auth", "login", "-s", "people", preset]);
+            assert!(r.is_ok(), "-s still combines with {preset}");
+        }
     }
 }
