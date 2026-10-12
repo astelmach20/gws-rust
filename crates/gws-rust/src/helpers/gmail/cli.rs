@@ -508,7 +508,7 @@ TIPS:
 }
 
 fn filter_cmd() -> Command {
-    let create = Command::new("create")
+    let create = with_yes(Command::new("create"))
         .about("Create a filter")
         .arg(
             Arg::new("from")
@@ -619,7 +619,7 @@ fn filter_cmd() -> Command {
         .arg(
             Arg::new("forward")
                 .long("forward")
-                .help("Forward to this verified forwarding address")
+                .help("Forward to this verified forwarding address (needs --yes when GWSR_REQUIRE_CONFIRM=1)")
                 .value_name("EMAIL"),
         )
         .group(
@@ -665,7 +665,8 @@ EXAMPLES:
 
 TIPS:
   Requires the gmail.settings.basic scope (gwsr auth login -s gmail).
-  Label names must already exist. Deleting a filter always requires --yes.
+  Label names must already exist. Deleting a filter always requires --yes;
+  a filter with --forward requires it when GWSR_REQUIRE_CONFIRM=1.
   With --sanitize, create screens the new filter before creating it (block mode:
   a match or a Model Armor failure creates nothing); list screens its output.",
         )
