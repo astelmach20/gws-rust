@@ -709,17 +709,7 @@ fn gmail_unsubscribe_dry_run_needs_no_credentials() {
     // No credential source exists in this isolated environment.
     let dir = setup();
     seed(dir.path(), "gmail", "v1", "");
-    let mut cmd = gwsr(dir.path());
-    // The helper builds its HTTP client even in a dry run, so restore what
-    // `env_clear` removed that the platform needs: Winsock fails to load
-    // without `SystemRoot`, and the TLS setup in a Nix build finds its roots
-    // through the certificate variables.
-    for key in ["SystemRoot", "SSL_CERT_FILE", "NIX_SSL_CERT_FILE"] {
-        if let Some(value) = std::env::var_os(key) {
-            cmd.env(key, value);
-        }
-    }
-    let out = cmd
+    let out = gwsr(dir.path())
         .args(["gmail", "+unsubscribe", "--message-id", "M1", "--dry-run"])
         .output()
         .unwrap();
