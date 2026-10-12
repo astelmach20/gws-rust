@@ -342,6 +342,17 @@ fn events_between_query(time_min: &str, time_max: &str) -> Vec<(&'static str, St
     ]
 }
 
+/// Query of `events.list` for the events that end after `time_min`, expanded
+/// and ordered by start time (one page of the next-meeting search).
+fn next_meeting_query(time_min: &str) -> Vec<(&'static str, String)> {
+    vec![
+        ("timeMin", time_min.to_string()),
+        ("singleEvents", "true".to_string()),
+        ("orderBy", "startTime".to_string()),
+        ("maxResults", "50".to_string()),
+    ]
+}
+
 /// Query of `tasks.list` for the open tasks of the default list.
 fn open_tasks_query() -> Vec<(&'static str, String)> {
     vec![
@@ -521,12 +532,7 @@ async fn meeting_prep(
     let url = calendar_events_url(bases, calendar_id);
     let mut page_token: Option<String> = None;
     let event = loop {
-        let mut query = vec![
-            ("timeMin", now.to_rfc3339()),
-            ("singleEvents", "true".to_string()),
-            ("orderBy", "startTime".to_string()),
-            ("maxResults", "50".to_string()),
-        ];
+        let mut query = next_meeting_query(&now.to_rfc3339());
         if let Some(t) = &page_token {
             query.push(("pageToken", t.clone()));
         }
@@ -596,7 +602,7 @@ async fn handle_meeting_prep(
             vec![dry_run_request(
                 "GET",
                 &calendar_events_url(&bases, &calendar_id),
-                &[],
+                &next_meeting_query("<now>"),
                 None,
             )],
         );

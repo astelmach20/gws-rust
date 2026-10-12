@@ -546,7 +546,7 @@ fn workflow_dry_run_plans_list_every_query_parameter() {
         "orderBy": "startTime",
         "maxResults": "250",
     });
-    let cases: [(&[&str], Vec<Value>); 4] = [
+    let cases: [(&[&str], Vec<Value>); 5] = [
         (
             &["workflow", "+standup-report", "--dry-run"],
             vec![
@@ -566,6 +566,15 @@ fn workflow_dry_run_plans_list_every_query_parameter() {
                 }),
                 json!({"q": "is:unread", "maxResults": "1"}),
             ],
+        ),
+        (
+            &["workflow", "+meeting-prep", "--dry-run"],
+            vec![json!({
+                "timeMin": "<now>",
+                "singleEvents": "true",
+                "orderBy": "startTime",
+                "maxResults": "50",
+            })],
         ),
         (
             &[
