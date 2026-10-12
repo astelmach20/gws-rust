@@ -482,6 +482,64 @@ async fn page_items_table_rows_align_with_the_first_item_header() {
     assert_eq!(em.captured_text(), "id  name\n──  ────\n1   a\n2   b\n3\n");
 }
 
+/// Mounts four list pages; the first and third omit the (empty) `files`
+/// array, as Google APIs do for empty lists.
+async fn mount_pages_with_empty_ones(server: &MockServer) {
+    let pages = [
+        (
+            None,
+            json!({"kind": "drive#fileList", "nextPageToken": "p2", "incompleteSearch": false}),
+        ),
+        (
+            Some("p2"),
+            json!({"files": [{"id": "1", "name": "a"}], "nextPageToken": "p3"}),
+        ),
+        (Some("p3"), json!({"nextPageToken": "p4"})),
+        (Some("p4"), json!({"files": [{"id": "2", "name": "b"}]})),
+    ];
+    for (token, body) in pages {
+        let mock = Mock::given(method("GET")).and(path("/drive/v3/files"));
+        let mock = match token {
+            None => mock.and(query_param_is_missing("pageToken")),
+            Some(t) => mock.and(query_param("pageToken", t)),
+        };
+        mock.respond_with(ResponseTemplate::new(200).set_body_json(body))
+            .mount(server)
+            .await;
+    }
+}
+
+#[tokio::test]
+async fn page_all_csv_skips_pages_without_items() {
+    let server = MockServer::start().await;
+    mount_pages_with_empty_ones(&server).await;
+    let d = doc(&server.uri());
+    let mut call = Call::new(&d, "list", &server);
+    call.pagination.page_all = true;
+    call.pagination.page_delay_ms = 0;
+    call.format = OutputFormat::Csv;
+    let em = Emitter::capturing();
+    call.run(&em).await.unwrap();
+    assert_eq!(em.captured_text(), "id,name\n1,a\n2,b\n");
+}
+
+#[tokio::test]
+async fn page_all_table_skips_pages_without_items() {
+    let server = MockServer::start().await;
+    mount_pages_with_empty_ones(&server).await;
+    let d = doc(&server.uri());
+    let mut call = Call::new(&d, "list", &server);
+    call.pagination.page_all = true;
+    call.pagination.page_delay_ms = 0;
+    call.format = OutputFormat::Table;
+    let em = Emitter::capturing();
+    call.run(&em).await.unwrap();
+    assert_eq!(
+        em.captured_text(),
+        "(empty)\nid  name\n──  ────\n1   a\n2   b\n"
+    );
+}
+
 #[tokio::test]
 async fn page_limit_truncation_is_marked() {
     let server = MockServer::start().await;

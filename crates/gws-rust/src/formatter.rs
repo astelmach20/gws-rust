@@ -168,6 +168,8 @@ pub(crate) fn csv_text_cell(s: &str) -> String {
 /// explicitly).
 #[derive(Debug, Default)]
 pub struct PageStream {
+    /// The stream carries whole list pages (`--page-all`), not single items.
+    list_pages: bool,
     /// Columns fixed by the first page with rows.
     layout: Option<Layout>,
     /// A page has been rendered (the empty-table marker is printed once).
@@ -185,6 +187,17 @@ struct Layout {
 }
 
 impl PageStream {
+    /// State for a stream of whole list pages (`--page-all`). Google omits an
+    /// empty list field, so a page holding only list metadata (`kind`,
+    /// `nextPageToken`, ...) is rendered as a page with no rows in CSV/table
+    /// output rather than as a row of its own.
+    pub fn list_pages() -> Self {
+        Self {
+            list_pages: true,
+            ..Self::default()
+        }
+    }
+
     fn layout(&self) -> Option<Layout> {
         self.layout.clone()
     }
@@ -245,6 +258,10 @@ fn render(
     };
 
     let Some(jq) = &settings.jq else {
+        let tabular = matches!(format, OutputFormat::Table | OutputFormat::Csv);
+        if tabular && page.as_ref().is_some_and(|p| p.list_pages) && is_empty_list_page(value) {
+            return render_one(&Value::Array(Vec::new()), format, settings, page, style);
+        }
         return render_one(value, format, settings, page, style);
     };
 
@@ -353,6 +370,16 @@ fn extract_items(value: &Value) -> Option<(&str, &Vec<Value>)> {
         }
     }
     found
+}
+
+/// A list page whose (empty) items field was omitted: an object with only
+/// list-envelope fields, such as `{"kind": "drive#fileList", "nextPageToken": "t"}`.
+fn is_empty_list_page(value: &Value) -> bool {
+    let Value::Object(obj) = value else {
+        return false;
+    };
+    obj.keys()
+        .all(|k| k.starts_with('_') || LIST_ENVELOPE_KEYS.contains(&k.as_str()))
 }
 
 /// Escape one object key for use as a segment of a dotted column name: `\`
@@ -1192,6 +1219,32 @@ mod tests {
         ];
         let (out, _) = stream(&pages, OutputFormat::Table, &plain());
         assert_eq!(out, ["(empty)", "id\n──\n1", ""]);
+    }
+
+    #[test]
+    fn list_pages_without_their_items_field_have_no_rows() {
+        let pages = [
+            json!({"kind": "drive#fileList", "nextPageToken": "p2"}),
+            json!({"files": [{"id": "1"}], "nextPageToken": "p3"}),
+            json!({"nextPageToken": "p4"}),
+            json!({"files": [{"id": "2"}]}),
+        ];
+        let render_all = |format| {
+            let mut state = PageStream::list_pages();
+            pages
+                .iter()
+                .map(|p| render(p, format, &plain(), Some(&mut state)).unwrap())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(render_all(OutputFormat::Csv), ["", "id\n1", "", "2"]);
+        assert_eq!(
+            render_all(OutputFormat::Table),
+            ["(empty)", "id\n──\n1", "", "2"]
+        );
+        // A stream of items keeps an item that has only envelope-like fields.
+        let item = json!({"summary": "s", "description": "d"});
+        let (csv, _) = stream(&[item], OutputFormat::Csv, &plain());
+        assert_eq!(csv, ["description,summary\nd,s"]);
     }
 
     #[test]
