@@ -39,18 +39,18 @@ pub(super) fn build_references_chain(original: &OriginalMessage) -> Vec<String> 
 
 /// Set threading headers on a `mail_builder::MessageBuilder`.
 /// See `ThreadingHeaders` for the bare-ID convention.
+///
+/// Every ID is checked before it is written: mail-builder wraps it in angle
+/// brackets verbatim, so an ID containing `<`, `>`, white space or a control
+/// character would produce a malformed `In-Reply-To`/`References` header.
 pub(super) fn set_threading_headers<'x>(
     mb: mail_builder::MessageBuilder<'x>,
     threading: &ThreadingHeaders<'x>,
-) -> mail_builder::MessageBuilder<'x> {
-    debug_assert!(
-        !threading.in_reply_to.contains('<'),
-        "threading IDs must be bare (no angle brackets)"
-    );
-    debug_assert!(
-        threading.references.iter().all(|id| !id.contains('<')),
-        "threading IDs must be bare (no angle brackets)"
-    );
+) -> Result<mail_builder::MessageBuilder<'x>, GwsError> {
+    validate_bare_msg_id(threading.in_reply_to)?;
+    for id in threading.references {
+        validate_bare_msg_id(id)?;
+    }
 
     use mail_builder::headers::message_id::MessageId;
 
@@ -63,7 +63,23 @@ pub(super) fn set_threading_headers<'x>(
             .collect(),
     };
 
-    mb.in_reply_to(in_reply_to).references(refs)
+    Ok(mb.in_reply_to(in_reply_to).references(refs))
+}
+
+/// Reject a message ID that cannot be written as `<id>` in a threading header.
+fn validate_bare_msg_id(id: &str) -> Result<(), GwsError> {
+    let bad = id.is_empty()
+        || id
+            .chars()
+            .any(|c| c == '<' || c == '>' || c.is_whitespace() || c.is_control());
+    if bad {
+        return Err(GwsError::Validation(format!(
+            "cannot thread the message: message ID {:?} is empty or contains angle brackets, \
+             white space or control characters",
+            sanitize_for_terminal(id)
+        )));
+    }
+    Ok(())
 }
 
 /// Apply optional From, CC, and BCC headers to a `MessageBuilder`.
@@ -182,7 +198,7 @@ mod tests {
             .to(MbAddress::new_address(None::<&str>, "test@example.com"))
             .subject("test")
             .text_body("body");
-        let mb = set_threading_headers(mb, &threading);
+        let mb = set_threading_headers(mb, &threading).unwrap();
         let raw = mb.write_to_string().unwrap();
 
         let in_reply_to = extract_header(&raw, "In-Reply-To").unwrap();
@@ -191,6 +207,37 @@ mod tests {
         let references = extract_header(&raw, "References").unwrap();
         assert!(references.contains("ref-1@example.com"));
         assert!(references.contains("ref-2@example.com"));
+    }
+
+    #[test]
+    fn set_threading_headers_rejects_ids_that_break_the_header() {
+        for bad in [
+            "",
+            "a<b@example.com",
+            "a>b@example.com",
+            "a b@example.com",
+            "a\rb",
+        ] {
+            let ok = vec!["ref@example.com".to_string()];
+            let threading = ThreadingHeaders {
+                in_reply_to: bad,
+                references: &ok,
+            };
+            let err = set_threading_headers(mail_builder::MessageBuilder::new(), &threading)
+                .err()
+                .unwrap_or_else(|| panic!("{bad:?} accepted as In-Reply-To"));
+            assert!(matches!(err, GwsError::Validation(_)), "{err:?}");
+
+            let refs = vec!["ok@example.com".to_string(), bad.to_string()];
+            let threading = ThreadingHeaders {
+                in_reply_to: "ok@example.com",
+                references: &refs,
+            };
+            assert!(
+                set_threading_headers(mail_builder::MessageBuilder::new(), &threading).is_err(),
+                "{bad:?} accepted in References"
+            );
+        }
     }
 
     #[test]

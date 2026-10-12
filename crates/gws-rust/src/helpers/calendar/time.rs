@@ -75,12 +75,14 @@ pub(super) fn parse_duration(s: &str) -> Result<Duration, GwsError> {
         }
         let n: i64 = num.parse().map_err(|_| err())?;
         num.clear();
-        total += match c {
-            'd' => Duration::days(n),
-            'h' => Duration::hours(n),
-            'm' => Duration::minutes(n),
+        let part = match c {
+            'd' => Duration::try_days(n),
+            'h' => Duration::try_hours(n),
+            'm' => Duration::try_minutes(n),
             _ => return Err(err()),
-        };
+        }
+        .ok_or_else(err)?;
+        total = total.checked_add(&part).ok_or_else(err)?;
         any = true;
     }
     if !num.is_empty() || !any || total <= Duration::zero() {
@@ -94,14 +96,34 @@ impl When {
     /// advanced in `tz`, so a span across a DST change keeps its real length
     /// instead of its wall-clock length.
     pub(super) fn plus(&self, d: Duration, tz: Tz) -> Result<When, GwsError> {
+        use chrono::Offset;
+        let too_long = || {
+            GwsError::Validation(
+                "--duration is too long: the event would end past the latest representable time"
+                    .into(),
+            )
+        };
         match self {
             When::Date(_) => Err(GwsError::Validation(
                 "--duration cannot be used with an all-day --start; pass --end YYYY-MM-DD".into(),
             )),
-            When::Instant(t) => Ok(When::Instant(*t + d)),
+            When::Instant(t) => t
+                .checked_add_signed(d)
+                .map(When::Instant)
+                .ok_or_else(too_long),
             When::Local(_) => {
-                let end = (self.to_utc(tz)? + d).with_timezone(&tz);
-                let naive = end.naive_local();
+                let end_utc = self
+                    .to_utc(tz)?
+                    .checked_add_signed(d)
+                    .ok_or_else(too_long)?;
+                let end = end_utc.with_timezone(&tz);
+                // `naive_local()` panics when the offset pushes the wall-clock
+                // time out of range; add the offset with a checked operation.
+                let offset = Duration::seconds(i64::from(end.offset().fix().local_minus_utc()));
+                let naive = end_utc
+                    .naive_utc()
+                    .checked_add_signed(offset)
+                    .ok_or_else(too_long)?;
                 // Keep the wall-clock form unless it is ambiguous (the
                 // repeated hour of a fall-back change); then pin the offset.
                 Ok(match tz.from_local_datetime(&naive) {
@@ -195,6 +217,20 @@ pub(super) fn parse_working_hours(s: &str) -> Result<(NaiveTime, NaiveTime), Gws
 
 pub(super) type Interval = (DateTime<Utc>, DateTime<Utc>);
 
+/// The instant of wall-clock time `local` in `tz`. A time skipped by a
+/// forward transition (a DST gap) resolves to the first valid local time after
+/// it, so a working day whose opening or closing time falls in the gap is kept.
+fn first_valid_local(tz: Tz, local: NaiveDateTime) -> Option<DateTime<Utc>> {
+    // Gaps are whole minutes and never longer than a day (Pacific/Apia skipped
+    // 2011-12-30 entirely), so a minute-by-minute scan of one day is enough.
+    (0..=24 * 60).find_map(|m| {
+        let shifted = local.checked_add_signed(Duration::minutes(m))?;
+        tz.from_local_datetime(&shifted)
+            .earliest()
+            .map(|t| t.with_timezone(&Utc))
+    })
+}
+
 /// Free intervals of at least `min` inside `[from, to)` that avoid `busy` and,
 /// when given, fall within daily working hours in `tz`.
 pub(super) fn free_slots(
@@ -228,11 +264,11 @@ pub(super) fn free_slots(
                 let mut day = gs.with_timezone(&tz).date_naive();
                 let last = ge.with_timezone(&tz).date_naive();
                 while day <= last {
-                    let open = tz.from_local_datetime(&day.and_time(ws)).earliest();
-                    let close = tz.from_local_datetime(&day.and_time(we)).earliest();
+                    let open = first_valid_local(tz, day.and_time(ws));
+                    let close = first_valid_local(tz, day.and_time(we));
                     if let (Some(o), Some(c)) = (open, close) {
-                        let s = gs.max(o.with_timezone(&Utc));
-                        let e = ge.min(c.with_timezone(&Utc));
+                        let s = gs.max(o);
+                        let e = ge.min(c);
                         if e > s {
                             out.push((s, e));
                         }
@@ -323,6 +359,33 @@ mod tests {
     }
 
     #[test]
+    fn huge_durations_are_rejected_not_panics() {
+        for bad in [
+            // Beyond chrono's TimeDelta range for one unit.
+            "99999999999999999d",
+            "9999999999999999h",
+            "999999999999999999m",
+            // Each part in range, the sum is not.
+            "106751991167d106751991167d",
+        ] {
+            let err = parse_duration(bad).unwrap_err();
+            assert!(err.to_string().contains("Invalid duration"), "{bad}: {err}");
+        }
+        // A representable duration that runs past the last representable time.
+        let start = parse_when("2026-06-17T09:00", "--start").unwrap();
+        let err = start
+            .plus(parse_duration("100000000d").unwrap(), chrono_tz::UTC)
+            .unwrap_err();
+        assert!(err.to_string().contains("--duration"), "{err}");
+        let start = parse_when("2026-06-17T09:00:00Z", "--start").unwrap();
+        assert!(
+            start
+                .plus(parse_duration("100000000d").unwrap(), chrono_tz::UTC)
+                .is_err()
+        );
+    }
+
+    #[test]
     fn range_checks() {
         let tz: Tz = "UTC".parse().unwrap();
         let d1 = parse_when("2026-01-01", "s").unwrap();
@@ -367,5 +430,40 @@ mod tests {
             tz,
         );
         assert!(slots.is_empty());
+    }
+    #[test]
+    fn working_hours_in_a_dst_gap_shift_to_the_first_valid_time() {
+        // America/New_York springs forward at 02:00 on 2026-03-08: 02:00-02:59
+        // local does not exist, and 03:00 EDT (07:00Z) follows 01:59 EST.
+        let tz: Tz = "America/New_York".parse().unwrap();
+        let t = |s: &str| DateTime::parse_from_rfc3339(s).unwrap().with_timezone(&Utc);
+        let from = t("2026-03-08T05:00:00Z");
+        let to = t("2026-03-09T04:00:00Z");
+        // Opening time in the gap: the day opens at 03:00 EDT.
+        let slots = free_slots(
+            from,
+            to,
+            vec![],
+            Duration::minutes(30),
+            Some(parse_working_hours("02:00-04:00").unwrap()),
+            tz,
+        );
+        assert_eq!(
+            slots,
+            vec![(t("2026-03-08T07:00:00Z"), t("2026-03-08T08:00:00Z"))]
+        );
+        // Closing time in the gap: the day closes at 03:00 EDT.
+        let slots = free_slots(
+            from,
+            to,
+            vec![],
+            Duration::minutes(30),
+            Some(parse_working_hours("00:00-02:30").unwrap()),
+            tz,
+        );
+        assert_eq!(
+            slots,
+            vec![(t("2026-03-08T05:00:00Z"), t("2026-03-08T07:00:00Z"))]
+        );
     }
 }
