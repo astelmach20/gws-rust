@@ -483,3 +483,45 @@ async fn restrict_paths_confines_files_written_under_an_output_dir() {
     assert_eq!(out.status.code(), Some(3), "{stderr}");
     assert!(stderr.contains("outside the current directory"), "{stderr}");
 }
+
+#[test]
+fn gmail_threading_helpers_reject_non_api_message_ids() {
+    let dir = setup();
+    seed(dir.path(), "gmail", "v1", "");
+    let cases: [&[&str]; 3] = [
+        &["gmail", "+reply", "--body", "hi"],
+        &["gmail", "+reply-all", "--body", "hi"],
+        &["gmail", "+forward", "--to", "dave@example.com"],
+    ];
+    for base in cases {
+        for id in ["<ID>", "a<b", "abc@mail.example.com", "a b"] {
+            let out = gwsr(dir.path())
+                .args(base)
+                .args(["--message-id", id, "--dry-run"])
+                .output()
+                .unwrap();
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            assert_eq!(out.status.code(), Some(3), "{base:?} {id:?}: {stderr}");
+            assert!(stderr.contains("not a Gmail API message ID"), "{stderr}");
+            assert!(out.stdout.is_empty(), "{base:?} {id:?}");
+        }
+        let out = gwsr(dir.path())
+            .args(base)
+            .args(["--message-id", "18f1a2b3c4d", "--dry-run"])
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let raw = stdout_json(&out)["raw_message"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert!(
+            raw.contains("In-Reply-To: <18f1a2b3c4d@example.com>"),
+            "{raw}"
+        );
+    }
+}
