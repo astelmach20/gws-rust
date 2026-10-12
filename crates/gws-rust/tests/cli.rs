@@ -1859,6 +1859,104 @@ async fn batch_results_are_screened_by_model_armor() {
     assert!(!out.status.success());
 }
 
+/// `--dry-run` before `auth` must not be silently dropped: `gwsr --dry-run
+/// auth logout` used to delete the profile's credentials (and revoke the
+/// refresh token) for real.
+#[test]
+fn global_dry_run_is_not_ignored_by_auth_commands() {
+    let env = Env::new();
+    let profile = env.config_dir().join("profiles").join("default");
+    std::fs::create_dir_all(&profile).unwrap();
+    let creds = profile.join("credentials.enc");
+    let meta = profile.join("profile.json");
+    std::fs::write(&creds, b"GWSR\x01not-really-encrypted").unwrap();
+    std::fs::write(&meta, b"{}").unwrap();
+
+    for args in [
+        &["--dry-run", "auth", "logout", "--no-revoke"][..],
+        &["--dry-run", "auth", "status", "--offline"][..],
+        &["--dry-run", "auth", "use", "default"][..],
+    ] {
+        let out = env.cmd().args(args).output().unwrap();
+        assert_eq!(out.status.code(), Some(3), "{args:?}: {out:?}");
+        assert!(out.stdout.is_empty(), "{args:?}: {out:?}");
+        let err: Value = serde_json::from_slice(&out.stderr).unwrap();
+        assert!(
+            err["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("--dry-run"),
+            "{args:?}: {err}"
+        );
+    }
+    assert!(
+        creds.exists(),
+        "--dry-run auth logout deleted the credentials"
+    );
+    assert!(meta.exists(), "--dry-run auth logout deleted profile.json");
+
+    // `auth setup` has a dry-run mode: the global flag reaches it (gcloud is
+    // kept off PATH so nothing can run).
+    let out = env
+        .cmd()
+        .env("PATH", env.work_dir())
+        .args(["--dry-run", "auth", "setup", "--non-interactive"])
+        .output()
+        .unwrap();
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("DRY RUN"),
+        "{out:?}"
+    );
+}
+
+// ── batch output honours the global output options ─────────────────────
+
+#[tokio::test(flavor = "multi_thread")]
+async fn batch_results_honour_jq_and_format() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    let parts = "--b\r\nContent-Type: application/http\r\nContent-ID: <response-item-a>\r\n\r\n\
+         HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{\"snippet\":\"first\"}\r\n\
+         --b\r\nContent-Type: application/http\r\nContent-ID: <response-item-b>\r\n\r\n\
+         HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{\"snippet\":\"second\"}\r\n--b--\r\n";
+    Mock::given(method("POST"))
+        .and(path("/batch/gmail/v1"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_raw(parts.as_bytes().to_vec(), "multipart/mixed; boundary=b"),
+        )
+        .mount(&server)
+        .await;
+    let env = Env::new();
+    seed_gmail_get(&env);
+    let input = "{\"id\":\"a\",\"method\":\"users.messages.get\",\"params\":{\"userId\":\"me\",\"id\":\"m1\"}}\n\
+                 {\"id\":\"b\",\"method\":\"users.messages.get\",\"params\":{\"userId\":\"me\",\"id\":\"m2\"}}\n";
+    let run = |extra: &[&str]| {
+        let mut c = env.cmd();
+        c.env("GWSR_TOKEN", "test-token")
+            .env("GWSR_API_BASE_URL", server.uri())
+            .args(["batch", "gmail"])
+            .args(extra)
+            .write_stdin(input);
+        c.output().unwrap()
+    };
+
+    // --jq is applied to every result line, as for any other command.
+    let out = run(&["--jq", ".body.snippet"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert_eq!(stdout_of(&out), "first\nsecond\n");
+
+    // --format csv prints one header, then one row per call.
+    let out = run(&["--format", "csv", "--columns", "id,status,body.snippet"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert_eq!(
+        stdout_of(&out),
+        "id,status,body.snippet\na,200,first\nb,200,second\n"
+    );
+}
+
 // ── -o/--output pointing at a directory ─────────────────────────────────
 
 #[tokio::test(flavor = "multi_thread")]
