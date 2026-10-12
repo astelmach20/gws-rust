@@ -589,12 +589,20 @@ async fn write_stream(
     }
 }
 
+/// Longest name [`safe_filename`] returns, in UTF-8 bytes.
+pub(crate) const SAFE_FILENAME_MAX_BYTES: usize = 200;
+
 /// Turn a remote (untrusted) file name into a safe single path component.
 ///
 /// Path separators, control characters and characters that are invalid on
 /// Windows are replaced with `_`; leading dots are stripped so the result can
 /// never be `.`/`..` or a hidden file. Falls back to `fallback` when nothing
 /// usable remains.
+///
+/// The result is at most [`SAFE_FILENAME_MAX_BYTES`] UTF-8 bytes (cut on a
+/// character boundary). File systems limit a name to 255 bytes (ext4) or 255
+/// UTF-16 units (APFS, NTFS), and UTF-8 is never shorter than either; the
+/// headroom leaves room for callers to add an extension or an ID prefix.
 pub(crate) fn safe_filename(raw: &str, fallback: &str) -> String {
     let cleaned: String = raw
         .chars()
@@ -607,7 +615,13 @@ pub(crate) fn safe_filename(raw: &str, fallback: &str) -> String {
         })
         .collect();
     let cleaned = cleaned.trim().trim_start_matches('.').trim();
-    let truncated: String = cleaned.chars().take(200).collect();
+    let mut truncated = String::new();
+    for c in cleaned.chars() {
+        if truncated.len() + c.len_utf8() > SAFE_FILENAME_MAX_BYTES {
+            break;
+        }
+        truncated.push(c);
+    }
     if truncated.is_empty() {
         fallback.to_string()
     } else {
@@ -1035,5 +1049,16 @@ mod tests {
         assert_eq!(safe_filename(".bashrc", "x"), "bashrc");
         assert_eq!(safe_filename("a\nb:c", "x"), "a_b_c");
         assert_eq!(safe_filename("Report Q1.pdf", "x"), "Report Q1.pdf");
+    }
+
+    #[test]
+    fn safe_filename_limits_bytes_not_chars() {
+        assert_eq!(safe_filename(&"a".repeat(300), "x"), "a".repeat(200));
+        // 4-byte characters: 50 fit in 200 bytes, never a split character.
+        let emoji = safe_filename(&"\u{1F4C4}".repeat(150), "x");
+        assert_eq!(emoji, "\u{1F4C4}".repeat(50));
+        let cjk = safe_filename(&"文".repeat(100), "x");
+        assert_eq!(cjk, "文".repeat(66));
+        assert!(cjk.len() <= SAFE_FILENAME_MAX_BYTES);
     }
 }

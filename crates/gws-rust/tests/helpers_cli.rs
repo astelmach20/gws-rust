@@ -309,6 +309,58 @@ fn upload_rejects_paths_outside_cwd() {
     assert_eq!(out.status.code(), Some(3));
 }
 
+/// `GWSR_API_BASE_URL` routes workflow requests to the configured endpoint,
+/// exactly like generated methods and the app helpers.
+#[test]
+fn workflow_requests_honour_api_base_override() {
+    let dir = setup();
+    let base = "http://127.0.0.1:9/";
+    let cases: [(&[&str], &[&str]); 3] = [
+        (
+            &["workflow", "+standup-report", "--dry-run"],
+            &[
+                "calendar/v3/calendars/primary/events",
+                "tasks/v1/lists/@default/tasks",
+            ],
+        ),
+        (
+            &["workflow", "+weekly-digest", "--dry-run"],
+            &[
+                "calendar/v3/calendars/primary/events",
+                "gmail/v1/users/me/messages",
+            ],
+        ),
+        (
+            &[
+                "workflow",
+                "+file-announce",
+                "--file-id",
+                "F",
+                "--space-id",
+                "S",
+                "--dry-run",
+            ],
+            &["drive/v3/files/F", "v1/spaces/S/messages"],
+        ),
+    ];
+    for (args, paths) in cases {
+        let out = gwsr(dir.path())
+            .env("GWSR_API_BASE_URL", base)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{args:?}: {out:?}");
+        let urls: Vec<String> = stdout_json(&out)["requests"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["url"].as_str().unwrap().to_string())
+            .collect();
+        let expected: Vec<String> = paths.iter().map(|p| format!("{base}{p}")).collect();
+        assert_eq!(urls, expected, "{args:?}");
+    }
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn text_responses_of_generated_methods_are_screened_by_model_armor() {
     use wiremock::matchers::{method, path};
@@ -387,4 +439,46 @@ async fn text_responses_of_generated_methods_are_screened_by_model_armor() {
         "text response printed without Model Armor screening: {stdout}"
     );
     assert!(!out.status.success());
+}
+
+#[test]
+fn gmail_threading_helpers_reject_non_api_message_ids() {
+    let dir = setup();
+    seed(dir.path(), "gmail", "v1", "");
+    let cases: [&[&str]; 3] = [
+        &["gmail", "+reply", "--body", "hi"],
+        &["gmail", "+reply-all", "--body", "hi"],
+        &["gmail", "+forward", "--to", "dave@example.com"],
+    ];
+    for base in cases {
+        for id in ["<ID>", "a<b", "abc@mail.example.com", "a b"] {
+            let out = gwsr(dir.path())
+                .args(base)
+                .args(["--message-id", id, "--dry-run"])
+                .output()
+                .unwrap();
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            assert_eq!(out.status.code(), Some(3), "{base:?} {id:?}: {stderr}");
+            assert!(stderr.contains("not a Gmail API message ID"), "{stderr}");
+            assert!(out.stdout.is_empty(), "{base:?} {id:?}");
+        }
+        let out = gwsr(dir.path())
+            .args(base)
+            .args(["--message-id", "18f1a2b3c4d", "--dry-run"])
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let raw = stdout_json(&out)["raw_message"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert!(
+            raw.contains("In-Reply-To: <18f1a2b3c4d@example.com>"),
+            "{raw}"
+        );
+    }
 }
