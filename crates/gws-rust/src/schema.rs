@@ -21,8 +21,8 @@
 use serde_json::{Value, json};
 
 use crate::discovery::{
-    JsonSchema, MethodParameter, PageTokenLocation, RestDescription, RestMethod, RestResource,
-    fetch_discovery_document,
+    JsonSchema, JsonSchemaProperty, MethodParameter, PageTokenLocation, RestDescription,
+    RestMethod, RestResource, fetch_discovery_document,
 };
 use crate::error::GwsError;
 use crate::services::resolve_service_spec;
@@ -30,7 +30,8 @@ use crate::services::resolve_service_spec;
 /// Handles the `gwsr schema <dotted.path>` command and returns the schema as
 /// JSON (the caller formats and prints it).
 ///
-/// Path format: `service.resource[.subresource].method` or `service.Type`,
+/// Path format: `service.resource[.subresource].method`, `service.Type`, or
+/// `service.method` for a method declared outside any resource,
 /// where `service` is a registered alias, `alias:version`, or any Discovery
 /// API as `<api>:<version>`.
 /// Examples: `drive.files.list`, `drive.File`, `admin:directory_v1.users.list`.
@@ -59,6 +60,15 @@ pub async fn handle_schema_command(path: &str, resolve_refs: bool) -> Result<Val
             }
             return Ok(output);
         }
+        // A method declared outside any resource (e.g. `oauth2:v2.tokeninfo`).
+        if let Some(method) = doc.methods.get(schema_name) {
+            let mut output = build_schema_output(&doc, method);
+            if resolve_refs {
+                let mut seen = std::collections::HashSet::new();
+                resolve_schema_refs(&mut output, &doc, &mut seen);
+            }
+            return Ok(output);
+        }
         if doc.resources.contains_key(schema_name) {
             return Err(GwsError::Validation(format!(
                 "'{schema_name}' is a resource. To see its methods, try 'gwsr schema {service_name}.{schema_name}.list' (or similar). To see a type definition, try 'gwsr schema {service_name}.<Type>'."
@@ -83,6 +93,53 @@ pub async fn handle_schema_command(path: &str, resolve_refs: bool) -> Result<Val
         resolve_schema_refs(&mut output, &doc, &mut seen);
     }
     Ok(output)
+}
+
+/// The `gwsr schema` argument that shows `method` of `doc`, e.g.
+/// `events.subscriptions.list` or `youtube:v3.videos.list`.
+///
+/// Built from the method's position in the resource tree, not from its
+/// Discovery `id`: ids use the API's own name (`workspaceevents`,
+/// `groupsSettings`) and sometimes skip resources (`alertcenter.getSettings`
+/// lives under the `v1beta1` resource), so they are not valid schema paths.
+/// `None` when `method` is not part of `doc`.
+pub fn method_schema_path(doc: &RestDescription, method: &RestMethod) -> Option<String> {
+    fn walk(
+        resources: &std::collections::HashMap<String, RestResource>,
+        method: &RestMethod,
+        path: &mut Vec<String>,
+    ) -> bool {
+        for (name, resource) in resources {
+            path.push(name.clone());
+            if let Some((method_name, _)) = resource
+                .methods
+                .iter()
+                .find(|(_, m)| std::ptr::eq(*m, method))
+            {
+                path.push(method_name.clone());
+                return true;
+            }
+            if walk(&resource.resources, method, path) {
+                return true;
+            }
+            path.pop();
+        }
+        false
+    }
+
+    let mut path = Vec::new();
+    // A method declared outside any resource (e.g. `oauth2:v2.tokeninfo`).
+    if let Some((method_name, _)) = doc.methods.iter().find(|(_, m)| std::ptr::eq(*m, method)) {
+        path.push(method_name.clone());
+    } else if !walk(&doc.resources, method, &mut path) {
+        return None;
+    }
+    let service = crate::services::SERVICES
+        .iter()
+        .find(|e| e.api_name == doc.name && e.version == doc.version)
+        .map(|e| e.aliases[0].to_string())
+        .unwrap_or_else(|| format!("{}:{}", doc.name, doc.version));
+    Some(format!("{service}.{}", path.join(".")))
 }
 
 /// Walks the resource tree to find a method.
@@ -226,6 +283,9 @@ fn param_to_json(param: &MethodParameter) -> Value {
     if let Some(ref vals) = param.enum_values {
         p["enum"] = json!(vals);
     }
+    if let Some(ref pattern) = param.pattern {
+        p["pattern"] = json!(pattern);
+    }
     if param.repeated {
         p["repeated"] = json!(true);
     }
@@ -246,47 +306,76 @@ fn schema_to_json(schema: &JsonSchema) -> Value {
         s["description"] = json!(desc);
     }
 
+    if let Some(ref r) = schema.schema_ref {
+        s["$ref"] = json!(r);
+    }
     if !schema.properties.is_empty() {
-        let mut props = json!({});
-        for (name, prop) in &schema.properties {
-            let mut p = json!({});
-            if let Some(ref t) = prop.prop_type {
-                p["type"] = json!(t);
-            }
-            if let Some(ref r) = prop.schema_ref {
-                p["$ref"] = json!(r);
-            }
-            if let Some(ref desc) = prop.description {
-                p["description"] = json!(desc);
-            }
-            if prop.read_only {
-                p["readOnly"] = json!(true);
-            }
-            if let Some(ref fmt) = prop.format {
-                p["format"] = json!(fmt);
-            }
-
-            // Handle items for array types
-            if let Some(ref items) = prop.items {
-                let mut items_json = json!({});
-                if let Some(ref t) = items.prop_type {
-                    items_json["type"] = json!(t);
-                }
-                if let Some(ref r) = items.schema_ref {
-                    items_json["$ref"] = json!(r);
-                }
-                p["items"] = items_json;
-            }
-
-            props[name] = p;
-        }
-        s["properties"] = props;
+        s["properties"] = properties_to_json(&schema.properties);
+    }
+    if !schema.required.is_empty() {
+        s["required"] = json!(schema.required);
+    }
+    if let Some(ref items) = schema.items {
+        s["items"] = property_to_json(items);
+    }
+    if let Some(ref additional) = schema.additional_properties {
+        s["additionalProperties"] = property_to_json(additional);
     }
 
     s
 }
 
+fn properties_to_json(properties: &std::collections::HashMap<String, JsonSchemaProperty>) -> Value {
+    let mut props = json!({});
+    for (name, prop) in properties {
+        props[name] = property_to_json(prop);
+    }
+    props
+}
+
+/// One property, including inline object properties, map values
+/// (`additionalProperties`) and array items at any depth.
+fn property_to_json(prop: &JsonSchemaProperty) -> Value {
+    let mut p = json!({});
+    if let Some(ref t) = prop.prop_type {
+        p["type"] = json!(t);
+    }
+    if let Some(ref r) = prop.schema_ref {
+        p["$ref"] = json!(r);
+    }
+    if let Some(ref desc) = prop.description {
+        p["description"] = json!(desc);
+    }
+    if prop.read_only {
+        p["readOnly"] = json!(true);
+    }
+    if let Some(ref fmt) = prop.format {
+        p["format"] = json!(fmt);
+    }
+    if let Some(ref def) = prop.default {
+        p["default"] = json!(def);
+    }
+    if let Some(ref vals) = prop.enum_values {
+        p["enum"] = json!(vals);
+    }
+    if !prop.properties.is_empty() {
+        p["properties"] = properties_to_json(&prop.properties);
+    }
+    if let Some(ref items) = prop.items {
+        p["items"] = property_to_json(items);
+    }
+    if let Some(ref additional) = prop.additional_properties {
+        p["additionalProperties"] = property_to_json(additional);
+    }
+    p
+}
+
 /// Recursively resolves "$ref" fields in the JSON value.
+///
+/// `seen` holds the schemas being expanded on the current branch; a `$ref`
+/// to one of them is left unexpanded, which is what ends `$ref` cycles
+/// (Docs `Tab.childTabs`, `StructuralElement` → `Table` → … →
+/// `StructuralElement`).
 fn resolve_schema_refs(
     val: &mut Value,
     doc: &RestDescription,
@@ -294,35 +383,31 @@ fn resolve_schema_refs(
 ) {
     match val {
         Value::Object(map) => {
-            // Check if this object is a reference
-            if let Some(ref_name) = map
+            // Expand a reference not already being expanded on this branch.
+            let expanding = map
                 .get("$ref")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string())
-            {
-                // If we haven't seen this schema yet in this branch
-                if !seen.contains(&ref_name)
-                    && let Some(schema) = doc.schemas.get(&ref_name)
-                {
-                    seen.insert(ref_name.clone());
-                    let mut resolved = schema_to_json(schema);
-                    // Recursively resolve the resolved schema
-                    resolve_schema_refs(&mut resolved, doc, seen);
-                    seen.remove(&ref_name);
-
-                    // Merge resolved schema into current object, but preserve existing fields
-                    // (though usually $ref stands alone)
-                    if let Value::Object(resolved_map) = resolved {
-                        for (k, v) in resolved_map {
-                            map.entry(k).or_insert(v);
-                        }
+                .and_then(Value::as_str)
+                .filter(|name| !seen.contains(*name))
+                .and_then(|name| doc.schemas.get(name).map(|s| (name.to_string(), s)));
+            if let Some((name, schema)) = &expanding {
+                // Merge the referenced schema, keeping fields the reference
+                // already has (usually `$ref` stands alone).
+                if let Value::Object(resolved) = schema_to_json(schema) {
+                    for (k, v) in resolved {
+                        map.entry(k).or_insert(v);
                     }
                 }
+                seen.insert(name.clone());
             }
 
-            // Recurse into all fields
+            // Walk every field once, with this schema still marked as being
+            // expanded, so nested references back to it stay unexpanded.
             for (_, v) in map.iter_mut() {
                 resolve_schema_refs(v, doc, seen);
+            }
+
+            if let Some((name, _)) = &expanding {
+                seen.remove(name);
             }
         }
         Value::Array(arr) => {
@@ -338,6 +423,77 @@ fn resolve_schema_refs(
 mod tests {
     use super::*;
 
+    fn doc_with_nested_method(name: &str, version: &str) -> RestDescription {
+        let mut messages = RestResource::default();
+        messages.methods.insert(
+            "create".into(),
+            RestMethod {
+                id: Some(format!("{name}.spaces.messages.create")),
+                ..Default::default()
+            },
+        );
+        let mut spaces = RestResource::default();
+        spaces.resources.insert("messages".into(), messages);
+        let mut doc = RestDescription {
+            name: name.into(),
+            version: version.into(),
+            ..Default::default()
+        };
+        doc.resources.insert("spaces".into(), spaces);
+        doc
+    }
+
+    #[test]
+    fn method_schema_path_follows_the_resource_tree() {
+        let doc = doc_with_nested_method("workspaceevents", "v1");
+        let m = &doc.resources["spaces"].resources["messages"].methods["create"];
+        // Registered services use their primary alias...
+        assert_eq!(
+            method_schema_path(&doc, m).as_deref(),
+            Some("events.spaces.messages.create")
+        );
+        // ...other APIs and versions use `<api>:<version>`.
+        for (name, version, expected) in [
+            ("youtube", "v3", "youtube:v3.spaces.messages.create"),
+            (
+                "workspaceevents",
+                "v2",
+                "workspaceevents:v2.spaces.messages.create",
+            ),
+        ] {
+            let doc = doc_with_nested_method(name, version);
+            let m = &doc.resources["spaces"].resources["messages"].methods["create"];
+            assert_eq!(method_schema_path(&doc, m).as_deref(), Some(expected));
+        }
+    }
+
+    #[test]
+    fn method_schema_path_names_top_level_methods() {
+        let mut doc = doc_with_nested_method("oauth2", "v2");
+        doc.methods.insert(
+            "tokeninfo".into(),
+            RestMethod {
+                id: Some("oauth2.tokeninfo".into()),
+                ..Default::default()
+            },
+        );
+        let m = &doc.methods["tokeninfo"];
+        assert_eq!(
+            method_schema_path(&doc, m).as_deref(),
+            Some("oauth2:v2.tokeninfo")
+        );
+    }
+
+    #[test]
+    fn method_schema_path_is_none_for_a_foreign_method() {
+        let doc = doc_with_nested_method("chat", "v1");
+        let other = RestMethod {
+            id: Some("chat.spaces.messages.create".into()),
+            ..Default::default()
+        };
+        assert_eq!(method_schema_path(&doc, &other), None);
+    }
+
     #[test]
     fn test_param_to_json() {
         let param = MethodParameter {
@@ -352,6 +508,7 @@ mod tests {
             repeated: false,
             minimum: None,
             maximum: None,
+            pattern: Some("^[01]$".to_string()),
             deprecated: true,
         };
 
@@ -363,6 +520,7 @@ mod tests {
         assert_eq!(json["format"], "int32");
         assert_eq!(json["default"], "0");
         assert!(json["enum"].is_array());
+        assert_eq!(json["pattern"], "^[01]$");
         assert_eq!(json["deprecated"], true);
         // repeated: false should NOT appear in output
         assert!(json.get("repeated").is_none());
@@ -403,6 +561,91 @@ mod tests {
         assert_eq!(json["type"], "object");
         assert!(json["properties"].is_object());
         assert_eq!(json["properties"]["name"]["type"], "string");
+    }
+
+    /// Inline object properties, maps (`additionalProperties`), nested array
+    /// items and enums are part of the body the executor validates, so
+    /// `gwsr schema` must show them rather than a bare `"type": "object"`.
+    #[test]
+    fn schema_to_json_keeps_nested_structure() {
+        let doc: RestDescription = serde_json::from_value(json!({
+            "name": "x", "version": "v1", "rootUrl": "https://x.googleapis.com/",
+            "schemas": {
+                "File": {
+                    "type": "object",
+                    "properties": {
+                        "contentHints": {
+                            "type": "object",
+                            "properties": {
+                                "thumbnail": {
+                                    "type": "object",
+                                    "properties": {
+                                        "image": {"type": "string", "format": "byte"},
+                                        "owner": {"$ref": "User"}
+                                    }
+                                }
+                            }
+                        },
+                        "appProperties": {
+                            "type": "object",
+                            "additionalProperties": {"type": "string"}
+                        },
+                        "values": {
+                            "type": "array",
+                            "items": {"type": "array", "items": {"type": "any"}}
+                        },
+                        "permissions": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {"role": {"type": "string"}}
+                            }
+                        },
+                        "status": {"type": "string", "enum": ["ACTIVE", "DELETED"]}
+                    }
+                },
+                "Labels": {
+                    "type": "object",
+                    "additionalProperties": {"$ref": "User"}
+                },
+                "User": {
+                    "type": "object",
+                    "properties": {"email": {"type": "string"}}
+                }
+            }
+        }))
+        .unwrap();
+
+        let file = schema_to_json(&doc.schemas["File"]);
+        let props = &file["properties"];
+        assert_eq!(
+            props["contentHints"]["properties"]["thumbnail"]["properties"]["image"]["format"],
+            "byte",
+            "{file:#}"
+        );
+        assert_eq!(
+            props["appProperties"]["additionalProperties"]["type"], "string",
+            "{file:#}"
+        );
+        assert_eq!(props["values"]["items"]["items"]["type"], "any", "{file:#}");
+        assert_eq!(
+            props["permissions"]["items"]["properties"]["role"]["type"], "string",
+            "{file:#}"
+        );
+        assert_eq!(props["status"]["enum"], json!(["ACTIVE", "DELETED"]));
+
+        let labels = schema_to_json(&doc.schemas["Labels"]);
+        assert_eq!(labels["additionalProperties"]["$ref"], "User", "{labels:#}");
+
+        // `--resolve-refs` follows references inside inline objects too.
+        let mut resolved = file.clone();
+        resolve_schema_refs(&mut resolved, &doc, &mut std::collections::HashSet::new());
+        assert_eq!(
+            resolved["properties"]["contentHints"]["properties"]["thumbnail"]["properties"]["owner"]
+                ["properties"]["email"]["type"],
+            "string",
+            "{resolved:#}"
+        );
     }
 
     #[test]
@@ -480,6 +723,61 @@ mod tests {
 
         let f_node = &val["properties"]["f"];
         assert_eq!(f_node["type"], "integer");
+    }
+
+    /// Resolve `root` against `schemas` on a worker thread, failing instead
+    /// of hanging when resolution does not finish.
+    fn resolve_with_deadline(schemas: Value, root: Value) -> Value {
+        let doc: RestDescription = serde_json::from_value(json!({
+            "name": "x", "version": "v1", "rootUrl": "https://x.googleapis.com/",
+            "schemas": schemas
+        }))
+        .unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::Builder::new()
+            .stack_size(64 * 1024 * 1024)
+            .spawn(move || {
+                let mut val = root;
+                resolve_schema_refs(&mut val, &doc, &mut std::collections::HashSet::new());
+                tx.send(val).unwrap();
+            })
+            .unwrap();
+        rx.recv_timeout(std::time::Duration::from_secs(10))
+            .expect("resolve_schema_refs did not finish within 10s")
+    }
+
+    #[test]
+    fn test_resolve_schema_refs_self_cycle_terminates() {
+        // Docs `Tab.childTabs` is an array of `Tab`: a `$ref` cycle.
+        let schemas = json!({
+            "Tab": { "type": "object", "properties": {
+                "title": { "type": "string" },
+                "childTabs": { "type": "array", "items": { "$ref": "Tab" } }
+            } }
+        });
+        let out = resolve_with_deadline(schemas, json!({ "response": { "$ref": "Tab" } }));
+        let tab = &out["response"];
+        assert_eq!(tab["properties"]["title"]["type"], "string");
+        // The recursive occurrence stays an unexpanded reference.
+        assert_eq!(
+            tab["properties"]["childTabs"]["items"],
+            json!({ "$ref": "Tab" })
+        );
+    }
+
+    #[test]
+    fn test_resolve_schema_refs_mutual_cycle_terminates() {
+        // Docs: StructuralElement -> Table -> TableRow -> TableCell -> StructuralElement.
+        let schemas = json!({
+            "A": { "type": "object", "properties": { "b": { "$ref": "B" } } },
+            "B": { "type": "object", "properties": {
+                "c": { "type": "array", "items": { "$ref": "C" } } } },
+            "C": { "type": "object", "properties": { "a": { "$ref": "A" } } }
+        });
+        let out = resolve_with_deadline(schemas, json!({ "request": { "$ref": "A" } }));
+        let c = &out["request"]["properties"]["b"]["properties"]["c"]["items"];
+        assert_eq!(c["type"], "object");
+        assert_eq!(c["properties"]["a"], json!({ "$ref": "A" }));
     }
 
     #[test]

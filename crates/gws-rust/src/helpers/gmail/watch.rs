@@ -118,9 +118,31 @@ fn parse_history_id(v: &Value, context: &str) -> Result<u64, GwsError> {
         .ok_or_else(|| GwsError::other(format!("{context}: invalid historyId {h}")))
 }
 
-/// Collect message IDs added in one history page (deduplicated, in order).
+/// Whether a message carries at least one of the watched labels. An empty
+/// filter matches everything. A message whose labels are not reported is kept
+/// (never silently dropped); Gmail always reports them in history entries.
+fn has_watched_label(message: &Value, label_ids: &[String]) -> bool {
+    if label_ids.is_empty() {
+        return true;
+    }
+    match message.get("labelIds").and_then(Value::as_array) {
+        Some(labels) => labels
+            .iter()
+            .filter_map(Value::as_str)
+            .any(|l| label_ids.iter().any(|w| w == l)),
+        None => true,
+    }
+}
+
+/// Collect message IDs added in one history page (deduplicated, in order),
+/// keeping only messages with one of `label_ids` (all when empty).
+///
+/// `users.watch` label filters only decide which mailbox changes trigger a
+/// notification; `users.history.list` since the last notification still
+/// returns every added message (sent mail, drafts, other labels).
 fn extract_message_ids_from_history(
     history_body: &Value,
+    label_ids: &[String],
     seen: &mut HashSet<String>,
 ) -> Vec<String> {
     let mut result = Vec::new();
@@ -128,10 +150,11 @@ fn extract_message_ids_from_history(
     for entry in entries.into_iter().flatten() {
         let added = entry.get("messagesAdded").and_then(Value::as_array);
         for msg_entry in added.into_iter().flatten() {
-            if let Some(id) = msg_entry
-                .get("message")
-                .and_then(|m| m.get("id"))
-                .and_then(Value::as_str)
+            let Some(message) = msg_entry.get("message") else {
+                continue;
+            };
+            if let Some(id) = message.get("id").and_then(Value::as_str)
+                && has_watched_label(message, label_ids)
                 && seen.insert(id.to_string())
             {
                 result.push(id.to_string());
@@ -210,7 +233,11 @@ impl GmailWatchStep<'_> {
                     ))),
                     other => StepError::from(other),
                 })?;
-            ids.extend(extract_message_ids_from_history(&page, &mut seen));
+            ids.extend(extract_message_ids_from_history(
+                &page,
+                &self.config.label_ids,
+                &mut seen,
+            ));
             match page.get("nextPageToken").and_then(Value::as_str) {
                 Some(t) => page_token = Some(t.to_string()),
                 None => break,
@@ -456,10 +483,31 @@ mod tests {
         ]});
         let mut seen = HashSet::new();
         assert_eq!(
-            extract_message_ids_from_history(&body, &mut seen),
+            extract_message_ids_from_history(&body, &[], &mut seen),
             vec!["a", "b"]
         );
-        assert!(extract_message_ids_from_history(&json!({}), &mut seen).is_empty());
+        assert!(extract_message_ids_from_history(&json!({}), &[], &mut seen).is_empty());
+    }
+
+    #[test]
+    fn test_extract_message_ids_from_history_filters_labels() {
+        let body = json!({ "history": [
+            { "messagesAdded": [
+                { "message": { "id": "sent", "labelIds": ["SENT"] } },
+                { "message": { "id": "inbox", "labelIds": ["UNREAD", "INBOX"] } },
+                { "message": { "id": "work", "labelIds": ["Label_7"] } },
+                { "message": { "id": "unknown" } }
+            ] }
+        ]});
+        let watched = vec!["INBOX".to_string(), "Label_7".to_string()];
+        assert_eq!(
+            extract_message_ids_from_history(&body, &watched, &mut HashSet::new()),
+            vec!["inbox", "work", "unknown"]
+        );
+        assert_eq!(
+            extract_message_ids_from_history(&body, &[], &mut HashSet::new()),
+            vec!["sent", "inbox", "work", "unknown"]
+        );
     }
 
     #[test]
@@ -532,11 +580,19 @@ mod tests {
     }
 
     async fn run_once(server: &MockServer, sanitize: &SanitizeConfig) -> Result<u64, GwsError> {
+        run_once_with_labels(server, sanitize, &[]).await
+    }
+
+    async fn run_once_with_labels(
+        server: &MockServer,
+        sanitize: &SanitizeConfig,
+        label_ids: &[&str],
+    ) -> Result<u64, GwsError> {
         let config = WatchConfig {
             project: None,
             subscription: Some("projects/test/subscriptions/demo".into()),
             topic: None,
-            label_ids: vec![],
+            label_ids: label_ids.iter().map(|l| (*l).to_string()).collect(),
             max_messages: 10,
             poll_interval: 1,
             max_failures: 3,
@@ -703,6 +759,44 @@ mod tests {
             .mount(&server)
             .await;
         run_once(&server, &SanitizeConfig::default()).await.unwrap();
+    }
+
+    /// `--label-ids` must filter what is emitted, not only which changes
+    /// trigger a notification: history since the last notification also
+    /// contains messages outside the watched labels (sent mail, drafts).
+    #[tokio::test]
+    async fn watch_emits_only_messages_with_watched_labels() {
+        let server = MockServer::start().await;
+        mount_pull(&server).await;
+        Mock::given(method("GET"))
+            .and(path("/gmail/v1/users/me/history"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "history": [
+                    { "messagesAdded": [{ "message": { "id": "sent-1", "labelIds": ["SENT"] } }] },
+                    { "messagesAdded": [{ "message": { "id": "draft-1", "labelIds": ["DRAFT"] } }] },
+                    { "messagesAdded": [{ "message": { "id": "in-1", "labelIds": ["UNREAD", "INBOX"] } }] }
+                ]
+            })))
+            .mount(&server)
+            .await;
+        for (id, n) in [("in-1", 1), ("sent-1", 0), ("draft-1", 0)] {
+            Mock::given(method("GET"))
+                .and(path(format!("/gmail/v1/users/me/messages/{id}")))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "id": id })))
+                .expect(n)
+                .named(id)
+                .mount(&server)
+                .await;
+        }
+        Mock::given(method("POST"))
+            .and(path("/v1/projects/test/subscriptions/demo:acknowledge"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(1)
+            .mount(&server)
+            .await;
+        run_once_with_labels(&server, &SanitizeConfig::default(), &["INBOX"])
+            .await
+            .unwrap();
     }
 
     /// SEC-14: when block-mode sanitization cannot run, nothing is emitted or acked.
