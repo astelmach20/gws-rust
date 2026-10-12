@@ -23,7 +23,7 @@
 //!   context or a CI log by accident.
 
 use std::io::{IsTerminal, Write};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use serde_json::{Value, json};
 use zeroize::Zeroizing;
@@ -36,15 +36,25 @@ use crate::error::GwsError;
 const SECRET_FIELDS: &[&str] = &["client_secret", "refresh_token", "private_key"];
 
 pub(super) async fn handle(m: &clap::ArgMatches) -> Result<(), GwsError> {
+    let unmasked = crate::args::flag(m, "unmasked")?;
+    // Check the destination under `GWSR_RESTRICT_PATHS` before any
+    // credentials are read.
+    let output = if unmasked {
+        let output = crate::args::value::<String>(m, "output")?
+            .ok_or_else(|| GwsError::Validation("--unmasked requires --output FILE".into()))?;
+        Some(crate::validate::validate_safe_file_path(
+            output, "--output",
+        )?)
+    } else {
+        None
+    };
+
     let env = AuthEnv::from_process().map_err(crate::auth::to_gws_error)?;
     let plaintext = tokio::task::spawn_blocking(move || read_profile_plaintext(&env))
         .await
         .map_err(|e| GwsError::other(format!("export task failed: {e}")))??;
 
-    if crate::args::flag(m, "unmasked")? {
-        let output = crate::args::value::<String>(m, "output")?
-            .map(PathBuf::from)
-            .ok_or_else(|| GwsError::Validation("--unmasked requires --output FILE".into()))?;
+    if let Some(output) = output {
         let confirmed = crate::args::flag(m, "confirm")?;
         let stdin_tty = std::io::stdin().is_terminal();
         confirm(confirmed, stdin_tty, &output, prompt_yes)?;
