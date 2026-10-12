@@ -350,6 +350,14 @@ const LIST_ENVELOPE_KEYS: &[&str] = &[
     "range",
     "majorDimension",
     "unreachable",
+    // The helpers' own list envelopes: `Page::into_json` (`count`,
+    // `truncated`), `calendar +agenda` (`timeMin`, `timeMax`) and
+    // `gmail +search` (`query`).
+    "count",
+    "truncated",
+    "timeMin",
+    "timeMax",
+    "query",
 ];
 
 /// Extract the items array from a typical Google API list response such as
@@ -978,6 +986,26 @@ mod tests {
             assert_eq!(head, cluster.repeat(head.len() / cluster.len()), "{out}");
             assert!(display_width(row) <= MAX_COLUMN_WIDTH, "{out}");
         }
+    }
+
+    #[test]
+    fn helper_list_envelopes_render_their_items_as_rows() {
+        // `Page::into_json` (classroom +courses, tasks +list, chat, ...).
+        let page = json!({"courses": [{"id": "1"}, {"id": "2"}], "count": 2});
+        assert_eq!(fmt(&page, OutputFormat::Csv), "id\n1\n2");
+        assert_eq!(fmt(&page, OutputFormat::Table), "id\n──\n1\n2");
+        let truncated = json!({
+            "tasks": [{"id": "1"}], "count": 1, "truncated": true, "nextPageToken": "t"
+        });
+        assert_eq!(fmt(&truncated, OutputFormat::Csv), "id\n1");
+        // calendar +agenda.
+        let agenda = json!({
+            "events": [{"id": "e"}], "count": 1, "timeMin": "a", "timeMax": "b", "timeZone": "UTC"
+        });
+        assert_eq!(fmt(&agenda, OutputFormat::Csv), "id\ne");
+        // gmail +search.
+        let search = json!({"messages": [{"id": "m"}], "resultSizeEstimate": 1, "query": "q"});
+        assert_eq!(fmt(&search, OutputFormat::Csv), "id\nm");
     }
 
     #[test]
