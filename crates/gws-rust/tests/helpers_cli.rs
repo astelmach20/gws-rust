@@ -704,6 +704,46 @@ fn dry_run_plan_keeps_repeated_query_keys() {
 }
 
 #[test]
+fn gmail_unsubscribe_dry_run_needs_no_credentials() {
+    // README/CONTEXT: `--dry-run` loads no credentials and sends nothing.
+    // No credential source exists in this isolated environment.
+    let dir = setup();
+    seed(dir.path(), "gmail", "v1", "");
+    let mut cmd = gwsr(dir.path());
+    // The helper builds its HTTP client even in a dry run, so restore what
+    // `env_clear` removed that the platform needs: Winsock fails to load
+    // without `SystemRoot`, and the TLS setup in a Nix build finds its roots
+    // through the certificate variables.
+    for key in ["SystemRoot", "SSL_CERT_FILE", "NIX_SSL_CERT_FILE"] {
+        if let Some(value) = std::env::var_os(key) {
+            cmd.env(key, value);
+        }
+    }
+    let out = cmd
+        .args(["gmail", "+unsubscribe", "--message-id", "M1", "--dry-run"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "exit {:?}: {}",
+        out.status.code(),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let v = stdout_json(&out);
+    assert_eq!(v["dry_run"], true);
+    let reqs = v["requests"].as_array().unwrap();
+    assert_eq!(reqs.len(), 2, "{v}");
+    assert_eq!(reqs[0]["method"], "GET");
+    assert_eq!(
+        reqs[0]["url"],
+        "https://gmail.googleapis.com/gmail/v1/users/me/messages/M1"
+    );
+    assert_eq!(reqs[0]["query_params"]["format"], "metadata");
+    assert_eq!(reqs[1]["method"], "POST");
+    assert_eq!(reqs[1]["body"], "List-Unsubscribe=One-Click");
+}
+
+#[test]
 fn gmail_threading_helpers_reject_non_api_message_ids() {
     let dir = setup();
     seed(dir.path(), "gmail", "v1", "");

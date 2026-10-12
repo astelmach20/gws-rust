@@ -689,7 +689,9 @@ TIPS:
   Gmail verified its DKIM signature. Otherwise the available unsubscribe
   links are printed and nothing is sent.
   With --sanitize, the unsubscribe URL is screened before the POST (block mode:
-  a match or a Model Armor failure sends nothing).",
+  a match or a Model Armor failure sends nothing).
+  --dry-run loads no credentials and reads nothing: it shows the metadata
+  read and the one-click POST, with the URL as a placeholder.",
     )
 }
 
