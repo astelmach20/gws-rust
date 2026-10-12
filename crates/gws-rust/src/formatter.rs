@@ -23,6 +23,7 @@
 //! every call site (executor, helpers) formats consistently without threading
 //! the options through each signature.
 
+use std::borrow::Cow;
 use std::sync::OnceLock;
 
 use serde_json::{Map, Value};
@@ -137,6 +138,13 @@ pub fn format_value(value: &Value, format: &OutputFormat) -> Result<String, GwsE
 /// `GWSR_FORMAT` > config), for commands without their own `--format`.
 pub fn emit_default(value: &Value) -> Result<(), GwsError> {
     crate::output::emit(&format_value(value, &settings().default_format)?)
+}
+
+/// A text cell for a CSV file written by a helper (for example
+/// `forms +responses --output`), with the same formula-injection guard and
+/// control-character stripping as `--format csv`.
+pub(crate) fn csv_text_cell(s: &str) -> String {
+    csv_text(s)
 }
 
 /// State shared by every page of one paginated (`--page-all` /
@@ -339,17 +347,37 @@ fn extract_items(value: &Value) -> Option<(&str, &Vec<Value>)> {
     found
 }
 
+/// Escape one object key for use as a segment of a dotted column name: `\`
+/// becomes `\\` and `.` becomes `\.`, so a literal `"a.b"` key (`a\.b`) never
+/// collides with the nested path `{"a": {"b": ..}}` (`a.b`).
+fn escape_key_segment(key: &str) -> Cow<'_, str> {
+    if !key.contains(['.', '\\']) {
+        return Cow::Borrowed(key);
+    }
+    let mut escaped = String::with_capacity(key.len() + 2);
+    for c in key.chars() {
+        if matches!(c, '.' | '\\') {
+            escaped.push('\\');
+        }
+        escaped.push(c);
+    }
+    Cow::Owned(escaped)
+}
+
 /// Recursively flatten a JSON object into `(dot.notation.key, value)` pairs.
+/// Dots and backslashes inside a key are escaped (see [`escape_key_segment`]),
+/// so every flattened name maps to exactly one value.
 fn flatten_object<'a>(
     obj: &'a Map<String, Value>,
     prefix: &str,
     out: &mut Vec<(String, &'a Value)>,
 ) {
     for (key, val) in obj {
+        let segment = escape_key_segment(key);
         let full_key = if prefix.is_empty() {
-            key.clone()
+            segment.into_owned()
         } else {
-            format!("{prefix}.{key}")
+            format!("{prefix}.{segment}")
         };
         match val {
             Value::Object(nested) if !nested.is_empty() => flatten_object(nested, &full_key, out),
@@ -864,6 +892,52 @@ mod tests {
         assert_eq!(
             fmt(&val, OutputFormat::Csv),
             "id,name\n1,hello\n2,\"has,comma\""
+        );
+    }
+
+    #[test]
+    fn csv_literal_dotted_key_does_not_collide_with_nested_path() {
+        // A literal "a.b" key and a nested {"a": {"b": ..}} used to flatten to
+        // the same column, and one of the two values was silently dropped.
+        let val = json!([{"a.b": "literal", "a": {"b": "nested"}}]);
+        let out = fmt(&val, OutputFormat::Csv);
+        assert!(out.contains("literal"), "{out}");
+        assert!(out.contains("nested"), "{out}");
+        assert_eq!(out, "a.b,a\\.b\nnested,literal");
+    }
+
+    #[test]
+    fn table_literal_dotted_key_does_not_collide_with_nested_path() {
+        let val = json!([{"a.b": "literal", "a": {"b": "nested"}}]);
+        let out = fmt(&val, OutputFormat::Table);
+        assert!(out.contains("literal"), "{out}");
+        assert!(out.contains("nested"), "{out}");
+        let single = fmt(
+            &json!({"a.b": "literal", "a": {"b": "nested"}}),
+            OutputFormat::Table,
+        );
+        assert_eq!(single, "a.b   nested\na\\.b  literal");
+    }
+
+    #[test]
+    fn columns_select_escaped_literal_dotted_key() {
+        let val = json!([{"labels": {"app.io/name": "web", "app": {"io/name": "x"}}, "\\": 1}]);
+        let settings = OutputSettings {
+            columns: Some(vec!["labels.app\\.io/name".into(), "\\\\".into()]),
+            ..Default::default()
+        };
+        assert_eq!(
+            fmt_with(&val, OutputFormat::Csv, &settings),
+            "labels.app\\.io/name,\\\\\nweb,1"
+        );
+        // The unescaped spelling names the nested path, not the literal key.
+        let settings = OutputSettings {
+            columns: Some(vec!["labels.app.io/name".into()]),
+            ..Default::default()
+        };
+        assert_eq!(
+            fmt_with(&val, OutputFormat::Csv, &settings),
+            "labels.app.io/name\nx"
         );
     }
 

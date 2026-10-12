@@ -149,7 +149,7 @@ fn create_forward_raw_message(
         .subject(envelope.subject);
 
     let mb = apply_optional_headers(mb, envelope.from, envelope.cc, envelope.bcc);
-    let mb = set_threading_headers(mb, &envelope.threading);
+    let mb = set_threading_headers(mb, &envelope.threading)?;
 
     let (forwarded_block, separator) = if envelope.html {
         (format_forwarded_message_html(original), "<br>\r\n")
@@ -244,7 +244,7 @@ fn parse_forward_args(matches: &ArgMatches) -> Result<ForwardConfig, GwsError> {
         ));
     }
     Ok(ForwardConfig {
-        message_id: required_str(matches, "message-id")?,
+        message_id: super::cli::required_message_id(matches)?,
         to,
         from: parse_optional_mailboxes(matches, "from")?,
         cc: parse_optional_mailboxes(matches, "cc")?,
