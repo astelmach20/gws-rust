@@ -734,6 +734,65 @@ fn auth_configuration_errors_exit_with_the_config_code() {
         .stderr(predicate::str::contains("GWSR_PROFILE"));
 }
 
+/// `auth status` must report the OAuth client `auth login` would use: the
+/// GWSR_CLIENT_ID/GWSR_CLIENT_SECRET pair overrides client_secret.json.
+#[test]
+fn auth_status_reports_the_client_login_would_use() {
+    let env = Env::new();
+    let saved = env.config_dir().join("client_secret.json");
+    std::fs::write(
+        &saved,
+        r#"{"installed":{"client_id":"1111111111-saved.apps.googleusercontent.com","client_secret":"saved-secret","project_id":"saved-project"}}"#,
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&saved, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    let status = |cmd: &mut Command| -> Value {
+        let out = cmd
+            .args(["auth", "status", "--offline"])
+            .assert()
+            .success()
+            .get_output()
+            .clone();
+        serde_json::from_str(&stdout_of(&out)).unwrap()
+    };
+
+    let v = status(&mut env.cmd());
+    assert_eq!(v["client"]["source"], "client_secret.json", "{v}");
+    assert_eq!(v["client"]["client_id"], "11111111....com", "{v}");
+
+    let v = status(
+        env.cmd()
+            .env(
+                "GWSR_CLIENT_ID",
+                "2222222222-env.apps.googleusercontent.com",
+            )
+            .env("GWSR_CLIENT_SECRET", "env-secret"),
+    );
+    assert_eq!(v["client"]["source"], "environment_variables", "{v}");
+    assert_eq!(v["client"]["client_id"], "22222222....com", "{v}");
+    assert_eq!(v["client"]["project_id"], "saved-project", "{v}");
+    assert_eq!(
+        v["client"]["overrides"],
+        saved.display().to_string(),
+        "the shadowed file must be named: {v}"
+    );
+    assert!(!v.to_string().contains("env-secret"), "no secrets: {v}");
+
+    // Half a pair makes `auth login` fail; status must say so, not show the file.
+    let v = status(env.cmd().env("GWSR_CLIENT_ID", "2222222222-env.apps"));
+    assert!(v.get("client").is_none(), "{v}");
+    assert!(
+        v["client_error"]
+            .as_str()
+            .is_some_and(|e| e.contains("GWSR_CLIENT_SECRET")),
+        "{v}"
+    );
+}
+
 #[test]
 fn auth_login_rejects_services_with_exact_scopes() {
     let env = Env::new();
@@ -1052,6 +1111,47 @@ fn dynamic_completion_uses_cached_discovery_documents() {
 }
 
 #[test]
+fn dynamic_completion_follows_the_selected_api_version() {
+    let env = Env::new();
+    env.seed_drive("v3 only");
+    let doc = json!({
+        "name": "drive",
+        "version": "v2",
+        "rootUrl": "https://www.googleapis.com/",
+        "servicePath": "drive/v2/",
+        "resources": {"revisionsV2": {"methods": {"get": {
+            "id": "drive.revisionsV2.get", "httpMethod": "GET", "path": "revisions"
+        }}}}
+    });
+    let v2 = env.cache_dir().join("discovery").join("drive+v2.json");
+    std::fs::write(&v2, serde_json::to_string(&doc).unwrap()).unwrap();
+    let complete = |args: &[&str]| {
+        let index = (args.len() - 1).to_string();
+        let mut argv = vec!["--"];
+        argv.extend_from_slice(args);
+        let out = env
+            .cmd()
+            .env("GWSR_COMPLETE", "bash")
+            .env("_CLAP_COMPLETE_INDEX", index)
+            .env("_CLAP_COMPLETE_COMP_TYPE", "9")
+            .env("_CLAP_COMPLETE_SPACE", "true")
+            .args(&argv)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{}", stderr_of(&out));
+        stdout_of(&out)
+    };
+    assert_eq!(
+        complete(&["gwsr", "drive", "--api-version", "v2", "rev"]),
+        "revisionsV2"
+    );
+    assert_eq!(complete(&["gwsr", "drive:v2", "rev"]), "revisionsV2");
+    // The default version still completes from its own document.
+    assert_eq!(complete(&["gwsr", "drive", "rev"]), "");
+    assert_eq!(complete(&["gwsr", "drive", "fi"]), "files");
+}
+
+#[test]
 fn cache_clear_reports_removed_documents() {
     let env = Env::new();
     env.seed_drive("x");
@@ -1072,6 +1172,81 @@ fn man_pages_are_generated() {
         .success();
     assert!(env.work_dir().join("man/gwsr.1").exists());
     assert!(env.work_dir().join("man/gwsr-completions.1").exists());
+}
+
+/// `gwsr auth` parses its own subcommands, so the completion and man page
+/// trees must include them rather than the top-level passthrough argument.
+#[test]
+fn auth_subcommands_complete_and_get_man_pages() {
+    let env = Env::new();
+    let complete = |index: &str, words: &[&str]| {
+        let out = env
+            .cmd()
+            .env("GWSR_COMPLETE", "bash")
+            .env("_CLAP_COMPLETE_INDEX", index)
+            .env("_CLAP_COMPLETE_COMP_TYPE", "9")
+            .env("_CLAP_COMPLETE_SPACE", "true")
+            .arg("--")
+            .args(words)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{out:?}");
+        String::from_utf8(out.stdout).unwrap()
+    };
+    assert_eq!(complete("2", &["gwsr", "auth", "log"]), "login\nlogout");
+    assert_eq!(
+        complete("3", &["gwsr", "auth", "status", "--off"]),
+        "--offline"
+    );
+    env.cmd()
+        .args(["dev", "man", "--output-dir", "man"])
+        .assert()
+        .success();
+    for page in ["gwsr-auth-login.1", "gwsr-auth-status.1", "gwsr-auth-use.1"] {
+        assert!(env.work_dir().join("man").join(page).exists(), "{page}");
+    }
+}
+
+/// `auth setup` parses its own flags too: completion and its man page must
+/// show them, not the passthrough `ARGS`.
+#[test]
+fn auth_setup_flags_complete_and_get_documented() {
+    let env = Env::new();
+    let complete = |words: &[&str]| {
+        let out = env
+            .cmd()
+            .env("GWSR_COMPLETE", "bash")
+            .env("_CLAP_COMPLETE_INDEX", (words.len() - 1).to_string())
+            .env("_CLAP_COMPLETE_COMP_TYPE", "9")
+            .env("_CLAP_COMPLETE_SPACE", "true")
+            .arg("--")
+            .args(words)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{out:?}");
+        String::from_utf8(out.stdout).unwrap()
+    };
+    assert_eq!(
+        complete(&["gwsr", "auth", "setup", "--non"]),
+        "--non-interactive"
+    );
+    // `--profile` is a global `auth` flag, which setup accepts too.
+    assert_eq!(
+        complete(&["gwsr", "auth", "setup", "--pro"]),
+        "--project\n--profile"
+    );
+    let flags = complete(&["gwsr", "auth", "setup", "--"]);
+    for flag in ["--project", "--login", "--dry-run", "--non-interactive"] {
+        assert!(flags.lines().any(|l| l == flag), "{flag} missing: {flags}");
+    }
+
+    env.cmd()
+        .args(["dev", "man", "--output-dir", "man"])
+        .assert()
+        .success();
+    let page = std::fs::read_to_string(env.work_dir().join("man/gwsr-auth-setup.1")).unwrap();
+    assert!(page.contains("non\\-interactive"), "{page}");
+    assert!(!page.contains("ARGS"), "{page}");
 }
 
 // ── generate-skills ─────────────────────────────────────────────────────
@@ -1682,4 +1857,126 @@ async fn batch_results_are_screened_by_model_armor() {
         stdout_of(&out)
     );
     assert!(!out.status.success());
+}
+
+// ── batch output honours the global output options ─────────────────────
+
+#[tokio::test(flavor = "multi_thread")]
+async fn batch_results_honour_jq_and_format() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    let parts = "--b\r\nContent-Type: application/http\r\nContent-ID: <response-item-a>\r\n\r\n\
+         HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{\"snippet\":\"first\"}\r\n\
+         --b\r\nContent-Type: application/http\r\nContent-ID: <response-item-b>\r\n\r\n\
+         HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{\"snippet\":\"second\"}\r\n--b--\r\n";
+    Mock::given(method("POST"))
+        .and(path("/batch/gmail/v1"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_raw(parts.as_bytes().to_vec(), "multipart/mixed; boundary=b"),
+        )
+        .mount(&server)
+        .await;
+    let env = Env::new();
+    seed_gmail_get(&env);
+    let input = "{\"id\":\"a\",\"method\":\"users.messages.get\",\"params\":{\"userId\":\"me\",\"id\":\"m1\"}}\n\
+                 {\"id\":\"b\",\"method\":\"users.messages.get\",\"params\":{\"userId\":\"me\",\"id\":\"m2\"}}\n";
+    let run = |extra: &[&str]| {
+        let mut c = env.cmd();
+        c.env("GWSR_TOKEN", "test-token")
+            .env("GWSR_API_BASE_URL", server.uri())
+            .args(["batch", "gmail"])
+            .args(extra)
+            .write_stdin(input);
+        c.output().unwrap()
+    };
+
+    // --jq is applied to every result line, as for any other command.
+    let out = run(&["--jq", ".body.snippet"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert_eq!(stdout_of(&out), "first\nsecond\n");
+
+    // --format csv prints one header, then one row per call.
+    let out = run(&["--format", "csv", "--columns", "id,status,body.snippet"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert_eq!(
+        stdout_of(&out),
+        "id,status,body.snippet\na,200,first\nb,200,second\n"
+    );
+}
+
+// ── -o/--output pointing at a directory ─────────────────────────────────
+
+#[tokio::test(flavor = "multi_thread")]
+async fn output_to_an_existing_directory_is_rejected_before_any_request() {
+    use wiremock::matchers::any;
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    Mock::given(any())
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_raw(b"%PDF-1.7 payload".to_vec(), "application/pdf"),
+        )
+        .mount(&server)
+        .await;
+    let env = Env::new();
+    let doc = json!({
+        "name": "drive",
+        "version": "v3",
+        "rootUrl": "https://www.googleapis.com/",
+        "servicePath": "drive/v3/",
+        "resources": {"files": {"methods": {"get": {
+            "id": "drive.files.get",
+            "httpMethod": "GET",
+            "path": "files/{fileId}",
+            "parameters": {
+                "fileId": {"type": "string", "location": "path", "required": true},
+                "alt": {"type": "string", "location": "query"}
+            },
+            "parameterOrder": ["fileId"],
+            "supportsMediaDownload": true,
+            "scopes": ["https://www.googleapis.com/auth/drive.readonly"]
+        }}}}
+    });
+    std::fs::write(
+        env.cache_dir().join("discovery/drive+v3.json"),
+        serde_json::to_string(&doc).unwrap(),
+    )
+    .unwrap();
+    let dir = env.work_dir().join("downloads");
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let out = env
+        .cmd()
+        .env("GWSR_TOKEN", "test-token")
+        .env("GWSR_API_BASE_URL", server.uri())
+        .args([
+            "drive",
+            "files",
+            "get",
+            "--params",
+            r#"{"fileId":"f1","alt":"media"}"#,
+            "-o",
+        ])
+        .arg(&dir)
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(3), "{}", stderr_of(&out));
+    let err = stderr_error(&out);
+    assert!(
+        err["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("is a directory"),
+        "{err}"
+    );
+    assert!(
+        server.received_requests().await.unwrap().is_empty(),
+        "nothing may be downloaded for an output path that can never be written"
+    );
+    assert!(dir.is_dir());
+    assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0);
 }

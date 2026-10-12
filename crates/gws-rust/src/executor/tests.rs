@@ -555,6 +555,36 @@ async fn page_items_emits_one_line_per_item() {
     assert_eq!(ids, ["1", "2", "3", "4"]);
 }
 
+/// A misspelled `--page-items=FIELD` must not silently print nothing: the
+/// response schema says which fields exist.
+#[tokio::test]
+async fn page_items_rejects_a_field_the_response_schema_lacks() {
+    let server = MockServer::start().await;
+    mount_pages(&server).await;
+    let d = doc(&server.uri());
+    let mut call = Call::new(&d, "list", &server);
+    call.pagination.page_delay_ms = 0;
+    call.options.page_items = Some(ItemsMode::Field("file".into()));
+    let em = Emitter::capturing();
+    let result = call.run(&em).await;
+    let printed = lines(&em);
+    let err = result.expect_err(&format!(
+        "--page-items=file must be rejected; printed {printed:?}"
+    ));
+    assert!(matches!(err, GwsError::Validation(_)), "{err:?}");
+    let msg = err.to_string();
+    assert!(msg.contains("'file'") && msg.contains("files"), "{msg}");
+    assert!(printed.is_empty(), "{printed:?}");
+
+    // The right name still works.
+    let mut call = Call::new(&d, "list", &server);
+    call.pagination.page_delay_ms = 0;
+    call.options.page_items = Some(ItemsMode::Field("files".into()));
+    let em = Emitter::capturing();
+    call.run(&em).await.unwrap();
+    assert_eq!(lines(&em).len(), 4);
+}
+
 #[tokio::test]
 async fn body_page_token_is_injected() {
     let server = MockServer::start().await;
@@ -938,6 +968,73 @@ async fn small_file_uses_multipart() {
     assert_eq!(lines(&em)[0]["id"], "new");
 }
 
+/// The dry run shows the uploadType the upload will actually send.
+#[tokio::test]
+async fn upload_dry_run_lists_the_upload_type() {
+    let server = MockServer::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("a.txt");
+    std::fs::write(&file, b"hello").unwrap();
+    let path = file.to_str().unwrap().to_string();
+    let d = doc(&server.uri());
+    let mut call = Call::new(&d, "create", &server);
+    call.body = Some(json!({"name": "a.txt"}));
+    call.upload = Some(UploadSource {
+        path: &path,
+        content_type: None,
+    });
+    call.options.dry_run = true;
+    let em = Emitter::capturing();
+    call.run(&em).await.unwrap();
+    let out = lines(&em);
+    assert_eq!(
+        out[0]["query_params"],
+        json!([["supportsAllDrives", "true"], ["uploadType", "multipart"]]),
+        "{out:?}"
+    );
+    assert!(server.received_requests().await.unwrap().is_empty());
+}
+
+/// `--upload` chooses the upload protocol itself. A `uploadType` in --params
+/// used to be sent as well (`uploadType=media&uploadType=multipart`), so the
+/// server could read the multipart envelope as the file's raw content.
+#[tokio::test]
+async fn upload_type_in_params_conflicts_with_upload() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id": "new"})))
+        .mount(&server)
+        .await;
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("a.txt");
+    std::fs::write(&file, b"hello").unwrap();
+    let path = file.to_str().unwrap().to_string();
+    let d = doc(&server.uri());
+    for upload_type in ["media", "multipart", "resumable"] {
+        for dry_run in [false, true] {
+            let mut call = Call::new(&d, "create", &server);
+            call.params = json!({"uploadType": upload_type});
+            call.body = Some(json!({"name": "a.txt"}));
+            call.upload = Some(UploadSource {
+                path: &path,
+                content_type: None,
+            });
+            call.options.dry_run = dry_run;
+            let err = call.run(&Emitter::capturing()).await.unwrap_err();
+            assert!(matches!(err, GwsError::Validation(_)), "{err:?}");
+            assert!(err.to_string().contains("uploadType"), "{err}");
+        }
+    }
+    let sent: Vec<String> = server
+        .received_requests()
+        .await
+        .unwrap()
+        .iter()
+        .map(|r| r.url.to_string())
+        .collect();
+    assert!(sent.is_empty(), "requests were sent: {sent:?}");
+}
+
 #[tokio::test]
 async fn resumable_upload_resumes_after_chunk_failure() {
     let server = MockServer::start().await;
@@ -1057,6 +1154,390 @@ async fn upload_session_uri_on_foreign_host_is_refused() {
         err.to_string().contains("does not match request origin"),
         "{err}"
     );
+}
+
+/// Runs a resumable upload of `size` bytes against a session whose every
+/// `PUT` gets `chunk_response`, bounded so a hang fails the test.
+async fn resumable_against(
+    size: usize,
+    chunk_response: ResponseTemplate,
+) -> (
+    Result<Result<Option<Value>, GwsError>, tokio::time::error::Elapsed>,
+    usize,
+) {
+    let server = MockServer::start().await;
+    let session = format!("{}/session/s", server.uri());
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).insert_header("location", session.as_str()))
+        .mount(&server)
+        .await;
+    Mock::given(method("PUT"))
+        .respond_with(chunk_response)
+        .mount(&server)
+        .await;
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("f.bin");
+    std::fs::write(&file, vec![7u8; size]).unwrap();
+    let file_path = file.to_str().unwrap().to_string();
+    let d = doc(&server.uri());
+    let mut call = Call::new(&d, "create", &server);
+    call.upload = Some(UploadSource {
+        path: &file_path,
+        content_type: Some("application/octet-stream"),
+    });
+    call.options.upload_mode = UploadMode::Resumable;
+    let em = Emitter::capturing();
+    let result = tokio::time::timeout(Duration::from_secs(10), call.run(&em)).await;
+    let puts = server
+        .received_requests()
+        .await
+        .unwrap()
+        .iter()
+        .filter(|r| r.method.as_str() == "PUT")
+        .count();
+    (result, puts)
+}
+
+#[tokio::test]
+async fn resumable_upload_without_progress_gives_up() {
+    // A 308 without a Range header means "nothing persisted": the chunk is
+    // resent, but a session that never makes progress must not loop forever.
+    let (result, puts) = resumable_against(1000, ResponseTemplate::new(308)).await;
+    let err = result
+        .expect("the upload must give up, not loop forever")
+        .unwrap_err();
+    assert!(err.to_string().contains("no progress"), "{err}");
+    assert!(puts <= 20, "{puts} PUTs");
+}
+
+#[tokio::test]
+async fn resumable_range_beyond_the_file_is_an_error_not_a_panic() {
+    let (result, _) = resumable_against(
+        1000,
+        ResponseTemplate::new(308).insert_header("range", "bytes=0-4999"),
+    )
+    .await;
+    let err = result.expect("must finish").unwrap_err();
+    assert!(err.to_string().contains("5000"), "{err}");
+}
+
+#[tokio::test]
+async fn resumable_308_with_every_byte_finalizes_with_a_status_query() {
+    // The server has all 1000 bytes but has not answered with the resource:
+    // the next request must be a valid `bytes */1000` query, not the
+    // malformed `bytes 1000-999/1000`.
+    let server = MockServer::start().await;
+    let session = format!("{}/session/s", server.uri());
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).insert_header("location", session.as_str()))
+        .mount(&server)
+        .await;
+    Mock::given(method("PUT"))
+        .and(header("content-range", "bytes 0-999/1000"))
+        .respond_with(ResponseTemplate::new(308).insert_header("range", "bytes=0-999"))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("PUT"))
+        .and(header("content-range", "bytes */1000"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id": "done"})))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("f.bin");
+    std::fs::write(&file, vec![7u8; 1000]).unwrap();
+    let file_path = file.to_str().unwrap().to_string();
+    let d = doc(&server.uri());
+    let mut call = Call::new(&d, "create", &server);
+    call.upload = Some(UploadSource {
+        path: &file_path,
+        content_type: Some("application/octet-stream"),
+    });
+    call.options.upload_mode = UploadMode::Resumable;
+    let em = Emitter::capturing();
+    tokio::time::timeout(Duration::from_secs(10), call.run(&em))
+        .await
+        .expect("must finish")
+        .unwrap();
+    assert_eq!(lines(&em)[0]["id"], "done");
+}
+
+/// Sends a multipart upload of a file that holds `actual` bytes although it
+/// was measured at `declared` (it changed size between planning and sending).
+async fn multipart_after_size_change(
+    declared: u64,
+    actual: usize,
+) -> (Result<gws_rust_core::client::Sent, GwsError>, Vec<Vec<u8>>) {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id": "x"})))
+        .mount(&server)
+        .await;
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("a.bin");
+    std::fs::write(&file, vec![b'A'; actual]).unwrap();
+    let data = UploadData {
+        path: file.to_str().unwrap().to_string(),
+        size: declared,
+    };
+    let transport = Transport::new(
+        &Credentials::Static("t".into()),
+        options(&server).retry,
+        EndpointPolicy::with_override(&server.uri()).unwrap(),
+        None,
+    )
+    .unwrap();
+    let result = upload::send_multipart(
+        &transport,
+        Method::POST,
+        &format!("{}/upload", server.uri()),
+        &[],
+        &None,
+        &data,
+        "application/octet-stream",
+        Idempotency::NonIdempotent,
+    )
+    .await;
+    let bodies = server
+        .received_requests()
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|r| r.body)
+        .collect();
+    (result, bodies)
+}
+
+#[tokio::test]
+async fn multipart_upload_of_a_file_that_grew_is_refused_not_truncated() {
+    // Before the fix the body was cut at the declared Content-Length: the
+    // server received all ten bytes and a truncated closing boundary.
+    let (result, bodies) = multipart_after_size_change(5, 10).await;
+    assert!(
+        bodies.is_empty(),
+        "the server received a corrupt multipart body: {:?}",
+        bodies
+            .iter()
+            .map(|b| String::from_utf8_lossy(b).into_owned())
+            .collect::<Vec<_>>()
+    );
+    let err = result.unwrap_err();
+    assert!(matches!(err, GwsError::Validation(_)), "{err:?}");
+    assert!(
+        err.to_string().contains("changed size during upload"),
+        "{err}"
+    );
+}
+
+#[tokio::test]
+async fn multipart_upload_of_an_unchanged_file_is_complete() {
+    for size in [0usize, 10] {
+        let (result, bodies) = multipart_after_size_change(size as u64, size).await;
+        result.unwrap();
+        let text = String::from_utf8_lossy(&bodies[0]).into_owned();
+        let boundary = text[2..text.find("\r\n").unwrap()].to_string();
+        let expected_media = format!("\r\n\r\n{}\r\n--{boundary}--\r\n", "A".repeat(size));
+        assert!(text.ends_with(&expected_media), "{text:?}");
+    }
+}
+
+#[tokio::test]
+async fn multipart_upload_of_a_file_that_shrank_names_the_cause() {
+    let (result, bodies) = multipart_after_size_change(10, 5).await;
+    assert!(bodies.is_empty());
+    let err = result.unwrap_err();
+    assert!(matches!(err, GwsError::Validation(_)), "{err:?}");
+    assert!(
+        err.to_string().contains("changed size during upload"),
+        "{err}"
+    );
+}
+
+/// A copy of [`doc`] whose `files.create` declares Gmail's `messages.send`
+/// upload limits (live Discovery: `"maxSize": "36700160"`, `"accept": ["message/*"]`).
+fn gmail_like_doc(server: &MockServer, max_size: &str) -> RestDescription {
+    let mut d = doc(&server.uri());
+    let create = d
+        .resources
+        .get_mut("files")
+        .unwrap()
+        .methods
+        .get_mut("create")
+        .unwrap();
+    let media = create.media_upload.as_mut().unwrap();
+    media.max_size = Some(max_size.into());
+    media.accept = Some(vec!["message/*".into()]);
+    d
+}
+
+/// Mounts a server that accepts every upload, so a test fails on what the
+/// client *sent* rather than on a missing mock.
+async fn accept_everything(server: &MockServer) {
+    Mock::given(method("POST"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("location", format!("{}/session/s", server.uri()).as_str())
+                .set_body_json(json!({"id": "sent"})),
+        )
+        .mount(server)
+        .await;
+    Mock::given(method("PUT"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id": "sent"})))
+        .mount(server)
+        .await;
+}
+
+#[tokio::test]
+async fn upload_over_discovery_max_size_is_rejected_before_sending() {
+    let server = MockServer::start().await;
+    accept_everything(&server).await;
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("big.eml");
+    // 35 MiB + 1 byte, sparse: Gmail's documented limit is 36700160 bytes.
+    std::fs::File::create(&file)
+        .unwrap()
+        .set_len(36_700_160 + 1)
+        .unwrap();
+    let file_path = file.to_str().unwrap().to_string();
+    let d = gmail_like_doc(&server, "36700160");
+    let mut call = Call::new(&d, "create", &server);
+    call.upload = Some(UploadSource {
+        path: &file_path,
+        content_type: None,
+    });
+    let err = call.run(&Emitter::capturing()).await.unwrap_err();
+    assert!(matches!(err, GwsError::Validation(_)), "{err:?}");
+    assert_eq!(err.exit_code(), 3);
+    assert!(err.to_string().contains("36700160"), "{err}");
+    assert!(
+        server.received_requests().await.unwrap().is_empty(),
+        "nothing may be sent for an oversized upload"
+    );
+}
+
+#[tokio::test]
+async fn upload_at_exactly_max_size_is_allowed_and_units_are_binary() {
+    let server = MockServer::start().await;
+    accept_everything(&server).await;
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("m.eml");
+    std::fs::write(&file, vec![b'x'; 1024]).unwrap();
+    let file_path = file.to_str().unwrap().to_string();
+    // "1KB" is 1024 bytes (Google's client libraries use binary units).
+    let d = gmail_like_doc(&server, "1KB");
+    let mut call = Call::new(&d, "create", &server);
+    call.upload = Some(UploadSource {
+        path: &file_path,
+        content_type: None,
+    });
+    call.run(&Emitter::capturing()).await.unwrap();
+    assert_eq!(server.received_requests().await.unwrap().len(), 1);
+
+    std::fs::write(&file, vec![b'x'; 1025]).unwrap();
+    let mut call = Call::new(&d, "create", &server);
+    call.upload = Some(UploadSource {
+        path: &file_path,
+        content_type: None,
+    });
+    let err = call.run(&Emitter::capturing()).await.unwrap_err();
+    assert!(matches!(err, GwsError::Validation(_)), "{err:?}");
+    assert_eq!(server.received_requests().await.unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn upload_with_unaccepted_media_type_is_rejected_before_sending() {
+    let server = MockServer::start().await;
+    accept_everything(&server).await;
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("note.txt");
+    std::fs::write(&file, b"Subject: hi\r\n\r\nbody").unwrap();
+    let file_path = file.to_str().unwrap().to_string();
+    let d = gmail_like_doc(&server, "36700160");
+
+    // Detected from the extension: text/plain is not message/*.
+    let mut call = Call::new(&d, "create", &server);
+    call.upload = Some(UploadSource {
+        path: &file_path,
+        content_type: None,
+    });
+    let err = call.run(&Emitter::capturing()).await.unwrap_err();
+    assert!(matches!(err, GwsError::Validation(_)), "{err:?}");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("text/plain") && msg.contains("message/*"),
+        "{msg}"
+    );
+    assert!(msg.contains("--upload-content-type"), "{msg}");
+
+    // An explicit type that is not accepted is rejected too.
+    let mut call = Call::new(&d, "create", &server);
+    call.upload = Some(UploadSource {
+        path: &file_path,
+        content_type: Some("application/octet-stream"),
+    });
+    assert!(matches!(
+        call.run(&Emitter::capturing()).await.unwrap_err(),
+        GwsError::Validation(_)
+    ));
+    // Dry runs report the problem as well.
+    let mut call = Call::new(&d, "create", &server);
+    call.options.dry_run = true;
+    call.upload = Some(UploadSource {
+        path: &file_path,
+        content_type: None,
+    });
+    assert!(matches!(
+        call.run(&Emitter::capturing()).await.unwrap_err(),
+        GwsError::Validation(_)
+    ));
+    assert!(server.received_requests().await.unwrap().is_empty());
+
+    // --upload-content-type overrides detection; wildcards, case and
+    // parameters are matched like the server does.
+    for explicit in [
+        "message/rfc822",
+        "Message/RFC822",
+        "message/rfc822; charset=utf-8",
+    ] {
+        let mut call = Call::new(&d, "create", &server);
+        call.upload = Some(UploadSource {
+            path: &file_path,
+            content_type: Some(explicit),
+        });
+        call.run(&Emitter::capturing()).await.unwrap();
+    }
+    assert_eq!(server.received_requests().await.unwrap().len(), 3);
+
+    // A .eml file is detected as message/rfc822 and needs no override.
+    let eml = dir.path().join("m.eml");
+    std::fs::write(&eml, b"Subject: hi\r\n\r\nbody").unwrap();
+    let eml_path = eml.to_str().unwrap().to_string();
+    let mut call = Call::new(&d, "create", &server);
+    call.upload = Some(UploadSource {
+        path: &eml_path,
+        content_type: None,
+    });
+    call.run(&Emitter::capturing()).await.unwrap();
+}
+
+#[tokio::test]
+async fn unparseable_discovery_max_size_fails_loudly() {
+    let server = MockServer::start().await;
+    accept_everything(&server).await;
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("m.eml");
+    std::fs::write(&file, b"x").unwrap();
+    let file_path = file.to_str().unwrap().to_string();
+    let d = gmail_like_doc(&server, "lots");
+    let mut call = Call::new(&d, "create", &server);
+    call.upload = Some(UploadSource {
+        path: &file_path,
+        content_type: None,
+    });
+    let err = call.run(&Emitter::capturing()).await.unwrap_err();
+    assert!(matches!(err, GwsError::Discovery(_)), "{err:?}");
+    assert!(server.received_requests().await.unwrap().is_empty());
 }
 
 // ── Downloads ───────────────────────────────────────────────────────────

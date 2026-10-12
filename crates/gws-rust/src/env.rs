@@ -106,7 +106,7 @@ pub const REGISTRY: &[EnvVar] = &[
     var(
         "GWSR_PROFILE",
         "Credential profile (same as --profile)",
-        "a profile name: 1-64 letters, digits, '-', '_' or '.', not starting with '.'",
+        "a profile name: 1-64 lowercase letters, digits, '-', '_' or '.', not starting with '.'",
     ),
     var(
         "GWSR_IMPERSONATE",
@@ -547,7 +547,7 @@ fn check_email(value: &str) -> Result<(), String> {
 
 /// A GCP project ID (optionally domain-scoped, `example.com:my-project`) or
 /// project number.
-fn is_gcp_project(value: &str) -> bool {
+pub(crate) fn is_gcp_project(value: &str) -> bool {
     let id = match value.rsplit_once(':') {
         Some((domain, id)) => {
             let domain_ok = !domain.is_empty()

@@ -14,14 +14,18 @@
 
 //! `gmail +reply` / `+reply-all`: threaded replies with the original quoted.
 
-use super::dispatch::{Delivery, deliver};
+use super::dispatch::{Delivery, deliver, outgoing_content};
 use super::prelude::*;
 use super::sender::resolve_sender;
 
 /// Handle the `+reply` and `+reply-all` subcommands.
-pub(super) async fn handle_reply(matches: &ArgMatches, reply_all: bool) -> Result<(), GwsError> {
+pub(super) async fn handle_reply(
+    matches: &ArgMatches,
+    reply_all: bool,
+    sanitize: &crate::helpers::modelarmor::SanitizeConfig,
+) -> Result<(), GwsError> {
     let mut config = parse_reply_args(matches)?;
-    let delivery = Delivery::from_matches(matches)?;
+    let delivery = Delivery::from_matches(matches, sanitize)?;
     delivery.confirm(
         matches,
         &format!("send a reply to message {}", config.message_id),
@@ -120,7 +124,15 @@ pub(super) async fn handle_reply(matches: &ArgMatches, reply_all: bool) -> Resul
     }
 
     let raw = create_reply_raw_message(&envelope, &original, &all_attachments)?;
-    deliver(api.as_ref(), delivery, &raw, original.thread_id.as_deref()).await
+    let outgoing = outgoing_content(envelope.subject, &reply_body(&envelope, &original));
+    deliver(
+        api.as_ref(),
+        delivery,
+        &outgoing,
+        &raw,
+        original.thread_id.as_deref(),
+    )
+    .await
 }
 
 // --- Data structures ---
@@ -358,16 +370,24 @@ fn create_reply_raw_message(
         .subject(envelope.subject);
 
     let mb = apply_optional_headers(mb, envelope.from, envelope.cc, envelope.bcc);
-    let mb = set_threading_headers(mb, &envelope.threading);
+    let mb = set_threading_headers(mb, &envelope.threading)?;
 
+    finalize_message(
+        mb,
+        reply_body(envelope, original),
+        envelope.html,
+        attachments,
+    )
+}
+
+/// The reply's body: the new text followed by the quoted original.
+fn reply_body(envelope: &ReplyEnvelope<'_>, original: &OriginalMessage) -> String {
     let (quoted, separator) = if envelope.html {
         (format_quoted_original_html(original), "<br>\r\n")
     } else {
         (format_quoted_original(original), "\r\n\r\n")
     };
-    let body = format!("{}{}{}", envelope.body, separator, quoted);
-
-    finalize_message(mb, body, envelope.html, attachments)
+    format!("{}{}{}", envelope.body, separator, quoted)
 }
 
 fn format_quoted_original(original: &OriginalMessage) -> String {
@@ -426,7 +446,7 @@ fn parse_reply_args(matches: &ArgMatches) -> Result<ReplyConfig, GwsError> {
         .filter(|v| !v.is_empty());
 
     Ok(ReplyConfig {
-        message_id: required_str(matches, "message-id")?,
+        message_id: super::cli::required_message_id(matches)?,
         body: required_str(matches, "body")?,
         from: parse_optional_mailboxes(matches, "from")?,
         extra_to: parse_optional_mailboxes(matches, "to")?,
@@ -505,6 +525,11 @@ mod tests {
         assert!(raw.contains("text/plain"));
         assert!(raw.contains("My reply"));
         assert!(raw.contains("> Original body"));
+
+        // --sanitize screens the new text and the quoted original.
+        let body = reply_body(&envelope, &original);
+        assert!(body.starts_with("My reply"), "{body}");
+        assert!(body.contains("> Original body"), "{body}");
     }
 
     #[test]
