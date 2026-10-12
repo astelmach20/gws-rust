@@ -276,7 +276,7 @@ gwsr auth export --unmasked --output ci-credentials.json
 |---|---|
 | `--format json\|table\|yaml\|csv` | Output format (default `json`) |
 | `--jq EXPR` | Filter with a jq expression (built in via [jaq](https://github.com/01mf02/jaq)). String results print raw, like `gh --jq` |
-| `--columns a,b.c` | Columns for `table`/`csv` (dot paths for nested fields). An unknown column is an error |
+| `--columns a,b.c` | Columns for `table`/`csv` (dot paths for nested fields; a `.` or `\` inside a field name is escaped as `\.` / `\\`, so `{"a.b": 1}` is column `a\.b`). An unknown column is an error |
 | `--compact` / `--pretty` | Force the JSON layout (`GWSR_JSON_STYLE=auto\|compact\|pretty`) |
 
 Table output escapes terminal control characters. CSV cells that start with a formula character get a `'` prefix.
@@ -314,7 +314,7 @@ Exit code 5 also covers internal programming errors, such as a command reading a
 
 ### Logging
 
-stderr log lines are JSON objects, unless `-v` is given or the output format is human. The default level is warnings and errors. Precedence: `-v`/`-vv`/`-vvv` or `-q` > `GWSR_LOG` (a filter such as `gwsr=debug`) > `RUST_LOG` > `log` in `config.toml`. `GWSR_LOG_FILE` (or `log_file`) names a directory that receives daily `gwsr.log.YYYY-MM-DD` JSON files at debug level (directory `0700`, files `0600`). Progress messages appear only with `-v`.
+stderr log lines are JSON objects, unless `-v` is given or the output format is human. The default level is warnings and errors. Precedence: `-v`/`-vv`/`-vvv` or `-q` > `GWSR_LOG` (a filter such as `gwsr=debug`) > `RUST_LOG` > `log` in `config.toml`. `GWSR_LOG_FILE` (or `log_file`) names a directory that receives daily `gwsr.log.YYYY-MM-DD` JSON files at debug level (directory `0700`, including an existing one, files `0600`). Progress messages appear only with `-v`.
 
 ## Making requests
 
@@ -346,7 +346,7 @@ Ranges contain `!`, which interactive bash history-expands inside double quotes.
 
 ### Quota project
 
-Requests carry an `x-goog-user-project` header naming the project that is billed and whose quota is used. It comes from `GWSR_PROJECT_ID`, then the OAuth client configuration's project, then `quota_project_id` in Application Default Credentials. A source that exists but can't be used is an error, not skipped: for example an unreadable client config or ADC file (exit `8` or `9`). Skipping it would silently bill a different project. Set `GWSR_PROJECT_ID`, or pass `--no-quota-project` (`GWSR_NO_QUOTA_PROJECT=1`) to send no header at all.
+Requests carry an `x-goog-user-project` header naming the project that is billed and whose quota is used. It comes from `GWSR_PROJECT_ID`, then the OAuth client configuration's project, then `quota_project_id` in Application Default Credentials (only when ADC is the credential in use; it is never sent with a `gwsr` profile, `GWSR_CREDENTIALS_FILE` or a token). A source that exists but can't be used is an error, not skipped: for example an unreadable client config or ADC file (exit `8` or `9`). Skipping it would silently bill a different project. Set `GWSR_PROJECT_ID`, or pass `--no-quota-project` (`GWSR_NO_QUOTA_PROJECT=1`) to send no header at all.
 
 ### Pagination
 
@@ -379,6 +379,7 @@ gwsr gmail users messages attachments get --params '{"userId":"me","messageId":"
 
 - A binary response needs `-o PATH` or an explicit `-o -`. `gwsr` never writes binary data to stdout unasked, and never invents a file name.
 - Files are written atomically (a temp file, then a rename) after `Content-Length` is checked. A `204` creates no file.
+- With `alt=media`, `-o` receives the file's exact bytes whatever its type, so a JSON file is saved as stored, not re-formatted.
 - Base64 fields are decoded into `-o` automatically for `format: byte` fields, or when you name one with `--decode-field`. Standard and URL-safe base64, padded or not, are accepted.
 - `drive files download` follows the returned `downloadUri`, and waits for the operation automatically when `-o` is given.
 

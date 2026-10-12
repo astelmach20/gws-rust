@@ -1059,6 +1059,97 @@ async fn upload_session_uri_on_foreign_host_is_refused() {
     );
 }
 
+/// Sends a multipart upload of a file that holds `actual` bytes although it
+/// was measured at `declared` (it changed size between planning and sending).
+async fn multipart_after_size_change(
+    declared: u64,
+    actual: usize,
+) -> (Result<gws_rust_core::client::Sent, GwsError>, Vec<Vec<u8>>) {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id": "x"})))
+        .mount(&server)
+        .await;
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("a.bin");
+    std::fs::write(&file, vec![b'A'; actual]).unwrap();
+    let data = UploadData {
+        path: file.to_str().unwrap().to_string(),
+        size: declared,
+    };
+    let transport = Transport::new(
+        &Credentials::Static("t".into()),
+        options(&server).retry,
+        EndpointPolicy::with_override(&server.uri()).unwrap(),
+        None,
+    )
+    .unwrap();
+    let result = upload::send_multipart(
+        &transport,
+        Method::POST,
+        &format!("{}/upload", server.uri()),
+        &[],
+        &None,
+        &data,
+        "application/octet-stream",
+        Idempotency::NonIdempotent,
+    )
+    .await;
+    let bodies = server
+        .received_requests()
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|r| r.body)
+        .collect();
+    (result, bodies)
+}
+
+#[tokio::test]
+async fn multipart_upload_of_a_file_that_grew_is_refused_not_truncated() {
+    // Before the fix the body was cut at the declared Content-Length: the
+    // server received all ten bytes and a truncated closing boundary.
+    let (result, bodies) = multipart_after_size_change(5, 10).await;
+    assert!(
+        bodies.is_empty(),
+        "the server received a corrupt multipart body: {:?}",
+        bodies
+            .iter()
+            .map(|b| String::from_utf8_lossy(b).into_owned())
+            .collect::<Vec<_>>()
+    );
+    let err = result.unwrap_err();
+    assert!(matches!(err, GwsError::Validation(_)), "{err:?}");
+    assert!(
+        err.to_string().contains("changed size during upload"),
+        "{err}"
+    );
+}
+
+#[tokio::test]
+async fn multipart_upload_of_an_unchanged_file_is_complete() {
+    for size in [0usize, 10] {
+        let (result, bodies) = multipart_after_size_change(size as u64, size).await;
+        result.unwrap();
+        let text = String::from_utf8_lossy(&bodies[0]).into_owned();
+        let boundary = text[2..text.find("\r\n").unwrap()].to_string();
+        let expected_media = format!("\r\n\r\n{}\r\n--{boundary}--\r\n", "A".repeat(size));
+        assert!(text.ends_with(&expected_media), "{text:?}");
+    }
+}
+
+#[tokio::test]
+async fn multipart_upload_of_a_file_that_shrank_names_the_cause() {
+    let (result, bodies) = multipart_after_size_change(10, 5).await;
+    assert!(bodies.is_empty());
+    let err = result.unwrap_err();
+    assert!(matches!(err, GwsError::Validation(_)), "{err:?}");
+    assert!(
+        err.to_string().contains("changed size during upload"),
+        "{err}"
+    );
+}
+
 // ── Downloads ───────────────────────────────────────────────────────────
 
 #[tokio::test]
@@ -1170,6 +1261,55 @@ async fn binary_download_to_file_is_atomic() {
 }
 
 #[tokio::test]
+async fn media_download_of_a_json_file_keeps_the_exact_bytes() {
+    // `alt=media` returns the stored file with its own Content-Type. A JSON
+    // file must be saved byte for byte: not re-serialized, not polled as an
+    // "operation" because it has `name` and `metadata` keys, and not refused
+    // because its content is not a single JSON document.
+    let files: [&[u8]; 3] = [
+        b"{\"b\": 1,   \"a\": [1.50, 2e3]}\n",
+        b"{\"name\": \"report\", \"metadata\": {\"owner\": \"x\"}}",
+        b"{\"n\": 1}\n{\"n\": 2}\n",
+    ];
+    let mut wrong = Vec::new();
+    for (i, content) in files.iter().enumerate() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(format!("/drive/v3/files/f{i}")))
+            .and(query_param("alt", "media"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_raw(content.to_vec(), "application/json"),
+            )
+            .mount(&server)
+            .await;
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("data.json");
+        let mut d = doc(&server.uri());
+        d.parameters.insert("alt".into(), qparam("string"));
+        for target in [OutputTarget::File(out.clone()), OutputTarget::Stdout] {
+            let mut call = Call::new(&d, "get", &server);
+            call.params = json!({"fileId": format!("f{i}"), "alt": "media"});
+            call.output = Some(target.clone());
+            let em = Emitter::capturing();
+            let got = match call.run(&em).await {
+                Err(e) => format!("error: {e}"),
+                Ok(_) if target == OutputTarget::Stdout => {
+                    String::from_utf8_lossy(&em.captured_bytes()).into_owned()
+                }
+                Ok(_) => String::from_utf8_lossy(&std::fs::read(&out).unwrap()).into_owned(),
+            };
+            if got.as_bytes() != *content {
+                wrong.push(format!(
+                    "{target:?}\n  file:  {:?}\n  saved: {got:?}",
+                    String::from_utf8_lossy(content)
+                ));
+            }
+        }
+    }
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+}
+
+#[tokio::test]
 async fn json_output_decodes_base64_attachment() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -1188,6 +1328,29 @@ async fn json_output_decodes_base64_attachment() {
 }
 
 // ── Long-running operations ─────────────────────────────────────────────
+
+#[tokio::test]
+async fn bodiless_post_sends_content_length_zero() {
+    // Upstream googleworkspace/cli#727: `drive files download` (a POST with no
+    // body) was rejected by Google with 411 Length Required.
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/drive/v3/files/f1/download"))
+        .and(header("content-length", "0"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({"name": "op1", "done": true, "response": {}})),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    let d = doc(&server.uri());
+    let mut call = Call::new(&d, "download", &server);
+    call.params = json!({"fileId": "f1"});
+    let em = Emitter::capturing();
+    call.run(&em).await.unwrap();
+    assert_eq!(lines(&em)[0]["name"], "op1");
+}
 
 #[tokio::test]
 async fn download_operation_is_waited_on_and_followed() {
