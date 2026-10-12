@@ -28,6 +28,29 @@ pub(super) fn required_str(matches: &ArgMatches, name: &str) -> Result<String, G
     Ok(crate::args::required(matches, name)?.to_string())
 }
 
+/// Read a required Gmail API message ID (`--message-id`).
+///
+/// Gmail API IDs are opaque ASCII tokens (hex in practice). Anything else,
+/// such as an RFC 5322 `Message-ID` header value (`<abc@mail.example>`) or
+/// the usage line's `<ID>` placeholder, is rejected here rather than sent to
+/// the API or written into a dry-run preview.
+pub(super) fn required_message_id(matches: &ArgMatches) -> Result<String, GwsError> {
+    let id = crate::args::required(matches, "message-id")?;
+    if id.is_empty()
+        || !id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        return Err(GwsError::Validation(format!(
+            "--message-id {:?} is not a Gmail API message ID: expected letters, digits, '-' or '_' \
+             (the `id` field from `gwsr gmail +triage` or `users messages list`), \
+             not a Message-ID header value",
+            sanitize_for_terminal(id)
+        )));
+    }
+    Ok(id.to_string())
+}
+
 /// Read a typed argument that has a default value.
 pub(super) fn value_or_default<T: Clone + Send + Sync + 'static>(
     matches: &ArgMatches,

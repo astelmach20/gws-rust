@@ -25,7 +25,7 @@
 //! When one-click is not possible the command fails and lists the manual
 //! unsubscribe options instead of guessing.
 
-use super::cli::required_str;
+use super::cli::required_message_id;
 use super::prelude::*;
 use crate::confirm::{self, Impact};
 
@@ -191,7 +191,7 @@ async fn post_one_click(url: &reqwest::Url) -> Result<u16, GwsError> {
 
 /// Handle `+unsubscribe`.
 pub(super) async fn handle_unsubscribe(matches: &ArgMatches) -> Result<(), GwsError> {
-    let message_id = required_str(matches, "message-id")?;
+    let message_id = required_message_id(matches)?;
     if crate::args::dry_run(matches)? {
         // --dry-run loads no credentials and sends nothing, so the one-click
         // URL (which comes from the message's headers) is shown as a placeholder.
