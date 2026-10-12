@@ -27,6 +27,19 @@ pub(super) fn html_to_text(html: &str) -> Result<String, GwsError> {
         .map_err(|e| GwsError::other(format!("Failed to render HTML body as text: {e}")))
 }
 
+/// Decode a Gmail message `snippet`, which the API returns HTML-escaped
+/// (`&amp;`, `&#39;`, ...), to plain text. Rendered at the snippet's own
+/// width so it is never re-wrapped.
+pub(super) fn snippet_to_text(snippet: &str) -> Result<String, GwsError> {
+    if snippet.is_empty() {
+        return Ok(String::new());
+    }
+    let text = html2text::config::plain()
+        .string_from_read(snippet.as_bytes(), snippet.len())
+        .map_err(|e| GwsError::other(format!("Failed to decode the message snippet: {e}")))?;
+    Ok(text.trim_end().to_string())
+}
+
 /// Resolve the HTML body for quoting or forwarding: use the original HTML
 /// body if available, otherwise escape the plain text and convert newlines
 /// to `<br>` tags.
