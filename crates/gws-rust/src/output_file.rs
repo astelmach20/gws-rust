@@ -50,8 +50,18 @@ pub(crate) struct AtomicFile {
 
 impl AtomicFile {
     /// Start writing `target`, creating its parent directories. Fails with a
-    /// validation error when the target exists and `overwrite` is false.
+    /// validation error when the target is a directory, when it exists and
+    /// `overwrite` is false, or when `GWSR_RESTRICT_PATHS` confines output and
+    /// `target` (resolved through any symlinked directories) lies outside the
+    /// current directory.
     pub(crate) fn create(target: &Path, overwrite: bool) -> Result<Self, GwsError> {
+        // Callers validate the paths given on the command line, but files
+        // under a validated directory get remote names and may pass through
+        // symlinked sub-directories; check before creating anything.
+        crate::validate::check_output_path(target)?;
+        // A directory can never be replaced by the rename in `commit`; refuse
+        // it before any data is written (and whatever `overwrite` says).
+        crate::validate::reject_directory(target, "output path")?;
         if !overwrite && target.exists() {
             return Err(exists_error(target));
         }
@@ -155,6 +165,20 @@ mod tests {
         assert_eq!(std::fs::read(&p).unwrap(), b"a");
         write_atomic(&p, b"c", true).await.unwrap();
         assert_eq!(std::fs::read(&p).unwrap(), b"c");
+    }
+
+    #[tokio::test]
+    async fn a_directory_target_is_refused_before_writing() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("out");
+        std::fs::create_dir(&target).unwrap();
+        for overwrite in [false, true] {
+            let err = write_atomic(&target, b"x", overwrite).await.unwrap_err();
+            assert!(matches!(err, GwsError::Validation(_)), "{err:?}");
+            assert!(err.to_string().contains("is a directory"), "{err}");
+        }
+        assert!(target.is_dir());
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
     }
 
     #[tokio::test]

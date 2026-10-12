@@ -8,13 +8,15 @@ metadata:
     requires:
       bins:
         - gwsr
+      skills:
+        - gwsr-shared
     cliHelp: "gwsr gmail +reply-all --help"
 ---
 <!-- gwsr generated skill: do not edit by hand -->
 
 # gmail +reply-all
 
-> **PREREQUISITE:** Read `../gwsr-shared/SKILL.md` for auth, global flags, and security rules.
+> **PREREQUISITE:** Read `../gwsr-shared/SKILL.md` for auth, global flags, and security rules. If it is missing, install it with `npx skills add https://github.com/astelmach20/gws-rust/tree/main/skills/gwsr-shared`.
 
 Reply to all recipients of a message (handles threading automatically)
 
@@ -52,6 +54,8 @@ gwsr gmail +reply-all --message-id 18f1a2b3c4d --body 'Adding Eve' --cc eve@exam
 
 - Replies to the sender and all original To/CC recipients, excluding yourself.
 - The command fails if no To recipient remains after exclusions and --to additions.
+- --sanitize screens the subject and body, quoted original included, before sending;
+- in block mode a match or a Model Armor failure sends nothing. --dry-run does not call Model Armor.
 
 ## See Also
 

@@ -26,7 +26,7 @@ pub mod batch;
 mod body_schema;
 pub(crate) mod download;
 mod input;
-mod operation;
+pub(crate) mod operation;
 pub mod options;
 mod output;
 mod pagination;
@@ -219,6 +219,7 @@ async fn plan_upload(
         path: (*path).to_string(),
         size: meta.len(),
     };
+    upload::check_limits(method, path, data.len(), &mime, content_type.is_some())?;
     let supports_resumable = method.resumable_upload_path().is_some();
     let resumable = match mode {
         UploadMode::Resumable if supports_resumable => true,
@@ -245,18 +246,29 @@ fn apply_param_defaults(
     paginating: bool,
 ) -> Result<(), GwsError> {
     if let Some(mask) = fields {
+        // An empty mask is never what was meant: sent as is it is ignored or
+        // rejected by the API, and pagination below would turn it into the
+        // malformed mask "nextPageToken,".
+        if mask.trim().is_empty() {
+            return Err(GwsError::Validation(
+                "--fields must not be empty; omit it for the full response".to_string(),
+            ));
+        }
         if params.contains_key("fields") {
             return Err(GwsError::Validation(
                 "--fields conflicts with \"fields\" in --params; use only one".to_string(),
             ));
         }
-        // A mask that drops nextPageToken silently stops pagination.
-        let mask = if paginating && !mask.contains("nextPageToken") {
-            format!("nextPageToken,{mask}")
-        } else {
-            mask.to_string()
-        };
-        params.insert("fields".to_string(), Value::String(mask));
+        params.insert("fields".to_string(), Value::String(mask.to_string()));
+    }
+    // A mask that drops nextPageToken silently stops pagination, whether it
+    // came from --fields or from "fields" in --params.
+    if paginating
+        && let Some(Value::String(mask)) = params.get_mut("fields")
+        && !mask.is_empty()
+        && !mask.contains("nextPageToken")
+    {
+        *mask = format!("nextPageToken,{mask}");
     }
     // Drive rejects items in shared drives unless supportsAllDrives is set.
     if method.parameters.contains_key("supportsAllDrives")
@@ -377,6 +389,13 @@ pub(crate) async fn execute_to(
     }
 
     let upload_plan = match &upload {
+        Some(_) if params.contains_key("uploadType") => {
+            // The upload protocol decides uploadType; sending both would give
+            // the server two conflicting values.
+            return Err(GwsError::Validation(
+                "--upload sets uploadType itself; remove \"uploadType\" from --params".to_string(),
+            ));
+        }
         Some(source) if method.supports_media_upload => {
             Some(plan_upload(source, method, &body, options.upload_mode).await?)
         }
@@ -396,11 +415,21 @@ pub(crate) async fn execute_to(
     let http = http_method(method)?;
 
     if options.dry_run {
+        // Show the query exactly as send_upload will send it.
+        let mut query_params = request_url.query.clone();
+        if let Some(p) = &upload_plan {
+            let protocol = if p.resumable {
+                "resumable"
+            } else {
+                "multipart"
+            };
+            query_params.push(("uploadType".to_string(), protocol.to_string()));
+        }
         let info = json!({
             "dry_run": true,
             "url": request_url.url,
             "method": method.http_method,
-            "query_params": request_url.query,
+            "query_params": query_params,
             "body": body,
             "upload": upload_plan.as_ref().map(|p| json!({
                 "protocol": if p.resumable { "resumable" } else { "multipart" },
@@ -446,6 +475,10 @@ pub(crate) async fn execute_to(
         captured: Vec::new(),
         pages: PageStream::default(),
     };
+    // `--decode-field` asks for a field of a JSON document, so it keeps the
+    // JSON path even with `alt=media`.
+    let media_download = options.decode_field.is_none()
+        && params.get("alt").and_then(Value::as_str) == Some("media");
     let mut query = request_url.query.clone();
     let mut pages: u32 = 0;
     let mut item_field: Option<String> = None;
@@ -503,6 +536,29 @@ pub(crate) async fn execute_to(
         let empty_success = json!({"status": "success", "httpStatus": status.as_u16()});
         if status == reqwest::StatusCode::NO_CONTENT {
             out.single(empty_success)?;
+            break;
+        }
+
+        // `alt=media` returns the stored file itself. Saved or streamed, it
+        // is delivered byte for byte, whatever its Content-Type: a JSON file
+        // must not be re-serialized or mistaken for an API response.
+        if let (true, Some(target)) = (media_download, output.as_ref()) {
+            let mime = if content_type.is_empty() {
+                "application/octet-stream"
+            } else {
+                content_type.as_str()
+            };
+            if let Some(summary) = download::stream_binary(
+                sent.response,
+                mime,
+                target,
+                options.idle_timeout(),
+                emitter,
+            )
+            .await?
+            {
+                out.single(summary)?;
+            }
             break;
         }
 

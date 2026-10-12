@@ -8,13 +8,15 @@ metadata:
     requires:
       bins:
         - gwsr
+      skills:
+        - gwsr-shared
     cliHelp: "gwsr meet +create --help"
 ---
 <!-- gwsr generated skill: do not edit by hand -->
 
 # meet +create
 
-> **PREREQUISITE:** Read `../gwsr-shared/SKILL.md` for auth, global flags, and security rules.
+> **PREREQUISITE:** Read `../gwsr-shared/SKILL.md` for auth, global flags, and security rules. If it is missing, install it with `npx skills add https://github.com/astelmach20/gws-rust/tree/main/skills/gwsr-shared`.
 
 Create a Meet meeting space and print its link
 
@@ -40,7 +42,7 @@ gwsr meet +create --access-type restricted
 ## Tips
 
 - Prints meetingUri and meetingCode. To attach a Meet link to a calendar
-- event use `gwsr calendar +insert --meet` instead.
+- event use `gwsr calendar +insert` with `--meet` instead.
 
 ## See Also
 

@@ -97,6 +97,9 @@ pub struct RestMethod {
     #[serde(default)]
     pub supports_media_upload: bool,
     pub media_upload: Option<MediaUpload>,
+    /// Discovery's method-level `deprecated: true`.
+    #[serde(default)]
+    pub deprecated: bool,
 }
 
 /// Media upload metadata from the Discovery Document.
@@ -153,6 +156,9 @@ pub struct MethodParameter {
     pub repeated: bool,
     pub minimum: Option<String>,
     pub maximum: Option<String>,
+    /// Regular expression (RE2 syntax) the value must match, e.g.
+    /// `^spaces/[^/]+$` for a `{+name}` path parameter.
+    pub pattern: Option<String>,
     #[serde(default)]
     pub deprecated: bool,
 }

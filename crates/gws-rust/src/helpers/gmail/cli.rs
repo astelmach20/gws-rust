@@ -28,6 +28,29 @@ pub(super) fn required_str(matches: &ArgMatches, name: &str) -> Result<String, G
     Ok(crate::args::required(matches, name)?.to_string())
 }
 
+/// Read a required Gmail API message ID (`--message-id`).
+///
+/// Gmail API IDs are opaque ASCII tokens (hex in practice). Anything else,
+/// such as an RFC 5322 `Message-ID` header value (`<abc@mail.example>`) or
+/// the usage line's `<ID>` placeholder, is rejected here rather than sent to
+/// the API or written into a dry-run preview.
+pub(super) fn required_message_id(matches: &ArgMatches) -> Result<String, GwsError> {
+    let id = crate::args::required(matches, "message-id")?;
+    if id.is_empty()
+        || !id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        return Err(GwsError::Validation(format!(
+            "--message-id {:?} is not a Gmail API message ID: expected letters, digits, '-' or '_' \
+             (the `id` field from `gwsr gmail +triage` or `users messages list`), \
+             not a Message-ID header value",
+            sanitize_for_terminal(id)
+        )));
+    }
+    Ok(id.to_string())
+}
+
 /// Read a typed argument that has a default value.
 pub(super) fn value_or_default<T: Clone + Send + Sync + 'static>(
     matches: &ArgMatches,
@@ -209,7 +232,9 @@ TIPS:
   --html sends multipart/alternative with a generated plain-text part.
   Total attachment size limit: 25MB.
   Sends are never retried automatically: a timeout may still have delivered the message.
-  With GWSR_REQUIRE_CONFIRM=1, sending requires --yes (drafts do not).",
+  With GWSR_REQUIRE_CONFIRM=1, sending requires --yes (drafts do not).
+  --sanitize screens the subject and body before sending; in block mode a match or
+  a Model Armor failure sends nothing. --dry-run does not call Model Armor.",
     )
 }
 
@@ -230,7 +255,9 @@ TIPS:
   Sets In-Reply-To, References, and threadId, and quotes the original message.
   With --html, inline images in the quoted message are preserved via cid: references.
   Replying to a message you sent goes to its original To recipients, as in Gmail.
-  For reply-all, use +reply-all instead.",
+  For reply-all, use +reply-all instead.
+  --sanitize screens the subject and body, quoted original included, before sending;
+  in block mode a match or a Model Armor failure sends nothing. --dry-run does not call Model Armor.",
     )
 }
 
@@ -255,7 +282,9 @@ EXAMPLES:
 
 TIPS:
   Replies to the sender and all original To/CC recipients, excluding yourself.
-  The command fails if no To recipient remains after exclusions and --to additions.",
+  The command fails if no To recipient remains after exclusions and --to additions.
+  --sanitize screens the subject and body, quoted original included, before sending;
+  in block mode a match or a Model Armor failure sends nothing. --dry-run does not call Model Armor.",
     )
 }
 
@@ -295,7 +324,9 @@ EXAMPLES:
 TIPS:
   Original attachments are included by default (matching Gmail web).
   In plain-text mode, inline images are not included (matching Gmail web).
-  Combined size of original and added attachments is limited to 25MB.",
+  Combined size of original and added attachments is limited to 25MB.
+  --sanitize screens the subject, note and forwarded message before sending;
+  in block mode a match or a Model Armor failure sends nothing. --dry-run does not call Model Armor.",
     )
 }
 
@@ -477,7 +508,7 @@ TIPS:
 }
 
 fn filter_cmd() -> Command {
-    let create = Command::new("create")
+    let create = with_yes(Command::new("create"))
         .about("Create a filter")
         .arg(
             Arg::new("from")
@@ -588,7 +619,7 @@ fn filter_cmd() -> Command {
         .arg(
             Arg::new("forward")
                 .long("forward")
-                .help("Forward to this verified forwarding address")
+                .help("Forward to this verified forwarding address (needs --yes when GWSR_REQUIRE_CONFIRM=1)")
                 .value_name("EMAIL"),
         )
         .group(
@@ -634,7 +665,10 @@ EXAMPLES:
 
 TIPS:
   Requires the gmail.settings.basic scope (gwsr auth login -s gmail).
-  Label names must already exist. Deleting a filter always requires --yes.",
+  Label names must already exist. Deleting a filter always requires --yes;
+  a filter with --forward requires it when GWSR_REQUIRE_CONFIRM=1.
+  With --sanitize, create screens the new filter before creating it (block mode:
+  a match or a Model Armor failure creates nothing); list screens its output.",
         )
 }
 
@@ -654,7 +688,11 @@ TIPS:
   One-click unsubscribe is performed only when the message advertises
   List-Unsubscribe-Post: List-Unsubscribe=One-Click with an https URL and
   Gmail verified its DKIM signature. Otherwise the available unsubscribe
-  links are printed and nothing is sent.",
+  links are printed and nothing is sent.
+  With --sanitize, the unsubscribe URL is screened before the POST (block mode:
+  a match or a Model Armor failure sends nothing).
+  --dry-run loads no credentials and reads nothing: it shows the metadata
+  read and the one-click POST, with the URL as a placeholder.",
     )
 }
 

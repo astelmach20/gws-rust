@@ -8,13 +8,15 @@ metadata:
     requires:
       bins:
         - gwsr
+      skills:
+        - gwsr-shared
     cliHelp: "gwsr gmail +send --help"
 ---
 <!-- gwsr generated skill: do not edit by hand -->
 
 # gmail +send
 
-> **PREREQUISITE:** Read `../gwsr-shared/SKILL.md` for auth, global flags, and security rules.
+> **PREREQUISITE:** Read `../gwsr-shared/SKILL.md` for auth, global flags, and security rules. If it is missing, install it with `npx skills add https://github.com/astelmach20/gws-rust/tree/main/skills/gwsr-shared`.
 
 Send an email
 
@@ -57,6 +59,8 @@ gwsr gmail +send --to alice@example.com --subject 'Hello' --body 'Hi!' --draft
 - Total attachment size limit: 25MB.
 - Sends are never retried automatically: a timeout may still have delivered the message.
 - With GWSR_REQUIRE_CONFIRM=1, sending requires --yes (drafts do not).
+- --sanitize screens the subject and body before sending; in block mode a match or
+- a Model Armor failure sends nothing. --dry-run does not call Model Armor.
 
 > [!CAUTION]
 > This is a **write** command — confirm with the user before executing.

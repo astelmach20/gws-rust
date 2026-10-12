@@ -24,7 +24,7 @@ use crate::error::GwsError;
 use crate::validate::encode_path_segment;
 use clap::{Arg, ArgAction, ArgMatches, Command};
 use serde_json::{Value, json};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::future::Future;
 use std::path::{Path, PathBuf};
@@ -373,6 +373,17 @@ fn local_path_for(name: &str, file_type: &str) -> Result<PathBuf, GwsError> {
                 "Refusing unsafe Apps Script file name '{name}'"
             )));
         }
+        // The name maps back to the path on +push, so it cannot be renamed
+        // on disk; refuse names Windows would treat as a device (`CON.gs`)
+        // or silently change (a trailing dot or space on a directory).
+        if crate::helpers::http::is_windows_device_name(part)
+            || (i != last && part.ends_with(['.', ' ']))
+        {
+            return Err(GwsError::Validation(format!(
+                "Refusing Apps Script file name '{name}': '{part}' is not a valid file or \
+                 directory name on Windows; rename it in the Apps Script editor"
+            )));
+        }
         // Append the extension rather than `set_extension`, which would
         // replace everything after a dot in the name (`a.b` -> `a.gs`).
         if i == last {
@@ -382,6 +393,40 @@ fn local_path_for(name: &str, file_type: &str) -> Result<PathBuf, GwsError> {
         }
     }
     Ok(path)
+}
+
+/// Record every prefix of `relative` (each directory and the file itself)
+/// under its lowercase form, and refuse two spellings that differ only in
+/// case. They are distinct Apps Script names but the same path on
+/// case-insensitive disks (macOS, Windows), where one file would silently
+/// replace the other, or two directories would merge and `+push` would
+/// rename files. The name maps back to the path on `+push`, so the file
+/// cannot simply be renamed on disk.
+fn claim_case_insensitively(
+    claimed: &mut HashMap<String, PathBuf>,
+    relative: &Path,
+) -> Result<(), GwsError> {
+    let mut prefix = PathBuf::new();
+    for component in relative.components() {
+        prefix.push(component);
+        let key = prefix.to_string_lossy().to_lowercase();
+        match claimed.get(&key) {
+            Some(existing) if *existing != prefix => {
+                return Err(GwsError::Validation(format!(
+                    "Apps Script files '{}' and '{}' differ only in case and would \
+                     overwrite each other on a case-insensitive disk; rename one in the \
+                     Apps Script editor (nothing was written)",
+                    existing.display(),
+                    prefix.display()
+                )));
+            }
+            Some(_) => {}
+            None => {
+                claimed.insert(key, prefix.clone());
+            }
+        }
+    }
+    Ok(())
 }
 
 async fn pull(api: &Api, script_id: &str, dir: &Path, overwrite: bool) -> Result<Value, GwsError> {
@@ -397,11 +442,15 @@ async fn pull(api: &Api, script_id: &str, dir: &Path, overwrite: bool) -> Result
         .and_then(Value::as_array)
         .ok_or_else(|| http::other_err(anyhow::anyhow!("Project content has no files")))?;
     let mut planned = Vec::new();
+    // Case-folded path prefix -> the spelling that claimed it first.
+    let mut claimed: HashMap<String, PathBuf> = HashMap::new();
     for f in files {
         let name = f.get("name").and_then(Value::as_str).unwrap_or("");
         let file_type = f.get("type").and_then(Value::as_str).unwrap_or("");
         let source = f.get("source").and_then(Value::as_str).unwrap_or("");
-        let path = dir.join(local_path_for(name, file_type)?);
+        let relative = local_path_for(name, file_type)?;
+        claim_case_insensitively(&mut claimed, &relative)?;
+        let path = dir.join(relative);
         if !overwrite && path.exists() {
             return Err(GwsError::Validation(format!(
                 "'{}' already exists; pass --overwrite to replace local files (nothing was written)",
@@ -616,6 +665,20 @@ mod tests {
         assert!(local_path_for("x", "WEIRD").is_err());
     }
 
+    #[test]
+    fn local_paths_refuse_windows_device_names() {
+        // `CON.gs` would open the console on Windows; the file cannot be
+        // renamed on disk because +push maps the path back to the name.
+        for name in [
+            "CON", "con", "lib/nul", "aux/util", "COM1", "lpt9.x", "dir./a", "dir /a",
+        ] {
+            let err = local_path_for(name, "SERVER_JS").unwrap_err().to_string();
+            assert!(err.contains("Windows"), "{name}: {err}");
+        }
+        assert!(local_path_for("CONTRACT", "SERVER_JS").is_ok());
+        assert!(local_path_for("lib/console", "SERVER_JS").is_ok());
+    }
+
     #[tokio::test]
     async fn run_keeps_unreserved_chars_in_script_id() {
         // Regression (#842): '-' and '_' must not be percent-encoded.
@@ -701,6 +764,34 @@ mod tests {
         );
         assert!(pull(&api, "S_1", dir.path(), false).await.is_err());
         pull(&api, "S_1", dir.path(), true).await.unwrap();
+    }
+
+    /// `Code` and `code` (or `lib/a` and `Lib/b`) are distinct in the
+    /// API but the same path on case-insensitive disks (macOS, Windows):
+    /// one file would silently replace the other. Refuse before writing.
+    #[tokio::test]
+    async fn pull_refuses_names_differing_only_in_case() {
+        for (a, b) in [("Code", "code"), ("lib/a", "Lib/b")] {
+            let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .and(path("/v1/projects/S_1/content"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({"files": [
+                    {"name": a, "type": "SERVER_JS", "source": "var first;"},
+                    {"name": b, "type": "SERVER_JS", "source": "var second;"}
+                ]})))
+                .mount(&server)
+                .await;
+            let api = api(&server.uri(), "");
+            let dir = tempdir().unwrap();
+            let err = pull(&api, "S_1", dir.path(), true).await.unwrap_err();
+            assert!(matches!(err, GwsError::Validation(_)), "{a}/{b}: {err:?}");
+            assert!(err.to_string().contains("differ only in case"), "{err}");
+            assert_eq!(
+                fs::read_dir(dir.path()).unwrap().count(),
+                0,
+                "nothing written"
+            );
+        }
     }
 
     /// Apps Script file names may contain dots. `a.b` and `a.c` are two

@@ -16,6 +16,9 @@
 
 use serde_json::Value;
 
+/// Deepest list `nestingLevel` the Docs API produces.
+const MAX_NESTING_LEVEL: u64 = 8;
+
 /// Render the document body. `markdown` selects Markdown vs plain text.
 pub(super) fn render(document: &Value, markdown: bool) -> String {
     let mut out = String::new();
@@ -70,7 +73,11 @@ fn render_paragraph(p: &Value, document: &Value, markdown: bool, out: &mut Strin
                     .or_else(|| person.pointer("/personProperties/email"))
                     .and_then(Value::as_str)
                     .unwrap_or("");
-                line.push_str(name);
+                if markdown {
+                    line.push_str(&escape_markdown(name));
+                } else {
+                    line.push_str(name);
+                }
             } else if let Some(link) = e.get("richLink") {
                 let title = link
                     .pointer("/richLinkProperties/title")
@@ -81,14 +88,17 @@ fn render_paragraph(p: &Value, document: &Value, markdown: bool, out: &mut Strin
                     .and_then(Value::as_str)
                     .unwrap_or("");
                 if markdown {
-                    line.push_str(&format!("[{title}]({uri})"));
+                    line.push_str(&format!("[{}]({uri})", escape_markdown(title)));
                 } else {
                     line.push_str(title);
                 }
             }
         }
     }
-    let line = line.replace('\u{000b}', "\n");
+    let mut line = line.replace('\u{000b}', "\n");
+    if markdown {
+        line = escape_line_starts(&line);
+    }
     let style = p
         .pointer("/paragraphStyle/namedStyleType")
         .and_then(Value::as_str)
@@ -100,15 +110,21 @@ fn render_paragraph(p: &Value, document: &Value, markdown: bool, out: &mut Strin
             .and_then(Value::as_u64)
             .unwrap_or(0);
         let list_id = bullet.get("listId").and_then(Value::as_str).unwrap_or("");
-        // `nestingLevel` is 0..=8 per the Docs API; a value beyond usize (only
-        // possible on 32-bit targets) renders unindented rather than failing.
-        let indent = "  ".repeat(usize::try_from(level).unwrap_or(0));
-        let marker = if is_ordered(document, list_id, level) {
-            "1."
-        } else {
-            "-"
+        let marker = |level: u64| {
+            if is_ordered(document, list_id, level) {
+                "1."
+            } else {
+                "-"
+            }
         };
-        out.push_str(&format!("{indent}{marker} {line}\n"));
+        // CommonMark nests an item only when it is indented to its parent's
+        // content column: 2 under "- ", 3 under "1. ". `nestingLevel` is
+        // 0..=8 per the Docs API; the bound keeps a malformed value from
+        // producing an unbounded indent.
+        let indent: String = (0..level.min(MAX_NESTING_LEVEL))
+            .map(|parent| " ".repeat(marker(parent).len() + 1))
+            .collect();
+        out.push_str(&format!("{indent}{} {line}\n", marker(level)));
         return;
     }
     if markdown {
@@ -132,10 +148,48 @@ fn render_paragraph(p: &Value, document: &Value, markdown: bool, out: &mut Strin
     }
 }
 
+/// Backslash-escape the characters that would otherwise turn literal
+/// document text into Markdown syntax (emphasis, code, links, HTML, entities,
+/// headings, quotes, tables).
+fn escape_markdown(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        if matches!(
+            c,
+            '\\' | '`' | '*' | '_' | '[' | ']' | '<' | '>' | '#' | '~' | '|' | '&'
+        ) {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// Escape block markers that only mean something at the start of a line:
+/// `-`/`+` bullets, `=` setext underlines and `1.`/`1)` ordered items.
+fn escape_line_starts(text: &str) -> String {
+    text.split('\n')
+        .map(|l| {
+            let body = l.trim_start_matches(' ');
+            let indent = &l[..l.len() - body.len()];
+            let digits = body.len() - body.trim_start_matches(|c: char| c.is_ascii_digit()).len();
+            if body.starts_with(['-', '+', '=']) {
+                format!("{indent}\\{body}")
+            } else if digits > 0 && body[digits..].starts_with(['.', ')']) {
+                format!("{indent}{}\\{}", &body[..digits], &body[digits..])
+            } else {
+                l.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// Wrap a run in Markdown marks, keeping surrounding whitespace outside.
+/// Literal text is escaped; code (monospace) runs are kept verbatim.
 fn styled(text: &str, style: Option<&Value>) -> String {
     let Some(style) = style else {
-        return text.to_string();
+        return escape_markdown(text);
     };
     let trimmed = text.trim();
     if trimmed.is_empty() {
@@ -154,7 +208,7 @@ fn styled(text: &str, style: Option<&Value>) -> String {
     let mut core = if mono {
         format!("`{trimmed}`")
     } else {
-        trimmed.to_string()
+        escape_markdown(trimmed)
     };
     if on("strikethrough") {
         core = format!("~~{core}~~");
@@ -182,11 +236,21 @@ fn cell_text(cell: &Value, document: &Value, markdown: bool) -> String {
         .filter(|l| !l.is_empty())
         .collect::<Vec<_>>()
         .join(" ");
-    if markdown {
-        joined.replace('|', "\\|")
-    } else {
-        joined
+    if !markdown {
+        return joined;
     }
+    // Literal text is already escaped by its runs; a `|` still bare here is in
+    // a code span, where GFM tables also need it escaped to stay in the cell.
+    let mut out = String::with_capacity(joined.len());
+    let mut backslashes = 0usize;
+    for c in joined.chars() {
+        if c == '|' && backslashes.is_multiple_of(2) {
+            out.push('\\');
+        }
+        backslashes = if c == '\\' { backslashes + 1 } else { 0 };
+        out.push(c);
+    }
+    out
 }
 
 fn render_table(table: &Value, document: &Value, markdown: bool, out: &mut String) {
@@ -265,6 +329,125 @@ mod tests {
         assert!(md.contains("- item\n"));
         assert!(md.contains("1. first\n"));
         assert!(md.contains("| A | B\\|C |\n| --- | --- |"));
+    }
+
+    /// Maximum list nesting depth CommonMark sees in `md`.
+    fn list_depth(md: &str) -> usize {
+        use pulldown_cmark::{Event, Parser, Tag, TagEnd};
+        let (mut depth, mut max) = (0usize, 0usize);
+        for event in Parser::new(md) {
+            match event {
+                Event::Start(Tag::List(_)) => {
+                    depth += 1;
+                    max = max.max(depth);
+                }
+                Event::End(TagEnd::List(_)) => depth -= 1,
+                _ => {}
+            }
+        }
+        max
+    }
+
+    #[test]
+    fn nested_list_items_stay_nested_in_markdown() {
+        let item = |list: &str, level: u64, text: &str| {
+            json!({"paragraph": {"bullet": {"listId": list, "nestingLevel": level},
+                "elements": [{"textRun": {"content": format!("{text}\n")}}]}})
+        };
+        let document = json!({
+            "lists": {
+                "N": {"listProperties": {"nestingLevels": [
+                    {"glyphType": "DECIMAL"}, {"glyphSymbol": "○"}, {"glyphType": "DECIMAL"}
+                ]}},
+                "B": {"listProperties": {"nestingLevels": [
+                    {"glyphSymbol": "●"}, {"glyphType": "DECIMAL"}, {"glyphSymbol": "■"}
+                ]}}
+            },
+            "body": {"content": [
+                item("N", 0, "numbered"),
+                item("N", 1, "bullet under number"),
+                item("N", 2, "number under bullet"),
+            ]}
+        });
+        let md = render(&document, true);
+        assert_eq!(list_depth(&md), 3, "nesting lost in:\n{md}");
+
+        let document = json!({
+            "lists": document["lists"].clone(),
+            "body": {"content": [
+                item("B", 0, "bullet"),
+                item("B", 1, "number under bullet"),
+                item("B", 2, "bullet under number"),
+            ]}
+        });
+        let md = render(&document, true);
+        assert_eq!(list_depth(&md), 3, "nesting lost in:\n{md}");
+        // Bullet parents keep the two-space indent.
+        assert!(md.contains("\n  1. number under bullet\n"), "{md}");
+    }
+
+    #[test]
+    fn markdown_table_cells_escape_pipes_once() {
+        let cell = |run: Value| json!({"content": [{"paragraph": {"elements": [run]}}]});
+        let document = json!({"body": {"content": [{"table": {"tableRows": [{"tableCells": [
+            cell(json!({"textRun": {"content": "a|b\n"}})),
+            cell(json!({"textRun": {"content": "x|y", "textStyle": {"weightedFontFamily": {"fontFamily": "Courier New"}}}})),
+        ]}]}}]}});
+        assert!(render(&document, true).starts_with("| a\\|b | `x\\|y` |\n"));
+    }
+
+    /// Parse Markdown back and describe it as (block structure, text, inline
+    /// marks), so a test can check what a Markdown reader actually sees.
+    fn parse_back(md: &str) -> (Vec<String>, String) {
+        use pulldown_cmark::{Event, Options, Parser};
+        let mut tags = Vec::new();
+        let mut text = String::new();
+        let options = Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TABLES;
+        for event in Parser::new_ext(md, options) {
+            match event {
+                Event::Start(tag) => tags.push(format!("{tag:?}")),
+                Event::Text(t) => text.push_str(&t),
+                Event::SoftBreak | Event::HardBreak => text.push('\n'),
+                Event::End(pulldown_cmark::TagEnd::Paragraph) => text.push('\n'),
+                other @ (Event::Html(_) | Event::InlineHtml(_) | Event::Code(_)) => {
+                    tags.push(format!("{other:?}"));
+                }
+                _ => {}
+            }
+        }
+        (tags, text)
+    }
+
+    #[test]
+    fn markdown_escapes_literal_markdown_syntax() {
+        let para = |t: &str| json!({"paragraph": {"elements": [{"textRun": {"content": t}}]}});
+        let lines = [
+            "# of seats: 12",
+            "1. This sentence is not a list item.",
+            "- 5 degrees overnight",
+            "+ extra",
+            "Call f(*args, **kwargs) on snake_case_names",
+            "See [draft] and <b>bold</b> & ~~old~~ `code`",
+            "> not a quote",
+            "C:\\temp\\*",
+        ];
+        let body: Vec<Value> = lines.iter().map(|l| para(&format!("{l}\n"))).collect();
+        let document = json!({"body": {"content": body}});
+        let md = render(&document, true);
+        let (tags, text) = parse_back(&md);
+        assert!(
+            tags.iter().all(|t| t == "Paragraph"),
+            "literal text parsed as Markdown structure {tags:?} from:\n{md}"
+        );
+        assert_eq!(text, format!("{}\n", lines.join("\n")), "from:\n{md}");
+        // Real styling still renders, and the plain-text form is untouched.
+        let styled_doc = json!({"body": {"content": [{"paragraph": {"elements": [
+            {"textRun": {"content": "a_b", "textStyle": {"bold": true}}},
+            {"textRun": {"content": " x*y", "textStyle": {"weightedFontFamily": {"fontFamily": "Roboto Mono"}}}},
+            {"textRun": {"content": "\n"}}
+        ]}}]}});
+        assert_eq!(render(&styled_doc, true), "**a\\_b** `x*y`\n\n");
+        assert_eq!(render(&document, false), format!("{}\n", lines.join("\n")));
     }
 
     #[test]

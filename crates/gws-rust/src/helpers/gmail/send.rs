@@ -14,14 +14,17 @@
 
 //! `gmail +send`: compose and send (or draft) a new message.
 
-use super::dispatch::{Delivery, deliver};
+use super::dispatch::{Delivery, deliver, outgoing_content};
 use super::prelude::*;
 use super::sender::resolve_sender;
 
 /// Handle the `+send` subcommand.
-pub(super) async fn handle_send(matches: &ArgMatches) -> Result<(), GwsError> {
+pub(super) async fn handle_send(
+    matches: &ArgMatches,
+    sanitize: &crate::helpers::modelarmor::SanitizeConfig,
+) -> Result<(), GwsError> {
     let mut config = parse_send_args(matches)?;
-    let delivery = Delivery::from_matches(matches)?;
+    let delivery = Delivery::from_matches(matches, sanitize)?;
     delivery.confirm(
         matches,
         &format!("send an email to {}", describe(&config.to)),
@@ -36,7 +39,8 @@ pub(super) async fn handle_send(matches: &ArgMatches) -> Result<(), GwsError> {
     };
 
     let raw = create_send_raw_message(&config)?;
-    deliver(api.as_ref(), delivery, &raw, None).await
+    let outgoing = outgoing_content(&config.subject, &config.body);
+    deliver(api.as_ref(), delivery, &outgoing, &raw, None).await
 }
 
 /// Comma-separated recipient list for confirmation prompts.

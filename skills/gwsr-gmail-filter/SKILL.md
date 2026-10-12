@@ -8,13 +8,15 @@ metadata:
     requires:
       bins:
         - gwsr
+      skills:
+        - gwsr-shared
     cliHelp: "gwsr gmail +filter --help"
 ---
 <!-- gwsr generated skill: do not edit by hand -->
 
 # gmail +filter
 
-> **PREREQUISITE:** Read `../gwsr-shared/SKILL.md` for auth, global flags, and security rules.
+> **PREREQUISITE:** Read `../gwsr-shared/SKILL.md` for auth, global flags, and security rules. If it is missing, install it with `npx skills add https://github.com/astelmach20/gws-rust/tree/main/skills/gwsr-shared`.
 
 List, create, or delete Gmail filters
 
@@ -36,7 +38,10 @@ gwsr gmail +filter delete --filter-id ANe1Bmj... --yes
 ## Tips
 
 - Requires the gmail.settings.basic scope (gwsr auth login -s gmail).
-- Label names must already exist. Deleting a filter always requires --yes.
+- Label names must already exist. Deleting a filter always requires --yes;
+- a filter with --forward requires it when GWSR_REQUIRE_CONFIRM=1.
+- With --sanitize, create screens the new filter before creating it (block mode:
+- a match or a Model Armor failure creates nothing); list screens its output.
 
 ## See Also
 

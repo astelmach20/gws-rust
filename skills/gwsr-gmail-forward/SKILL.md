@@ -8,13 +8,15 @@ metadata:
     requires:
       bins:
         - gwsr
+      skills:
+        - gwsr-shared
     cliHelp: "gwsr gmail +forward --help"
 ---
 <!-- gwsr generated skill: do not edit by hand -->
 
 # gmail +forward
 
-> **PREREQUISITE:** Read `../gwsr-shared/SKILL.md` for auth, global flags, and security rules.
+> **PREREQUISITE:** Read `../gwsr-shared/SKILL.md` for auth, global flags, and security rules. If it is missing, install it with `npx skills add https://github.com/astelmach20/gws-rust/tree/main/skills/gwsr-shared`.
 
 Forward a message to new recipients
 
@@ -53,6 +55,8 @@ gwsr gmail +forward --message-id 18f1a2b3c4d --to dave@example.com --no-original
 - Original attachments are included by default (matching Gmail web).
 - In plain-text mode, inline images are not included (matching Gmail web).
 - Combined size of original and added attachments is limited to 25MB.
+- --sanitize screens the subject, note and forwarded message before sending;
+- in block mode a match or a Model Armor failure sends nothing. --dry-run does not call Model Armor.
 
 ## See Also
 

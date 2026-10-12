@@ -111,12 +111,8 @@ impl ApiRequest {
             "url": self.url,
         });
         if !self.query.is_empty() {
-            let q: Map<String, Value> = self
-                .query
-                .iter()
-                .map(|(k, v)| (k.clone(), Value::String(v.clone())))
-                .collect();
-            out["query_params"] = Value::Object(q);
+            out["query_params"] =
+                query_params_json(self.query.iter().map(|(k, v)| (k.as_str(), v.as_str())));
         }
         match &self.body {
             Body::None => {}
@@ -191,7 +187,7 @@ impl OutputTarget {
         if value == "-" {
             return Ok(Self::Stdout);
         }
-        let path = crate::validate::validate_safe_file_path(value, "--output")?;
+        let path = crate::validate::validate_output_file_path(value, "--output")?;
         Ok(Self::File { path, overwrite })
     }
 
@@ -565,14 +561,13 @@ async fn write_stream(
 ) -> Result<u64, GwsError> {
     match target {
         OutputTarget::Stdout => {
-            use futures_util::StreamExt;
             use tokio::io::AsyncWriteExt;
+            let expected = resp.content_length();
             let mut stream = resp.bytes_stream();
             let mut written: u64 = 0;
             let mut out = tokio::io::stdout();
-            while let Some(chunk) = stream.next().await {
-                let chunk =
-                    chunk.map_err(|e| other_err(anyhow::anyhow!("Download interrupted: {e}")))?;
+            // Same idle limit and error class as a download to a file.
+            while let Some(chunk) = crate::transport::next_chunk(&mut stream, idle).await? {
                 out.write_all(&chunk)
                     .await
                     .map_err(|e| other_err(anyhow::anyhow!("Failed writing to stdout: {e}")))?;
@@ -581,6 +576,7 @@ async fn write_stream(
             out.flush()
                 .await
                 .map_err(|e| other_err(anyhow::anyhow!("Failed flushing stdout: {e}")))?;
+            crate::executor::download::check_length(expected, written)?;
             Ok(written)
         }
         OutputTarget::File { path, overwrite } => {
@@ -596,8 +592,11 @@ pub(crate) const SAFE_FILENAME_MAX_BYTES: usize = 200;
 ///
 /// Path separators, control characters and characters that are invalid on
 /// Windows are replaced with `_`; leading dots are stripped so the result can
-/// never be `.`/`..` or a hidden file. Falls back to `fallback` when nothing
-/// usable remains.
+/// never be `.`/`..` or a hidden file, and trailing dots and spaces (which
+/// Windows drops) are stripped too. Windows device names such as `CON.pdf`
+/// get a `_` prefix on every platform, so the same remote file gets the same
+/// local name everywhere. Falls back to `fallback` when nothing usable
+/// remains.
 ///
 /// The result is at most [`SAFE_FILENAME_MAX_BYTES`] UTF-8 bytes (cut on a
 /// character boundary). File systems limit a name to 255 bytes (ext4) or 255
@@ -614,7 +613,7 @@ pub(crate) fn safe_filename(raw: &str, fallback: &str) -> String {
             }
         })
         .collect();
-    let cleaned = cleaned.trim().trim_start_matches('.').trim();
+    let cleaned = avoid_windows_device_name(trim_name(cleaned.trim_start_matches('.')));
     let mut truncated = String::new();
     for c in cleaned.chars() {
         if truncated.len() + c.len_utf8() > SAFE_FILENAME_MAX_BYTES {
@@ -622,10 +621,52 @@ pub(crate) fn safe_filename(raw: &str, fallback: &str) -> String {
         }
         truncated.push(c);
     }
+    // Truncation can expose a trailing dot or space.
+    let truncated = trim_name(&truncated);
     if truncated.is_empty() {
         fallback.to_string()
     } else {
-        truncated
+        truncated.to_string()
+    }
+}
+
+/// Trim surrounding whitespace, and the trailing dots and spaces Windows
+/// silently drops (so `a.` would collide with `a`, and `CON.` is `CON`).
+fn trim_name(name: &str) -> &str {
+    name.trim().trim_end_matches(['.', ' ']).trim()
+}
+
+/// Whether `component` names a Windows device (`CON`, `PRN`, `AUX`, `NUL`,
+/// `COM1`–`COM9`, `LPT1`–`LPT9`, including the superscript-digit forms, and
+/// `CONIN$`/`CONOUT$`) in any case and with any extension. Windows also
+/// ignores trailing dots and spaces, so `CON .txt` and `nul.` match too.
+/// Opening such a path opens the device instead of a file, so the data is
+/// lost or the write fails.
+pub(crate) fn is_windows_device_name(component: &str) -> bool {
+    let base = component.split('.').next().unwrap_or_default();
+    let base = base.trim_end_matches(' ').to_ascii_uppercase();
+    match base.as_str() {
+        "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$" => true,
+        _ => base
+            .strip_prefix("COM")
+            .or_else(|| base.strip_prefix("LPT"))
+            .is_some_and(|digit| {
+                let mut chars = digit.chars();
+                matches!(
+                    (chars.next(), chars.next()),
+                    (Some('1'..='9' | '\u{b9}' | '\u{b2}' | '\u{b3}'), None)
+                )
+            }),
+    }
+}
+
+/// Prefix a Windows device name with `_` so it is written as an ordinary
+/// file on every platform (the same name results everywhere).
+fn avoid_windows_device_name(name: &str) -> String {
+    if is_windows_device_name(name) {
+        format!("_{name}")
+    } else {
+        name.to_string()
     }
 }
 
@@ -648,6 +689,23 @@ pub(crate) fn print_text(text: &str) -> Result<(), GwsError> {
     crate::output::emit(text)
 }
 
+/// `query_params` for a dry-run plan: each key maps to its value, or to the
+/// array of its values, in order, when the request repeats the key.
+fn query_params_json<'a>(pairs: impl Iterator<Item = (&'a str, &'a str)>) -> Value {
+    let mut q = Map::new();
+    for (k, v) in pairs {
+        let v = Value::String(v.to_string());
+        match q.get_mut(k) {
+            None => {
+                q.insert(k.to_string(), v);
+            }
+            Some(Value::Array(values)) => values.push(v),
+            Some(first) => *first = Value::Array(vec![first.take(), v]),
+        }
+    }
+    Value::Object(q)
+}
+
 /// A request description for a `--dry-run` plan, in the same shape as
 /// [`ApiRequest::describe`].
 pub(crate) fn dry_run_request(
@@ -658,11 +716,7 @@ pub(crate) fn dry_run_request(
 ) -> Value {
     let mut out = json!({ "method": method, "url": url });
     if !query.is_empty() {
-        let q: Map<String, Value> = query
-            .iter()
-            .map(|(k, v)| ((*k).to_string(), Value::String(v.clone())))
-            .collect();
-        out["query_params"] = Value::Object(q);
+        out["query_params"] = query_params_json(query.iter().map(|(k, v)| (*k, v.as_str())));
     }
     if let Some(b) = body {
         out["body"] = b.clone();
@@ -753,6 +807,26 @@ mod tests {
         );
         assert_eq!(v, req.describe());
         assert_eq!(v["query_params"]["a"], "b");
+    }
+
+    #[test]
+    fn describe_lists_every_value_of_a_repeated_query_key() {
+        let req = ApiRequest::get("https://x/y")
+            .query("s", "1")
+            .query("a", "b")
+            .query("s", "2")
+            .query("s", "3");
+        assert_eq!(
+            req.describe()["query_params"],
+            json!({"s": ["1", "2", "3"], "a": "b"})
+        );
+        let v = dry_run_request(
+            "GET",
+            "https://x/y",
+            &[("s", "1".to_string()), ("s", "2".to_string())],
+            None,
+        );
+        assert_eq!(v["query_params"], json!({"s": ["1", "2"]}));
     }
 
     #[test]
@@ -1043,12 +1117,59 @@ mod tests {
     }
 
     #[test]
+    fn output_target_refuses_an_existing_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().to_str().unwrap();
+        for overwrite in [false, true] {
+            let err = OutputTarget::parse(target, overwrite).unwrap_err();
+            assert!(matches!(err, GwsError::Validation(_)), "{err:?}");
+            assert!(err.to_string().contains("is a directory"), "{err}");
+        }
+        let file = dir.path().join("out.pdf");
+        assert!(OutputTarget::parse(file.to_str().unwrap(), false).is_ok());
+    }
+
+    #[test]
     fn safe_filename_strips_dangerous_parts() {
         assert_eq!(safe_filename("../../etc/passwd", "x"), "_.._etc_passwd");
         assert_eq!(safe_filename("..", "x"), "x");
         assert_eq!(safe_filename(".bashrc", "x"), "bashrc");
         assert_eq!(safe_filename("a\nb:c", "x"), "a_b_c");
         assert_eq!(safe_filename("Report Q1.pdf", "x"), "Report Q1.pdf");
+    }
+
+    #[test]
+    fn safe_filename_avoids_windows_reserved_names() {
+        // Device names open the console/printer/serial port on Windows,
+        // with any extension and in any case.
+        assert_eq!(safe_filename("CON", "x"), "_CON");
+        assert_eq!(safe_filename("con.pdf", "x"), "_con.pdf");
+        assert_eq!(safe_filename("Aux.tar.gz", "x"), "_Aux.tar.gz");
+        assert_eq!(safe_filename("nul", "x"), "_nul");
+        assert_eq!(safe_filename("PRN.txt", "x"), "_PRN.txt");
+        assert_eq!(safe_filename("COM1.log", "x"), "_COM1.log");
+        assert_eq!(safe_filename("lpt9", "x"), "_lpt9");
+        assert_eq!(safe_filename("COM\u{b9}.txt", "x"), "_COM\u{b9}.txt");
+        assert_eq!(safe_filename("CONIN$", "x"), "_CONIN$");
+        // Windows drops trailing dots and spaces: `CON .txt` and `CON.` are
+        // the device too, and `a.` would silently become `a`.
+        assert_eq!(safe_filename("CON .txt", "x"), "_CON .txt");
+        assert_eq!(safe_filename("CON.", "x"), "_CON");
+        assert_eq!(safe_filename("report.", "x"), "report");
+        assert_eq!(safe_filename("report. . ", "x"), "report");
+        assert_eq!(safe_filename(". . .", "x"), "x");
+        // Ordinary names that merely start with a device name are kept.
+        assert_eq!(safe_filename("CONTRACT.pdf", "x"), "CONTRACT.pdf");
+        assert_eq!(safe_filename("COM10.txt", "x"), "COM10.txt");
+        assert_eq!(safe_filename("COM0.txt", "x"), "COM0.txt");
+        assert_eq!(safe_filename("my con.pdf", "x"), "my con.pdf");
+    }
+
+    #[test]
+    fn safe_filename_never_ends_in_a_dot_after_truncation() {
+        let name = format!("{}. tail", "a".repeat(SAFE_FILENAME_MAX_BYTES - 1));
+        let out = safe_filename(&name, "x");
+        assert_eq!(out, "a".repeat(SAFE_FILENAME_MAX_BYTES - 1));
     }
 
     #[test]
