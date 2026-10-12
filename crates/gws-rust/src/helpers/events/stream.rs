@@ -44,7 +44,7 @@ pub(crate) enum StepError {
 
 /// Whether an HTTP status is worth retrying.
 pub(crate) fn is_transient_status(status: u16) -> bool {
-    matches!(status, 408 | 429 | 500 | 502 | 503 | 504)
+    gws_rust_core::error::is_retryable_status_code(status)
 }
 
 impl From<GwsError> for StepError {
