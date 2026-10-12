@@ -375,10 +375,23 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
 
     /// A fake gcloud: a shell script with canned behaviour per subcommand.
+    ///
+    /// The script is written by a child `sh`, not by this process. A file
+    /// this process opened for writing would be inherited by any child that
+    /// another test thread forks at the same moment, and while that child
+    /// held the descriptor, running the script would fail with ETXTBSY
+    /// ("Text file busy").
     fn fake_gcloud(dir: &std::path::Path, script: &str) -> Gcloud {
         let path = dir.join("gcloud");
-        std::fs::write(&path, format!("#!/bin/sh\n{script}\n")).unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let status = std::process::Command::new("/bin/sh")
+            .args(["-c", r#"printf '%s\n' "$1" > "$2" && chmod 755 "$2""#, "sh"])
+            .arg(format!("#!/bin/sh\n{script}"))
+            .arg(&path)
+            .status()
+            .unwrap();
+        assert!(status.success(), "writing the fake gcloud failed: {status}");
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o755);
         Gcloud::with_bin(path)
     }
 
