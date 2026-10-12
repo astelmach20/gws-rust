@@ -56,10 +56,18 @@ pub(crate) fn next_token(page: &Value) -> Option<&str> {
         .filter(|t| !t.is_empty())
 }
 
+/// An array field that describes the list rather than holding its items,
+/// such as Calendar's `defaultReminders` (the keys table/CSV output also
+/// treats as list metadata).
+fn is_list_metadata(field: &str) -> bool {
+    crate::formatter::LIST_ENVELOPE_KEYS.contains(&field)
+}
+
 /// Which array field of a page holds the items for `--page-items`.
 ///
 /// `requested` wins. Otherwise the response schema's single array property is
-/// used, falling back to the page's single array field.
+/// used, falling back to the page's single array field; list metadata arrays
+/// ([`is_list_metadata`]) are not candidates.
 pub(crate) fn item_field(
     doc: &RestDescription,
     method: &RestMethod,
@@ -103,7 +111,7 @@ pub(crate) fn item_field(
             let mut v: Vec<String> = s
                 .properties
                 .iter()
-                .filter(|(_, p)| p.prop_type.as_deref() == Some("array"))
+                .filter(|(k, p)| p.prop_type.as_deref() == Some("array") && !is_list_metadata(k))
                 .map(|(k, _)| k.clone())
                 .collect();
             v.sort();
@@ -118,7 +126,7 @@ pub(crate) fn item_field(
         .map(|o| {
             let mut v: Vec<String> = o
                 .iter()
-                .filter(|(_, v)| v.is_array())
+                .filter(|(k, v)| v.is_array() && !is_list_metadata(k))
                 .map(|(k, _)| k.clone())
                 .collect();
             v.sort();
@@ -226,6 +234,34 @@ mod tests {
             item_field(&doc, &bare, &json!({"items": [1]}), None).unwrap(),
             "items"
         );
+    }
+
+    #[test]
+    fn item_field_ignores_list_metadata_arrays() {
+        // Calendar `Events`: `defaultReminders` describes the calendar, not
+        // the items of the page.
+        let mut schemas = HashMap::new();
+        schemas.insert(
+            "Events".to_string(),
+            schema(&[
+                ("items", "array"),
+                ("defaultReminders", "array"),
+                ("nextPageToken", "string"),
+            ]),
+        );
+        let doc = RestDescription {
+            schemas,
+            ..Default::default()
+        };
+        let events = RestMethod {
+            response: sref("Events"),
+            ..Default::default()
+        };
+        let page = json!({"items": [], "defaultReminders": []});
+        assert_eq!(item_field(&doc, &events, &page, None).unwrap(), "items");
+        // Without a schema, the page's own arrays are filtered the same way.
+        let bare = RestMethod::default();
+        assert_eq!(item_field(&doc, &bare, &page, None).unwrap(), "items");
     }
 
     #[test]

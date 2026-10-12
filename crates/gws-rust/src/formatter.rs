@@ -328,7 +328,7 @@ fn json_string(value: &Value, style: JsonStyle) -> String {
 /// Keys that describe a list response rather than its items. An object is
 /// treated as a list envelope only when every non-array key is one of these,
 /// so single resources (and `--dry-run` output) keep all their fields.
-const LIST_ENVELOPE_KEYS: &[&str] = &[
+pub(crate) const LIST_ENVELOPE_KEYS: &[&str] = &[
     "kind",
     "etag",
     "nextPageToken",
