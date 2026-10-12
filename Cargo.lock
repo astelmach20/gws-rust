@@ -1589,6 +1589,8 @@ dependencies = [
  "tracing",
  "tracing-appender",
  "tracing-subscriber",
+ "unicode-segmentation",
+ "unicode-width",
  "uuid",
  "webbrowser",
  "wiremock",
