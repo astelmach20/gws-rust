@@ -537,10 +537,12 @@ pub(crate) async fn execute_to(
             ));
         }
         // Empty success responses still produce a JSON document on stdout
-        // (and never create an --output file).
+        // (and never create an --output file); an empty later page of a
+        // --page-all stream ends the stream instead (`pages` counts parsed
+        // pages, so it is non-zero only there).
         let empty_success = json!({"status": "success", "httpStatus": status.as_u16()});
         if status == reqwest::StatusCode::NO_CONTENT {
-            out.single(empty_success)?;
+            end_on_empty_response(&mut out, empty_success, pages)?;
             break;
         }
 
@@ -586,7 +588,7 @@ pub(crate) async fn execute_to(
 
         let raw = read_body(sent.response, options.idle_timeout()).await?;
         if raw.iter().all(u8::is_ascii_whitespace) {
-            out.single(empty_success)?;
+            end_on_empty_response(&mut out, empty_success, pages)?;
             break;
         }
         let mut value: Value = match serde_json::from_slice(&raw) {
@@ -759,6 +761,25 @@ pub(crate) async fn execute_to(
     }
 
     Ok(out.finish())
+}
+
+/// Report an empty success response (204, or no body). The first response
+/// prints `empty_success`; an empty later page of a `--page-all` stream
+/// (`pages_done > 0`) just ends the stream, which stays one page or item per
+/// line.
+fn end_on_empty_response(
+    out: &mut Output<'_>,
+    empty_success: Value,
+    pages_done: u32,
+) -> Result<(), GwsError> {
+    if pages_done == 0 {
+        return out.single(empty_success);
+    }
+    tracing::warn!(
+        "page {} returned an empty response; treating it as the end of the list",
+        pages_done + 1
+    );
+    Ok(())
 }
 
 /// Screen a text response inlined into the JSON output with Model Armor, like
