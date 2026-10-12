@@ -17,7 +17,7 @@ metadata:
 
 # Create and Share a Google Form
 
-> **PREREQUISITE:** Load the following skills to execute this recipe: `gwsr-forms`, `gwsr-gmail`
+> **PREREQUISITE:** Load the following skills to execute this recipe: `gwsr-forms`, `gwsr-gmail` (install any that are missing with `npx skills add https://github.com/astelmach20/gws-rust/tree/main/skills/<name>`)
 
 Create a Google Form for feedback and share it via Gmail.
 

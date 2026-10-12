@@ -613,6 +613,62 @@ async fn fields_flag_keeps_next_page_token() {
     call.run(&Emitter::capturing()).await.unwrap();
 }
 
+/// Mimics Google's partial responses: `nextPageToken` is only returned when
+/// the `fields` mask asks for it.
+struct FieldsMaskedPages;
+
+impl Respond for FieldsMaskedPages {
+    fn respond(&self, req: &Request) -> ResponseTemplate {
+        let query: HashMap<_, _> = req.url.query_pairs().into_owned().collect();
+        let fields = query.get("fields").cloned().unwrap_or_default();
+        let page = match query.get("pageToken").map(String::as_str) {
+            None => json!({"files": [{"id": "1"}], "nextPageToken": "p2"}),
+            Some("p2") => json!({"files": [{"id": "2"}]}),
+            Some(other) => return ResponseTemplate::new(400).set_body_string(other.to_string()),
+        };
+        let mut page = page;
+        if !fields.is_empty() && !fields.contains("nextPageToken") {
+            page.as_object_mut().unwrap().remove("nextPageToken");
+        }
+        ResponseTemplate::new(200).set_body_json(page)
+    }
+}
+
+/// `"fields"` given in `--params` must not silently stop `--page-all` after
+/// the first page (the `--fields` flag already adds `nextPageToken`).
+#[tokio::test]
+async fn params_fields_keeps_next_page_token() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/drive/v3/files"))
+        .respond_with(FieldsMaskedPages)
+        .mount(&server)
+        .await;
+    let d = doc(&server.uri());
+    let mut call = Call::new(&d, "list", &server);
+    call.params = json!({"fields": "files(id)"});
+    call.pagination = PaginationConfig {
+        page_all: true,
+        page_limit: 0,
+        page_delay_ms: 0,
+    };
+    let em = Emitter::capturing();
+    call.run(&em).await.unwrap();
+    let out = lines(&em);
+    assert_eq!(out.len(), 2, "expected both pages, got {out:?}");
+    let sent: Vec<String> = server
+        .received_requests()
+        .await
+        .unwrap()
+        .iter()
+        .map(|r| r.url.query().unwrap_or_default().to_string())
+        .collect();
+    assert!(
+        sent[0].contains("fields=nextPageToken%2Cfiles%28id%29"),
+        "{sent:?}"
+    );
+}
+
 // ── Validation ──────────────────────────────────────────────────────────
 
 #[tokio::test]
@@ -1114,6 +1170,55 @@ async fn binary_download_to_file_is_atomic() {
 }
 
 #[tokio::test]
+async fn media_download_of_a_json_file_keeps_the_exact_bytes() {
+    // `alt=media` returns the stored file with its own Content-Type. A JSON
+    // file must be saved byte for byte: not re-serialized, not polled as an
+    // "operation" because it has `name` and `metadata` keys, and not refused
+    // because its content is not a single JSON document.
+    let files: [&[u8]; 3] = [
+        b"{\"b\": 1,   \"a\": [1.50, 2e3]}\n",
+        b"{\"name\": \"report\", \"metadata\": {\"owner\": \"x\"}}",
+        b"{\"n\": 1}\n{\"n\": 2}\n",
+    ];
+    let mut wrong = Vec::new();
+    for (i, content) in files.iter().enumerate() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(format!("/drive/v3/files/f{i}")))
+            .and(query_param("alt", "media"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_raw(content.to_vec(), "application/json"),
+            )
+            .mount(&server)
+            .await;
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("data.json");
+        let mut d = doc(&server.uri());
+        d.parameters.insert("alt".into(), qparam("string"));
+        for target in [OutputTarget::File(out.clone()), OutputTarget::Stdout] {
+            let mut call = Call::new(&d, "get", &server);
+            call.params = json!({"fileId": format!("f{i}"), "alt": "media"});
+            call.output = Some(target.clone());
+            let em = Emitter::capturing();
+            let got = match call.run(&em).await {
+                Err(e) => format!("error: {e}"),
+                Ok(_) if target == OutputTarget::Stdout => {
+                    String::from_utf8_lossy(&em.captured_bytes()).into_owned()
+                }
+                Ok(_) => String::from_utf8_lossy(&std::fs::read(&out).unwrap()).into_owned(),
+            };
+            if got.as_bytes() != *content {
+                wrong.push(format!(
+                    "{target:?}\n  file:  {:?}\n  saved: {got:?}",
+                    String::from_utf8_lossy(content)
+                ));
+            }
+        }
+    }
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+}
+
+#[tokio::test]
 async fn json_output_decodes_base64_attachment() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -1132,6 +1237,29 @@ async fn json_output_decodes_base64_attachment() {
 }
 
 // ── Long-running operations ─────────────────────────────────────────────
+
+#[tokio::test]
+async fn bodiless_post_sends_content_length_zero() {
+    // Upstream googleworkspace/cli#727: `drive files download` (a POST with no
+    // body) was rejected by Google with 411 Length Required.
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/drive/v3/files/f1/download"))
+        .and(header("content-length", "0"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({"name": "op1", "done": true, "response": {}})),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    let d = doc(&server.uri());
+    let mut call = Call::new(&d, "download", &server);
+    call.params = json!({"fileId": "f1"});
+    let em = Emitter::capturing();
+    call.run(&em).await.unwrap();
+    assert_eq!(lines(&em)[0]["name"], "op1");
+}
 
 #[tokio::test]
 async fn download_operation_is_waited_on_and_followed() {
