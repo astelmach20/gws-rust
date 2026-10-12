@@ -43,7 +43,7 @@ pub struct SetupOptions {
     pub non_interactive: bool,
 }
 
-fn setup_command() -> clap::Command {
+pub(crate) fn setup_command() -> clap::Command {
     clap::Command::new("setup")
         .bin_name("gwsr auth setup")
         .about("Create a GCP project + OAuth client with gcloud (interactive)")

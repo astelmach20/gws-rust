@@ -1174,6 +1174,81 @@ fn man_pages_are_generated() {
     assert!(env.work_dir().join("man/gwsr-completions.1").exists());
 }
 
+/// `gwsr auth` parses its own subcommands, so the completion and man page
+/// trees must include them rather than the top-level passthrough argument.
+#[test]
+fn auth_subcommands_complete_and_get_man_pages() {
+    let env = Env::new();
+    let complete = |index: &str, words: &[&str]| {
+        let out = env
+            .cmd()
+            .env("GWSR_COMPLETE", "bash")
+            .env("_CLAP_COMPLETE_INDEX", index)
+            .env("_CLAP_COMPLETE_COMP_TYPE", "9")
+            .env("_CLAP_COMPLETE_SPACE", "true")
+            .arg("--")
+            .args(words)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{out:?}");
+        String::from_utf8(out.stdout).unwrap()
+    };
+    assert_eq!(complete("2", &["gwsr", "auth", "log"]), "login\nlogout");
+    assert_eq!(
+        complete("3", &["gwsr", "auth", "status", "--off"]),
+        "--offline"
+    );
+    env.cmd()
+        .args(["dev", "man", "--output-dir", "man"])
+        .assert()
+        .success();
+    for page in ["gwsr-auth-login.1", "gwsr-auth-status.1", "gwsr-auth-use.1"] {
+        assert!(env.work_dir().join("man").join(page).exists(), "{page}");
+    }
+}
+
+/// `auth setup` parses its own flags too: completion and its man page must
+/// show them, not the passthrough `ARGS`.
+#[test]
+fn auth_setup_flags_complete_and_get_documented() {
+    let env = Env::new();
+    let complete = |words: &[&str]| {
+        let out = env
+            .cmd()
+            .env("GWSR_COMPLETE", "bash")
+            .env("_CLAP_COMPLETE_INDEX", (words.len() - 1).to_string())
+            .env("_CLAP_COMPLETE_COMP_TYPE", "9")
+            .env("_CLAP_COMPLETE_SPACE", "true")
+            .arg("--")
+            .args(words)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{out:?}");
+        String::from_utf8(out.stdout).unwrap()
+    };
+    assert_eq!(
+        complete(&["gwsr", "auth", "setup", "--non"]),
+        "--non-interactive"
+    );
+    // `--profile` is a global `auth` flag, which setup accepts too.
+    assert_eq!(
+        complete(&["gwsr", "auth", "setup", "--pro"]),
+        "--project\n--profile"
+    );
+    let flags = complete(&["gwsr", "auth", "setup", "--"]);
+    for flag in ["--project", "--login", "--dry-run", "--non-interactive"] {
+        assert!(flags.lines().any(|l| l == flag), "{flag} missing: {flags}");
+    }
+
+    env.cmd()
+        .args(["dev", "man", "--output-dir", "man"])
+        .assert()
+        .success();
+    let page = std::fs::read_to_string(env.work_dir().join("man/gwsr-auth-setup.1")).unwrap();
+    assert!(page.contains("non\\-interactive"), "{page}");
+    assert!(!page.contains("ARGS"), "{page}");
+}
+
 // ── generate-skills ─────────────────────────────────────────────────────
 
 #[test]
