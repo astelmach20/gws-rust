@@ -617,14 +617,26 @@ fn agenda_bounds(
     window: &Window,
     tz: Tz,
 ) -> Result<(chrono::DateTime<Tz>, chrono::DateTime<Tz>), GwsError> {
-    let today = crate::timezone::start_of_today(tz)?;
-    let day = chrono::Duration::days(1);
+    agenda_bounds_at(window, tz, chrono::Utc::now())
+}
+
+fn agenda_bounds_at(
+    window: &Window,
+    tz: Tz,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<(chrono::DateTime<Tz>, chrono::DateTime<Tz>), GwsError> {
+    let today = now.with_timezone(&tz).date_naive();
     Ok(match window {
-        Window::Today => (today, today + day),
-        Window::Tomorrow => (today + day, today + day * 2),
+        Window::Today => crate::timezone::day_bounds(today, tz)?,
+        Window::Tomorrow => {
+            let tomorrow = today
+                .succ_opt()
+                .ok_or_else(|| GwsError::Validation(format!("{today} has no following day")))?;
+            crate::timezone::day_bounds(tomorrow, tz)?
+        }
         Window::Days(n) => {
-            let now = chrono::Utc::now().with_timezone(&tz);
-            (now, now + day * i32::try_from(*n).map_err(http::other_err)?)
+            let now = now.with_timezone(&tz);
+            (now, now + chrono::Duration::days(i64::from(*n)))
         }
     })
 }
@@ -1252,6 +1264,31 @@ mod tests {
         assert_eq!(insert(&api, &args).await.unwrap()["id"], "E1");
     }
 
+    #[test]
+    fn all_day_dates_are_reported_unshifted_east_of_utc() {
+        // Upstream googleworkspace/cli#579: in Asia/Seoul an all-day event on
+        // 2026-03-23 was shown as starting 2026-03-21.
+        let event = json!({
+            "id": "e1",
+            "summary": "Holiday",
+            "start": {"date": "2026-03-23"},
+            "end": {"date": "2026-03-24"}
+        });
+        let s = summarize_event(&event, "primary", "Me");
+        assert_eq!(s["start"], "2026-03-23");
+        assert_eq!(s["end"], "2026-03-24");
+        assert_eq!(s["allDay"], true);
+        let seoul: Tz = "Asia/Seoul".parse().unwrap();
+        let timed = json!({"start": "2026-03-23T00:30:00+09:00"});
+        assert!(start_key(&s, seoul) < start_key(&timed, seoul));
+        assert_eq!(
+            start_key(&s, seoul),
+            chrono::DateTime::parse_from_rfc3339("2026-03-23T00:00:00+09:00")
+                .unwrap()
+                .timestamp()
+        );
+    }
+
     #[tokio::test]
     async fn agenda_paginates_and_fails_loudly_per_calendar() {
         let server = MockServer::start().await;
@@ -1678,11 +1715,96 @@ mod tests {
         );
     }
 
+    fn bounds_at(window: &Window, tz: Tz, now: &str) -> (String, String) {
+        let now = chrono::DateTime::parse_from_rfc3339(now)
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let (s, e) = agenda_bounds_at(window, tz, now).unwrap();
+        (s.to_rfc3339(), e.to_rfc3339())
+    }
+
+    #[test]
+    fn agenda_today_and_tomorrow_on_a_normal_day() {
+        let tz = chrono_tz::America::Denver;
+        let now = "2026-06-17T12:00:00-06:00";
+        assert_eq!(
+            bounds_at(&Window::Today, tz, now),
+            (
+                "2026-06-17T00:00:00-06:00".to_string(),
+                "2026-06-18T00:00:00-06:00".to_string()
+            )
+        );
+        assert_eq!(
+            bounds_at(&Window::Tomorrow, tz, now),
+            (
+                "2026-06-18T00:00:00-06:00".to_string(),
+                "2026-06-19T00:00:00-06:00".to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn agenda_today_spans_the_whole_25_hour_fall_back_day() {
+        let tz = chrono_tz::America::Denver;
+        assert_eq!(
+            bounds_at(&Window::Today, tz, "2026-11-01T12:00:00-07:00"),
+            (
+                "2026-11-01T00:00:00-06:00".to_string(),
+                "2026-11-02T00:00:00-07:00".to_string()
+            )
+        );
+        assert_eq!(
+            bounds_at(&Window::Tomorrow, tz, "2026-10-31T12:00:00-06:00"),
+            (
+                "2026-11-01T00:00:00-06:00".to_string(),
+                "2026-11-02T00:00:00-07:00".to_string()
+            )
+        );
+        // The day after the transition is an ordinary 24-hour day again.
+        assert_eq!(
+            bounds_at(&Window::Tomorrow, tz, "2026-11-01T12:00:00-07:00"),
+            (
+                "2026-11-02T00:00:00-07:00".to_string(),
+                "2026-11-03T00:00:00-07:00".to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn agenda_today_stops_at_midnight_on_the_23_hour_spring_forward_day() {
+        let tz = chrono_tz::America::Denver;
+        assert_eq!(
+            bounds_at(&Window::Today, tz, "2026-03-08T12:00:00-06:00"),
+            (
+                "2026-03-08T00:00:00-07:00".to_string(),
+                "2026-03-09T00:00:00-06:00".to_string()
+            )
+        );
+        assert_eq!(
+            bounds_at(&Window::Tomorrow, tz, "2026-03-07T12:00:00-07:00"),
+            (
+                "2026-03-08T00:00:00-07:00".to_string(),
+                "2026-03-09T00:00:00-06:00".to_string()
+            )
+        );
+        assert_eq!(
+            bounds_at(&Window::Tomorrow, tz, "2026-03-08T12:00:00-06:00"),
+            (
+                "2026-03-09T00:00:00-06:00".to_string(),
+                "2026-03-10T00:00:00-06:00".to_string()
+            )
+        );
+    }
+
     #[test]
     fn agenda_bounds_use_time_zone() {
         let (start, end) = agenda_bounds(&Window::Today, chrono_tz::America::Denver).unwrap();
         let s = start.to_rfc3339();
         assert!(s.ends_with("-07:00") || s.ends_with("-06:00"), "{s}");
-        assert_eq!(end - start, chrono::Duration::days(1));
+        use chrono::Timelike;
+        for t in [start, end] {
+            assert_eq!((t.hour(), t.minute(), t.second()), (0, 0, 0), "{t}");
+        }
+        assert_eq!(end.date_naive(), start.date_naive().succ_opt().unwrap());
     }
 }

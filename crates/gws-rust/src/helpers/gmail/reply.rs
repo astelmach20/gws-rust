@@ -358,7 +358,7 @@ fn create_reply_raw_message(
         .subject(envelope.subject);
 
     let mb = apply_optional_headers(mb, envelope.from, envelope.cc, envelope.bcc);
-    let mb = set_threading_headers(mb, &envelope.threading);
+    let mb = set_threading_headers(mb, &envelope.threading)?;
 
     let (quoted, separator) = if envelope.html {
         (format_quoted_original_html(original), "<br>\r\n")
@@ -426,7 +426,7 @@ fn parse_reply_args(matches: &ArgMatches) -> Result<ReplyConfig, GwsError> {
         .filter(|v| !v.is_empty());
 
     Ok(ReplyConfig {
-        message_id: required_str(matches, "message-id")?,
+        message_id: super::cli::required_message_id(matches)?,
         body: required_str(matches, "body")?,
         from: parse_optional_mailboxes(matches, "from")?,
         extra_to: parse_optional_mailboxes(matches, "to")?,
@@ -934,6 +934,35 @@ mod tests {
         let recipients =
             build_reply_all_recipients(&original, None, None, Some("me@example.com"), None)
                 .unwrap();
+        let emails = |list: &[Mailbox]| list.iter().map(|m| m.email.clone()).collect::<Vec<_>>();
+        assert_eq!(emails(&recipients.to), vec!["alice@example.com"]);
+        assert_eq!(
+            emails(&recipients.cc.unwrap_or_default()),
+            vec!["bob@example.com", "carol@example.com"]
+        );
+    }
+
+    /// A message sent with only Bcc recipients carries the RFC 5322 empty group
+    /// `To: undisclosed-recipients:;`. Reply-all must not turn the group name
+    /// into a Cc recipient, and members of a named group must keep their
+    /// addresses intact.
+    #[test]
+    fn test_reply_all_ignores_rfc5322_group_syntax() {
+        let msg = json!({
+            "threadId": "t1",
+            "payload": {
+                "headers": [
+                    { "name": "From", "value": "alice@example.com" },
+                    { "name": "To", "value": "undisclosed-recipients:;" },
+                    { "name": "Cc", "value": "Team: bob@example.com, Carol <carol@example.com>;" },
+                    { "name": "Subject", "value": "Hello" },
+                    { "name": "Message-ID", "value": "<m1@example.com>" }
+                ]
+            }
+        });
+        let original = parse_original_message(&msg).unwrap();
+        let recipients = build_reply_all_recipients(&original, None, None, None, None).unwrap();
+
         let emails = |list: &[Mailbox]| list.iter().map(|m| m.email.clone()).collect::<Vec<_>>();
         assert_eq!(emails(&recipients.to), vec!["alice@example.com"]);
         assert_eq!(

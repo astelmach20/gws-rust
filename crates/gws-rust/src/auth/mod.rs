@@ -321,9 +321,12 @@ pub async fn get_token_fresh(
                 token::refresh_user(user, downscope.as_deref(), &endpoints, &login).await
             };
             if matches!(source, CredentialSource::Profile { .. }) {
+                // The grant fingerprint keeps a token minted from a previous
+                // login's refresh token from ever being served for this one.
                 let key = format!(
-                    "{}|{}",
+                    "{}|grant:{}|{}",
                     credential.identity(),
+                    token_cache::grant_fingerprint(&user.refresh_token),
                     downscope
                         .as_ref()
                         .map(|s| sorted_join(s))
@@ -399,6 +402,42 @@ fn granted_scopes_for(env: &AuthEnv) -> anyhow::Result<Option<Vec<String>>> {
     }
 }
 
+/// A stable, non-secret key for the identity requests are made as, used to
+/// keep per-account caches (such as the account time zone) apart.
+///
+/// It names the credential source (profile, credentials file or ADC file)
+/// and the impersonated user, so switching profile, credentials file or
+/// `--impersonate` subject never reuses another identity's cached data.
+/// Returns `Ok(None)` for a raw access token (`GWSR_TOKEN`,
+/// `GWSR_TOKEN_FILE`), whose account is unknown: nothing may be cached for it.
+///
+/// # Errors
+///
+/// Credential-source resolution failures (conflicting or missing sources).
+pub fn identity_cache_key() -> anyhow::Result<Option<String>> {
+    let env = AuthEnv::from_process()?;
+    Ok(identity_cache_key_for(&env)?)
+}
+
+fn identity_cache_key_for(env: &AuthEnv) -> Result<Option<String>, AuthError> {
+    let source = env.source()?;
+    let source = match &source {
+        CredentialSource::TokenEnv | CredentialSource::TokenFile(_) => return Ok(None),
+        CredentialSource::Profile { name, .. } => {
+            format!("profile:{}:{name}", env.base.display())
+        }
+        CredentialSource::CredentialsFile(path)
+        | CredentialSource::AdcEnv(path)
+        | CredentialSource::AdcWellKnown(path) => {
+            format!("{}:{}", source.kind(), path.display())
+        }
+    };
+    Ok(Some(match &env.impersonate {
+        Some(subject) => format!("{source}|impersonate:{subject}"),
+        None => source,
+    }))
+}
+
 /// Choose the scope for a Discovery method call, warning loudly on stderr
 /// when the recorded grant does not cover the method.
 ///
@@ -428,7 +467,8 @@ pub fn scopes_for_method(
 /// Returns the project ID used for quota and billing (`x-goog-user-project`).
 ///
 /// Priority: `GWSR_PROJECT_ID`, then the OAuth client configuration's project,
-/// then `quota_project_id` from Application Default Credentials.
+/// then `quota_project_id` from Application Default Credentials when ADC is
+/// the credential in use.
 ///
 /// # Errors
 ///
@@ -439,21 +479,24 @@ pub fn scopes_for_method(
 /// [`crate::env`].)
 /// `GWSR_NO_QUOTA_PROJECT` / `--no-quota-project` skip the lookup entirely.
 pub fn get_quota_project() -> Result<Option<String>, GwsError> {
-    let adc = std::env::var_os("GOOGLE_APPLICATION_CREDENTIALS")
-        .filter(|v| !v.is_empty())
-        .map(std::path::PathBuf::from)
-        .or_else(|| {
-            dirs::home_dir().map(|h| {
-                h.join(".config")
-                    .join("gcloud")
-                    .join("application_default_credentials.json")
-            })
-        });
+    let env = AuthEnv::from_process().map_err(to_gws_error)?;
     resolve_quota_project(
         crate::env::get()?.project_id.clone(),
         client_config::load_saved,
-        adc.as_deref(),
+        adc_quota_source(&env)?.as_deref(),
     )
+}
+
+/// The ADC file whose `quota_project_id` may be used: only the one that is
+/// this invocation's credential. A `quota_project_id` belongs to the ADC
+/// identity; sending it with a profile, a credentials file or a token bills
+/// (and permission-checks) a project unrelated to that credential.
+fn adc_quota_source(env: &AuthEnv) -> Result<Option<std::path::PathBuf>, GwsError> {
+    match env.source() {
+        Ok(CredentialSource::AdcEnv(path) | CredentialSource::AdcWellKnown(path)) => Ok(Some(path)),
+        Ok(_) | Err(AuthError::NoCredentials) => Ok(None),
+        Err(e) => Err(to_gws_error(e.into())),
+    }
 }
 
 fn resolve_quota_project(
@@ -547,6 +590,76 @@ mod tests {
             resolve_quota_project(None, || Ok(None), None).unwrap(),
             None
         );
+    }
+
+    /// The ADC file's `quota_project_id` belongs to the ADC identity. It must
+    /// not be sent for a gwsr profile, a credentials file or a token.
+    #[test]
+    fn adc_quota_project_only_applies_to_adc_credentials() {
+        let dir = tempfile::tempdir().unwrap();
+        let adc = dir.path().join("adc.json");
+        crate::fs_util::atomic_write(
+            &adc,
+            br#"{"type":"authorized_user","client_id":"c","client_secret":"s","refresh_token":"r","quota_project_id":"unrelated-adc-project"}"#,
+        )
+        .unwrap();
+        let (ks, _) = memory_keystore(dir.path());
+        let mut env = AuthEnv::new(
+            dir.path().to_path_buf(),
+            ActiveProfile {
+                name: "default".into(),
+                source: ProfileSource::Default,
+            },
+            ProfilePaths::new(dir.path(), "default"),
+        )
+        .with_keystore(ks);
+        env.adc_well_known = Some(adc.clone());
+        let quota = |env: &AuthEnv| {
+            resolve_quota_project(
+                None,
+                || Ok(Some(client_with_project(None))),
+                adc_quota_source(env).unwrap().as_deref(),
+            )
+            .unwrap()
+        };
+
+        // ADC is the credential: its quota project applies.
+        assert_eq!(quota(&env).as_deref(), Some("unrelated-adc-project"));
+
+        // A logged-in profile (no project_id in client_secret.json): none.
+        env.paths.ensure_dir().unwrap();
+        let ct = env
+            .keystore()
+            .encrypt(
+                Purpose::Credentials,
+                br#"{"type":"authorized_user","client_id":"c","client_secret":"s","refresh_token":"r"}"#,
+            )
+            .unwrap();
+        crate::fs_util::atomic_write(&env.paths.credentials, &ct).unwrap();
+        assert_eq!(
+            quota(&env),
+            None,
+            "profile credentials must not use ADC's quota project"
+        );
+
+        // GWSR_TOKEN: none either.
+        env.token = Some(secrecy::SecretString::from("ya29.t".to_string()));
+        assert_eq!(
+            quota(&env),
+            None,
+            "a raw token must not use ADC's quota project"
+        );
+
+        // No credentials at all: nothing to bill.
+        let empty = AuthEnv::new(
+            dir.path().join("empty"),
+            ActiveProfile {
+                name: "default".into(),
+                source: ProfileSource::Default,
+            },
+            ProfilePaths::new(&dir.path().join("empty"), "default"),
+        );
+        assert_eq!(adc_quota_source(&empty).unwrap(), None);
     }
 
     #[test]
@@ -743,6 +856,80 @@ mod tests {
         );
     }
 
+    fn write_user_creds(env: &AuthEnv, refresh_token: &str) {
+        let json = format!(
+            r#"{{"type":"authorized_user","client_id":"cid","client_secret":"cs","refresh_token":"{refresh_token}"}}"#
+        );
+        let ct = env
+            .keystore()
+            .encrypt(Purpose::Credentials, json.as_bytes())
+            .unwrap();
+        crate::fs_util::atomic_write(&env.paths.credentials, &ct).unwrap();
+    }
+
+    fn token_reply(access_token: &str) -> ResponseTemplate {
+        ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "access_token": access_token, "expires_in": 3600, "token_type": "Bearer"
+        }))
+    }
+
+    /// A refresh that loaded the previous grant's refresh token, and only
+    /// took the cache lock after re-login cleared the cache, caches the old
+    /// grant's access token. The next lookup must not be served that token.
+    #[tokio::test]
+    async fn token_cached_from_a_previous_grant_is_not_served_after_relogin() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/token"))
+            .and(body_string_contains("refresh_token=rtold"))
+            .respond_with(token_reply("ya29.old-grant"))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/token"))
+            .and(body_string_contains("refresh_token=rtnew"))
+            .respond_with(token_reply("ya29.new-grant"))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let env = profile_env(dir.path(), &server);
+        write_user_creds(&env, "rtold");
+
+        // Re-login holds the cache lock while a concurrent command, having
+        // already loaded the old credentials, waits for it.
+        let login_lock = crate::fs_util::FileLock::acquire(
+            &env.paths.token_lock,
+            std::time::Duration::from_secs(1),
+        )
+        .unwrap();
+        let stale_env = env.clone();
+        let stale =
+            tokio::spawn(async move { get_token_fresh(&stale_env, &[], Freshness::Cached).await });
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        assert!(
+            !stale.is_finished(),
+            "the refresh must be waiting for the lock"
+        );
+        write_user_creds(&env, "rtnew");
+        match std::fs::remove_file(&env.paths.token_cache) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => panic!("{e}"),
+        }
+        drop(login_lock);
+        let old = stale.await.unwrap().unwrap();
+        assert_eq!(old.expose_secret(), "ya29.old-grant");
+
+        let next = get_token_fresh(&env, &[], Freshness::Cached).await.unwrap();
+        assert_eq!(
+            next.expose_secret(),
+            "ya29.new-grant",
+            "the previous grant's cached token was served after re-login"
+        );
+    }
+
     #[tokio::test]
     async fn expired_refresh_token_suggests_login() {
         let dir = tempfile::tempdir().unwrap();
@@ -807,6 +994,47 @@ mod tests {
             "tok"
         );
         assert_eq!(granted_scopes_for(&env).unwrap(), None);
+    }
+
+    #[test]
+    fn identity_cache_key_separates_accounts() {
+        let dir = tempfile::tempdir().unwrap();
+        let mk = |name: &str| {
+            let paths = ProfilePaths::new(dir.path(), name);
+            paths.ensure_dir().unwrap();
+            std::fs::write(&paths.credentials, b"x").unwrap();
+            AuthEnv::new(
+                dir.path().to_path_buf(),
+                ActiveProfile {
+                    name: name.into(),
+                    source: ProfileSource::Flag,
+                },
+                paths,
+            )
+        };
+        let key = |env: &AuthEnv| identity_cache_key_for(env).unwrap();
+        let work = key(&mk("work"));
+        let personal = key(&mk("personal"));
+        assert!(work.is_some());
+        assert_ne!(work, personal, "profiles");
+
+        let sa = dir.path().join("sa.json");
+        std::fs::write(&sa, "{}").unwrap();
+        let mut as_alice = mk("default");
+        as_alice.profile.source = ProfileSource::Default;
+        as_alice.credentials_file = Some(sa);
+        as_alice.impersonate = Some("alice@example.com".into());
+        let mut as_bob = as_alice.clone();
+        as_bob.impersonate = Some("bob@example.com".into());
+        assert_ne!(key(&as_alice), key(&as_bob), "impersonation subjects");
+        assert_ne!(key(&as_alice), key(&mk("default")), "sources");
+
+        let mut token = mk("default");
+        // An explicit --profile conflicts with GWSR_TOKEN, so the token case
+        // uses the default profile.
+        token.profile.source = ProfileSource::Default;
+        token.token = Some(SecretString::from("tok".to_string()));
+        assert_eq!(key(&token), None, "a raw token has no known account");
     }
 
     #[test]
