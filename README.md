@@ -276,7 +276,7 @@ gwsr auth export --unmasked --output ci-credentials.json
 |---|---|
 | `--format json\|table\|yaml\|csv` | Output format (default `json`) |
 | `--jq EXPR` | Filter with a jq expression (built in via [jaq](https://github.com/01mf02/jaq)). String results print raw, like `gh --jq` |
-| `--columns a,b.c` | Columns for `table`/`csv` (dot paths for nested fields). An unknown column is an error |
+| `--columns a,b.c` | Columns for `table`/`csv` (dot paths for nested fields; a `.` or `\` inside a field name is escaped as `\.` / `\\`, so `{"a.b": 1}` is column `a\.b`). An unknown column is an error |
 | `--compact` / `--pretty` | Force the JSON layout (`GWSR_JSON_STYLE=auto\|compact\|pretty`) |
 
 Table output escapes terminal control characters. CSV cells that start with a formula character get a `'` prefix.
@@ -314,7 +314,7 @@ Exit code 5 also covers internal programming errors, such as a command reading a
 
 ### Logging
 
-stderr log lines are JSON objects, unless `-v` is given or the output format is human. The default level is warnings and errors. Precedence: `-v`/`-vv`/`-vvv` or `-q` > `GWSR_LOG` (a filter such as `gwsr=debug`) > `RUST_LOG` > `log` in `config.toml`. `GWSR_LOG_FILE` (or `log_file`) names a directory that receives daily `gwsr.log.YYYY-MM-DD` JSON files at debug level (directory `0700`, files `0600`). Progress messages appear only with `-v`.
+stderr log lines are JSON objects, unless `-v` is given or the output format is human. The default level is warnings and errors. Precedence: `-v`/`-vv`/`-vvv` or `-q` > `GWSR_LOG` (a filter such as `gwsr=debug`) > `RUST_LOG` > `log` in `config.toml`. `GWSR_LOG_FILE` (or `log_file`) names a directory that receives daily `gwsr.log.YYYY-MM-DD` JSON files at debug level (directory `0700`, including an existing one, files `0600`). Progress messages appear only with `-v`.
 
 ## Making requests
 
