@@ -54,6 +54,14 @@ fn gwsr(config: &Path) -> Command {
         .env("GWSR_CACHE_DIR", config.join("cache"))
         .env("HOME", config)
         .current_dir(config);
+    // Keep what the platform needs to build an HTTP client: Winsock fails to
+    // load without `SystemRoot`, and the TLS setup in a Nix build finds its
+    // roots through the certificate variables.
+    for key in ["SystemRoot", "SSL_CERT_FILE", "NIX_SSL_CERT_FILE"] {
+        if let Some(value) = std::env::var_os(key) {
+            cmd.env(key, value);
+        }
+    }
     cmd
 }
 
@@ -619,16 +627,7 @@ async fn events_helpers_honour_api_base_override() {
         .await;
     let dir = tempfile::tempdir().unwrap();
     seed(dir.path(), "workspaceevents", "v1", "");
-    let mut cmd = gwsr(dir.path());
-    // This request must succeed, so restore what `env_clear` removed that the
-    // platform needs: Winsock fails to load without `SystemRoot`, and the TLS
-    // setup in a Nix build finds its roots through the certificate variables.
-    for key in ["SystemRoot", "SSL_CERT_FILE", "NIX_SSL_CERT_FILE"] {
-        if let Some(value) = std::env::var_os(key) {
-            cmd.env(key, value);
-        }
-    }
-    let out = cmd
+    let out = gwsr(dir.path())
         .env("GWSR_TOKEN", "test-token")
         .env("GWSR_API_BASE_URL", format!("{}/", server.uri()))
         .env("HTTPS_PROXY", "http://127.0.0.1:9")
