@@ -17,7 +17,7 @@ metadata:
 
 # IT Administrator
 
-> **PREREQUISITE:** Load the following utility skills to operate as this persona: `gwsr-gmail`, `gwsr-drive`, `gwsr-calendar`
+> **PREREQUISITE:** Load the following utility skills to operate as this persona: `gwsr-gmail`, `gwsr-drive`, `gwsr-calendar` (install any that are missing with `npx skills add https://github.com/astelmach20/gws-rust/tree/main/skills/<name>`)
 
 Administer IT — monitor security and configure Workspace.
 

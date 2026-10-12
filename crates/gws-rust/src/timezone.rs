@@ -16,37 +16,75 @@
 //!
 //! Resolves the authenticated user's timezone with the following priority:
 //! 1. Explicit `--timezone` CLI flag (hard error if invalid)
-//! 2. Cached value in the gwsr cache directory (24h TTL)
+//! 2. Cached value in the gwsr cache directory (24h TTL), one file per
+//!    credential identity (see [`crate::auth::identity_cache_key`]); nothing
+//!    is cached for a raw access token, whose account is unknown
 //! 3. Google Calendar Settings API (`users/me/settings/timezone`)
 //! 4. Machine-local timezone (fallback with warning)
 
 use crate::error::GwsError;
 use crate::transport::Transport;
 use chrono_tz::Tz;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-/// Cache filename stored in the gwsr cache directory.
-const CACHE_FILENAME: &str = "account_timezone";
+/// Prefix of the per-identity cache files in the gwsr cache directory.
+const CACHE_FILENAME_PREFIX: &str = "account_timezone";
 
 /// Cache TTL in seconds (24 hours).
 const CACHE_TTL_SECS: u64 = 86400;
 
-/// Returns the path to the timezone cache file.
-fn cache_path() -> Result<PathBuf, GwsError> {
-    Ok(crate::discovery::gwsr_cache_root()?.join(CACHE_FILENAME))
+/// The cache file under `root` for the account `identity`, or `None` when
+/// the identity is unknown (then nothing is cached). The identity is hashed
+/// into the file name, so each account has its own file.
+fn cache_file(root: &Path, identity: Option<&str>) -> Option<PathBuf> {
+    identity.map(|id| {
+        let hash = uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_OID, id.as_bytes());
+        root.join(format!("{CACHE_FILENAME_PREFIX}-{}", hash.simple()))
+    })
 }
 
-/// Remove the cached timezone file. Called on auth login/logout to
-/// invalidate stale values when the account changes.
+/// The cache file for the credential this invocation uses.
+fn cache_path() -> Result<Option<PathBuf>, GwsError> {
+    let identity = crate::auth::identity_cache_key().map_err(crate::auth::to_gws_error)?;
+    Ok(cache_file(
+        &crate::discovery::gwsr_cache_root()?,
+        identity.as_deref(),
+    ))
+}
+
+/// Remove every cached timezone. Called on auth login/logout to invalidate
+/// stale values when the account changes.
 pub fn invalidate_cache() -> Result<(), GwsError> {
-    let path = cache_path()?;
-    if let Err(e) = std::fs::remove_file(&path)
-        && e.kind() != std::io::ErrorKind::NotFound
-    {
-        return Err(GwsError::other(anyhow::Error::new(e).context(format!(
+    invalidate_cache_in(&crate::discovery::gwsr_cache_root()?)
+}
+
+fn invalidate_cache_in(root: &Path) -> Result<(), GwsError> {
+    let failed = |path: &Path, e: std::io::Error| {
+        GwsError::other(anyhow::Error::new(e).context(format!(
             "failed to remove the timezone cache {}",
             path.display()
-        ))));
+        )))
+    };
+    let entries = match std::fs::read_dir(root) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(failed(root, e)),
+    };
+    for entry in entries {
+        let entry = entry.map_err(|e| failed(root, e))?;
+        if !entry
+            .file_name()
+            .to_string_lossy()
+            .starts_with(CACHE_FILENAME_PREFIX)
+        {
+            continue;
+        }
+        let path = entry.path();
+        if let Err(e) = std::fs::remove_file(&path)
+            && e.kind() != std::io::ErrorKind::NotFound
+        {
+            return Err(failed(&path, e));
+        }
     }
     Ok(())
 }
@@ -105,11 +143,25 @@ fn write_cache(path: &std::path::Path, tz_name: &str) {
     }
 }
 
-/// Fetch the account timezone from the Google Calendar Settings API.
-async fn fetch_account_timezone(transport: &Transport) -> Result<Tz, GwsError> {
-    let url = "https://www.googleapis.com/calendar/v3/users/me/settings/timezone";
+/// The Calendar Settings URL for the account time zone, under the
+/// `GWSR_API_BASE_URL` override when the transport has one.
+fn settings_url(transport: &Transport) -> String {
+    let base = transport
+        .endpoints()
+        .override_base()
+        .map_or("https://www.googleapis.com/", |b| b.as_str());
+    format!("{base}calendar/v3/users/me/settings/timezone")
+}
+
+/// Fetch the account timezone from the Google Calendar Settings API,
+/// caching it in `cache` (if any).
+async fn fetch_account_timezone(
+    transport: &Transport,
+    cache: Option<&Path>,
+) -> Result<Tz, GwsError> {
+    let url = settings_url(transport);
     let json = transport
-        .get_json(url, &[], "Failed to fetch account timezone")
+        .get_json(&url, &[], "Failed to fetch account timezone")
         .await?;
 
     let tz_name = json
@@ -128,8 +180,9 @@ async fn fetch_account_timezone(transport: &Transport) -> Result<Tz, GwsError> {
         ))
     })?;
 
-    // Cache for future use
-    write_cache(&cache_path()?, tz_name);
+    if let Some(path) = cache {
+        write_cache(path, tz_name);
+    }
     tracing::info!(
         timezone = tz_name,
         source = "calendar_api",
@@ -167,15 +220,20 @@ pub(crate) async fn resolve_account_timezone(
         );
         return Ok(tz);
     }
+    resolve_with(transport, cache_path()?.as_deref()).await
+}
 
-    // 2. Check cache
-    if let Some(tz) = read_cache(&cache_path()?) {
+/// Steps 2-4 of [`resolve_account_timezone`], with the identity's cache file
+/// (`None`: do not cache) passed in.
+async fn resolve_with(transport: &Transport, cache: Option<&Path>) -> Result<Tz, GwsError> {
+    // 2. Check this identity's cache
+    if let Some(tz) = cache.and_then(read_cache) {
         tracing::debug!(timezone = %tz, source = "cache", "using cached timezone");
         return Ok(tz);
     }
 
     // 3. Fetch from Calendar Settings API
-    let api_error = match fetch_account_timezone(transport).await {
+    let api_error = match fetch_account_timezone(transport, cache).await {
         Ok(tz) => return Ok(tz),
         Err(e) => e,
     };
@@ -196,22 +254,42 @@ pub(crate) async fn resolve_account_timezone(
     Ok(tz)
 }
 
-/// Return the start of today (midnight) in the given timezone as a
-/// timezone-aware `DateTime`. Errors if midnight cannot be resolved
-/// (e.g. a DST transition that skips midnight — extremely rare).
-pub fn start_of_today(tz: Tz) -> Result<chrono::DateTime<Tz>, crate::error::GwsError> {
-    use chrono::{NaiveTime, TimeZone, Utc};
+/// The first instant of the local calendar day `date` in `tz`.
+///
+/// Normally local midnight. When midnight is ambiguous (clocks fall back
+/// across it) this is the earlier of the two; when midnight does not exist
+/// (clocks spring forward across it, as in some South American zones) it is
+/// the first local time that does exist that day, i.e. the transition instant.
+fn start_of_day(
+    date: chrono::NaiveDate,
+    tz: Tz,
+) -> Result<chrono::DateTime<Tz>, crate::error::GwsError> {
+    use chrono::{Duration, NaiveTime, TimeZone};
 
-    let now_in_tz = Utc::now().with_timezone(&tz);
-    let today_start = now_in_tz.date_naive().and_time(NaiveTime::MIN);
-    tz.from_local_datetime(&today_start)
-        .earliest()
+    let midnight = date.and_time(NaiveTime::MIN);
+    // Offset changes happen on whole minutes, so stepping a minute at a time
+    // through the day finds the end of any gap covering midnight.
+    (0..24 * 60)
+        .map(|m| midnight + Duration::minutes(m))
+        .find_map(|local| tz.from_local_datetime(&local).earliest())
         .ok_or_else(|| {
             crate::error::GwsError::other(anyhow::anyhow!(
-                "Could not determine start of day in timezone '{}'",
-                tz
+                "Could not determine the start of {date} in timezone '{tz}'"
             ))
         })
+}
+
+/// The local calendar day `date` in `tz` as a half-open interval
+/// `[start of day, start of next day)`. This is 23 or 25 hours long on
+/// daylight-saving transition days, never a fixed 24 hours.
+pub fn day_bounds(
+    date: chrono::NaiveDate,
+    tz: Tz,
+) -> Result<(chrono::DateTime<Tz>, chrono::DateTime<Tz>), crate::error::GwsError> {
+    let next = date.succ_opt().ok_or_else(|| {
+        crate::error::GwsError::other(anyhow::anyhow!("{date} has no following day"))
+    })?;
+    Ok((start_of_day(date, tz)?, start_of_day(next, tz)?))
 }
 
 /// Machine-local IANA timezone, read from the OS by `iana-time-zone`.
@@ -224,6 +302,7 @@ fn local_timezone() -> Result<Tz, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::TimeZone;
 
     #[test]
     fn parse_valid_iana_timezone() {
@@ -255,7 +334,7 @@ mod tests {
     #[test]
     fn cache_roundtrip() {
         let dir = tempfile::tempdir().unwrap();
-        let cache_file = dir.path().join(CACHE_FILENAME);
+        let cache_file = cache_file(dir.path(), Some("profile:/c:default")).unwrap();
         std::fs::write(&cache_file, "America/New_York\n").unwrap();
         assert_eq!(read_cache(&cache_file), Some(chrono_tz::America::New_York));
     }
@@ -263,10 +342,80 @@ mod tests {
     #[test]
     fn missing_or_corrupt_cache_is_a_miss() {
         let dir = tempfile::tempdir().unwrap();
-        let cache_file = dir.path().join(CACHE_FILENAME);
+        let cache_file = cache_file(dir.path(), Some("profile:/c:default")).unwrap();
         assert_eq!(read_cache(&cache_file), None);
         std::fs::write(&cache_file, "Not/A/Zone").unwrap();
         assert_eq!(read_cache(&cache_file), None);
+    }
+
+    async fn settings_server(tz: &str) -> wiremock::MockServer {
+        use wiremock::matchers::{method, path};
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(method("GET"))
+            .and(path("/calendar/v3/users/me/settings/timezone"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({ "value": tz })),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        server
+    }
+
+    async fn resolve_from(server: &wiremock::MockServer, cache: Option<&Path>) -> Tz {
+        resolve_with(&Transport::for_test(&server.uri()), cache)
+            .await
+            .unwrap()
+    }
+
+    /// Two identities (here two profiles) never share a cached time zone:
+    /// switching profile, credentials file or `--impersonate` subject must
+    /// not reuse the previous account's zone.
+    #[tokio::test]
+    async fn cached_timezone_is_never_shared_between_identities() {
+        let dir = tempfile::tempdir().unwrap();
+        let tokyo = settings_server("Asia/Tokyo").await;
+        let new_york = settings_server("America/New_York").await;
+        let work = cache_file(dir.path(), Some("profile:/c:work"));
+        let personal = cache_file(dir.path(), Some("profile:/c:personal"));
+
+        assert_eq!(
+            resolve_from(&tokyo, work.as_deref()).await,
+            chrono_tz::Asia::Tokyo
+        );
+        assert_eq!(
+            resolve_from(&new_york, personal.as_deref()).await,
+            chrono_tz::America::New_York,
+            "the second account must not get the first account's cached zone"
+        );
+        // Each identity's value is cached (each server expects one call).
+        assert_eq!(
+            resolve_from(&tokyo, work.as_deref()).await,
+            chrono_tz::Asia::Tokyo
+        );
+
+        invalidate_cache_in(dir.path()).unwrap();
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+    }
+
+    /// A raw access token has no known account: its zone is never cached.
+    #[tokio::test]
+    async fn unknown_identity_is_not_cached() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(cache_file(dir.path(), None), None);
+        let server = settings_server("Asia/Tokyo").await;
+        assert_eq!(resolve_from(&server, None).await, chrono_tz::Asia::Tokyo);
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn settings_url_honours_api_base_override() {
+        let t = Transport::for_test("http://127.0.0.1:9/");
+        assert_eq!(
+            settings_url(&t),
+            "http://127.0.0.1:9/calendar/v3/users/me/settings/timezone"
+        );
     }
 
     #[test]
@@ -278,10 +427,53 @@ mod tests {
         }
     }
 
+    fn day(s: &str) -> chrono::NaiveDate {
+        s.parse().unwrap()
+    }
+
     #[test]
-    fn start_of_today_is_midnight() {
-        use chrono::Timelike;
-        let start = start_of_today(chrono_tz::America::Denver).unwrap();
-        assert_eq!((start.hour(), start.minute(), start.second()), (0, 0, 0));
+    fn day_bounds_follow_local_midnights_across_dst() {
+        let tz = chrono_tz::America::Denver;
+        let fmt = |(s, e): (chrono::DateTime<Tz>, chrono::DateTime<Tz>)| {
+            (s.to_rfc3339(), e.to_rfc3339(), (e - s).num_hours())
+        };
+        assert_eq!(
+            fmt(day_bounds(day("2026-11-01"), tz).unwrap()),
+            (
+                "2026-11-01T00:00:00-06:00".to_string(),
+                "2026-11-02T00:00:00-07:00".to_string(),
+                25
+            )
+        );
+        assert_eq!(
+            fmt(day_bounds(day("2026-03-08"), tz).unwrap()),
+            (
+                "2026-03-08T00:00:00-07:00".to_string(),
+                "2026-03-09T00:00:00-06:00".to_string(),
+                23
+            )
+        );
+        assert_eq!(fmt(day_bounds(day("2026-06-17"), tz).unwrap()).2, 24);
+    }
+
+    #[test]
+    fn start_of_day_skips_a_nonexistent_midnight() {
+        // Chile springs forward at local midnight: 2026-09-06 00:00 does not
+        // exist, so the day starts at 01:00 (-03:00).
+        let tz = chrono_tz::America::Santiago;
+        assert!(
+            tz.from_local_datetime(&day("2026-09-06").and_time(chrono::NaiveTime::MIN))
+                .earliest()
+                .is_none()
+        );
+        let (start, end) = day_bounds(day("2026-09-06"), tz).unwrap();
+        assert_eq!(start.to_rfc3339(), "2026-09-06T01:00:00-03:00");
+        assert_eq!(end.to_rfc3339(), "2026-09-07T00:00:00-03:00");
+    }
+
+    #[test]
+    fn day_bounds_reject_the_last_representable_day() {
+        let err = day_bounds(chrono::NaiveDate::MAX, chrono_tz::UTC).unwrap_err();
+        assert!(err.to_string().contains("no following day"), "{err}");
     }
 }

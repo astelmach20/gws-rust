@@ -963,20 +963,24 @@ enum SyncKind {
 /// mistakes one item's local copy for another's. A prefixed name that still
 /// collides (an item literally named `{other id}-{name}`) is an error rather
 /// than a silent overwrite.
+///
+/// Names are compared case-insensitively: Drive names are case-sensitive,
+/// but the default macOS and Windows file systems are not, so `Report.txt`
+/// and `report.txt` would otherwise share one local file.
 fn disambiguate(children: &[(&str, &str)]) -> Result<Vec<String>, GwsError> {
-    let mut claims: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    let mut claims: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
     for &(_, name) in children {
-        *claims.entry(name).or_insert(0) += 1;
+        *claims.entry(name.to_lowercase()).or_insert(0) += 1;
     }
     let mut used = std::collections::HashSet::new();
     let mut out = Vec::with_capacity(children.len());
     for &(id, name) in children {
-        let local = if matches!(claims.get(name), Some(&n) if n > 1) {
+        let local = if matches!(claims.get(&name.to_lowercase()), Some(&n) if n > 1) {
             safe_filename(&format!("{id}-{name}"), id)
         } else {
             name.to_string()
         };
-        if !used.insert(local.clone()) {
+        if !used.insert(local.to_lowercase()) {
             return Err(GwsError::other(anyhow::anyhow!(
                 "cannot sync: more than one Drive item in the same folder maps to the local name '{local}' (item '{id}'); rename one in Drive"
             )));
@@ -1616,6 +1620,91 @@ mod tests {
         let err = sync(&api, "ROOT", dir.path()).await.unwrap_err();
         assert!(err.to_string().contains("P-a.txt"), "{err}");
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+    }
+
+    /// File systems cap a name at 255 bytes, not characters: a long non-ASCII
+    /// Drive name (plus the export extension) must still be writable.
+    #[tokio::test]
+    async fn sync_fits_long_multibyte_names_in_the_file_system_limit() {
+        // 150 chars: 300 UTF-16 units (APFS limit 255) and 600 UTF-8 bytes
+        // (ext4 limit 255).
+        let long_name = "\u{1F4C4}".repeat(150);
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/drive/v3/files"))
+            .and(query_param("q", "'ROOT' in parents and trashed = false"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"files": [
+                {"id": "D", "name": long_name, "mimeType": DOC},
+                {"id": "A", "name": "a.txt", "mimeType": "text/plain"}
+            ]})))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/drive/v3/files/A"))
+            .and(query_param("alt", "media"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(b"A".to_vec()))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/drive/v3/files/D/export"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(b"DOCX".to_vec()))
+            .mount(&server)
+            .await;
+        let api = api(&server.uri(), "drive/v3/");
+        let dir = tempfile::tempdir().unwrap();
+        let v = sync(&api, "ROOT", dir.path()).await.unwrap();
+        assert_eq!(v["downloaded"].as_array().unwrap().len(), 2, "{v}");
+        let doc = PathBuf::from(v["downloaded"][0]["path"].as_str().unwrap());
+        let file_name = doc.file_name().unwrap().to_str().unwrap();
+        assert!(file_name.len() <= 255, "{file_name}");
+        assert!(file_name.starts_with('\u{1F4C4}'), "{file_name}");
+        assert!(file_name.ends_with(".docx"), "{file_name}");
+        assert_eq!(std::fs::read(&doc).unwrap(), b"DOCX");
+    }
+
+    /// Drive names are case-sensitive but the default macOS and Windows
+    /// file systems are not: `Report.txt` and `report.txt` must not share a
+    /// local path, or the second one is silently reported "unchanged" (or
+    /// overwrites the first).
+    #[tokio::test]
+    async fn sync_disambiguates_names_differing_only_by_case() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/drive/v3/files"))
+            .and(query_param("q", "'ROOT' in parents and trashed = false"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"files": [
+                {"id": "U", "name": "Report.txt", "mimeType": "text/plain", "modifiedTime": "2020-01-01T00:00:00Z"},
+                {"id": "L", "name": "report.txt", "mimeType": "text/plain", "modifiedTime": "2020-01-01T00:00:00Z"}
+            ]})))
+            .mount(&server)
+            .await;
+        for id in ["U", "L"] {
+            Mock::given(method("GET"))
+                .and(path(format!("/drive/v3/files/{id}")))
+                .and(query_param("alt", "media"))
+                .respond_with(ResponseTemplate::new(200).set_body_bytes(id.as_bytes().to_vec()))
+                .mount(&server)
+                .await;
+        }
+        let api = api(&server.uri(), "drive/v3/");
+        let dir = tempfile::tempdir().unwrap();
+        let v = sync(&api, "ROOT", dir.path()).await.unwrap();
+        assert_eq!(v["unchanged"], json!([]), "{v}");
+        let paths: Vec<PathBuf> = v["downloaded"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|d| PathBuf::from(d["path"].as_str().unwrap()))
+            .collect();
+        assert_eq!(paths.len(), 2, "{v}");
+        let folded: std::collections::HashSet<String> = paths
+            .iter()
+            .map(|p| p.to_string_lossy().to_lowercase())
+            .collect();
+        assert_eq!(folded.len(), 2, "paths collide case-insensitively: {v}");
+        let mut contents: Vec<Vec<u8>> = paths.iter().map(|p| std::fs::read(p).unwrap()).collect();
+        contents.sort();
+        assert_eq!(contents, vec![b"L".to_vec(), b"U".to_vec()]);
     }
 
     #[test]

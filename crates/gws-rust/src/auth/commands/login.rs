@@ -103,6 +103,9 @@ pub(crate) fn parse_args(m: &clap::ArgMatches) -> Result<LoginArgs, GwsError> {
             .filter(|s| !s.is_empty())
             .collect::<HashSet<String>>()
     });
+    if let Some(services) = &services {
+        scopes::validate_service_names(services)?;
+    }
     let timeout = crate::args::value::<u64>(m, "timeout")?
         .copied()
         .ok_or_else(|| GwsError::Validation("--timeout is required".into()))?;
@@ -157,7 +160,7 @@ async fn resolve_scopes(
     };
     let mut result = scopes::filter_scopes_by_services(base, services);
     if let Some(services) = services {
-        super::picker::augment_with_discovery_scopes(&mut result, services, readonly_only).await;
+        super::picker::augment_with_discovery_scopes(&mut result, services, readonly_only).await?;
     }
     if result.is_empty() {
         return Err(GwsError::Validation(
@@ -358,8 +361,6 @@ mod tests {
         let a = parse_args(&matches(&[
             "--scopes",
             "gmail.modify, https://mail.google.com/",
-            "-s",
-            "Gmail,drive",
             "--no-browser",
             "--no-localhost",
             "--timeout",
@@ -373,16 +374,20 @@ mod tests {
                 "https://mail.google.com/".into()
             ])
         );
+        assert!(a.services.is_none());
+        assert!(!a.open_browser);
+        assert_eq!(a.mode, RedirectMode::Manual);
+        assert_eq!(a.timeout, Duration::from_secs(30));
+        assert!(parse_args(&matches(&["--scopes", " , "])).is_err());
+
+        let a = parse_args(&matches(&["-s", "Gmail,drive", "--write"])).unwrap();
+        assert_eq!(a.scope_mode, ScopeMode::Write);
         assert_eq!(
             a.services.unwrap(),
             ["gmail".to_string(), "drive".to_string()]
                 .into_iter()
                 .collect()
         );
-        assert!(!a.open_browser);
-        assert_eq!(a.mode, RedirectMode::Manual);
-        assert_eq!(a.timeout, Duration::from_secs(30));
-        assert!(parse_args(&matches(&["--scopes", " , "])).is_err());
     }
 
     #[tokio::test]
@@ -417,18 +422,29 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn custom_scopes_bypass_filter() {
-        let services: HashSet<String> = ["drive".to_string()].into_iter().collect();
-        let custom = vec!["https://mail.google.com/".to_string()];
-        let s = resolve_scopes(
-            ScopeMode::Custom(custom.clone()),
-            None,
-            Some(&services),
-            false,
-        )
-        .await
-        .unwrap();
-        assert_eq!(s, custom);
+    async fn services_filter_drops_cloud_platform() {
+        let services: HashSet<String> = ["gmail".to_string()].into_iter().collect();
+        let s = resolve_scopes(ScopeMode::Full, None, Some(&services), false)
+            .await
+            .unwrap();
+        assert!(
+            !s.iter().any(|x| x == scopes::PLATFORM_SCOPE),
+            "`--full -s gmail` must not request cloud-platform: {s:?}"
+        );
+        let s = resolve_scopes(ScopeMode::Full, None, None, false)
+            .await
+            .unwrap();
+        assert!(s.iter().any(|x| x == scopes::PLATFORM_SCOPE));
+    }
+
+    #[test]
+    fn unknown_service_names_are_rejected() {
+        let err = parse_args(&matches(&["-s", "gmail,contacts.other.readonly"]))
+            .err()
+            .expect("unknown service must be an error")
+            .to_string();
+        assert!(err.contains("contacts.other.readonly"), "{err}");
+        assert!(parse_args(&matches(&["-s", "gmail,drive,chat"])).is_ok());
     }
 
     #[test]
