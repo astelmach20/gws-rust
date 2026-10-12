@@ -249,6 +249,7 @@ pub(crate) fn validate_params(
             tracing::warn!("parameter '{name}' is deprecated");
         }
         check_param_value(name, def, value, &mut errors);
+        check_reserved_pattern(method, name, def, value, &mut errors)?;
     }
 
     for (name, def) in &method.parameters {
@@ -276,6 +277,50 @@ pub(crate) fn validate_params(
             errors.join("\n- "),
         )))
     }
+}
+
+/// Enforce the Discovery `pattern` of a `{+name}` path parameter.
+///
+/// Reserved expansion keeps `/` in the value, so a value outside the pattern
+/// addresses a different method: `groups.delete` with
+/// `groups/g1/memberships/m1` would send `DELETE v1/groups/g1/memberships/m1`,
+/// which deletes a membership. A plain `{var}` value is percent-encoded into
+/// one segment and cannot do that; its pattern is left to the API.
+fn check_reserved_pattern(
+    method: &RestMethod,
+    name: &str,
+    def: &MethodParameter,
+    value: &Value,
+    errors: &mut Vec<String>,
+) -> Result<(), GwsError> {
+    let Some(pattern) = &def.pattern else {
+        return Ok(());
+    };
+    if def.location.as_deref() != Some("path")
+        || !super::url::path_template(method).contains(&format!("{{+{name}}}"))
+    {
+        return Ok(());
+    }
+    let text = match value {
+        Value::String(s) => s.clone(),
+        Value::Number(n) => n.to_string(),
+        // Wrong types are reported by `check_param_value`.
+        _ => return Ok(()),
+    };
+    let re = regex::Regex::new(&format!("^(?:{pattern})$")).map_err(|e| {
+        GwsError::Discovery(format!(
+            "parameter '{name}' of {} has a pattern that cannot be compiled ('{}'): {e}",
+            method.id.as_deref().unwrap_or("this method"),
+            pattern.escape_debug()
+        ))
+    })?;
+    if !re.is_match(&text) {
+        errors.push(format!(
+            "parameter '{name}' value '{}' does not match the pattern {pattern} required by this method",
+            text.escape_debug()
+        ));
+    }
+    Ok(())
 }
 
 fn check_param_value(name: &str, def: &MethodParameter, value: &Value, errors: &mut Vec<String>) {
@@ -511,6 +556,76 @@ mod tests {
             msg.contains("required path parameter 'fileId' is missing"),
             "{msg}"
         );
+    }
+
+    /// `cloudidentity.groups.delete` and a `{date}` path parameter shaped
+    /// like `admin:reports_v1`, as the Discovery documents declare them.
+    fn pattern_doc() -> RestDescription {
+        serde_json::from_value(json!({
+            "name": "cloudidentity", "version": "v1",
+            "rootUrl": "https://cloudidentity.googleapis.com/",
+            "resources": { "groups": { "methods": {
+                "delete": {
+                    "id": "cloudidentity.groups.delete",
+                    "httpMethod": "DELETE",
+                    "path": "v1/{+name}",
+                    "flatPath": "v1/groups/{groupsId}",
+                    "parameters": { "name": {
+                        "type": "string", "location": "path", "required": true,
+                        "pattern": "^groups/[^/]+$"
+                    } }
+                },
+                "usage": {
+                    "id": "cloudidentity.groups.usage",
+                    "httpMethod": "GET",
+                    "path": "usage/dates/{date}",
+                    "parameters": { "date": {
+                        "type": "string", "location": "path", "required": true,
+                        "pattern": "(\\d){4}-(\\d){2}-(\\d){2}"
+                    } }
+                }
+            } } }
+        }))
+        .unwrap()
+    }
+
+    fn validate_pattern(method: &str, params: Value) -> Result<(), GwsError> {
+        let doc = pattern_doc();
+        let method = &doc.resources["groups"].methods[method];
+        let Value::Object(map) = params else {
+            unreachable!()
+        };
+        validate_params(&doc, method, &map, false)
+    }
+
+    #[test]
+    fn reserved_path_param_must_match_pattern() {
+        validate_pattern("delete", json!({"name": "groups/g1"})).unwrap();
+
+        // `v1/{+name}` keeps slashes, so this would send
+        // DELETE v1/groups/g1/memberships/m1: groups.memberships.delete.
+        for name in [
+            "groups/g1/memberships/m1",
+            "groups/",
+            "customers/c1",
+            "xgroups/g1",
+        ] {
+            let msg = validate_pattern("delete", json!({ "name": name }))
+                .unwrap_err()
+                .to_string();
+            assert!(
+                msg.contains(&format!("parameter 'name' value '{name}' does not match"))
+                    && msg.contains("^groups/[^/]+$"),
+                "{name}: {msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn simple_path_param_pattern_is_not_enforced() {
+        // A `{var}` value is encoded into one segment and cannot reach another
+        // method; its pattern (often a stale value list) is left to the API.
+        validate_pattern("usage", json!({"date": "yesterday"})).unwrap();
     }
 
     #[test]

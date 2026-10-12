@@ -239,6 +239,38 @@ fn outbound_helper_is_gated_only_under_policy() {
 }
 
 #[test]
+fn agenda_dry_run_shows_calendar_list_page_size() {
+    let dir = setup();
+    let out = gwsr(dir.path())
+        .args([
+            "calendar",
+            "+agenda",
+            "--today",
+            "--timezone",
+            "UTC",
+            "--dry-run",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let v = stdout_json(&out);
+    let list = &v["requests"][0];
+    assert!(
+        list["url"]
+            .as_str()
+            .unwrap()
+            .ends_with("/users/me/calendarList"),
+        "{v}"
+    );
+    // The real request asks for 250 calendars per page; the plan must too.
+    assert_eq!(list["query_params"]["maxResults"], "250", "{v}");
+}
+
+#[test]
 fn dry_run_bypasses_gate_and_prints_json() {
     let dir = setup();
     let out = gwsr(dir.path())
@@ -358,6 +390,91 @@ fn workflow_requests_honour_api_base_override() {
             .collect();
         let expected: Vec<String> = paths.iter().map(|p| format!("{base}{p}")).collect();
         assert_eq!(urls, expected, "{args:?}");
+    }
+}
+
+/// A workflow `--dry-run` plan lists every query parameter the real run
+/// sends; values only known at run time are `<placeholders>`.
+#[test]
+fn workflow_dry_run_plans_list_every_query_parameter() {
+    let dir = setup();
+    let events = json!({
+        "timeMin": "<start of today in the account time zone>",
+        "timeMax": "<start of tomorrow in the account time zone>",
+        "singleEvents": "true",
+        "orderBy": "startTime",
+        "maxResults": "250",
+    });
+    let cases: [(&[&str], Vec<Value>); 4] = [
+        (
+            &["workflow", "+standup-report", "--dry-run"],
+            vec![
+                events.clone(),
+                json!({"showCompleted": "false", "maxResults": "100"}),
+            ],
+        ),
+        (
+            &["workflow", "+weekly-digest", "--dry-run"],
+            vec![
+                json!({
+                    "timeMin": "<now>",
+                    "timeMax": "<now + 7 days>",
+                    "singleEvents": "true",
+                    "orderBy": "startTime",
+                    "maxResults": "250",
+                }),
+                json!({"q": "is:unread", "maxResults": "1"}),
+            ],
+        ),
+        (
+            &[
+                "workflow",
+                "+email-to-task",
+                "--message-id",
+                "M",
+                "--tasklist-id",
+                "T",
+                "--dry-run",
+            ],
+            vec![
+                json!({"format": "metadata", "metadataHeaders": "Subject"}),
+                Value::Null,
+            ],
+        ),
+        (
+            &[
+                "workflow",
+                "+file-announce",
+                "--file-id",
+                "F",
+                "--space-id",
+                "S",
+                "--dry-run",
+            ],
+            vec![
+                json!({"fields": "id,name,webViewLink", "supportsAllDrives": "true"}),
+                json!({"requestId": "<random UUID>"}),
+            ],
+        ),
+    ];
+    for (args, queries) in cases {
+        let out = gwsr(dir.path()).args(args).output().unwrap();
+        assert!(out.status.success(), "{args:?}: {out:?}");
+        let plan = stdout_json(&out);
+        let got: Vec<Value> = plan["requests"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["query_params"].clone())
+            .collect();
+        assert_eq!(got, queries, "{args:?}");
+        if args[1] == "+email-to-task" {
+            // The real task's notes end with the message snippet.
+            assert_eq!(
+                plan["requests"][1]["body"]["notes"],
+                "From email: M\n\n<snippet of the message>"
+            );
+        }
     }
 }
 
@@ -540,6 +657,66 @@ async fn dot_segment_path_parameters_are_rejected_before_sending() {
         .map(|r| format!("{} {}", r.method, r.url.path()))
         .collect();
     assert!(sent.is_empty(), "requests reached the server: {sent:?}");
+}
+
+/// A helper's `--dry-run` plan must list every query parameter the real
+/// request sends.
+#[test]
+fn dry_run_plan_keeps_flag_only_query_parameter() {
+    let dir = setup();
+    seed(dir.path(), "gmail", "v1", "gmail/v1/");
+    let out = gwsr(dir.path())
+        .args([
+            "gmail",
+            "+search",
+            "--query",
+            "x",
+            "--include-spam-trash",
+            "--dry-run",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let v = stdout_json(&out);
+    assert_eq!(
+        v["requests"][0]["query_params"]["includeSpamTrash"], "true",
+        "{v}"
+    );
+}
+
+#[test]
+fn dry_run_plan_keeps_repeated_query_keys() {
+    let dir = setup();
+    seed(dir.path(), "people", "v1", "");
+    let out = gwsr(dir.path())
+        .args([
+            "people",
+            "+find",
+            "--query",
+            "bob",
+            "--directory",
+            "--dry-run",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let v = stdout_json(&out);
+    assert_eq!(
+        v["requests"][0]["query_params"]["sources"],
+        json!([
+            "DIRECTORY_SOURCE_TYPE_DOMAIN_PROFILE",
+            "DIRECTORY_SOURCE_TYPE_DOMAIN_CONTACT"
+        ]),
+        "{v}"
+    );
 }
 
 #[test]
