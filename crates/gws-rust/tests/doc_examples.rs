@@ -484,16 +484,24 @@ fn documented_examples_pass_argument_validation() {
             };
             let cwd = tempfile::tempdir().unwrap();
             create_inputs(cwd.path(), &args);
-            let out = Command::cargo_bin("gwsr")
-                .unwrap()
-                .env_clear()
+            let mut cmd = Command::cargo_bin("gwsr").unwrap();
+            cmd.env_clear()
                 .env("GWSR_CONFIG_DIR", home.path())
                 .env("GWSR_CACHE_DIR", &cache)
                 .env("HOME", home.path())
                 // Nothing here may reach the network.
                 .env("HTTPS_PROXY", "http://127.0.0.1:9")
                 .env("HTTP_PROXY", "http://127.0.0.1:9")
-                .env("ALL_PROXY", "http://127.0.0.1:9")
+                .env("ALL_PROXY", "http://127.0.0.1:9");
+            // Keep what the platform needs to build an HTTP client: Winsock
+            // fails to load without `SystemRoot`, and the TLS setup in a Nix
+            // build finds its roots through the certificate variables.
+            for key in ["SystemRoot", "SSL_CERT_FILE", "NIX_SSL_CERT_FILE"] {
+                if let Some(value) = std::env::var_os(key) {
+                    cmd.env(key, value);
+                }
+            }
+            let out = cmd
                 .current_dir(cwd.path())
                 .args(&args)
                 .write_stdin(STDIN)
