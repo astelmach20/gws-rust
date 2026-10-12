@@ -473,7 +473,12 @@ pub(crate) async fn execute_to(
         format: &format,
         capture: capture_output,
         captured: Vec::new(),
-        pages: PageStream::default(),
+        // Whole pages, unless --page-items splits them into items.
+        pages: if options.page_items.is_some() {
+            PageStream::default()
+        } else {
+            PageStream::list_pages()
+        },
     };
     // `--decode-field` asks for a field of a JSON document, so it keeps the
     // JSON path even with `alt=media`.

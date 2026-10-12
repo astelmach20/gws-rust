@@ -72,6 +72,10 @@ impl Emitter {
     /// Write one line (a trailing newline is added) through
     /// [`crate::output::emit`].
     pub(crate) fn line(&self, text: &str) -> Result<(), GwsError> {
+        // Like `emit`, an empty text prints nothing (not even a newline).
+        if text.is_empty() {
+            return Ok(());
+        }
         let mut data = Vec::with_capacity(text.len() + 1);
         data.extend_from_slice(text.as_bytes());
         data.push(b'\n');
