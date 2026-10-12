@@ -147,9 +147,13 @@ pub(super) async fn build_report(env: &AuthEnv, offline: bool) -> Value {
                         out["token_scopes"] = json!(scopes);
                     }
                 }
-                // No response from Google: nothing was verified, so report it
-                // like `--offline` instead of as a rejected credential.
-                Err(e @ crate::auth::AuthError::Network(_)) => {
+                // No response from Google, or a 429/5xx outage: nothing was
+                // verified, so report it like `--offline` instead of as a
+                // rejected credential.
+                Err(
+                    e @ (crate::auth::AuthError::Network(_)
+                    | crate::auth::AuthError::TokenEndpointUnavailable { .. }),
+                ) => {
                     out["authenticated"] = json!(true);
                     out["verified"] = json!(false);
                     out["verification_error"] = json!(e.to_string());
@@ -285,5 +289,40 @@ mod tests {
         assert_eq!(r["verified"], false, "{r}");
         assert_ne!(r["authenticated"], false, "{r}");
         assert!(r["verification_error"].is_string(), "{r}");
+    }
+
+    /// A 429/5xx from the token endpoint is Google being unavailable, not a
+    /// rejected credential (the error itself says "The credentials were not
+    /// rejected"). It must not be reported as a verified "not authenticated".
+    #[tokio::test]
+    async fn token_endpoint_outage_is_not_a_verified_failure() {
+        for status in [429, 500, 503] {
+            let dir = tempfile::tempdir().unwrap();
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/token"))
+                .respond_with(ResponseTemplate::new(status).set_body_string("backend error"))
+                .mount(&server)
+                .await;
+            let (ks, _) = memory_keystore(dir.path());
+            let mut e = env(dir.path());
+            e.paths.ensure_dir().unwrap();
+            let ct = ks
+                .encrypt(
+                    Purpose::Credentials,
+                    br#"{"type":"authorized_user","client_id":"cid-1234567890.apps","client_secret":"cs","refresh_token":"rt"}"#,
+                )
+                .unwrap();
+            crate::fs_util::atomic_write(&e.paths.credentials, &ct).unwrap();
+            e.endpoints = crate::auth::token::tests::endpoints(&server);
+            let e = e.with_keystore(ks);
+
+            let r = build_report(&e, false).await;
+            assert_eq!(r["verified"], false, "HTTP {status}: {r}");
+            assert_ne!(r["authenticated"], false, "HTTP {status}: {r}");
+            assert!(r.get("token_error").is_none(), "HTTP {status}: {r}");
+            let detail = r["verification_error"].as_str().unwrap_or_default();
+            assert!(detail.contains("temporarily unavailable"), "{r}");
+        }
     }
 }
