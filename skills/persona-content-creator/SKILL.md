@@ -19,7 +19,7 @@ metadata:
 
 # Content Creator
 
-> **PREREQUISITE:** Load the following utility skills to operate as this persona: `gwsr-docs`, `gwsr-drive`, `gwsr-gmail`, `gwsr-chat`, `gwsr-slides`
+> **PREREQUISITE:** Load the following utility skills to operate as this persona: `gwsr-docs`, `gwsr-drive`, `gwsr-gmail`, `gwsr-chat`, `gwsr-slides` (install any that are missing with `npx skills add https://github.com/astelmach20/gws-rust/tree/main/skills/<name>`)
 
 Create, organize, and distribute content across Workspace.
 

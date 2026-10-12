@@ -18,7 +18,7 @@ metadata:
 
 # Customer Support Agent
 
-> **PREREQUISITE:** Load the following utility skills to operate as this persona: `gwsr-gmail`, `gwsr-sheets`, `gwsr-chat`, `gwsr-calendar`
+> **PREREQUISITE:** Load the following utility skills to operate as this persona: `gwsr-gmail`, `gwsr-sheets`, `gwsr-chat`, `gwsr-calendar` (install any that are missing with `npx skills add https://github.com/astelmach20/gws-rust/tree/main/skills/<name>`)
 
 Manage customer support — track tickets, respond, escalate issues.
 
