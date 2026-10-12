@@ -93,13 +93,7 @@ pub(crate) fn find_operations_get(doc: &RestDescription) -> Option<&RestMethod> 
 /// operation itself when it has none. A failed operation becomes an error.
 pub(crate) fn operation_result(op: Value) -> Result<Value, GwsError> {
     if let Some(err) = op.get("error").filter(|e| !e.is_null()) {
-        let code = err
-            .get("code")
-            .and_then(Value::as_u64)
-            // A missing or out-of-range code is reported as 500; the
-            // message below still carries the operation's own error.
-            .and_then(|c| u16::try_from(c).ok())
-            .unwrap_or(500);
+        let (code, status) = status_code(err);
         let message = err
             .get("message")
             .and_then(Value::as_str)
@@ -108,7 +102,7 @@ pub(crate) fn operation_result(op: Value) -> Result<Value, GwsError> {
         return Err(GwsError::Api {
             code,
             message: format!(
-                "Operation {} failed: {message}",
+                "Operation {} failed ({status}): {message}",
                 op.get("name")
                     .and_then(Value::as_str)
                     .unwrap_or("(unnamed)")
@@ -123,6 +117,43 @@ pub(crate) fn operation_result(op: Value) -> Result<Value, GwsError> {
             None => Value::Object(map),
         },
         other => other,
+    })
+}
+
+/// The HTTP status and gRPC status name for an operation's `error`.
+///
+/// `error` is a `google.rpc.Status`: its `code` is a gRPC code, not an HTTP
+/// status. A missing or unknown code is reported as UNKNOWN (500); callers
+/// still carry the operation's own message.
+pub(crate) fn status_code(err: &Value) -> (u16, &'static str) {
+    err.get("code")
+        .and_then(Value::as_u64)
+        .and_then(grpc_to_http)
+        .unwrap_or((500, "UNKNOWN"))
+}
+
+/// The HTTP status and name Google maps a `google.rpc.Code` to
+/// (`google/rpc/code.proto`); `None` for a code outside that enum.
+fn grpc_to_http(code: u64) -> Option<(u16, &'static str)> {
+    Some(match code {
+        1 => (499, "CANCELLED"),
+        2 => (500, "UNKNOWN"),
+        3 => (400, "INVALID_ARGUMENT"),
+        4 => (504, "DEADLINE_EXCEEDED"),
+        5 => (404, "NOT_FOUND"),
+        6 => (409, "ALREADY_EXISTS"),
+        7 => (403, "PERMISSION_DENIED"),
+        8 => (429, "RESOURCE_EXHAUSTED"),
+        9 => (400, "FAILED_PRECONDITION"),
+        10 => (409, "ABORTED"),
+        11 => (400, "OUT_OF_RANGE"),
+        12 => (501, "UNIMPLEMENTED"),
+        13 => (500, "INTERNAL"),
+        14 => (503, "UNAVAILABLE"),
+        15 => (500, "DATA_LOSS"),
+        16 => (401, "UNAUTHENTICATED"),
+        // 0 is OK, which an `error` never carries.
+        _ => return None,
     })
 }
 
@@ -228,6 +259,34 @@ mod tests {
                                           "error": {"code": 9, "message": "precondition"}}))
         .unwrap_err();
         assert!(err.to_string().contains("precondition"));
+    }
+
+    #[test]
+    fn failed_operation_maps_grpc_codes_to_http_statuses() {
+        let failed = |code: u64| {
+            operation_result(json!({"name": "o", "done": true,
+                                    "error": {"code": code, "message": "m"}}))
+            .unwrap_err()
+        };
+        // google.rpc.Code 14 UNAVAILABLE is transient: HTTP 503, exit 6.
+        let err = failed(14);
+        assert_eq!(err.to_json()["error"]["code"], 503, "{err:?}");
+        assert!(err.is_retryable());
+        assert_eq!(err.exit_code(), GwsError::EXIT_CODE_API_RETRYABLE);
+        // 8 RESOURCE_EXHAUSTED is a quota error: HTTP 429, exit 6.
+        let err = failed(8);
+        assert_eq!(err.to_json()["error"]["code"], 429, "{err:?}");
+        assert_eq!(err.exit_code(), GwsError::EXIT_CODE_API_RETRYABLE);
+        // 9 FAILED_PRECONDITION is a permanent client error: HTTP 400, exit 1.
+        let err = failed(9);
+        assert_eq!(err.to_json()["error"]["code"], 400, "{err:?}");
+        assert_eq!(err.exit_code(), GwsError::EXIT_CODE_API);
+        assert!(err.to_string().contains("FAILED_PRECONDITION"), "{err}");
+        // 5 NOT_FOUND and 7 PERMISSION_DENIED keep their HTTP meaning.
+        assert_eq!(failed(5).to_json()["error"]["code"], 404);
+        assert_eq!(failed(7).to_json()["error"]["code"], 403);
+        // A code outside google.rpc.Code is an unknown server failure.
+        assert_eq!(failed(99).to_json()["error"]["code"], 500);
     }
 
     #[test]
