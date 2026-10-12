@@ -30,7 +30,8 @@ use crate::services::resolve_service_spec;
 /// Handles the `gwsr schema <dotted.path>` command and returns the schema as
 /// JSON (the caller formats and prints it).
 ///
-/// Path format: `service.resource[.subresource].method` or `service.Type`,
+/// Path format: `service.resource[.subresource].method`, `service.Type`, or
+/// `service.method` for a method declared outside any resource,
 /// where `service` is a registered alias, `alias:version`, or any Discovery
 /// API as `<api>:<version>`.
 /// Examples: `drive.files.list`, `drive.File`, `admin:directory_v1.users.list`.
@@ -59,6 +60,15 @@ pub async fn handle_schema_command(path: &str, resolve_refs: bool) -> Result<Val
             }
             return Ok(output);
         }
+        // A method declared outside any resource (e.g. `oauth2:v2.tokeninfo`).
+        if let Some(method) = doc.methods.get(schema_name) {
+            let mut output = build_schema_output(&doc, method);
+            if resolve_refs {
+                let mut seen = std::collections::HashSet::new();
+                resolve_schema_refs(&mut output, &doc, &mut seen);
+            }
+            return Ok(output);
+        }
         if doc.resources.contains_key(schema_name) {
             return Err(GwsError::Validation(format!(
                 "'{schema_name}' is a resource. To see its methods, try 'gwsr schema {service_name}.{schema_name}.list' (or similar). To see a type definition, try 'gwsr schema {service_name}.<Type>'."
@@ -83,6 +93,53 @@ pub async fn handle_schema_command(path: &str, resolve_refs: bool) -> Result<Val
         resolve_schema_refs(&mut output, &doc, &mut seen);
     }
     Ok(output)
+}
+
+/// The `gwsr schema` argument that shows `method` of `doc`, e.g.
+/// `events.subscriptions.list` or `youtube:v3.videos.list`.
+///
+/// Built from the method's position in the resource tree, not from its
+/// Discovery `id`: ids use the API's own name (`workspaceevents`,
+/// `groupsSettings`) and sometimes skip resources (`alertcenter.getSettings`
+/// lives under the `v1beta1` resource), so they are not valid schema paths.
+/// `None` when `method` is not part of `doc`.
+pub fn method_schema_path(doc: &RestDescription, method: &RestMethod) -> Option<String> {
+    fn walk(
+        resources: &std::collections::HashMap<String, RestResource>,
+        method: &RestMethod,
+        path: &mut Vec<String>,
+    ) -> bool {
+        for (name, resource) in resources {
+            path.push(name.clone());
+            if let Some((method_name, _)) = resource
+                .methods
+                .iter()
+                .find(|(_, m)| std::ptr::eq(*m, method))
+            {
+                path.push(method_name.clone());
+                return true;
+            }
+            if walk(&resource.resources, method, path) {
+                return true;
+            }
+            path.pop();
+        }
+        false
+    }
+
+    let mut path = Vec::new();
+    // A method declared outside any resource (e.g. `oauth2:v2.tokeninfo`).
+    if let Some((method_name, _)) = doc.methods.iter().find(|(_, m)| std::ptr::eq(*m, method)) {
+        path.push(method_name.clone());
+    } else if !walk(&doc.resources, method, &mut path) {
+        return None;
+    }
+    let service = crate::services::SERVICES
+        .iter()
+        .find(|e| e.api_name == doc.name && e.version == doc.version)
+        .map(|e| e.aliases[0].to_string())
+        .unwrap_or_else(|| format!("{}:{}", doc.name, doc.version));
+    Some(format!("{service}.{}", path.join(".")))
 }
 
 /// Walks the resource tree to find a method.
@@ -337,6 +394,77 @@ fn resolve_schema_refs(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn doc_with_nested_method(name: &str, version: &str) -> RestDescription {
+        let mut messages = RestResource::default();
+        messages.methods.insert(
+            "create".into(),
+            RestMethod {
+                id: Some(format!("{name}.spaces.messages.create")),
+                ..Default::default()
+            },
+        );
+        let mut spaces = RestResource::default();
+        spaces.resources.insert("messages".into(), messages);
+        let mut doc = RestDescription {
+            name: name.into(),
+            version: version.into(),
+            ..Default::default()
+        };
+        doc.resources.insert("spaces".into(), spaces);
+        doc
+    }
+
+    #[test]
+    fn method_schema_path_follows_the_resource_tree() {
+        let doc = doc_with_nested_method("workspaceevents", "v1");
+        let m = &doc.resources["spaces"].resources["messages"].methods["create"];
+        // Registered services use their primary alias...
+        assert_eq!(
+            method_schema_path(&doc, m).as_deref(),
+            Some("events.spaces.messages.create")
+        );
+        // ...other APIs and versions use `<api>:<version>`.
+        for (name, version, expected) in [
+            ("youtube", "v3", "youtube:v3.spaces.messages.create"),
+            (
+                "workspaceevents",
+                "v2",
+                "workspaceevents:v2.spaces.messages.create",
+            ),
+        ] {
+            let doc = doc_with_nested_method(name, version);
+            let m = &doc.resources["spaces"].resources["messages"].methods["create"];
+            assert_eq!(method_schema_path(&doc, m).as_deref(), Some(expected));
+        }
+    }
+
+    #[test]
+    fn method_schema_path_names_top_level_methods() {
+        let mut doc = doc_with_nested_method("oauth2", "v2");
+        doc.methods.insert(
+            "tokeninfo".into(),
+            RestMethod {
+                id: Some("oauth2.tokeninfo".into()),
+                ..Default::default()
+            },
+        );
+        let m = &doc.methods["tokeninfo"];
+        assert_eq!(
+            method_schema_path(&doc, m).as_deref(),
+            Some("oauth2:v2.tokeninfo")
+        );
+    }
+
+    #[test]
+    fn method_schema_path_is_none_for_a_foreign_method() {
+        let doc = doc_with_nested_method("chat", "v1");
+        let other = RestMethod {
+            id: Some("chat.spaces.messages.create".into()),
+            ..Default::default()
+        };
+        assert_eq!(method_schema_path(&doc, &other), None);
+    }
 
     #[test]
     fn test_param_to_json() {

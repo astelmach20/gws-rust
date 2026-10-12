@@ -16,7 +16,7 @@ metadata:
 
 # Review Overdue Tasks
 
-> **PREREQUISITE:** Load the following skills to execute this recipe: `gwsr-tasks`
+> **PREREQUISITE:** Load the following skills to execute this recipe: `gwsr-tasks` (install any that are missing with `npx skills add https://github.com/astelmach20/gws-rust/tree/main/skills/<name>`)
 
 Find Google Tasks that are past due and need attention.
 

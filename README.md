@@ -167,7 +167,7 @@ Signs in with the OAuth authorization-code flow: PKCE (S256), a random `state` t
 
 | Flag | Effect |
 |---|---|
-| `-s, --services drive,gmail` | Limit the request to these services (other services' scopes come from their Discovery documents) |
+| `-s, --services drive,gmail` | Limit the request to these services (other services' scopes come from their Discovery documents). An unknown service name is an error, and `cloud-platform` is never included (it belongs to no single service); pass it with `--scopes` if you need it |
 | `--write` | Read-write scopes for the core services |
 | `--full` | Read-write core scopes plus `gmail.settings.basic`, Pub/Sub and `cloud-platform` |
 | `--scopes a,b` | Exact scopes; short names such as `gmail.modify` expand to `https://www.googleapis.com/auth/gmail.modify` |
@@ -222,7 +222,7 @@ Checked in this order:
 4. `GOOGLE_APPLICATION_CREDENTIALS`
 5. `~/.config/gcloud/application_default_credentials.json`
 
-Once a source exists, it is used or the command fails. A damaged or undecryptable credentials file is never deleted or silently skipped. A profile you selected explicitly never falls back to Application Default Credentials. `--dry-run` loads no credentials at all.
+Once a source exists, it is used or the command fails. A damaged or undecryptable credentials file is never deleted or silently skipped. A profile you selected explicitly never falls back to Application Default Credentials, and `--profile` together with `GWSR_TOKEN`, `GWSR_TOKEN_FILE` or `GWSR_CREDENTIALS_FILE` is a configuration error instead of silently using the other identity. `--dry-run` loads no credentials at all.
 
 ### Storage and key backends
 
@@ -276,10 +276,12 @@ gwsr auth export --unmasked --output ci-credentials.json
 |---|---|
 | `--format json\|table\|yaml\|csv` | Output format (default `json`) |
 | `--jq EXPR` | Filter with a jq expression (built in via [jaq](https://github.com/01mf02/jaq)). String results print raw, like `gh --jq` |
-| `--columns a,b.c` | Columns for `table`/`csv` (dot paths for nested fields). An unknown column is an error |
+| `--columns a,b.c` | Columns for `table`/`csv` (dot paths for nested fields; a `.` or `\` inside a field name is escaped as `\.` / `\\`, so `{"a.b": 1}` is column `a\.b`). An unknown column is an error |
 | `--compact` / `--pretty` | Force the JSON layout (`GWSR_JSON_STYLE=auto\|compact\|pretty`) |
 
 Table output escapes terminal control characters. CSV cells that start with a formula character get a `'` prefix.
+
+With `--page-all` or `--page-items`, `table` and `csv` print one header: the first page with rows fixes the columns (the `--columns` selection, or that page's fields), and every later row is aligned to them, with empty cells for missing fields. A field that first appears on a later page is left out, and a warning on stderr names it; pass `--columns` or use `--format json` to keep it.
 
 ### Errors
 
@@ -312,7 +314,7 @@ Exit code 5 also covers internal programming errors, such as a command reading a
 
 ### Logging
 
-stderr log lines are JSON objects, unless `-v` is given or the output format is human. The default level is warnings and errors. Precedence: `-v`/`-vv`/`-vvv` or `-q` > `GWSR_LOG` (a filter such as `gwsr=debug`) > `RUST_LOG` > `log` in `config.toml`. `GWSR_LOG_FILE` (or `log_file`) names a directory that receives daily `gwsr.log.YYYY-MM-DD` JSON files at debug level (directory `0700`, files `0600`). Progress messages appear only with `-v`.
+stderr log lines are JSON objects, unless `-v` is given or the output format is human. The default level is warnings and errors. Precedence: `-v`/`-vv`/`-vvv` or `-q` > `GWSR_LOG` (a filter such as `gwsr=debug`) > `RUST_LOG` > `log` in `config.toml`. `GWSR_LOG_FILE` (or `log_file`) names a directory that receives daily `gwsr.log.YYYY-MM-DD` JSON files at debug level (directory `0700`, including an existing one, files `0600`). Progress messages appear only with `-v`.
 
 ## Making requests
 
@@ -344,7 +346,7 @@ Ranges contain `!`, which interactive bash history-expands inside double quotes.
 
 ### Quota project
 
-Requests carry an `x-goog-user-project` header naming the project that is billed and whose quota is used. It comes from `GWSR_PROJECT_ID`, then the OAuth client configuration's project, then `quota_project_id` in Application Default Credentials. A source that exists but can't be used is an error, not skipped: for example an unreadable client config or ADC file (exit `8` or `9`). Skipping it would silently bill a different project. Set `GWSR_PROJECT_ID`, or pass `--no-quota-project` (`GWSR_NO_QUOTA_PROJECT=1`) to send no header at all.
+Requests carry an `x-goog-user-project` header naming the project that is billed and whose quota is used. It comes from `GWSR_PROJECT_ID`, then the OAuth client configuration's project, then `quota_project_id` in Application Default Credentials (only when ADC is the credential in use; it is never sent with a `gwsr` profile, `GWSR_CREDENTIALS_FILE` or a token). A source that exists but can't be used is an error, not skipped: for example an unreadable client config or ADC file (exit `8` or `9`). Skipping it would silently bill a different project. Set `GWSR_PROJECT_ID`, or pass `--no-quota-project` (`GWSR_NO_QUOTA_PROJECT=1`) to send no header at all.
 
 ### Pagination
 
@@ -377,6 +379,7 @@ gwsr gmail users messages attachments get --params '{"userId":"me","messageId":"
 
 - A binary response needs `-o PATH` or an explicit `-o -`. `gwsr` never writes binary data to stdout unasked, and never invents a file name.
 - Files are written atomically (a temp file, then a rename) after `Content-Length` is checked. A `204` creates no file.
+- With `alt=media`, `-o` receives the file's exact bytes whatever its type, so a JSON file is saved as stored, not re-formatted.
 - Base64 fields are decoded into `-o` automatically for `format: byte` fields, or when you name one with `--decode-field`. Standard and URL-safe base64, padded or not, are accepted.
 - `drive files download` follows the returned `downloadUri`, and waits for the operation automatically when `-o` is given.
 
@@ -388,7 +391,7 @@ File path flags (`-o`, `--upload`, `--output-dir`, `--dir`, `@file`) accept any 
 
 ### Batch
 
-`gwsr batch <service[:version]>` reads NDJSON calls from stdin or `--input FILE`. It sends them in `multipart/mixed` batches of up to 100, and writes one result line per call:
+`gwsr batch <service[:version]>` reads NDJSON calls from stdin or `--input FILE`. It sends them in `multipart/mixed` batches of up to 100, and writes one result line per call, in input order. `id` is optional (a line without one gets its position) but must be unique:
 
 ```bash
 cat <<'EOF' | gwsr batch drive
@@ -399,7 +402,7 @@ EOF
 # {"id":"b","status":404,"body":{"error":{...}}}
 ```
 
-Every call is validated like a normal command (`--allow-unknown-params` and `--allow-unknown-fields` apply). Destructive calls need `--yes`. Failed calls are reported as result lines on stdout. When any call fails, the command exits `1` with reason `batchPartialFailure` after printing every result.
+Every call is validated like a normal command (`--allow-unknown-params` and `--allow-unknown-fields` apply). A line may only carry `id`, `method`, `params` and `json`; any other key, or `json` on a method that takes no request body, is rejected. Destructive calls need `--yes`. With `--sanitize`, each result body is screened by Model Armor before it is printed. Failed calls are reported as result lines on stdout. When any call fails, the command exits `1` with reason `batchPartialFailure` after printing every result.
 
 ## Confirmations
 
@@ -408,7 +411,7 @@ One confirmation gate covers generated methods, `gwsr batch` and every helper.
 | Class | What | Gated |
 |---|---|---|
 | **Destructive** | Any `DELETE` method; `gmail.users.messages.batchDelete`, `calendar.calendars.clear`, `people.people.batchDeleteContacts`, `tasks.tasks.clear`, `drive.files.emptyTrash`; `calendar +delete`, `sheets +clear`, `script +push`, `gmail +filter delete`, `admin +user-suspend`; `drive +share` for owner transfer or writer-level access for a whole domain or anyone with the link | Always |
-| **Outbound** | Actions that notify or grant access to other people, or run code: `gmail +send/+reply/+reply-all/+forward` (not `--draft`), `gmail +unsubscribe`, `chat +send`, `drive +share`, `calendar +insert` with attendees, `+update`, `+rsvp`, `script +run`, `admin +group-add-member`, `admin +user-suspend --unsuspend`, `workflow +file-announce` | Only when `GWSR_REQUIRE_CONFIRM=1` |
+| **Outbound** | Actions that notify or grant access to other people, or run code: `gmail +send/+reply/+reply-all/+forward` (not `--draft`), `gmail +unsubscribe`, `chat +send`, `drive +share`, `calendar +insert` with attendees, `+update`, `+rsvp`, `script +run`, `admin +group-add-member`, `admin +user-suspend --unsuspend`, `workflow +file-announce`; the methods `gmail.users.messages.send`, `gmail.users.drafts.send`, `chat.spaces.messages.create`, `drive.permissions.create`, `drive.permissions.update`, `script.scripts.run`, `directory.members.insert`, `calendar.acl.insert`/`update`/`patch`, `gmail.users.settings.delegates.create`, `gmail.users.settings.updateAutoForwarding`, `gmail.users.settings.forwardingAddresses.create`, `gmail.users.settings.sendAs.create`, `gmail.users.settings.filters.create`, and `calendar.events.insert`/`update`/`patch`/`move`/`quickAdd` when `sendUpdates` is `all`/`externalOnly` or `sendNotifications` is `true` (directly or in `gwsr batch`) | Only when `GWSR_REQUIRE_CONFIRM=1` |
 
 A gated action proceeds without a prompt when `--yes`/`-y` or `--dry-run` is given. On a terminal it asks. Without a terminal it is refused with exit code `7` (`"reason":"confirmationRequired"`) and nothing is sent. Agents should ask the user, then re-run with `--yes`. `GWSR_REQUIRE_CONFIRM` accepts `1`/`true`/`yes`/`on` or `0`/`false`/`no`/`off`; any other value fails every command at startup with a configuration error (exit `8`).
 
@@ -454,7 +457,7 @@ gwsr events +subscribe --target //chat.googleapis.com/spaces/SPACE_ID --event-ty
 
 Helper flag conventions: IDs are `--<noun>-id` (`--document-id`, `--spreadsheet-id`, `--calendar-id`, `--message-id`, `--space-id`, `--script-id`). People and groups are `--email`, `--user`, `--group`, `--member`. Local output is `--output PATH` (`-` for stdout) and never overwrites an existing file without `--overwrite`. Result counts use `--limit N`.
 
-Calendar helpers interpret times without a UTC offset in `--timezone`, falling back to your Google account's time zone. It is fetched from the Calendar settings API and cached for 24 hours in the cache directory. A date-only `--start` creates an all-day event. `calendar +insert` emails attendees by default (`--send-updates all`).
+Calendar helpers interpret times without a UTC offset in `--timezone`, falling back to your Google account's time zone. It is fetched from the Calendar settings API and cached for 24 hours in the cache directory, separately for each profile, credentials file and `--impersonate` user (never for `GWSR_TOKEN`/`GWSR_TOKEN_FILE`). A date-only `--start` creates an all-day event. `calendar +insert` emails attendees by default (`--send-updates all`).
 
 `gmail +watch` and `events +subscribe` stream NDJSON on stdout. Transient failures (408/429/5xx/network) back off with jitter, up to `--max-failures N` consecutive failures (default 10). Pub/Sub messages are acknowledged only after they are written.
 
@@ -476,7 +479,7 @@ gwsr gmail users messages get --params '{"userId":"me","id":"MSG"}' \
 - **`block`:** fails closed. A match prints nothing on stdout and exits `11` (`sanitizationBlocked`). If Model Armor can't be reached, the output is still withheld and the exit code is the cause's own (auth `2`, network `10`, API `1` or `6`).
 - The template name is parsed strictly, and the request always goes to `modelarmor.<location>.rep.googleapis.com`.
 
-`--sanitize` applies to generated methods and to the helpers that return user content (for example `gmail +read`, `+search`, `+triage`, `+watch`, `events +subscribe`, and the app helpers). `gwsr modelarmor +create-template --preset jailbreak` creates a template from the built-in preset.
+`--sanitize` applies to generated methods and to the helpers that return user content (for example `gmail +read`, `+search`, `+triage`, `+watch`, `events +subscribe`, the `workflow` helpers, and the app helpers). `gwsr modelarmor +create-template --preset jailbreak` creates a template from the built-in preset.
 
 ## Configuration
 
@@ -550,7 +553,8 @@ The repository ships 151 [Agent Skills](https://agentskills.io) (`skills/*/SKILL
 
 ```bash
 npx skills add https://github.com/astelmach20/gws-rust                                   # all skills
-npx skills add https://github.com/astelmach20/gws-rust/tree/main/skills/gwsr-gmail       # just one
+npx skills add https://github.com/astelmach20/gws-rust/tree/main/skills/gwsr-shared      # needed by every other skill
+npx skills add https://github.com/astelmach20/gws-rust/tree/main/skills/gwsr-gmail       # then just the ones you want
 ln -s "$(pwd)"/skills/gwsr-* ~/.openclaw/skills/                                      # OpenClaw
 ```
 
