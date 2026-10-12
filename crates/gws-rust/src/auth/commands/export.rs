@@ -43,7 +43,7 @@ pub(super) async fn handle(m: &clap::ArgMatches) -> Result<(), GwsError> {
         let output = crate::args::value::<String>(m, "output")?
             .ok_or_else(|| GwsError::Validation("--unmasked requires --output FILE".into()))?;
         Some(crate::validate::validate_safe_file_path(
-            &output, "--output",
+            output, "--output",
         )?)
     } else {
         None
