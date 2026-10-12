@@ -18,7 +18,7 @@ metadata:
 
 # Set Up Post-Mortem
 
-> **PREREQUISITE:** Load the following skills to execute this recipe: `gwsr-docs`, `gwsr-calendar`, `gwsr-chat`
+> **PREREQUISITE:** Load the following skills to execute this recipe: `gwsr-docs`, `gwsr-calendar`, `gwsr-chat` (install any that are missing with `npx skills add https://github.com/astelmach20/gws-rust/tree/main/skills/<name>`)
 
 Create a Google Docs post-mortem, schedule a Google Calendar review, and notify via Chat.
 
