@@ -272,7 +272,7 @@ async fn token_for(scopes: &[&str], freshness: Freshness) -> anyhow::Result<Stri
 }
 
 /// The `gwsr auth login` command that re-authenticates the active profile.
-fn login_command(env: &AuthEnv) -> String {
+pub(crate) fn login_command(env: &AuthEnv) -> String {
     if env.profile_is_explicit() || env.profile.name != profiles::DEFAULT_PROFILE {
         format!("gwsr auth login --profile {}", env.profile.name)
     } else {
