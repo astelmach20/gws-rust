@@ -63,8 +63,11 @@
               ./Cargo.toml
               ./Cargo.lock
               ./crates
-              # Read by drift tests (env table, CI skill-marker check).
+              # Read by drift tests (env table, CI skill-marker check) and the
+              # documented-examples test (README, CONTEXT, skills).
               ./README.md
+              ./CONTEXT.md
+              ./skills
               ./.github/workflows/ci.yml
             ];
           };

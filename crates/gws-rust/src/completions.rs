@@ -28,50 +28,122 @@ use clap::Command;
 use clap_complete::env::{CompleteEnv, Shells};
 
 use crate::cli_args::CompletionShell;
+use crate::discovery::RestDescription;
 use crate::error::GwsError;
 use crate::services::SERVICES;
 
 /// Environment variable that activates completion mode.
 pub const COMPLETE_VAR: &str = "GWSR_COMPLETE";
 
-/// The first word after the binary name that names a known service.
+/// Whether the global option spelled `word` (`--name` or `-c`, without an
+/// inline `=value`) consumes the next word as its value.
+fn global_takes_value(globals: &[clap::Arg], word: &str) -> bool {
+    if word.contains('=') {
+        return false;
+    }
+    globals.iter().any(|arg| {
+        let named = match word.strip_prefix("--") {
+            Some(long) => arg.get_long() == Some(long),
+            None => word
+                .strip_prefix('-')
+                .and_then(|s| {
+                    let mut chars = s.chars();
+                    chars.next().filter(|_| chars.next().is_none())
+                })
+                .is_some_and(|c| arg.get_short() == Some(c)),
+        };
+        named && arg.get_action().takes_values()
+    })
+}
+
+/// The service token being completed, as typed (`drive`, `drive:v2`,
+/// `youtube:v3`): the first positional word after the binary name, skipping
+/// global options and their values. `None` for a static command.
+fn service_token(words: &[OsString]) -> Option<&str> {
+    let globals = crate::cli_args::global_args();
+    let static_tree = crate::cli_args::command();
+    let mut iter = words.iter().skip(1);
+    while let Some(word) = iter.next() {
+        let word = word.to_str()?;
+        if word == "--" {
+            return None;
+        }
+        if word.starts_with('-') {
+            if global_takes_value(&globals, word) {
+                iter.next();
+            }
+            continue;
+        }
+        return static_tree.find_subcommand(word).is_none().then_some(word);
+    }
+    None
+}
+
+/// The registered service a token names (`drive` or `drive:v2`), if any.
 fn service_word(words: &[OsString]) -> Option<&'static crate::services::ServiceEntry> {
-    words
-        .iter()
-        .skip(1)
-        .filter_map(|w| w.to_str())
-        .filter(|w| !w.starts_with('-'))
-        .find_map(|w| SERVICES.iter().find(|e| e.aliases.contains(&w)))
+    let token = service_token(words)?;
+    let name = token.split_once(':').map_or(token, |(name, _)| name);
+    crate::services::find_service(name)
+}
+
+/// The Discovery document to complete the typed service from: the same API
+/// and version the command itself would load (`--api-version` beats the
+/// `:version` suffix, which beats the registry default). `None` when the
+/// token or version is invalid, or nothing is cached.
+fn active_document(
+    words: &[OsString],
+    token: &str,
+    load_cached: LoadCached<'_>,
+) -> Option<RestDescription> {
+    let prescan = crate::cli_args::prescan(words.get(1..)?);
+    // An invalid spec or version is reported when the command runs; here it
+    // just means there is nothing to complete.
+    let (_, api, version) =
+        crate::parse_service_and_version(token, prescan.api_version.as_deref()).ok()?;
+    crate::service::synthetic_document(&api).or_else(|| load_cached(&api, &version))
 }
 
 /// Static tree plus one subcommand per service. The service being completed
 /// gets its full tree from the Discovery cache when available.
 pub fn completion_command(words: &[OsString]) -> Command {
+    completion_tree(words, &|api, version| {
+        // Completion must never fail loudly inside the shell: an unreadable
+        // cache just means no resource completions.
+        crate::discovery::loader()
+            .ok()
+            .and_then(|l| l.load_cached(api, version).ok())
+            .flatten()
+    })
+}
+
+/// A cached-document lookup by `(api_name, version)`.
+type LoadCached<'a> = &'a dyn Fn(&str, &str) -> Option<RestDescription>;
+
+fn completion_tree(words: &[OsString], load_cached: LoadCached<'_>) -> Command {
+    let token = service_token(words);
     let active = service_word(words);
+    let doc = token.and_then(|t| active_document(words, t, load_cached));
+    // A `<api>:<version>` token is its own subcommand, so clap can walk into it.
+    let versioned = token.filter(|t| t.contains(':'));
     let mut root = crate::cli_args::command();
     for entry in SERVICES {
         let alias = entry.aliases[0];
-        let is_active = active.is_some_and(|a| a.aliases[0] == alias);
-        let cached = if is_active {
-            crate::service::synthetic_document(entry.api_name).or_else(|| {
-                // Completion must never fail loudly inside the shell: an
-                // unreadable cache just means no resource completions.
-                crate::discovery::loader()
-                    .ok()
-                    .and_then(|l| l.load_cached(entry.api_name, entry.version).ok())
-                    .flatten()
-            })
-        } else {
-            None
-        };
-        let sub = match cached {
-            Some(doc) => crate::service::build_command(alias, &doc),
-            None => Command::new(alias),
+        let is_active = versioned.is_none() && active.is_some_and(|a| a.aliases[0] == alias);
+        let sub = match &doc {
+            Some(doc) if is_active => crate::service::build_command(alias, doc),
+            _ => Command::new(alias),
         };
         let sub = sub
             .about(entry.description)
             .aliases(entry.aliases[1..].iter().copied());
         root = root.subcommand(sub);
+    }
+    if let Some(token) = versioned {
+        let sub = match &doc {
+            Some(doc) => crate::service::build_command(token, doc),
+            None => Command::new(token.to_string()),
+        };
+        root = root.subcommand(sub.about(active.map_or("", |e| e.description)));
     }
     root
 }
@@ -97,12 +169,16 @@ pub fn complete_if_requested() -> Result<bool, clap::Error> {
 /// Replace the top-level `auth` passthrough argument with the real `gwsr auth`
 /// tree, which `auth` parses on its own, so completion and man pages cover its
 /// subcommands and flags. The top-level description is kept.
+///
+/// `auth setup` is a passthrough inside that tree as well (it parses its own
+/// flags), so it is replaced by the command `setup` actually parses with.
 fn with_auth_tree(root: Command) -> Command {
     root.mut_subcommands(|sub| {
         if sub.get_name() != "auth" {
             return sub;
         }
-        let auth = crate::auth::commands::auth_command();
+        let auth = crate::auth::commands::auth_command()
+            .mut_subcommand("setup", |_| crate::auth::setup::setup_command());
         match sub.get_about() {
             Some(about) => auth.about(about.clone()),
             None => auth,
@@ -198,6 +274,23 @@ mod tests {
             Some("drive")
         );
         assert!(service_word(&words(&["gwsr", "schema"])).is_none());
+        // A static command's arguments are not a service.
+        assert!(service_token(&words(&["gwsr", "schema", "drive:v2.files.list"])).is_none());
+        // Values of global options are skipped.
+        assert_eq!(
+            service_token(&words(&[
+                "gwsr",
+                "--profile",
+                "work",
+                "--format=csv",
+                "drive:v2"
+            ])),
+            Some("drive:v2")
+        );
+        assert_eq!(
+            service_word(&words(&["gwsr", "--jq", ".x", "-v", "gmail"])).map(|e| e.aliases[0]),
+            Some("gmail")
+        );
         assert!(
             service_word(&words(&["drive"])).is_none(),
             "argv[0] is not a service"
@@ -219,6 +312,83 @@ mod tests {
         }
     }
 
+    /// A cache holding only `drive` `v2`, whose one resource is `revisionsV2`.
+    fn drive_v2_only(api: &str, version: &str) -> Option<RestDescription> {
+        (api == "drive" && version == "v2").then(|| {
+            let mut res = crate::discovery::RestResource::default();
+            res.methods.insert(
+                "get".into(),
+                crate::discovery::RestMethod {
+                    http_method: "GET".into(),
+                    ..Default::default()
+                },
+            );
+            let mut doc = RestDescription {
+                name: "drive".into(),
+                version: "v2".into(),
+                ..Default::default()
+            };
+            doc.resources.insert("revisionsV2".into(), res);
+            doc
+        })
+    }
+
+    fn has_resource(cmd: &Command, service: &str, resource: &str) -> bool {
+        cmd.find_subcommand(service)
+            .is_some_and(|s| s.find_subcommand(resource).is_some())
+    }
+
+    #[test]
+    fn api_version_flag_selects_the_cached_document() {
+        for ws in [
+            &["gwsr", "drive", "--api-version", "v2", ""][..],
+            &["gwsr", "--api-version=v2", "drive", ""],
+            &["gwsr", "drive:v1", "--api-version", "v2", ""],
+        ] {
+            let cmd = completion_tree(&words(ws), &drive_v2_only);
+            let typed = ws.iter().find(|w| w.starts_with("drive")).unwrap();
+            assert!(has_resource(&cmd, typed, "revisionsV2"), "{ws:?}");
+        }
+    }
+
+    #[test]
+    fn service_version_suffix_completes_that_version() {
+        let cmd = completion_tree(&words(&["gwsr", "drive:v2", ""]), &drive_v2_only);
+        assert!(has_resource(&cmd, "drive:v2", "revisionsV2"));
+        // Any `<api>:<version>`, registered or not, is completed the same way.
+        let cmd = completion_tree(&words(&["gwsr", "drive:v3", ""]), &drive_v2_only);
+        assert!(cmd.find_subcommand("drive:v3").is_some());
+        assert!(!has_resource(&cmd, "drive:v3", "revisionsV2"));
+    }
+
+    #[test]
+    fn default_version_is_used_without_an_override() {
+        let seen = std::cell::RefCell::new(Vec::new());
+        let record = |api: &str, version: &str| {
+            seen.borrow_mut().push(format!("{api}:{version}"));
+            None
+        };
+        completion_tree(&words(&["gwsr", "drive", ""]), &record);
+        assert_eq!(*seen.borrow(), vec!["drive:v3".to_string()]);
+    }
+
+    #[test]
+    fn invalid_version_completes_nothing_and_does_not_fail() {
+        let seen = std::cell::RefCell::new(Vec::new());
+        let record = |api: &str, version: &str| {
+            seen.borrow_mut().push(format!("{api}:{version}"));
+            None
+        };
+        for ws in [
+            &["gwsr", "drive", "--api-version", "../x", ""][..],
+            &["gwsr", "drive:", ""],
+        ] {
+            let cmd = completion_tree(&words(ws), &record);
+            assert!(cmd.find_subcommand("drive").is_some(), "{ws:?}");
+        }
+        assert!(seen.borrow().is_empty(), "{:?}", seen.borrow());
+    }
+
     #[test]
     fn auth_tree_replaces_the_passthrough_and_stays_valid() {
         let cmd = with_auth_tree(completion_command(&words(&["gwsr", "auth"])));
@@ -233,6 +403,17 @@ mod tests {
             auth.get_arguments().all(|a| a.get_id() != "args"),
             "the passthrough argument is gone"
         );
+        let setup = auth.find_subcommand("setup").unwrap();
+        assert!(
+            setup.get_arguments().all(|a| a.get_id() != "args"),
+            "setup's passthrough argument is gone"
+        );
+        for flag in ["project", "login", "dry-run", "non-interactive"] {
+            assert!(
+                setup.get_arguments().any(|a| a.get_long() == Some(flag)),
+                "{flag}"
+            );
+        }
         let top = crate::cli_args::command();
         assert_eq!(
             auth.get_about().map(ToString::to_string),

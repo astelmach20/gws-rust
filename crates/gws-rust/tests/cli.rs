@@ -1111,6 +1111,47 @@ fn dynamic_completion_uses_cached_discovery_documents() {
 }
 
 #[test]
+fn dynamic_completion_follows_the_selected_api_version() {
+    let env = Env::new();
+    env.seed_drive("v3 only");
+    let doc = json!({
+        "name": "drive",
+        "version": "v2",
+        "rootUrl": "https://www.googleapis.com/",
+        "servicePath": "drive/v2/",
+        "resources": {"revisionsV2": {"methods": {"get": {
+            "id": "drive.revisionsV2.get", "httpMethod": "GET", "path": "revisions"
+        }}}}
+    });
+    let v2 = env.cache_dir().join("discovery").join("drive+v2.json");
+    std::fs::write(&v2, serde_json::to_string(&doc).unwrap()).unwrap();
+    let complete = |args: &[&str]| {
+        let index = (args.len() - 1).to_string();
+        let mut argv = vec!["--"];
+        argv.extend_from_slice(args);
+        let out = env
+            .cmd()
+            .env("GWSR_COMPLETE", "bash")
+            .env("_CLAP_COMPLETE_INDEX", index)
+            .env("_CLAP_COMPLETE_COMP_TYPE", "9")
+            .env("_CLAP_COMPLETE_SPACE", "true")
+            .args(&argv)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{}", stderr_of(&out));
+        stdout_of(&out)
+    };
+    assert_eq!(
+        complete(&["gwsr", "drive", "--api-version", "v2", "rev"]),
+        "revisionsV2"
+    );
+    assert_eq!(complete(&["gwsr", "drive:v2", "rev"]), "revisionsV2");
+    // The default version still completes from its own document.
+    assert_eq!(complete(&["gwsr", "drive", "rev"]), "");
+    assert_eq!(complete(&["gwsr", "drive", "fi"]), "files");
+}
+
+#[test]
 fn cache_clear_reports_removed_documents() {
     let env = Env::new();
     env.seed_drive("x");
@@ -1164,6 +1205,48 @@ fn auth_subcommands_complete_and_get_man_pages() {
     for page in ["gwsr-auth-login.1", "gwsr-auth-status.1", "gwsr-auth-use.1"] {
         assert!(env.work_dir().join("man").join(page).exists(), "{page}");
     }
+}
+
+/// `auth setup` parses its own flags too: completion and its man page must
+/// show them, not the passthrough `ARGS`.
+#[test]
+fn auth_setup_flags_complete_and_get_documented() {
+    let env = Env::new();
+    let complete = |words: &[&str]| {
+        let out = env
+            .cmd()
+            .env("GWSR_COMPLETE", "bash")
+            .env("_CLAP_COMPLETE_INDEX", (words.len() - 1).to_string())
+            .env("_CLAP_COMPLETE_COMP_TYPE", "9")
+            .env("_CLAP_COMPLETE_SPACE", "true")
+            .arg("--")
+            .args(words)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{out:?}");
+        String::from_utf8(out.stdout).unwrap()
+    };
+    assert_eq!(
+        complete(&["gwsr", "auth", "setup", "--non"]),
+        "--non-interactive"
+    );
+    // `--profile` is a global `auth` flag, which setup accepts too.
+    assert_eq!(
+        complete(&["gwsr", "auth", "setup", "--pro"]),
+        "--project\n--profile"
+    );
+    let flags = complete(&["gwsr", "auth", "setup", "--"]);
+    for flag in ["--project", "--login", "--dry-run", "--non-interactive"] {
+        assert!(flags.lines().any(|l| l == flag), "{flag} missing: {flags}");
+    }
+
+    env.cmd()
+        .args(["dev", "man", "--output-dir", "man"])
+        .assert()
+        .success();
+    let page = std::fs::read_to_string(env.work_dir().join("man/gwsr-auth-setup.1")).unwrap();
+    assert!(page.contains("non\\-interactive"), "{page}");
+    assert!(!page.contains("ARGS"), "{page}");
 }
 
 // ── generate-skills ─────────────────────────────────────────────────────
@@ -1774,6 +1857,104 @@ async fn batch_results_are_screened_by_model_armor() {
         stdout_of(&out)
     );
     assert!(!out.status.success());
+}
+
+/// `--dry-run` before `auth` must not be silently dropped: `gwsr --dry-run
+/// auth logout` used to delete the profile's credentials (and revoke the
+/// refresh token) for real.
+#[test]
+fn global_dry_run_is_not_ignored_by_auth_commands() {
+    let env = Env::new();
+    let profile = env.config_dir().join("profiles").join("default");
+    std::fs::create_dir_all(&profile).unwrap();
+    let creds = profile.join("credentials.enc");
+    let meta = profile.join("profile.json");
+    std::fs::write(&creds, b"GWSR\x01not-really-encrypted").unwrap();
+    std::fs::write(&meta, b"{}").unwrap();
+
+    for args in [
+        &["--dry-run", "auth", "logout", "--no-revoke"][..],
+        &["--dry-run", "auth", "status", "--offline"][..],
+        &["--dry-run", "auth", "use", "default"][..],
+    ] {
+        let out = env.cmd().args(args).output().unwrap();
+        assert_eq!(out.status.code(), Some(3), "{args:?}: {out:?}");
+        assert!(out.stdout.is_empty(), "{args:?}: {out:?}");
+        let err: Value = serde_json::from_slice(&out.stderr).unwrap();
+        assert!(
+            err["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("--dry-run"),
+            "{args:?}: {err}"
+        );
+    }
+    assert!(
+        creds.exists(),
+        "--dry-run auth logout deleted the credentials"
+    );
+    assert!(meta.exists(), "--dry-run auth logout deleted profile.json");
+
+    // `auth setup` has a dry-run mode: the global flag reaches it (gcloud is
+    // kept off PATH so nothing can run).
+    let out = env
+        .cmd()
+        .env("PATH", env.work_dir())
+        .args(["--dry-run", "auth", "setup", "--non-interactive"])
+        .output()
+        .unwrap();
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("DRY RUN"),
+        "{out:?}"
+    );
+}
+
+// ── batch output honours the global output options ─────────────────────
+
+#[tokio::test(flavor = "multi_thread")]
+async fn batch_results_honour_jq_and_format() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    let parts = "--b\r\nContent-Type: application/http\r\nContent-ID: <response-item-a>\r\n\r\n\
+         HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{\"snippet\":\"first\"}\r\n\
+         --b\r\nContent-Type: application/http\r\nContent-ID: <response-item-b>\r\n\r\n\
+         HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{\"snippet\":\"second\"}\r\n--b--\r\n";
+    Mock::given(method("POST"))
+        .and(path("/batch/gmail/v1"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_raw(parts.as_bytes().to_vec(), "multipart/mixed; boundary=b"),
+        )
+        .mount(&server)
+        .await;
+    let env = Env::new();
+    seed_gmail_get(&env);
+    let input = "{\"id\":\"a\",\"method\":\"users.messages.get\",\"params\":{\"userId\":\"me\",\"id\":\"m1\"}}\n\
+                 {\"id\":\"b\",\"method\":\"users.messages.get\",\"params\":{\"userId\":\"me\",\"id\":\"m2\"}}\n";
+    let run = |extra: &[&str]| {
+        let mut c = env.cmd();
+        c.env("GWSR_TOKEN", "test-token")
+            .env("GWSR_API_BASE_URL", server.uri())
+            .args(["batch", "gmail"])
+            .args(extra)
+            .write_stdin(input);
+        c.output().unwrap()
+    };
+
+    // --jq is applied to every result line, as for any other command.
+    let out = run(&["--jq", ".body.snippet"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert_eq!(stdout_of(&out), "first\nsecond\n");
+
+    // --format csv prints one header, then one row per call.
+    let out = run(&["--format", "csv", "--columns", "id,status,body.snippet"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert_eq!(
+        stdout_of(&out),
+        "id,status,body.snippet\na,200,first\nb,200,second\n"
+    );
 }
 
 // ── -o/--output pointing at a directory ─────────────────────────────────

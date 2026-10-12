@@ -54,6 +54,14 @@ fn gwsr(config: &Path) -> Command {
         .env("GWSR_CACHE_DIR", config.join("cache"))
         .env("HOME", config)
         .current_dir(config);
+    // Keep what the platform needs to build an HTTP client: Winsock fails to
+    // load without `SystemRoot`, and the TLS setup in a Nix build finds its
+    // roots through the certificate variables.
+    for key in ["SystemRoot", "SSL_CERT_FILE", "NIX_SSL_CERT_FILE"] {
+        if let Some(value) = std::env::var_os(key) {
+            cmd.env(key, value);
+        }
+    }
     cmd
 }
 
@@ -239,6 +247,38 @@ fn outbound_helper_is_gated_only_under_policy() {
 }
 
 #[test]
+fn agenda_dry_run_shows_calendar_list_page_size() {
+    let dir = setup();
+    let out = gwsr(dir.path())
+        .args([
+            "calendar",
+            "+agenda",
+            "--today",
+            "--timezone",
+            "UTC",
+            "--dry-run",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let v = stdout_json(&out);
+    let list = &v["requests"][0];
+    assert!(
+        list["url"]
+            .as_str()
+            .unwrap()
+            .ends_with("/users/me/calendarList"),
+        "{v}"
+    );
+    // The real request asks for 250 calendars per page; the plan must too.
+    assert_eq!(list["query_params"]["maxResults"], "250", "{v}");
+}
+
+#[test]
 fn dry_run_bypasses_gate_and_prints_json() {
     let dir = setup();
     let out = gwsr(dir.path())
@@ -309,6 +349,50 @@ fn upload_rejects_paths_outside_cwd() {
     assert_eq!(out.status.code(), Some(3));
 }
 
+#[test]
+fn gmail_helper_output_honors_sanitize_block_mode() {
+    let dir = setup();
+    seed(dir.path(), "gmail", "v1", "");
+    let args = [
+        "gmail",
+        "+resolve-url",
+        "--no-verify",
+        "--url",
+        "18f1a2b3c4d5e6f7",
+    ];
+    // Without --sanitize the result is printed.
+    let out = gwsr(dir.path()).args(args).output().unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(stdout_json(&out)["id"], "18f1a2b3c4d5e6f7");
+
+    // With --sanitize in block mode the output must be screened. Model Armor
+    // can't be reached here (no credentials), so block mode fails closed and
+    // prints nothing instead of silently skipping the screen.
+    let out = gwsr(dir.path())
+        .args(args)
+        .args([
+            "--sanitize",
+            "projects/my-project/locations/us-central1/templates/t",
+        ])
+        .env("GWSR_SANITIZE_MODE", "block")
+        .output()
+        .unwrap();
+    assert!(
+        !out.status.success(),
+        "block mode printed unscreened output: {}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    assert!(
+        out.stdout.is_empty(),
+        "{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+}
+
 /// `GWSR_API_BASE_URL` routes workflow requests to the configured endpoint,
 /// exactly like generated methods and the app helpers.
 #[test]
@@ -358,6 +442,91 @@ fn workflow_requests_honour_api_base_override() {
             .collect();
         let expected: Vec<String> = paths.iter().map(|p| format!("{base}{p}")).collect();
         assert_eq!(urls, expected, "{args:?}");
+    }
+}
+
+/// A workflow `--dry-run` plan lists every query parameter the real run
+/// sends; values only known at run time are `<placeholders>`.
+#[test]
+fn workflow_dry_run_plans_list_every_query_parameter() {
+    let dir = setup();
+    let events = json!({
+        "timeMin": "<start of today in the account time zone>",
+        "timeMax": "<start of tomorrow in the account time zone>",
+        "singleEvents": "true",
+        "orderBy": "startTime",
+        "maxResults": "250",
+    });
+    let cases: [(&[&str], Vec<Value>); 4] = [
+        (
+            &["workflow", "+standup-report", "--dry-run"],
+            vec![
+                events.clone(),
+                json!({"showCompleted": "false", "maxResults": "100"}),
+            ],
+        ),
+        (
+            &["workflow", "+weekly-digest", "--dry-run"],
+            vec![
+                json!({
+                    "timeMin": "<now>",
+                    "timeMax": "<now + 7 days>",
+                    "singleEvents": "true",
+                    "orderBy": "startTime",
+                    "maxResults": "250",
+                }),
+                json!({"q": "is:unread", "maxResults": "1"}),
+            ],
+        ),
+        (
+            &[
+                "workflow",
+                "+email-to-task",
+                "--message-id",
+                "M",
+                "--tasklist-id",
+                "T",
+                "--dry-run",
+            ],
+            vec![
+                json!({"format": "metadata", "metadataHeaders": "Subject"}),
+                Value::Null,
+            ],
+        ),
+        (
+            &[
+                "workflow",
+                "+file-announce",
+                "--file-id",
+                "F",
+                "--space-id",
+                "S",
+                "--dry-run",
+            ],
+            vec![
+                json!({"fields": "id,name,webViewLink", "supportsAllDrives": "true"}),
+                json!({"requestId": "<random UUID>"}),
+            ],
+        ),
+    ];
+    for (args, queries) in cases {
+        let out = gwsr(dir.path()).args(args).output().unwrap();
+        assert!(out.status.success(), "{args:?}: {out:?}");
+        let plan = stdout_json(&out);
+        let got: Vec<Value> = plan["requests"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["query_params"].clone())
+            .collect();
+        assert_eq!(got, queries, "{args:?}");
+        if args[1] == "+email-to-task" {
+            // The real task's notes end with the message snippet.
+            assert_eq!(
+                plan["requests"][1]["body"]["notes"],
+                "From email: M\n\n<snippet of the message>"
+            );
+        }
     }
 }
 
@@ -441,6 +610,251 @@ async fn text_responses_of_generated_methods_are_screened_by_model_armor() {
     assert!(!out.status.success());
 }
 
+/// `GWSR_API_BASE_URL` routes Workspace Events requests to the configured
+/// endpoint, like generated methods. The closed-port proxy makes a request
+/// that escapes to Google fail instead of reaching the network.
+#[tokio::test(flavor = "multi_thread")]
+async fn events_helpers_honour_api_base_override() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/subscriptions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let dir = tempfile::tempdir().unwrap();
+    seed(dir.path(), "workspaceevents", "v1", "");
+    let out = gwsr(dir.path())
+        .env("GWSR_TOKEN", "test-token")
+        .env("GWSR_API_BASE_URL", format!("{}/", server.uri()))
+        .env("HTTPS_PROXY", "http://127.0.0.1:9")
+        .args([
+            "events",
+            "+renew",
+            "--all",
+            "--event-types",
+            "google.workspace.chat.message.v1.created",
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "events +renew: {out:?}");
+}
+
+/// With `GWSR_RESTRICT_PATHS=cwd`, the files a helper writes *under* a
+/// validated `--dir` must stay under the current directory too: a remote file
+/// name that walks through a symlinked sub-directory must not escape it.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn restrict_paths_confines_files_written_under_an_output_dir() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/projects/S/content"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"files": [
+            {"name": "lib/Code", "type": "SERVER_JS", "source": "function f() {}"}
+        ]})))
+        .mount(&server)
+        .await;
+
+    let dir = setup();
+    let outside = tempfile::tempdir().unwrap();
+    std::fs::create_dir(dir.path().join("src")).unwrap();
+    std::os::unix::fs::symlink(outside.path(), dir.path().join("src").join("lib")).unwrap();
+
+    let out = gwsr(dir.path())
+        .env("GWSR_TOKEN", "test-token")
+        .env("GWSR_API_BASE_URL", server.uri())
+        .env("GWSR_RESTRICT_PATHS", "cwd")
+        .args(["script", "+pull", "--script-id", "S", "--dir", "src"])
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let escaped: Vec<_> = std::fs::read_dir(outside.path())
+        .unwrap()
+        .map(|e| e.unwrap().file_name())
+        .collect();
+    assert!(
+        escaped.is_empty(),
+        "+pull wrote outside the current directory despite GWSR_RESTRICT_PATHS=cwd: {escaped:?}; stderr: {stderr}"
+    );
+    assert_eq!(out.status.code(), Some(3), "{stderr}");
+    assert!(stderr.contains("outside the current directory"), "{stderr}");
+}
+
+/// A local HTTP server for `drive +download`: file metadata answers normally,
+/// but the `alt=media` body stalls after its first bytes (it announces 1000
+/// bytes, sends 5, then goes quiet without closing the connection).
+fn stalling_drive_server() -> String {
+    use std::io::{BufRead, BufReader, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { return };
+            std::thread::spawn(move || {
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut request_line = String::new();
+                if reader.read_line(&mut request_line).is_err() {
+                    return;
+                }
+                loop {
+                    let mut line = String::new();
+                    match reader.read_line(&mut line) {
+                        Ok(0) | Err(_) => return,
+                        Ok(_) if line == "\r\n" => break,
+                        Ok(_) => {}
+                    }
+                }
+                let response = if request_line.contains("alt=media") {
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\n\
+                     Content-Length: 1000\r\n\r\nhello"
+                        .to_string()
+                } else {
+                    let body =
+                        r#"{"id":"F1","name":"f.bin","mimeType":"application/octet-stream"}"#;
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+                         Content-Length: {}\r\n\r\n{body}",
+                        body.len()
+                    )
+                };
+                stream.write_all(response.as_bytes()).unwrap();
+                stream.flush().unwrap();
+                // Keep the connection open (and the media body unfinished).
+                std::thread::sleep(std::time::Duration::from_secs(60));
+            });
+        }
+    });
+    format!("http://{addr}")
+}
+
+/// `--output -` streams the body to stdout; a stalled body must hit the
+/// `--timeout`/`GWSR_TIMEOUT` idle limit and fail as a network error (exit
+/// 10), exactly like a download to a file, instead of hanging forever.
+#[test]
+fn drive_download_to_stdout_honors_the_idle_timeout() {
+    let dir = setup();
+    let base = stalling_drive_server();
+    for output in ["copy.bin", "-"] {
+        let started = std::time::Instant::now();
+        let out = gwsr(dir.path())
+            .env("GWSR_TOKEN", "test-token")
+            .env("GWSR_API_BASE_URL", &base)
+            .env("GWSR_TIMEOUT", "1")
+            .args(["drive", "+download", "--file-id", "F1", "--output", output])
+            .timeout(std::time::Duration::from_secs(20))
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(15),
+            "--output {output}: a stalled download body was never timed out \
+             (killed after {:?}); stderr: {stderr}",
+            started.elapsed()
+        );
+        assert_eq!(out.status.code(), Some(10), "--output {output}: {stderr}");
+        assert!(
+            stderr.contains("no data received"),
+            "--output {output}: {stderr}"
+        );
+    }
+}
+
+/// A helper's `--dry-run` plan must list every query parameter the real
+/// request sends.
+#[test]
+fn dry_run_plan_keeps_flag_only_query_parameter() {
+    let dir = setup();
+    seed(dir.path(), "gmail", "v1", "gmail/v1/");
+    let out = gwsr(dir.path())
+        .args([
+            "gmail",
+            "+search",
+            "--query",
+            "x",
+            "--include-spam-trash",
+            "--dry-run",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let v = stdout_json(&out);
+    assert_eq!(
+        v["requests"][0]["query_params"]["includeSpamTrash"], "true",
+        "{v}"
+    );
+}
+
+#[test]
+fn dry_run_plan_keeps_repeated_query_keys() {
+    let dir = setup();
+    seed(dir.path(), "people", "v1", "");
+    let out = gwsr(dir.path())
+        .args([
+            "people",
+            "+find",
+            "--query",
+            "bob",
+            "--directory",
+            "--dry-run",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let v = stdout_json(&out);
+    assert_eq!(
+        v["requests"][0]["query_params"]["sources"],
+        json!([
+            "DIRECTORY_SOURCE_TYPE_DOMAIN_PROFILE",
+            "DIRECTORY_SOURCE_TYPE_DOMAIN_CONTACT"
+        ]),
+        "{v}"
+    );
+}
+
+#[test]
+fn gmail_unsubscribe_dry_run_needs_no_credentials() {
+    // README/CONTEXT: `--dry-run` loads no credentials and sends nothing.
+    // No credential source exists in this isolated environment.
+    let dir = setup();
+    seed(dir.path(), "gmail", "v1", "");
+    let out = gwsr(dir.path())
+        .args(["gmail", "+unsubscribe", "--message-id", "M1", "--dry-run"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "exit {:?}: {}",
+        out.status.code(),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let v = stdout_json(&out);
+    assert_eq!(v["dry_run"], true);
+    let reqs = v["requests"].as_array().unwrap();
+    assert_eq!(reqs.len(), 2, "{v}");
+    assert_eq!(reqs[0]["method"], "GET");
+    assert_eq!(
+        reqs[0]["url"],
+        "https://gmail.googleapis.com/gmail/v1/users/me/messages/M1"
+    );
+    assert_eq!(reqs[0]["query_params"]["format"], "metadata");
+    assert_eq!(reqs[1]["method"], "POST");
+    assert_eq!(reqs[1]["body"], "List-Unsubscribe=One-Click");
+}
+
 #[test]
 fn gmail_threading_helpers_reject_non_api_message_ids() {
     let dir = setup();
@@ -481,4 +895,60 @@ fn gmail_threading_helpers_reject_non_api_message_ids() {
             "{raw}"
         );
     }
+}
+
+#[test]
+fn gmail_filter_forward_is_gated_under_policy() {
+    let dir = setup();
+    seed(dir.path(), "gmail", "v1", "");
+    let create = |extra: &[&str]| {
+        let mut args = vec!["gmail", "+filter", "create", "--from", "boss@example.com"];
+        args.extend_from_slice(extra);
+        gwsr(dir.path())
+            .env("GWSR_REQUIRE_CONFIRM", "1")
+            .args(args)
+            .output()
+            .unwrap()
+    };
+
+    // A filter that forwards mail sends it to someone else: under the
+    // policy it needs --yes, exactly like `gmail +forward`.
+    let out = create(&["--forward", "fwd@example.com"]);
+    assert_eq!(
+        out.status.code(),
+        Some(7),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(out.stdout.is_empty());
+    let err: Value = serde_json::from_slice(&out.stderr).unwrap();
+    assert_eq!(err["error"]["reason"], "confirmationRequired", "{err}");
+    assert!(
+        err["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("fwd@example.com"),
+        "{err}"
+    );
+
+    // --yes confirms it (shown with --dry-run, which never sends anything).
+    let out = create(&["--forward", "fwd@example.com", "--yes", "--dry-run"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let plan = stdout_json(&out);
+    assert_eq!(
+        plan["requests"][0]["body"]["action"]["forward"],
+        "fwd@example.com"
+    );
+
+    // A filter that only labels or archives mail is not outbound.
+    let out = create(&["--archive", "--dry-run"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 }

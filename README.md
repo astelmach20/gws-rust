@@ -308,7 +308,7 @@ The fields are `code`, `message`, `reason` and `retryable`, plus `hint` when the
 | `8` | Configuration error (`configError`): an invalid environment variable, `config.toml`, profile name or OAuth client file |
 | `9` | Credential store error (`credentialStoreError`): the OS keyring, key file or stored credentials can't be read, written or decrypted |
 | `10` | Network error (`networkError`): no response (connection, DNS, TLS, timeout). Not marked retryable, because a non-idempotent call may already have been applied; check before retrying |
-| `11` | Blocked by Model Armor (`sanitizationBlocked`): `--sanitize` in `block` mode matched the output, which was withheld. The API request itself succeeded |
+| `11` | Blocked by Model Armor (`sanitizationBlocked`): `--sanitize` in `block` mode matched. Usually the output matched and was withheld after the API request succeeded; for `gmail` helpers that send or create something (`+send`, `+reply`, `+reply-all`, `+forward`, `+filter create`, `+unsubscribe`) the outgoing content matched and nothing was sent |
 
 Exit code 5 also covers internal programming errors, such as a command reading an argument it doesn't define.
 
@@ -402,7 +402,7 @@ EOF
 # {"id":"b","status":404,"body":{"error":{...}}}
 ```
 
-Every call is validated like a normal command (`--allow-unknown-params` and `--allow-unknown-fields` apply). A line may only carry `id`, `method`, `params` and `json`; any other key, or `json` on a method that takes no request body, is rejected. Destructive calls need `--yes`. With `--sanitize`, each result body is screened by Model Armor before it is printed. Failed calls are reported as result lines on stdout. When any call fails, the command exits `1` with reason `batchPartialFailure` after printing every result.
+Every call is validated like a normal command (`--allow-unknown-params` and `--allow-unknown-fields` apply). A line may only carry `id`, `method`, `params` and `json`; any other key, or `json` on a method that takes no request body, is rejected. Destructive calls need `--yes`. With `--sanitize`, each result body is screened by Model Armor before it is printed. `--jq`, `--format` and `--columns` apply to every result line, as they do to a `--page-all` stream. Failed calls are reported as result lines on stdout. When any call fails, the command exits `1` with reason `batchPartialFailure` after printing every result.
 
 ## Confirmations
 
@@ -411,7 +411,7 @@ One confirmation gate covers generated methods, `gwsr batch` and every helper.
 | Class | What | Gated |
 |---|---|---|
 | **Destructive** | Any `DELETE` method; `gmail.users.messages.batchDelete`, `calendar.calendars.clear`, `people.people.batchDeleteContacts`, `tasks.tasks.clear`, `drive.files.emptyTrash`; `calendar +delete`, `sheets +clear`, `script +push`, `gmail +filter delete`, `admin +user-suspend`; `drive +share` for owner transfer or writer-level access for a whole domain or anyone with the link | Always |
-| **Outbound** | Actions that notify or grant access to other people, or run code: `gmail +send/+reply/+reply-all/+forward` (not `--draft`), `gmail +unsubscribe`, `chat +send`, `drive +share`, `calendar +insert` with attendees, `+update`, `+rsvp`, `script +run`, `admin +group-add-member`, `admin +user-suspend --unsuspend`, `workflow +file-announce`; the methods `gmail.users.messages.send`, `gmail.users.drafts.send`, `chat.spaces.messages.create`, `drive.permissions.create`, `drive.permissions.update`, `script.scripts.run`, `directory.members.insert`, `calendar.acl.insert`/`update`/`patch`, `gmail.users.settings.delegates.create`, `gmail.users.settings.updateAutoForwarding`, `gmail.users.settings.forwardingAddresses.create`, `gmail.users.settings.sendAs.create`, `gmail.users.settings.filters.create`, and `calendar.events.insert`/`update`/`patch`/`move`/`quickAdd` when `sendUpdates` is `all`/`externalOnly` or `sendNotifications` is `true` (directly or in `gwsr batch`) | Only when `GWSR_REQUIRE_CONFIRM=1` |
+| **Outbound** | Actions that notify or grant access to other people, or run code: `gmail +send/+reply/+reply-all/+forward` (not `--draft`), `gmail +unsubscribe`, `gmail +filter create --forward`, `chat +send`, `drive +share`, `calendar +insert` with attendees, `+update`, `+rsvp`, `script +run`, `admin +group-add-member`, `admin +user-suspend --unsuspend`, `workflow +file-announce`; the methods `gmail.users.messages.send`, `gmail.users.drafts.send`, `chat.spaces.messages.create`, `drive.permissions.create`, `drive.permissions.update`, `script.scripts.run`, `directory.members.insert`, `calendar.acl.insert`/`update`/`patch`, `gmail.users.settings.delegates.create`, `gmail.users.settings.updateAutoForwarding`, `gmail.users.settings.forwardingAddresses.create`, `gmail.users.settings.sendAs.create`, `gmail.users.settings.filters.create`, and `calendar.events.insert`/`update`/`patch`/`move`/`quickAdd` when `sendUpdates` is `all`/`externalOnly` or `sendNotifications` is `true` (directly or in `gwsr batch`) | Only when `GWSR_REQUIRE_CONFIRM=1` |
 
 A gated action proceeds without a prompt when `--yes`/`-y` or `--dry-run` is given. On a terminal it asks. Without a terminal it is refused with exit code `7` (`"reason":"confirmationRequired"`) and nothing is sent. Agents should ask the user, then re-run with `--yes`. `GWSR_REQUIRE_CONFIRM` accepts `1`/`true`/`yes`/`on` or `0`/`false`/`no`/`off`; any other value fails every command at startup with a configuration error (exit `8`).
 
@@ -445,12 +445,12 @@ Helpers are hand-written commands prefixed with `+`, so they never collide with 
 gwsr gmail +send --to alice@example.com --subject 'Hello' --body 'Hi Alice' --attach report.pdf
 gwsr gmail +reply --message-id 18f1a2b3c4d --body 'Thanks!'
 gwsr gmail +search --query 'from:billing newer_than:7d' --max 20
-gwsr drive +upload --file ./report.pdf --folder-id FOLDER_ID --convert
+gwsr drive +upload --file ./report.docx --folder-id FOLDER_ID --convert
 gwsr drive +export --file-id DOC_ID --to pdf --output report.pdf
 gwsr docs +write --document-id DOC_ID --text-file notes.md --markdown
 gwsr sheets +append --spreadsheet-id SHEET_ID --range 'Sheet2!A1' --values 'Alice,95'
 gwsr calendar +insert --summary 'Standup' --start '2026-06-17T09:00' --duration 30m --attendee bob@example.com
-gwsr calendar +freebusy --start 2026-06-17 --duration 5d --slot 30m --working-hours 09:00-17:00
+gwsr calendar +freebusy --start 2026-06-17 --end 2026-06-22 --slot 30m --working-hours 09:00-17:00
 gwsr tasks +add --title 'File taxes' --due 2026-04-15
 gwsr events +subscribe --target //chat.googleapis.com/spaces/SPACE_ID --event-types google.workspace.chat.message.v1.created --project my-project
 ```
@@ -467,19 +467,25 @@ Calendar helpers interpret times without a UTC offset in `--timezone`, falling b
 
 ```bash
 gwsr gmail users messages get --params '{"userId":"me","id":"MSG"}' \
-  --sanitize projects/P/locations/us-central1/templates/T
+  --sanitize projects/my-project/locations/us-central1/templates/my-tmpl
 ```
 
 | Setting | Values |
 |---|---|
-| `--sanitize TEMPLATE` / `GWSR_SANITIZE_TEMPLATE` / `sanitize_template` | `projects/P/locations/L/templates/T` |
+| `--sanitize TEMPLATE` / `GWSR_SANITIZE_TEMPLATE` / `sanitize_template` | `projects/PROJECT/locations/LOCATION/templates/TEMPLATE` |
 | `GWSR_SANITIZE_MODE` / `sanitize_mode` | `warn` (default) or `block`. Any other value is an error |
 
 - **`warn`:** output is printed. A match or a sanitization failure adds a `_sanitization` annotation and a warning on stderr.
 - **`block`:** fails closed. A match prints nothing on stdout and exits `11` (`sanitizationBlocked`). If Model Armor can't be reached, the output is still withheld and the exit code is the cause's own (auth `2`, network `10`, API `1` or `6`).
 - The template name is parsed strictly, and the request always goes to `modelarmor.<location>.rep.googleapis.com`.
 
-`--sanitize` applies to generated methods and to the helpers that return user content (for example `gmail +read`, `+search`, `+triage`, `+watch`, `events +subscribe`, the `workflow` helpers, and the app helpers). `gwsr modelarmor +create-template --preset jailbreak` creates a template from the built-in preset.
+`--sanitize` applies to generated methods and to the helpers that return user content (for example `gmail +read`, `+search`, `+triage`, `+watch`, `events +subscribe`, the `workflow` helpers, and the app helpers). Every `gmail` helper screens its printed result, except `+attachments`, which rejects `--sanitize` because binary files cannot be scanned, and the helpers that send or create something:
+
+- `gmail +send`, `+reply`, `+reply-all` and `+forward` (including `--draft`) screen the outgoing subject and body, quoted or forwarded text included, **before** sending. `+filter create` screens the new filter before creating it, and `+unsubscribe` screens the unsubscribe URL before the one-click POST.
+- In `block` mode a match (exit `11`) or a Model Armor failure (the cause's exit code) sends or creates nothing. In `warn` mode the action goes ahead after a warning on stderr, and the printed result carries the `_sanitization` annotation.
+- `--dry-run` never calls Model Armor; it prints the planned request unscreened.
+
+`gwsr modelarmor +create-template --project my-project --location us-central1 --template-id my-tmpl --preset jailbreak` creates a template from the built-in preset.
 
 ## Configuration
 
@@ -491,7 +497,7 @@ json_style = "auto"       # auto | compact | pretty                   (GWSR_JSON
 page_limit = 50           # default --page-limit                      (GWSR_PAGE_LIMIT)
 page_delay_ms = 100       # default --page-delay                      (GWSR_PAGE_DELAY_MS)
 timeout_secs = 60         # request timeout                           (GWSR_TIMEOUT, --timeout)
-sanitize_template = "projects/p/locations/l/templates/t"            # (GWSR_SANITIZE_TEMPLATE, --sanitize)
+sanitize_template = "projects/my-project/locations/us-central1/templates/t1"  # (GWSR_SANITIZE_TEMPLATE, --sanitize)
 sanitize_mode = "warn"    # warn | block                              (GWSR_SANITIZE_MODE)
 profile = "work"          # default profile; written by `gwsr auth use` (GWSR_PROFILE, --profile)
 log = "gwsr=info"         # stderr log filter                         (GWSR_LOG, RUST_LOG, -v/-q)

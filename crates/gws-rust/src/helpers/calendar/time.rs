@@ -92,24 +92,46 @@ pub(super) fn parse_duration(s: &str) -> Result<Duration, GwsError> {
 }
 
 impl When {
-    /// Add a duration (not valid for all-day dates).
-    pub(super) fn plus(&self, d: Duration) -> Result<When, GwsError> {
-        let end = match self {
-            When::Date(_) => {
-                return Err(GwsError::Validation(
-                    "--duration cannot be used with an all-day --start; pass --end YYYY-MM-DD"
-                        .into(),
-                ));
-            }
-            When::Instant(t) => t.checked_add_signed(d).map(When::Instant),
-            When::Local(t) => t.checked_add_signed(d).map(When::Local),
-        };
-        end.ok_or_else(|| {
+    /// Add an elapsed duration (not valid for all-day dates). A local time is
+    /// advanced in `tz`, so a span across a DST change keeps its real length
+    /// instead of its wall-clock length.
+    pub(super) fn plus(&self, d: Duration, tz: Tz) -> Result<When, GwsError> {
+        use chrono::Offset;
+        let too_long = || {
             GwsError::Validation(
                 "--duration is too long: the event would end past the latest representable time"
                     .into(),
             )
-        })
+        };
+        match self {
+            When::Date(_) => Err(GwsError::Validation(
+                "--duration cannot be used with an all-day --start; pass --end YYYY-MM-DD".into(),
+            )),
+            When::Instant(t) => t
+                .checked_add_signed(d)
+                .map(When::Instant)
+                .ok_or_else(too_long),
+            When::Local(_) => {
+                let end_utc = self
+                    .to_utc(tz)?
+                    .checked_add_signed(d)
+                    .ok_or_else(too_long)?;
+                let end = end_utc.with_timezone(&tz);
+                // `naive_local()` panics when the offset pushes the wall-clock
+                // time out of range; add the offset with a checked operation.
+                let offset = Duration::seconds(i64::from(end.offset().fix().local_minus_utc()));
+                let naive = end_utc
+                    .naive_utc()
+                    .checked_add_signed(offset)
+                    .ok_or_else(too_long)?;
+                // Keep the wall-clock form unless it is ambiguous (the
+                // repeated hour of a fall-back change); then pin the offset.
+                Ok(match tz.from_local_datetime(&naive) {
+                    chrono::LocalResult::Single(_) => When::Local(naive),
+                    _ => When::Instant(end.fixed_offset()),
+                })
+            }
+        }
     }
 
     /// Calendar API `EventDateTime` JSON. `tz` is the event time zone; it is
@@ -310,6 +332,33 @@ mod tests {
     }
 
     #[test]
+    fn plus_advances_local_times_by_elapsed_time() {
+        let ny: Tz = "America/New_York".parse().unwrap();
+        let local = |s: &str| parse_when(s, "--start").unwrap();
+        // Ordinary day: the wall-clock form is kept.
+        assert_eq!(
+            local("2026-06-17T09:00")
+                .plus(Duration::hours(1), ny)
+                .unwrap(),
+            local("2026-06-17T10:00")
+        );
+        // Landing in the repeated fall-back hour pins the offset (EDT here).
+        assert_eq!(
+            local("2026-11-01T00:30")
+                .plus(Duration::hours(1), ny)
+                .unwrap(),
+            parse_when("2026-11-01T01:30:00-04:00", "e").unwrap()
+        );
+        // A start inside the spring-forward gap is still rejected.
+        assert!(
+            local("2026-03-08T02:30")
+                .plus(Duration::hours(1), ny)
+                .is_err()
+        );
+        assert!(local("2026-03-08").plus(Duration::hours(1), ny).is_err());
+    }
+
+    #[test]
     fn huge_durations_are_rejected_not_panics() {
         for bad in [
             // Beyond chrono's TimeDelta range for one unit.
@@ -325,11 +374,15 @@ mod tests {
         // A representable duration that runs past the last representable time.
         let start = parse_when("2026-06-17T09:00", "--start").unwrap();
         let err = start
-            .plus(parse_duration("100000000d").unwrap())
+            .plus(parse_duration("100000000d").unwrap(), chrono_tz::UTC)
             .unwrap_err();
         assert!(err.to_string().contains("--duration"), "{err}");
         let start = parse_when("2026-06-17T09:00:00Z", "--start").unwrap();
-        assert!(start.plus(parse_duration("100000000d").unwrap()).is_err());
+        assert!(
+            start
+                .plus(parse_duration("100000000d").unwrap(), chrono_tz::UTC)
+                .is_err()
+        );
     }
 
     #[test]
