@@ -8,13 +8,15 @@ metadata:
     requires:
       bins:
         - gwsr
+      skills:
+        - gwsr-shared
     cliHelp: "gwsr admin +user-suspend --help"
 ---
 <!-- gwsr generated skill: do not edit by hand -->
 
 # admin +user-suspend
 
-> **PREREQUISITE:** Read `../gwsr-shared/SKILL.md` for auth, global flags, and security rules.
+> **PREREQUISITE:** Read `../gwsr-shared/SKILL.md` for auth, global flags, and security rules. If it is missing, install it with `npx skills add https://github.com/astelmach20/gws-rust/tree/main/skills/gwsr-shared`.
 
 Suspend (or with --unsuspend, restore) a user
 
@@ -30,7 +32,6 @@ gwsr admin +user-suspend --user <EMAIL>
 |------|----------|---------|-------------|
 | `--user` | ✓ | — | User email or ID |
 | `--unsuspend` | — | — | Restore a suspended user instead |
-| `--reason` | — | — | Suspension reason recorded on the account |
 | `--yes` | — | — | Confirm this action without prompting (required when not on a terminal) |
 
 ## Examples
@@ -43,6 +44,8 @@ gwsr admin +user-suspend --user ann@example.com --unsuspend
 ## Tips
 
 - Suspending requires --yes (or a prompt on a terminal).
+- The Directory API cannot record a suspension reason (its suspensionReason
+- field is output-only).
 
 ## See Also
 
