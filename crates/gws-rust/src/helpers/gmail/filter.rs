@@ -98,16 +98,22 @@ fn build_filter(spec: &FilterSpec, add: &[String], remove: &[String]) -> Value {
     json!({ "criteria": spec.criteria, "action": action })
 }
 
-fn print(value: &Value, matches: &ArgMatches) -> Result<(), GwsError> {
+async fn print(
+    value: Value,
+    matches: &ArgMatches,
+    sanitize: &crate::helpers::modelarmor::SanitizeConfig,
+) -> Result<(), GwsError> {
     let format = crate::helpers::http::output_format(matches)?;
-    crate::output::emit(&crate::formatter::format_value(value, &format)?)?;
-    Ok(())
+    super::emit_screened(sanitize, &format, value).await
 }
 
 /// Handle `+filter`.
-pub(super) async fn handle_filter(matches: &ArgMatches) -> Result<(), GwsError> {
+pub(super) async fn handle_filter(
+    matches: &ArgMatches,
+    sanitize: &crate::helpers::modelarmor::SanitizeConfig,
+) -> Result<(), GwsError> {
     let dry_run = crate::args::dry_run(matches)?;
-    let base = format!("{}/users/me/settings/filters", super::api::GMAIL_API_BASE);
+    let base = format!("{}/users/me/settings/filters", super::api::api_base()?);
     match matches.subcommand() {
         Some(("list", sub)) => {
             if dry_run {
@@ -123,10 +129,17 @@ pub(super) async fn handle_filter(matches: &ArgMatches) -> Result<(), GwsError> 
             }
             let api = super::api::authenticated(&[GMAIL_SETTINGS_SCOPE]).await?;
             let filters = api.list_filters().await?;
-            print(&filters, sub)
+            print(filters, sub, sanitize).await
         }
         Some(("create", sub)) => {
             let spec = parse_create_args(sub)?;
+            if let Some(to) = &spec.forward {
+                confirm::confirm(
+                    sub,
+                    Impact::Outbound,
+                    &format!("create a filter that forwards matching mail to {to}"),
+                )?;
+            }
             if dry_run {
                 let body = build_filter(&spec, &spec.add_labels, &spec.remove_labels);
                 return crate::helpers::http::print_dry_run(
@@ -148,8 +161,17 @@ pub(super) async fn handle_filter(matches: &ArgMatches) -> Result<(), GwsError> 
                 let remove = resolve_label_ids(&spec.remove_labels, &labels)?;
                 build_filter(&spec, &add, &remove)
             };
+            // Screen the filter (which may forward mail) before creating it:
+            // screening the response afterwards could not undo the creation.
+            let screening =
+                crate::helpers::modelarmor::screen_outgoing(sanitize, &body, None).await?;
             let created = api.create_filter(&body).await?;
-            print(&created, sub)
+            let created = match screening {
+                Some(annotation) => crate::helpers::modelarmor::annotate(created, annotation),
+                None => created,
+            };
+            let format = crate::helpers::http::output_format(sub)?;
+            crate::output::emit(&crate::formatter::format_value(&created, &format)?)
         }
         Some(("delete", sub)) => {
             let id = required_str(sub, "filter-id")?;
@@ -172,7 +194,7 @@ pub(super) async fn handle_filter(matches: &ArgMatches) -> Result<(), GwsError> 
             }
             let api = super::api::authenticated(&[GMAIL_SETTINGS_SCOPE]).await?;
             api.delete_filter(&id).await?;
-            print(&json!({ "deleted": true, "filterId": id }), sub)
+            print(json!({ "deleted": true, "filterId": id }), sub, sanitize).await
         }
         Some((other, _)) => Err(GwsError::other(format!("unknown +filter action '{other}'"))),
         None => Err(GwsError::Validation(
@@ -261,13 +283,13 @@ mod tests {
             return;
         }
         let m = helper_matches(&["+filter", "delete", "--filter-id", "f1"]);
-        let err = handle_filter(&m).await.unwrap_err();
+        let err = handle_filter(&m, &Default::default()).await.unwrap_err();
         assert!(err.to_string().contains("Confirmation required"), "{err}");
     }
 
     #[tokio::test]
     async fn delete_dry_run_needs_no_confirmation() {
         let m = helper_matches(&["+filter", "delete", "--filter-id", "f1", "--dry-run"]);
-        handle_filter(&m).await.unwrap();
+        handle_filter(&m, &Default::default()).await.unwrap();
     }
 }

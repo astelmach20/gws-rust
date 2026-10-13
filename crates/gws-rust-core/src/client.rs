@@ -83,12 +83,31 @@ fn redirect_policy(attempt: reqwest::redirect::Attempt<'_>) -> reqwest::redirect
     attempt.follow()
 }
 
+/// Builds a new client, with the same configuration as [`shared_client`] but
+/// its own connection pool.
+///
+/// A pooled connection is driven by a task on the Tokio runtime that opened
+/// it, so a pool must not outlive, or be shared across, runtimes. Code that
+/// runs more than one runtime in a process (such as `#[tokio::test]`, which
+/// starts a runtime per test) needs a client per runtime.
+pub fn build_client() -> Result<reqwest::Client, GwsError> {
+    build_client_inner().map_err(GwsError::other)
+}
+
 /// Returns a clone of the single process-wide client.
 ///
 /// `reqwest::Client` is reference counted, so clones share one connection
 /// pool. Building the client can only fail if the TLS backend cannot be
 /// initialised; that failure is cached and reported on every call.
+///
+/// The pool is bound to the runtime that uses it first (see
+/// [`build_client`]), which is correct for a binary that runs a single Tokio
+/// runtime. This crate's unit tests start a runtime per test, so under
+/// `cfg(test)` every call returns a new client instead.
 pub fn shared_client() -> Result<reqwest::Client, GwsError> {
+    if cfg!(test) {
+        return build_client();
+    }
     static CLIENT: OnceLock<Result<reqwest::Client, String>> = OnceLock::new();
     match CLIENT.get_or_init(build_client_inner) {
         Ok(client) => Ok(client.clone()),
@@ -221,13 +240,24 @@ pub struct Sent {
     pub response: reqwest::Response,
     /// Number of attempts made (1 when the first attempt succeeded).
     pub attempts: u32,
-    /// The last `Retry-After` the server sent, if any.
+    /// The `Retry-After` of the returned response, when it is a retryable
+    /// failure that carried one. A `Retry-After` from an earlier attempt is
+    /// never reported against a later, different answer.
     pub retry_after: Option<Duration>,
+    /// Whether `response` is a retryable failure the client stopped retrying
+    /// (attempts exhausted, a non-idempotent request, or a `Retry-After`
+    /// longer than the policy allows). False for a definitive answer.
+    pub gave_up: bool,
 }
 
 impl Sent {
     /// Human-readable note describing retries, for appending to error messages.
+    /// `None` when the response is a definitive answer, even after earlier
+    /// retried attempts.
     pub fn retry_note(&self) -> Option<String> {
+        if !self.gave_up {
+            return None;
+        }
         retry_note(self.attempts, self.retry_after)
     }
 }
@@ -312,30 +342,21 @@ enum Verdict {
     },
 }
 
-// Google signals per-user and per-project rate limits with HTTP 403 and one
-// of these reasons in `error.errors[].reason` (or `error.details[].reason`).
-use crate::error::RATE_LIMIT_REASONS;
+// Google signals per-user and per-project rate limits with HTTP 403 and a
+// rate-limit reason in `error.errors[].reason` (or `error.details[].reason`).
 
 /// Returns true when a Google error body names a retryable rate-limit reason.
 pub fn is_rate_limit_body(body: &[u8]) -> bool {
     let Ok(json) = serde_json::from_slice::<serde_json::Value>(body) else {
         return false;
     };
-    let err = &json["error"];
-    let reasons = err["errors"]
-        .as_array()
-        .into_iter()
-        .chain(err["details"].as_array())
-        .flatten()
-        .filter_map(|e| e["reason"].as_str());
-    reasons
-        .chain(err["reason"].as_str())
-        .any(|r| RATE_LIMIT_REASONS.contains(&r))
+    crate::error::rate_limit_reason(&json["error"]).is_some()
 }
 
-/// HTTP statuses retried for idempotent requests.
+/// HTTP statuses retried for idempotent requests (the same set that exits
+/// with code 6; see [`crate::error::is_retryable_status_code`]).
 pub fn is_retryable_status(status: StatusCode) -> bool {
-    matches!(status.as_u16(), 408 | 429 | 500 | 502 | 503 | 504)
+    crate::error::is_retryable_status_code(status.as_u16())
 }
 
 /// Parse a `Retry-After` header: delta-seconds or an HTTP-date. An invalid
@@ -434,7 +455,6 @@ pub async fn send(
     build: impl Fn() -> reqwest::RequestBuilder,
 ) -> Result<Sent, SendError> {
     let max_attempts = policy.max_attempts.max(1);
-    let mut last_retry_after = None;
     let mut attempt: u32 = 0;
     loop {
         attempt += 1;
@@ -493,22 +513,21 @@ pub async fn send(
                 return Ok(Sent {
                     response,
                     attempts: attempt,
-                    retry_after: last_retry_after,
+                    retry_after: None,
+                    gave_up: false,
                 });
             }
             Verdict::Retry {
                 response,
                 retry_after,
             } => {
-                if retry_after.is_some() {
-                    last_retry_after = retry_after;
-                }
                 let too_long = retry_after.is_some_and(|ra| ra > policy.max_retry_after);
                 if !idempotent || !can_retry || too_long {
                     return Ok(Sent {
                         response,
                         attempts: attempt,
-                        retry_after: last_retry_after,
+                        retry_after,
+                        gave_up: true,
                     });
                 }
                 let delay = retry_after.unwrap_or_else(|| policy.backoff(attempt - 1));
@@ -588,15 +607,6 @@ mod tests {
             "error": {"code": 403, "message": "slow down",
                       "errors": [{"reason": "userRateLimitExceeded"}]}
         }))
-    }
-
-    #[test]
-    fn shared_client_is_reused() {
-        let a = shared_client().unwrap();
-        let b = shared_client().unwrap();
-        let ra = a.get("https://example.com").build().unwrap();
-        let rb = b.get("https://example.com").build().unwrap();
-        assert_eq!(ra.url(), rb.url());
     }
 
     #[test]
@@ -699,6 +709,61 @@ mod tests {
             Some("gave up after 4 attempts")
         );
         assert_eq!(sent.response.text().await.unwrap(), "final");
+    }
+
+    #[tokio::test]
+    async fn final_non_retryable_response_carries_no_stale_retry_note() {
+        let server = MockServer::start().await;
+        let calls = mount_sequence(
+            &server,
+            "GET",
+            vec![
+                ResponseTemplate::new(503).insert_header("Retry-After", "1"),
+                ResponseTemplate::new(404).set_body_string("gone"),
+            ],
+        )
+        .await;
+        let client = shared_client().unwrap();
+        let url = format!("{}/r", server.uri());
+        let sent = send(&fast_policy(), Idempotency::FromMethod, || client.get(&url))
+            .await
+            .unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert_eq!(sent.attempts, 2);
+        assert_eq!(sent.response.status(), 404);
+        // The 404 is the server's definitive answer: it neither asked for a
+        // retry nor did the client give up retrying it.
+        assert_eq!(sent.retry_after, None);
+        assert_eq!(sent.retry_note(), None);
+    }
+
+    #[tokio::test]
+    async fn exhausted_retries_report_only_the_final_retry_after() {
+        let server = MockServer::start().await;
+        mount_sequence(
+            &server,
+            "GET",
+            vec![
+                ResponseTemplate::new(503).insert_header("Retry-After", "1"),
+                ResponseTemplate::new(503),
+            ],
+        )
+        .await;
+        let client = shared_client().unwrap();
+        let url = format!("{}/r", server.uri());
+        let policy = RetryPolicy {
+            max_attempts: 2,
+            ..fast_policy()
+        };
+        let sent = send(&policy, Idempotency::FromMethod, || client.get(&url))
+            .await
+            .unwrap();
+        assert_eq!(sent.response.status(), 503);
+        assert_eq!(sent.retry_after, None);
+        assert_eq!(
+            sent.retry_note().as_deref(),
+            Some("gave up after 2 attempts")
+        );
     }
 
     #[tokio::test]

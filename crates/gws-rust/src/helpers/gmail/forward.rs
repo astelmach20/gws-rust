@@ -15,14 +15,17 @@
 //! `gmail +forward`: forward a message (with its attachments) to new recipients.
 
 use super::cli::{parse_optional_mailboxes, parse_optional_trimmed, required_str};
-use super::dispatch::{Delivery, deliver};
+use super::dispatch::{Delivery, deliver, outgoing_content};
 use super::prelude::*;
 use super::sender::resolve_sender;
 
 /// Handle the `+forward` subcommand.
-pub(super) async fn handle_forward(matches: &ArgMatches) -> Result<(), GwsError> {
+pub(super) async fn handle_forward(
+    matches: &ArgMatches,
+    sanitize: &crate::helpers::modelarmor::SanitizeConfig,
+) -> Result<(), GwsError> {
     let mut config = parse_forward_args(matches)?;
-    let delivery = Delivery::from_matches(matches)?;
+    let delivery = Delivery::from_matches(matches, sanitize)?;
     delivery.confirm(
         matches,
         &format!(
@@ -86,7 +89,15 @@ pub(super) async fn handle_forward(matches: &ArgMatches) -> Result<(), GwsError>
     };
 
     let raw = create_forward_raw_message(&envelope, &original, &all_attachments)?;
-    deliver(api.as_ref(), delivery, &raw, original.thread_id.as_deref()).await
+    let outgoing = outgoing_content(envelope.subject, &forward_body(&envelope, &original));
+    deliver(
+        api.as_ref(),
+        delivery,
+        &outgoing,
+        &raw,
+        original.thread_id.as_deref(),
+    )
+    .await
 }
 
 /// Whether an original MIME part should be included when forwarding.
@@ -149,19 +160,27 @@ fn create_forward_raw_message(
         .subject(envelope.subject);
 
     let mb = apply_optional_headers(mb, envelope.from, envelope.cc, envelope.bcc);
-    let mb = set_threading_headers(mb, &envelope.threading);
+    let mb = set_threading_headers(mb, &envelope.threading)?;
 
+    finalize_message(
+        mb,
+        forward_body(envelope, original),
+        envelope.html,
+        attachments,
+    )
+}
+
+/// The forward's body: the optional note followed by the forwarded message.
+fn forward_body(envelope: &ForwardEnvelope<'_>, original: &OriginalMessage) -> String {
     let (forwarded_block, separator) = if envelope.html {
         (format_forwarded_message_html(original), "<br>\r\n")
     } else {
         (format_forwarded_message(original), "\r\n\r\n")
     };
-    let body = match envelope.body {
+    match envelope.body {
         Some(note) => format!("{}{}{}", note, separator, forwarded_block),
         None => forwarded_block,
-    };
-
-    finalize_message(mb, body, envelope.html, attachments)
+    }
 }
 
 /// Join mailboxes into a comma-separated Display string.
@@ -244,7 +263,7 @@ fn parse_forward_args(matches: &ArgMatches) -> Result<ForwardConfig, GwsError> {
         ));
     }
     Ok(ForwardConfig {
-        message_id: required_str(matches, "message-id")?,
+        message_id: super::cli::required_message_id(matches)?,
         to,
         from: parse_optional_mailboxes(matches, "from")?,
         cc: parse_optional_mailboxes(matches, "cc")?,
@@ -392,6 +411,10 @@ mod tests {
         assert!(raw.contains("---------- Forwarded message ---------"));
         assert!(raw.contains("From: alice@example.com"));
         assert!(raw.contains("Original content"));
+
+        // --sanitize screens the forwarded message too.
+        let body = forward_body(&envelope, &original);
+        assert!(body.contains("Original content"), "{body}");
     }
 
     #[test]
@@ -450,6 +473,58 @@ mod tests {
         );
         assert!(raw.contains("FYI see below"));
         assert!(raw.contains("carol@example.com")); // in forwarded block
+    }
+
+    /// A References header written without spaces (`<a@x><b@x>`, valid per
+    /// RFC 5322) must thread as separate IDs, and a Message-ID followed by a
+    /// comment must not leak into In-Reply-To.
+    #[test]
+    fn test_forward_threading_from_unspaced_references() {
+        use base64::Engine as _;
+        let msg = serde_json::json!({
+            "threadId": "t1",
+            "payload": {
+                "mimeType": "text/plain",
+                "headers": [
+                    { "name": "From", "value": "alice@example.com" },
+                    { "name": "Subject", "value": "Hello" },
+                    { "name": "Message-ID", "value": "<msg-2@example.com> (added by relay)" },
+                    { "name": "References", "value": "<msg-0@example.com><msg-1@example.com>" }
+                ],
+                "body": { "data": base64::engine::general_purpose::URL_SAFE.encode("hi") }
+            }
+        });
+        let original = super::super::message::parse_original_message(&msg).unwrap();
+        let refs = build_references_chain(&original);
+        let to = Mailbox::parse_list("dave@example.com");
+        let envelope = ForwardEnvelope {
+            to: &to,
+            cc: None,
+            bcc: None,
+            from: None,
+            subject: "Fwd: Hello",
+            body: None,
+            html: false,
+            threading: ThreadingHeaders {
+                in_reply_to: &original.message_id,
+                references: &refs,
+            },
+        };
+        let raw = create_forward_raw_message(&envelope, &original, &[]).unwrap();
+        assert_eq!(
+            extract_header(&raw, "In-Reply-To").unwrap(),
+            "<msg-2@example.com>"
+        );
+        let refs_header = extract_header(&raw, "References").unwrap();
+        let ids: Vec<&str> = refs_header.split_whitespace().collect();
+        assert_eq!(
+            ids,
+            [
+                "<msg-0@example.com>",
+                "<msg-1@example.com>",
+                "<msg-2@example.com>"
+            ]
+        );
     }
 
     #[test]

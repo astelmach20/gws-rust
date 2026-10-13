@@ -37,7 +37,8 @@ pub use endpoint::{
 };
 pub use modelarmor::ModelArmorTemplate;
 pub use paths::{
-    PathPolicy, RESTRICT_PATHS_ENV, resolve_dir_path, resolve_file_path, resolve_output_dir,
+    PathPolicy, RESTRICT_PATHS_ENV, check_derived_path, resolve_dir_path, resolve_file_path,
+    resolve_output_dir,
 };
 
 use crate::error::GwsError;
@@ -98,13 +99,43 @@ const PATH_SEGMENT: &percent_encoding::AsciiSet = &percent_encoding::NON_ALPHANU
 ///
 /// Unreserved characters stay literal: Google IDs routinely contain `-` and
 /// `_`, and some endpoints (e.g. `scripts.run`, upstream #842) reject them as
-/// `%2D`/`%5F`. The dot-segments `.` and `..` are always escaped so they can
-/// never climb the path.
+/// `%2D`/`%5F`. The dot-segments `.` and `..` are escaped, but URL parsers
+/// (WHATWG, as used by `reqwest`) still treat `%2E`/`%2E%2E` as dot segments,
+/// so every URL built from these must pass [`reject_dot_segments`].
 pub fn encode_path_segment(s: &str) -> String {
     if s == "." || s == ".." {
         return s.replace('.', "%2E");
     }
     percent_encoding::utf8_percent_encode(s, PATH_SEGMENT).to_string()
+}
+
+/// Reject a URL whose path contains a `.` or `..` segment, literal or
+/// percent-encoded (`%2E`, `%2e`, `.%2E`, ...).
+///
+/// URL parsing removes such segments (`files/F1/permissions/..` becomes
+/// `files/F1/`), so the request would address a different resource than the
+/// one named, e.g. a whole calendar instead of one of its events.
+pub fn reject_dot_segments(url: &str) -> Result<(), GwsError> {
+    let after_scheme = url.split_once("://").map_or(url, |(_, rest)| rest);
+    let path_and_rest = after_scheme
+        .find('/')
+        .map_or("", |start| &after_scheme[start..]);
+    let path = path_and_rest
+        .split(['?', '#'])
+        .next()
+        .unwrap_or(path_and_rest);
+    let is_dot_segment = |segment: &str| {
+        let decoded = segment.replace("%2E", ".").replace("%2e", ".");
+        decoded == "." || decoded == ".."
+    };
+    if path.split('/').any(is_dot_segment) {
+        return Err(GwsError::Validation(format!(
+            "Refusing to send a request whose URL path has a '.' or '..' dot segment \
+             (an ID or resource name of '.' or '..'), which would address a different \
+             resource: {url}"
+        )));
+    }
+    Ok(())
 }
 
 /// Percent-encode a value for use in URI path templates where `/` should stay
@@ -138,6 +169,33 @@ fn is_resource_name_char(c: char) -> bool {
 /// control characters and non-ASCII are rejected. Segments must be non-empty
 /// and must not be `.` or `..`. Returns the validated name.
 pub fn validate_resource_name(s: &str) -> Result<&str, GwsError> {
+    check_resource_name(s, is_resource_name_char, "only A-Z a-z 0-9 . _ ~ / - are")
+}
+
+/// Whether `c` is an RFC 3986 `pchar` other than `%`: unreserved, the
+/// sub-delims `!$&'()*+,;=`, `:` and `@` (plus `/` between segments).
+fn is_path_char(c: char) -> bool {
+    is_resource_name_char(c) || "!$&'()*+,;=:@".contains(c)
+}
+
+/// Validate the value of a `{+name}` (RFC 6570 reserved expansion) path
+/// parameter of a Discovery method.
+///
+/// Like [`validate_resource_name`], but every RFC 3986 path character is
+/// allowed, because documented resource names use them: Chat accepts
+/// `users/user@example.com/...` and `customEmojis/:example-emoji:`. `%`,
+/// `?`, `#`, whitespace, control and non-ASCII characters, empty segments
+/// and `.`/`..` segments are still rejected. Encode the result with
+/// [`encode_path_preserving_slashes`].
+pub fn validate_reserved_path_value(s: &str) -> Result<&str, GwsError> {
+    check_resource_name(s, is_path_char, "only RFC 3986 path characters are")
+}
+
+fn check_resource_name<'a>(
+    s: &'a str,
+    allowed: fn(char) -> bool,
+    allowed_text: &str,
+) -> Result<&'a str, GwsError> {
     if s.is_empty() {
         return Err(GwsError::Validation(
             "Resource name must not be empty".to_string(),
@@ -162,10 +220,9 @@ pub fn validate_resource_name(s: &str) -> Result<&str, GwsError> {
             "Resource name must not contain '?' or '#': {shown}"
         )));
     }
-    if let Some(c) = s.chars().find(|c| !is_resource_name_char(*c)) {
+    if let Some(c) = s.chars().find(|c| !allowed(*c)) {
         return Err(GwsError::Validation(format!(
-            "Resource name contains invalid characters ({:?} is not allowed; only A-Z a-z 0-9 . _ ~ / - are): {shown}",
-            c
+            "Resource name contains invalid characters ({c:?} is not allowed; {allowed_text}): {shown}"
         )));
     }
     if s.split('/').any(str::is_empty) {
@@ -258,6 +315,42 @@ mod tests {
         assert_eq!(encode_path_segment("."), "%2E");
         assert_eq!(encode_path_segment(".."), "%2E%2E");
         assert_eq!(encode_path_segment("..."), "...");
+    }
+
+    #[test]
+    fn reject_dot_segments_catches_literal_and_encoded_dots() {
+        for bad in [
+            "https://www.googleapis.com/drive/v3/files/..",
+            "https://www.googleapis.com/drive/v3/files/%2E%2E/x",
+            "https://www.googleapis.com/drive/v3/files/%2e/permissions/p",
+            "https://www.googleapis.com/drive/v3/files/.%2E?alt=media",
+            "http://127.0.0.1:8080/calendar/v3/calendars/c/events/.",
+        ] {
+            let err = reject_dot_segments(bad).unwrap_err();
+            assert!(err.to_string().contains("dot segment"), "{bad}: {err}");
+        }
+        for ok in [
+            "https://www.googleapis.com/drive/v3/files/...",
+            "https://www.googleapis.com/drive/v3/files/a.b",
+            "https://www.googleapis.com/drive/v3/files/.hidden",
+            "https://www.googleapis.com/drive/v3/files?q=..",
+            "https://www.googleapis.com/",
+        ] {
+            assert!(reject_dot_segments(ok).is_ok(), "{ok}");
+        }
+    }
+
+    #[test]
+    fn encoded_dot_segments_are_still_removed_by_url_parsing() {
+        // Why escaping alone is not enough: the WHATWG parser (url/reqwest)
+        // treats %2E%2E as `..`.
+        let url = format!(
+            "https://www.googleapis.com/drive/v3/files/{}",
+            encode_path_segment("..")
+        );
+        let parsed = url::Url::parse(&url).unwrap();
+        assert_eq!(parsed.path(), "/drive/v3/");
+        assert!(reject_dot_segments(&url).is_err());
     }
 
     #[test]
@@ -369,6 +462,39 @@ mod tests {
         assert!(validate_resource_name("%2e%2e").is_err());
         assert!(validate_resource_name("spaces/%2e%2e/etc").is_err());
         assert!(validate_resource_name("spaces/100%").is_err());
+    }
+
+    #[test]
+    fn test_validate_reserved_path_value() {
+        for ok in [
+            "users/user@example.com/spaces/A",
+            "customEmojis/:emoji:",
+            "users/a+b@example.com",
+            "@default",
+            "projects/p1/topics/t1",
+        ] {
+            assert_eq!(validate_reserved_path_value(ok).unwrap(), ok);
+        }
+        for bad in [
+            "",
+            "users/a b",
+            "users/a%40b",
+            "users/a?x",
+            "users/a#x",
+            "users/../x",
+            "users/./x",
+            "users//x",
+            "/users/x",
+            "users/x/",
+            "users/é",
+            "users/a\\b",
+            "users/a\u{200B}b",
+            "users/a\nb",
+        ] {
+            assert!(validate_reserved_path_value(bad).is_err(), "{bad:?}");
+        }
+        // The resource-name validator used by helpers stays strict.
+        assert!(validate_resource_name("users/user@example.com").is_err());
     }
 
     // --- reject_dangerous_chars Unicode ---

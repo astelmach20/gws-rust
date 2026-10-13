@@ -69,7 +69,8 @@ impl OriginalPart {
 /// `From` is missing. `body_text` always has a value — it falls back to the
 /// message snippet when no `text/plain` MIME part is found. Semantically optional
 /// fields (`cc`, `reply_to`, `date`, `body_html`) use `Option` so the compiler
-/// enforces absence checks.
+/// enforces absence checks. A whitespace-only `text/plain` part yields to a
+/// non-blank `text/html` part rendered as text.
 #[derive(Default, Serialize)]
 pub(super) struct OriginalMessage {
     pub thread_id: Option<String>,
@@ -148,15 +149,16 @@ fn parse_message_headers(headers: &[Value]) -> ParsedMessageHeaders {
         let name = header.get("name").and_then(|v| v.as_str()).unwrap_or("");
         let value = header.get("value").and_then(|v| v.as_str()).unwrap_or("");
 
-        match name {
-            "From" => parsed.from = value.to_string(),
-            "Reply-To" => append_address_list_header_value(&mut parsed.reply_to, value),
-            "To" => append_address_list_header_value(&mut parsed.to, value),
-            "Cc" => append_address_list_header_value(&mut parsed.cc, value),
-            "Subject" => parsed.subject = value.to_string(),
-            "Date" => parsed.date = value.to_string(),
-            "Message-ID" | "Message-Id" => parsed.message_id = value.to_string(),
-            "References" => append_header_value(&mut parsed.references, value),
+        // RFC 5322 §1.2.2: header field names are case-insensitive.
+        match name.to_ascii_lowercase().as_str() {
+            "from" => parsed.from = value.to_string(),
+            "reply-to" => append_address_list_header_value(&mut parsed.reply_to, value),
+            "to" => append_address_list_header_value(&mut parsed.to, value),
+            "cc" => append_address_list_header_value(&mut parsed.cc, value),
+            "subject" => parsed.subject = value.to_string(),
+            "date" => parsed.date = value.to_string(),
+            "message-id" => parsed.message_id = value.to_string(),
+            "references" => append_header_value(&mut parsed.references, value),
             _ => {}
         }
     }
@@ -198,10 +200,10 @@ pub(super) fn parse_original_message(msg: &Value) -> Result<OriginalMessage, Gws
         return Err(GwsError::other("Message is missing From header"));
     }
 
-    let message_id = strip_angle_brackets(&parsed_headers.message_id);
-    if message_id.is_empty() {
-        return Err(GwsError::other("Message is missing Message-ID header"));
-    }
+    let message_id = parse_msg_ids(&parsed_headers.message_id)
+        .into_iter()
+        .next()
+        .ok_or_else(|| GwsError::other("Message is missing Message-ID header"))?;
 
     let PayloadContents {
         body_text: extracted_text,
@@ -213,32 +215,36 @@ pub(super) fn parse_original_message(msg: &Value) -> Result<OriginalMessage, Gws
     };
 
     // Prefer the text/plain part; otherwise render the HTML part as text;
-    // only when the message has neither fall back to the API snippet.
-    let body_text = match (extracted_text, &body_html) {
-        (Some(text), _) => text,
-        (None, Some(html)) => html_to_text(html)?,
-        (None, None) => snippet,
+    // only when the message has neither fall back to the API snippet, which
+    // Gmail returns HTML-escaped. A whitespace-only text/plain alternative is
+    // a stub, not the body, so it yields to a non-blank HTML part.
+    let html_is_blank = body_html.as_deref().is_none_or(|h| h.trim().is_empty());
+    let body_text = match extracted_text {
+        Some(text) if html_is_blank || !text.trim().is_empty() => text,
+        _ => match &body_html {
+            Some(html) => html_to_text(html)?,
+            None => {
+                tracing::warn!(
+                    "message has no text/plain or text/html body part; using the API snippet, which may be truncated"
+                );
+                snippet_to_text(&snippet)?
+            }
+        },
     };
 
-    // Parse references: split on whitespace and strip any angle brackets, producing bare IDs
-    let references = parsed_headers
-        .references
-        .split_whitespace()
-        .map(|id| strip_angle_brackets(id).to_string())
-        .filter(|id| !id.is_empty())
-        .collect();
+    let references = parse_msg_ids(&parsed_headers.references);
 
-    let reply_to = non_empty_then(&parsed_headers.reply_to, Mailbox::parse_list);
-    let cc = non_empty_then(&parsed_headers.cc, Mailbox::parse_list);
+    let reply_to = non_empty_then(&parsed_headers.reply_to, Mailbox::parse_header_list);
+    let cc = non_empty_then(&parsed_headers.cc, Mailbox::parse_header_list);
     let date = Some(parsed_headers.date).filter(|s| !s.is_empty());
 
     Ok(OriginalMessage {
         thread_id,
-        message_id: message_id.to_string(),
+        message_id,
         references,
         from: Mailbox::parse(&parsed_headers.from),
         reply_to,
-        to: Mailbox::parse_list(&parsed_headers.to),
+        to: Mailbox::parse_header_list(&parsed_headers.to),
         cc,
         subject: parsed_headers.subject,
         date,
@@ -534,6 +540,35 @@ mod tests {
         assert_eq!(original.message_id, "bare-id@example.com");
     }
 
+    /// RFC 5322 §3.6.4: `References` is `1*msg-id` with *optional* folding
+    /// white space between IDs, so `<a@x><b@x>` is two IDs. Splitting on
+    /// white space alone glued them into one ID containing `><`.
+    #[test]
+    fn test_parse_original_message_references_without_spaces() {
+        let msg = json!({
+            "threadId": "t1",
+            "payload": {
+                "mimeType": "text/plain",
+                "headers": [
+                    { "name": "From", "value": "alice@example.com" },
+                    { "name": "Message-ID", "value": "<msg@example.com> (added by relay)" },
+                    { "name": "References", "value": "<ref-1@example.com><ref-2@example.com>\r\n <ref-3@example.com>" }
+                ],
+                "body": { "data": URL_SAFE.encode("text") }
+            }
+        });
+        let original = parse_original_message(&msg).unwrap();
+        assert_eq!(
+            original.references,
+            vec![
+                "ref-1@example.com",
+                "ref-2@example.com",
+                "ref-3@example.com"
+            ]
+        );
+        assert_eq!(original.message_id, "msg@example.com");
+    }
+
     #[test]
     fn test_parse_original_message_missing_payload() {
         let msg = json!({
@@ -634,6 +669,50 @@ mod tests {
         assert_eq!(
             parse_original_message(&msg).unwrap().body_text,
             "Snippet only"
+        );
+    }
+
+    fn snippet_only_message(snippet: &str) -> Value {
+        json!({
+            "snippet": snippet,
+            "payload": {
+                "mimeType": "multipart/mixed",
+                "headers": [
+                    { "name": "From", "value": "alice@example.com" },
+                    { "name": "Message-ID", "value": "<msg@example.com>" }
+                ],
+                "parts": []
+            }
+        })
+    }
+
+    #[test]
+    fn test_snippet_fallback_decodes_html_entities() {
+        // Gmail returns `snippet` HTML-escaped; body_text is plain text.
+        let msg = snippet_only_message(
+            "Tom &amp; Jerry&#39;s &quot;plan&quot;: 1 &lt; 2 &gt; 0, a long line of text \
+             that goes well past seventy-eight columns so it must not be wrapped",
+        );
+        assert_eq!(
+            parse_original_message(&msg).unwrap().body_text,
+            "Tom & Jerry's \"plan\": 1 < 2 > 0, a long line of text \
+             that goes well past seventy-eight columns so it must not be wrapped"
+        );
+        assert_eq!(
+            parse_original_message(&snippet_only_message(""))
+                .unwrap()
+                .body_text,
+            ""
+        );
+    }
+
+    #[test]
+    fn test_snippet_fallback_is_escaped_once_in_html_quote() {
+        let original =
+            parse_original_message(&snippet_only_message("Tom &amp; Jerry&#39;s")).unwrap();
+        assert_eq!(
+            super::super::html::resolve_html_body(&original),
+            "Tom &amp; Jerry&#39;s"
         );
     }
 
@@ -743,6 +822,83 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_original_message_header_names_are_case_insensitive() {
+        // RFC 5322 header field names are case-insensitive; senders emit `CC`,
+        // `Reply-to`, `Message-id` and so on.
+        let msg = json!({
+            "threadId": "thread-case",
+            "payload": {
+                "mimeType": "text/plain",
+                "headers": [
+                    { "name": "FROM", "value": "alice@example.com" },
+                    { "name": "Reply-to", "value": "team@example.com" },
+                    { "name": "to", "value": "bob@example.com" },
+                    { "name": "CC", "value": "dave@example.com" },
+                    { "name": "cc", "value": "erin@example.com" },
+                    { "name": "subject", "value": "Hello" },
+                    { "name": "DATE", "value": "Fri, 6 Mar 2026 12:00:00 +0000" },
+                    { "name": "Message-id", "value": "<msg@example.com>" },
+                    { "name": "REFERENCES", "value": "<ref-1@example.com>" },
+                    { "name": "X-Cc", "value": "notcc@example.com" }
+                ],
+                "body": { "data": URL_SAFE.encode("Body") }
+            }
+        });
+
+        let original = parse_original_message(&msg).unwrap();
+
+        assert_eq!(original.from.email, "alice@example.com");
+        let reply_to = original.reply_to.unwrap();
+        assert_eq!(reply_to.len(), 1);
+        assert_eq!(reply_to[0].email, "team@example.com");
+        assert_eq!(original.to.len(), 1);
+        assert_eq!(original.to[0].email, "bob@example.com");
+        let cc = original.cc.unwrap();
+        assert_eq!(cc.len(), 2);
+        assert_eq!(cc[0].email, "dave@example.com");
+        assert_eq!(cc[1].email, "erin@example.com");
+        assert_eq!(original.subject, "Hello");
+        assert_eq!(
+            original.date.as_deref(),
+            Some("Fri, 6 Mar 2026 12:00:00 +0000")
+        );
+        assert_eq!(original.message_id, "msg@example.com");
+        assert_eq!(original.references, vec!["ref-1@example.com"]);
+    }
+
+    #[test]
+    fn test_parse_original_message_rejects_lookalike_header_names() {
+        // Case-insensitive matching must not turn a different header into a
+        // required one: `X-From` / `Message-ID-Old` are not `From` / `Message-ID`.
+        let msg = json!({
+            "payload": {
+                "mimeType": "text/plain",
+                "headers": [
+                    { "name": "X-From", "value": "alice@example.com" },
+                    { "name": "message-id", "value": "<msg@example.com>" }
+                ]
+            }
+        });
+        let err = parse_original_message(&msg).err().unwrap();
+        assert!(err.to_string().contains("missing From header"), "{err}");
+
+        let msg = json!({
+            "payload": {
+                "mimeType": "text/plain",
+                "headers": [
+                    { "name": "from", "value": "alice@example.com" },
+                    { "name": "Message-ID-Old", "value": "<msg@example.com>" }
+                ]
+            }
+        });
+        let err = parse_original_message(&msg).err().unwrap();
+        assert!(
+            err.to_string().contains("missing Message-ID header"),
+            "{err}"
+        );
+    }
+
+    #[test]
     fn test_parse_original_message_concatenates_repeated_address_and_reference_headers() {
         let msg = json!({
             "threadId": "thread-123",
@@ -829,6 +985,61 @@ mod tests {
 
         assert_eq!(original.body_text, "Plain text body");
         assert_eq!(original.body_html.as_deref(), Some("<p>Rich HTML body</p>"));
+    }
+
+    #[test]
+    fn test_parse_original_message_blank_text_part_uses_html() {
+        // Upstream googleworkspace/cli#889: a whitespace-only text/plain
+        // alternative must not hide the real (HTML) body.
+        let msg = json!({
+            "threadId": "t1",
+            "snippet": "Snippet",
+            "payload": {
+                "mimeType": "multipart/alternative",
+                "headers": [
+                    { "name": "From", "value": "alice@example.com" },
+                    { "name": "Message-ID", "value": "<msg@example.com>" }
+                ],
+                "parts": [
+                    {
+                        "mimeType": "text/plain",
+                        "body": { "data": URL_SAFE.encode("\r\n \r\n") }
+                    },
+                    {
+                        "mimeType": "text/html",
+                        "body": { "data": URL_SAFE.encode(
+                            "<p>Reset: <a href=\"https://example.com/r?t=1\">link</a></p>"
+                        ) }
+                    }
+                ]
+            }
+        });
+
+        let original = parse_original_message(&msg).unwrap();
+
+        assert!(
+            original.body_text.contains("https://example.com/r?t=1"),
+            "body_text should be the rendered HTML, got {:?}",
+            original.body_text
+        );
+    }
+
+    #[test]
+    fn test_parse_original_message_blank_text_part_without_html_is_kept() {
+        // With no HTML alternative, a blank text part is the body: it is not
+        // replaced by the (truncated) snippet.
+        let msg = json!({
+            "snippet": "Snippet",
+            "payload": {
+                "mimeType": "text/plain",
+                "headers": [
+                    { "name": "From", "value": "alice@example.com" },
+                    { "name": "Message-ID", "value": "<msg@example.com>" }
+                ],
+                "body": { "data": URL_SAFE.encode("\r\n") }
+            }
+        });
+        assert_eq!(parse_original_message(&msg).unwrap().body_text, "\r\n");
     }
 
     #[test]

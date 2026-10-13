@@ -26,7 +26,7 @@ pub mod batch;
 mod body_schema;
 pub(crate) mod download;
 mod input;
-mod operation;
+pub(crate) mod operation;
 pub mod options;
 mod output;
 mod pagination;
@@ -51,7 +51,7 @@ pub use upload::UploadMode;
 
 use crate::discovery::{RestDescription, RestMethod};
 use crate::error::GwsError;
-use crate::formatter::OutputFormat;
+use crate::formatter::{OutputFormat, PageStream};
 use crate::helpers::modelarmor::SanitizeConfig;
 use crate::transport::errors::error_from_response;
 use crate::transport::{Transport, read_body};
@@ -69,6 +69,11 @@ pub struct UploadSource<'a> {
 /// Whether `method` is destructive (see [`crate::confirm`]).
 pub fn is_destructive(method: &RestMethod) -> bool {
     crate::confirm::is_destructive_method(method)
+}
+
+/// Whether `method` is behind the confirmation gate and so takes `--yes`.
+pub fn is_gated(method: &RestMethod) -> bool {
+    crate::confirm::may_be_gated(method)
 }
 
 /// Configuration for auto-pagination.
@@ -214,6 +219,7 @@ async fn plan_upload(
         path: (*path).to_string(),
         size: meta.len(),
     };
+    upload::check_limits(method, path, data.len(), &mime, content_type.is_some())?;
     let supports_resumable = method.resumable_upload_path().is_some();
     let resumable = match mode {
         UploadMode::Resumable if supports_resumable => true,
@@ -240,18 +246,29 @@ fn apply_param_defaults(
     paginating: bool,
 ) -> Result<(), GwsError> {
     if let Some(mask) = fields {
+        // An empty mask is never what was meant: sent as is it is ignored or
+        // rejected by the API, and pagination below would turn it into the
+        // malformed mask "nextPageToken,".
+        if mask.trim().is_empty() {
+            return Err(GwsError::Validation(
+                "--fields must not be empty; omit it for the full response".to_string(),
+            ));
+        }
         if params.contains_key("fields") {
             return Err(GwsError::Validation(
                 "--fields conflicts with \"fields\" in --params; use only one".to_string(),
             ));
         }
-        // A mask that drops nextPageToken silently stops pagination.
-        let mask = if paginating && !mask.contains("nextPageToken") {
-            format!("nextPageToken,{mask}")
-        } else {
-            mask.to_string()
-        };
-        params.insert("fields".to_string(), Value::String(mask));
+        params.insert("fields".to_string(), Value::String(mask.to_string()));
+    }
+    // A mask that drops nextPageToken silently stops pagination, whether it
+    // came from --fields or from "fields" in --params.
+    if paginating
+        && let Some(Value::String(mask)) = params.get_mut("fields")
+        && !mask.is_empty()
+        && !mask.contains("nextPageToken")
+    {
+        *mask = format!("nextPageToken,{mask}");
     }
     // Drive rejects items in shared drives unless supportsAllDrives is set.
     if method.parameters.contains_key("supportsAllDrives")
@@ -291,7 +308,8 @@ struct Output<'a> {
     format: &'a OutputFormat,
     capture: bool,
     captured: Vec<Value>,
-    lines_emitted: usize,
+    /// Column layout shared by every page of a CSV/table stream.
+    pages: PageStream,
 }
 
 impl Output<'_> {
@@ -308,9 +326,19 @@ impl Output<'_> {
             self.captured.push(value);
             return Ok(());
         }
-        let first = self.lines_emitted == 0;
-        self.lines_emitted += 1;
-        self.emitter.page(&value, self.format, first)
+        self.emitter.page(&value, self.format, &mut self.pages)
+    }
+
+    /// Write a stream marker (`_truncated`) as one compact JSON line. It is
+    /// not a page or item, so neither `--jq` nor the page layout applies.
+    fn marker(&mut self, value: Value) -> Result<(), GwsError> {
+        if self.capture {
+            self.captured.push(value);
+            return Ok(());
+        }
+        let line = serde_json::to_string(&value)
+            .map_err(|e| GwsError::other(anyhow::anyhow!("cannot serialize stream marker: {e}")))?;
+        self.emitter.line(&line)
     }
 
     fn finish(mut self) -> Option<Value> {
@@ -373,6 +401,13 @@ pub(crate) async fn execute_to(
     }
 
     let upload_plan = match &upload {
+        Some(_) if params.contains_key("uploadType") => {
+            // The upload protocol decides uploadType; sending both would give
+            // the server two conflicting values.
+            return Err(GwsError::Validation(
+                "--upload sets uploadType itself; remove \"uploadType\" from --params".to_string(),
+            ));
+        }
         Some(source) if method.supports_media_upload => {
             Some(plan_upload(source, method, &body, options.upload_mode).await?)
         }
@@ -392,11 +427,21 @@ pub(crate) async fn execute_to(
     let http = http_method(method)?;
 
     if options.dry_run {
+        // Show the query exactly as send_upload will send it.
+        let mut query_params = request_url.query.clone();
+        if let Some(p) = &upload_plan {
+            let protocol = if p.resumable {
+                "resumable"
+            } else {
+                "multipart"
+            };
+            query_params.push(("uploadType".to_string(), protocol.to_string()));
+        }
         let info = json!({
             "dry_run": true,
             "url": request_url.url,
             "method": method.http_method,
-            "query_params": request_url.query,
+            "query_params": query_params,
             "body": body,
             "upload": upload_plan.as_ref().map(|p| json!({
                 "protocol": if p.resumable { "resumable" } else { "multipart" },
@@ -412,11 +457,14 @@ pub(crate) async fn execute_to(
         return Ok(None);
     }
 
-    if is_destructive(method) {
-        options.gate().check(
-            crate::confirm::Impact::Destructive,
-            &format!("run destructive method {method_id}"),
-        )?;
+    match crate::confirm::method_impact(method, &params) {
+        Some(impact @ crate::confirm::Impact::Destructive) => options
+            .gate()
+            .check(impact, &format!("run destructive method {method_id}"))?,
+        Some(impact @ crate::confirm::Impact::Outbound) => options
+            .gate()
+            .check(impact, &format!("run outbound method {method_id}"))?,
+        None => {}
     }
 
     let quota_project = if options.quota_project {
@@ -437,11 +485,23 @@ pub(crate) async fn execute_to(
         format: &format,
         capture: capture_output,
         captured: Vec::new(),
-        lines_emitted: 0,
+        // Whole pages, unless --page-items splits them into items.
+        pages: if options.page_items.is_some() {
+            PageStream::default()
+        } else {
+            PageStream::list_pages()
+        },
     };
+    // `--decode-field` asks for a field of a JSON document, so it keeps the
+    // JSON path even with `alt=media`.
+    let media_download = options.decode_field.is_none()
+        && params.get("alt").and_then(Value::as_str) == Some("media");
     let mut query = request_url.query.clone();
     let mut pages: u32 = 0;
     let mut item_field: Option<String> = None;
+    // Page tokens already followed: an API that repeats one would otherwise
+    // loop forever under the default unlimited --page-limit.
+    let mut seen_tokens: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     loop {
         let sent = match (&upload_plan, pages) {
@@ -489,10 +549,35 @@ pub(crate) async fn execute_to(
             ));
         }
         // Empty success responses still produce a JSON document on stdout
-        // (and never create an --output file).
+        // (and never create an --output file); an empty later page of a
+        // --page-all stream ends the stream instead (`pages` counts parsed
+        // pages, so it is non-zero only there).
         let empty_success = json!({"status": "success", "httpStatus": status.as_u16()});
         if status == reqwest::StatusCode::NO_CONTENT {
-            out.single(empty_success)?;
+            end_on_empty_response(&mut out, empty_success, pages)?;
+            break;
+        }
+
+        // `alt=media` returns the stored file itself. Saved or streamed, it
+        // is delivered byte for byte, whatever its Content-Type: a JSON file
+        // must not be re-serialized or mistaken for an API response.
+        if let (true, Some(target)) = (media_download, output.as_ref()) {
+            let mime = if content_type.is_empty() {
+                "application/octet-stream"
+            } else {
+                content_type.as_str()
+            };
+            if let Some(summary) = download::stream_binary(
+                sent.response,
+                mime,
+                target,
+                options.idle_timeout(),
+                emitter,
+            )
+            .await?
+            {
+                out.single(summary)?;
+            }
             break;
         }
 
@@ -508,14 +593,14 @@ pub(crate) async fn execute_to(
             )
             .await?
             {
-                out.single(summary)?;
+                out.single(screen_inline(&sanitize, output.as_ref(), summary).await?)?;
             }
             break;
         }
 
         let raw = read_body(sent.response, options.idle_timeout()).await?;
         if raw.iter().all(u8::is_ascii_whitespace) {
-            out.single(empty_success)?;
+            end_on_empty_response(&mut out, empty_success, pages)?;
             break;
         }
         let mut value: Value = match serde_json::from_slice(&raw) {
@@ -538,18 +623,15 @@ pub(crate) async fn execute_to(
                         emitter.bytes(&raw).await?;
                         emitter.flush().await?;
                     }
-                    None => out.single(download::wrap_text(status.as_u16(), "(none)", &raw)?)?,
+                    None => {
+                        let text = download::wrap_text(status.as_u16(), "(none)", &raw)?;
+                        out.single(screen_inline(&sanitize, None, text).await?)?;
+                    }
                 }
                 break;
             }
         };
         pages += 1;
-
-        if sanitize.template.is_some() {
-            value = crate::helpers::modelarmor::require_pass(
-                crate::helpers::modelarmor::sanitize_value(&sanitize, value).await?,
-            )?;
-        }
 
         // Long-running operations.
         let auto_wait = output.is_some() && operation::is_operation(&value);
@@ -590,10 +672,18 @@ pub(crate) async fn execute_to(
                 )
                 .await?
                 {
-                    out.single(summary)?;
+                    out.single(screen_inline(&sanitize, output.as_ref(), summary).await?)?;
                 }
                 break;
             }
+        }
+
+        // Screen what is printed or saved: with --wait that is the finished
+        // operation's result, not the pending operation first returned.
+        if sanitize.template.is_some() {
+            value = crate::helpers::modelarmor::require_pass(
+                crate::helpers::modelarmor::sanitize_value(&sanitize, value).await?,
+            )?;
         }
 
         match &output {
@@ -664,9 +754,15 @@ pub(crate) async fn execute_to(
                 pagination.page_limit
             );
             if format == OutputFormat::Json {
-                out.stream(json!({"_truncated": {"pagesFetched": pages, "nextPageToken": token}}))?;
+                out.marker(json!({"_truncated": {"pagesFetched": pages, "nextPageToken": token}}))?;
             }
             break;
+        }
+        if !seen_tokens.insert(token.clone()) {
+            return Err(GwsError::other(anyhow::anyhow!(
+                "{method_id} returned a repeated nextPageToken after {pages} page(s); \
+                 aborting --page-all instead of looping forever"
+            )));
         }
         if let Some(loc) = token_location {
             pagination::place_token(loc, &token, &mut query, &mut body)?;
@@ -677,6 +773,41 @@ pub(crate) async fn execute_to(
     }
 
     Ok(out.finish())
+}
+
+/// Report an empty success response (204, or no body). The first response
+/// prints `empty_success`; an empty later page of a `--page-all` stream
+/// (`pages_done > 0`) just ends the stream, which stays one page or item per
+/// line.
+fn end_on_empty_response(
+    out: &mut Output<'_>,
+    empty_success: Value,
+    pages_done: u32,
+) -> Result<(), GwsError> {
+    if pages_done == 0 {
+        return out.single(empty_success);
+    }
+    tracing::warn!(
+        "page {} returned an empty response; treating it as the end of the list",
+        pages_done + 1
+    );
+    Ok(())
+}
+
+/// Screen a text response inlined into the JSON output with Model Armor, like
+/// a JSON response. Summaries of bodies saved to a file (`-o PATH`) or
+/// streamed raw on request (`-o -`) carry no API content and pass unchanged.
+async fn screen_inline(
+    sanitize: &SanitizeConfig,
+    output: Option<&OutputTarget>,
+    value: Value,
+) -> Result<Value, GwsError> {
+    if output.is_some() || sanitize.template.is_none() {
+        return Ok(value);
+    }
+    crate::helpers::modelarmor::require_pass(
+        crate::helpers::modelarmor::sanitize_value(sanitize, value).await?,
+    )
 }
 
 async fn send_plain(

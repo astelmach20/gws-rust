@@ -43,13 +43,22 @@ pub(super) async fn build_report(env: &AuthEnv, offline: bool) -> Value {
 
     out["keyring_backend"] = json!(env.keyring_backend.as_str());
 
-    match client_config::client_config_path().and_then(|p| client_config::load_from(&p)) {
+    // Report the client `auth login` would use (same resolution order), and
+    // name a saved file that the environment variables shadow.
+    match client_config::resolve_optional_in(&env.base) {
         Ok(Some(c)) => {
-            out["client"] = json!({
+            let mut client = json!({
                 "source": c.source.kind(),
                 "client_id": client_config::mask_client_id(&c.client_id),
                 "project_id": c.project_id,
             });
+            if c.source == client_config::ClientSource::EnvVars {
+                let p = client_config::client_config_path_in(&env.base);
+                if p.exists() {
+                    client["overrides"] = json!(p.display().to_string());
+                }
+            }
+            out["client"] = client;
         }
         Ok(None) => out["client"] = Value::Null,
         Err(e) => out["client_error"] = json!(format!("{e:#}")),
@@ -137,6 +146,17 @@ pub(super) async fn build_report(env: &AuthEnv, offline: bool) -> Value {
                         out["token_scopes"] = json!(scopes);
                     }
                 }
+                // No response from Google, or a 429/5xx outage: nothing was
+                // verified, so report it like `--offline` instead of as a
+                // rejected credential.
+                Err(
+                    e @ (crate::auth::AuthError::Network(_)
+                    | crate::auth::AuthError::TokenEndpointUnavailable { .. }),
+                ) => {
+                    out["authenticated"] = json!(true);
+                    out["verified"] = json!(false);
+                    out["verification_error"] = json!(e.to_string());
+                }
                 Err(e) => {
                     out["authenticated"] = json!(false);
                     out["verified"] = json!(true);
@@ -172,6 +192,24 @@ mod tests {
             },
             ProfilePaths::new(dir, "default"),
         )
+    }
+
+    /// The report reads the OAuth client from the config directory it is
+    /// given, never from the process-wide (real) one.
+    #[tokio::test]
+    async fn client_is_read_from_the_reports_config_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        crate::auth::client_config::save_client_config(
+            &dir.path().join("client_secret.json"),
+            "123-hermetic.apps.googleusercontent.com",
+            &secrecy::SecretString::from("cs".to_string()),
+            Some("hermetic-test-project"),
+        )
+        .unwrap();
+        let r = build_report(&env(dir.path()), true).await;
+        // No message: on failure the report would describe the real client.
+        assert!(r["client"]["project_id"] == "hermetic-test-project");
+        assert!(r["client"]["source"] == "client_secret.json");
     }
 
     #[tokio::test]
@@ -238,5 +276,70 @@ mod tests {
             !text.contains("\"rt\"") && !text.contains("\"cs\""),
             "no secrets: {text}"
         );
+    }
+
+    /// Without a response from the token endpoint nothing was verified: the
+    /// report must not claim a verified "not authenticated".
+    #[tokio::test]
+    async fn unreachable_token_endpoint_is_not_a_verified_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ks, _) = memory_keystore(dir.path());
+        let mut e = env(dir.path());
+        e.paths.ensure_dir().unwrap();
+        let ct = ks
+            .encrypt(
+                Purpose::Credentials,
+                br#"{"type":"authorized_user","client_id":"cid-1234567890.apps","client_secret":"cs","refresh_token":"rt"}"#,
+            )
+            .unwrap();
+        crate::fs_util::atomic_write(&e.paths.credentials, &ct).unwrap();
+        // A port nothing listens on: the refresh gets no response at all.
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        e.endpoints.token_url = format!("http://127.0.0.1:{port}/token");
+        let e = e.with_keystore(ks);
+
+        let r = build_report(&e, false).await;
+        assert_eq!(r["verified"], false, "{r}");
+        assert_ne!(r["authenticated"], false, "{r}");
+        assert!(r["verification_error"].is_string(), "{r}");
+    }
+
+    /// A 429/5xx from the token endpoint is Google being unavailable, not a
+    /// rejected credential (the error itself says "The credentials were not
+    /// rejected"). It must not be reported as a verified "not authenticated".
+    #[tokio::test]
+    async fn token_endpoint_outage_is_not_a_verified_failure() {
+        for status in [429, 500, 503] {
+            let dir = tempfile::tempdir().unwrap();
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/token"))
+                .respond_with(ResponseTemplate::new(status).set_body_string("backend error"))
+                .mount(&server)
+                .await;
+            let (ks, _) = memory_keystore(dir.path());
+            let mut e = env(dir.path());
+            e.paths.ensure_dir().unwrap();
+            let ct = ks
+                .encrypt(
+                    Purpose::Credentials,
+                    br#"{"type":"authorized_user","client_id":"cid-1234567890.apps","client_secret":"cs","refresh_token":"rt"}"#,
+                )
+                .unwrap();
+            crate::fs_util::atomic_write(&e.paths.credentials, &ct).unwrap();
+            e.endpoints = crate::auth::token::tests::endpoints(&server);
+            let e = e.with_keystore(ks);
+
+            let r = build_report(&e, false).await;
+            assert_eq!(r["verified"], false, "HTTP {status}: {r}");
+            assert_ne!(r["authenticated"], false, "HTTP {status}: {r}");
+            assert!(r.get("token_error").is_none(), "HTTP {status}: {r}");
+            let detail = r["verification_error"].as_str().unwrap_or_default();
+            assert!(detail.contains("temporarily unavailable"), "{r}");
+        }
     }
 }

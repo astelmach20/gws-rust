@@ -20,10 +20,34 @@
 use super::prelude::*;
 use crate::transport::Transport;
 use gws_rust_core::client::Idempotency;
+use gws_rust_core::validate::EndpointPolicy;
 use reqwest::Method;
 
-pub(super) const GMAIL_API_BASE: &str = "https://gmail.googleapis.com/gmail/v1";
-pub(super) const GMAIL_UPLOAD_BASE: &str = "https://gmail.googleapis.com/upload/gmail/v1";
+const GMAIL_API_BASE: &str = "https://gmail.googleapis.com/gmail/v1";
+const GMAIL_UPLOAD_BASE: &str = "https://gmail.googleapis.com/upload/gmail/v1";
+
+/// The Gmail REST and upload bases: Google's, or the same paths under the
+/// `GWSR_API_BASE_URL` override (as generated Gmail methods build them).
+fn bases_for(endpoints: &EndpointPolicy) -> (String, String) {
+    match endpoints.override_base() {
+        // The override always ends with '/'.
+        Some(base) => (format!("{base}gmail/v1"), format!("{base}upload/gmail/v1")),
+        None => (GMAIL_API_BASE.to_string(), GMAIL_UPLOAD_BASE.to_string()),
+    }
+}
+
+/// The Gmail REST base a real run would use, for `--dry-run` plans.
+pub(super) fn api_base() -> Result<String, GwsError> {
+    Ok(bases_for(&crate::env::get()?.endpoint_policy()).0)
+}
+
+/// The Gmail upload base a real run would use, for `--dry-run` plans.
+pub(super) fn upload_base() -> Result<String, GwsError> {
+    Ok(bases_for(&crate::env::get()?.endpoint_policy()).1)
+}
+/// `mediaUpload.maxSize` of `users.messages.send` and `users.drafts.create`
+/// in the Gmail Discovery document (35 MiB), for the whole raw message.
+pub(super) const MAX_UPLOAD_BYTES: u64 = 36_700_160;
 
 /// Gmail API client bound to the authenticated user (`users/me`).
 #[derive(Clone)]
@@ -42,7 +66,8 @@ pub(super) struct Label {
 
 impl GmailApi {
     pub(super) fn new(rest: Transport) -> Self {
-        Self::with_bases(rest, GMAIL_API_BASE, GMAIL_UPLOAD_BASE)
+        let (base, upload_base) = bases_for(rest.endpoints());
+        Self::with_bases(rest, &base, &upload_base)
     }
 
     pub(super) fn with_bases(rest: Transport, base: &str, upload_base: &str) -> Self {
@@ -57,7 +82,7 @@ impl GmailApi {
         format!("{}/users/me/{path}", self.base)
     }
 
-    fn message_url(&self, id: &str) -> String {
+    pub(super) fn message_url(&self, id: &str) -> String {
         self.url(&format!(
             "messages/{}",
             crate::validate::encode_path_segment(id)
@@ -354,6 +379,7 @@ impl GmailApi {
         metadata: &Value,
         draft: bool,
     ) -> Result<Value, GwsError> {
+        check_raw_size(raw.len())?;
         let boundary = format!("gwsr_{:032x}", rand::random::<u128>());
         let body = build_related_upload(&boundary, metadata, raw)?;
         let context = if draft {
@@ -397,6 +423,18 @@ impl TargetKind {
             TargetKind::Thread => "thread",
         }
     }
+}
+
+/// Refuse a raw message over Gmail's upload limit before sending any of it.
+/// The attachment limit alone does not bound it: base64 and the message's
+/// own text and headers come on top.
+pub(super) fn check_raw_size(len: usize) -> Result<(), GwsError> {
+    if len as u64 > MAX_UPLOAD_BYTES {
+        return Err(GwsError::Validation(format!(
+            "the encoded message is {len} bytes; Gmail accepts at most {MAX_UPLOAD_BYTES} bytes (35 MiB) including attachments, base64 encoding and headers"
+        )));
+    }
+    Ok(())
 }
 
 /// Build a `multipart/related` body: JSON metadata part + `message/rfc822` part.
@@ -488,6 +526,22 @@ mod tests {
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     #[test]
+    fn bases_follow_the_api_base_override() {
+        assert_eq!(
+            bases_for(&EndpointPolicy::google_only()),
+            (GMAIL_API_BASE.to_string(), GMAIL_UPLOAD_BASE.to_string())
+        );
+        let base = reqwest::Url::parse("http://127.0.0.1:8080/").unwrap();
+        assert_eq!(
+            bases_for(&EndpointPolicy::new(Some(base))),
+            (
+                "http://127.0.0.1:8080/gmail/v1".to_string(),
+                "http://127.0.0.1:8080/upload/gmail/v1".to_string()
+            )
+        );
+    }
+
+    #[test]
     fn related_upload_has_both_parts() {
         let body =
             build_related_upload("B", &json!({"threadId": "t1"}), b"Subject: hi\r\n\r\nx").unwrap();
@@ -565,6 +619,23 @@ mod tests {
             GwsError::Api { code, .. } => assert_eq!(code, 503),
             other => panic!("unexpected {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn upload_raw_over_the_send_limit_is_rejected_before_sending() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id": "m"})))
+            .mount(&server)
+            .await;
+        let api = mock_api(&server);
+        let raw = vec![b'x'; MAX_UPLOAD_BYTES as usize + 1];
+        for draft in [false, true] {
+            let err = api.upload_raw(&raw, &json!({}), draft).await.unwrap_err();
+            assert!(matches!(err, GwsError::Validation(_)), "{err:?}");
+        }
+        assert!(server.received_requests().await.unwrap().is_empty());
+        api.upload_raw(&raw[1..], &json!({}), false).await.unwrap();
     }
 
     #[tokio::test]

@@ -56,29 +56,62 @@ pub(crate) fn next_token(page: &Value) -> Option<&str> {
         .filter(|t| !t.is_empty())
 }
 
+/// An array field that describes the list rather than holding its items,
+/// such as Calendar's `defaultReminders` (the keys table/CSV output also
+/// treats as list metadata).
+fn is_list_metadata(field: &str) -> bool {
+    crate::formatter::LIST_ENVELOPE_KEYS.contains(&field)
+}
+
 /// Which array field of a page holds the items for `--page-items`.
 ///
 /// `requested` wins. Otherwise the response schema's single array property is
-/// used, falling back to the page's single array field.
+/// used, falling back to the page's single array field; list metadata arrays
+/// ([`is_list_metadata`]) are not candidates.
 pub(crate) fn item_field(
     doc: &RestDescription,
     method: &RestMethod,
     page: &Value,
     requested: Option<&str>,
 ) -> Result<String, GwsError> {
-    if let Some(field) = requested {
-        return Ok(field.to_string());
-    }
-    let schema_arrays: Vec<String> = method
+    let response_schema = method
         .response
         .as_ref()
         .and_then(|r| r.schema_ref.as_deref())
-        .and_then(|name| doc.schemas.get(name))
+        .and_then(|name| doc.schemas.get(name));
+    if let Some(field) = requested {
+        // APIs omit empty list fields from a page, so a field missing from
+        // the page is only an error when the response schema lacks it too;
+        // otherwise a typo would silently print nothing.
+        let in_page = page.get(field).is_some();
+        if let Some(schema) = response_schema.filter(|s| !s.properties.is_empty())
+            && !in_page
+            && !schema.properties.contains_key(field)
+        {
+            let mut arrays: Vec<&str> = schema
+                .properties
+                .iter()
+                .filter(|(_, p)| p.prop_type.as_deref() == Some("array"))
+                .map(|(k, _)| k.as_str())
+                .collect();
+            arrays.sort_unstable();
+            return Err(GwsError::Validation(format!(
+                "--page-items: the response has no field '{field}'; its list fields are: {}",
+                if arrays.is_empty() {
+                    "(none)".to_string()
+                } else {
+                    arrays.join(", ")
+                }
+            )));
+        }
+        return Ok(field.to_string());
+    }
+    let schema_arrays: Vec<String> = response_schema
         .map(|s| {
             let mut v: Vec<String> = s
                 .properties
                 .iter()
-                .filter(|(_, p)| p.prop_type.as_deref() == Some("array"))
+                .filter(|(k, p)| p.prop_type.as_deref() == Some("array") && !is_list_metadata(k))
                 .map(|(k, _)| k.clone())
                 .collect();
             v.sort();
@@ -93,7 +126,7 @@ pub(crate) fn item_field(
         .map(|o| {
             let mut v: Vec<String> = o
                 .iter()
-                .filter(|(_, v)| v.is_array())
+                .filter(|(k, v)| v.is_array() && !is_list_metadata(k))
                 .map(|(k, _)| k.clone())
                 .collect();
             v.sort();
@@ -200,6 +233,71 @@ mod tests {
         assert_eq!(
             item_field(&doc, &bare, &json!({"items": [1]}), None).unwrap(),
             "items"
+        );
+    }
+
+    #[test]
+    fn item_field_ignores_list_metadata_arrays() {
+        // Calendar `Events`: `defaultReminders` describes the calendar, not
+        // the items of the page.
+        let mut schemas = HashMap::new();
+        schemas.insert(
+            "Events".to_string(),
+            schema(&[
+                ("items", "array"),
+                ("defaultReminders", "array"),
+                ("nextPageToken", "string"),
+            ]),
+        );
+        let doc = RestDescription {
+            schemas,
+            ..Default::default()
+        };
+        let events = RestMethod {
+            response: sref("Events"),
+            ..Default::default()
+        };
+        let page = json!({"items": [], "defaultReminders": []});
+        assert_eq!(item_field(&doc, &events, &page, None).unwrap(), "items");
+        // Without a schema, the page's own arrays are filtered the same way.
+        let bare = RestMethod::default();
+        assert_eq!(item_field(&doc, &bare, &page, None).unwrap(), "items");
+    }
+
+    #[test]
+    fn requested_item_field_is_checked_against_the_schema() {
+        let mut schemas = HashMap::new();
+        schemas.insert(
+            "FileList".to_string(),
+            schema(&[("files", "array"), ("nextPageToken", "string")]),
+        );
+        let doc = RestDescription {
+            schemas,
+            ..Default::default()
+        };
+        let files = RestMethod {
+            response: sref("FileList"),
+            ..Default::default()
+        };
+        // An empty page may omit the list field: the schema still knows it.
+        assert_eq!(
+            item_field(&doc, &files, &json!({}), Some("files")).unwrap(),
+            "files"
+        );
+        // A typo is rejected, naming the list fields.
+        let err = item_field(&doc, &files, &json!({}), Some("file")).unwrap_err();
+        assert!(matches!(err, GwsError::Validation(_)), "{err:?}");
+        assert!(err.to_string().contains("files"), "{err}");
+        // A field the page has but the schema lacks is trusted.
+        assert_eq!(
+            item_field(&doc, &files, &json!({"extra": []}), Some("extra")).unwrap(),
+            "extra"
+        );
+        // Without a response schema there is nothing to check against.
+        let bare = RestMethod::default();
+        assert_eq!(
+            item_field(&doc, &bare, &json!({}), Some("anything")).unwrap(),
+            "anything"
         );
     }
 }

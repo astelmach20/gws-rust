@@ -8,13 +8,15 @@ metadata:
     requires:
       bins:
         - gwsr
+      skills:
+        - gwsr-shared
     cliHelp: "gwsr drive +sync --help"
 ---
 <!-- gwsr generated skill: do not edit by hand -->
 
 # drive +sync
 
-> **PREREQUISITE:** Read `../gwsr-shared/SKILL.md` for auth, global flags, and security rules.
+> **PREREQUISITE:** Read `../gwsr-shared/SKILL.md` for auth, global flags, and security rules. If it is missing, install it with `npx skills add https://github.com/astelmach20/gws-rust/tree/main/skills/gwsr-shared`.
 
 Mirror a Drive folder into a local directory (one-way, download only)
 
@@ -42,12 +44,12 @@ gwsr drive +sync --folder-id FOLDER_ID --dir ./mirror --dry-run
 
 - Recurses into sub-folders. Regular files are downloaded; Google
 - Docs/Sheets/Slides/Drawings are exported as docx/xlsx/pptx/pdf.
-- Downloaded files carry the Drive modification time. A local file is
-- replaced whenever its modification time or size differs from the Drive
-- copy, so a mirrored file edited locally is overwritten on the next run.
-- Local files that are not in Drive are left untouched (nothing is ever
-- deleted).
+- Local files are replaced only when the Drive copy is newer; local files
+- that are not in Drive are left untouched (nothing is ever deleted).
 - Other Google-native types (Forms, Sites, shortcuts...) are reported as skipped.
+- A file the API refuses (download restricted, export too large) is listed
+- under "failed" and the rest are still mirrored; the report is printed and
+- the command then exits 1 with reason syncPartialFailure.
 
 ## See Also
 

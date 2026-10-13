@@ -59,7 +59,7 @@ fn scalar_to_string(value: &Value) -> String {
 /// parameters. Some documents (Slides `presentations.get`) have `flatPath`
 /// placeholders that don't match parameter names; fall back to `path`,
 /// whose RFC 6570 `{+var}` operators are handled below.
-fn path_template(method: &RestMethod) -> &str {
+pub(crate) fn path_template(method: &RestMethod) -> &str {
     match method.flat_path.as_deref() {
         Some(fp) => {
             let all_match = method
@@ -134,6 +134,7 @@ pub(crate) fn build_url(
                 )
             }
         };
+    crate::validate::reject_dot_segments(&url)?;
 
     Ok(RequestUrl { url, query })
 }
@@ -180,8 +181,15 @@ pub(crate) fn render_path_template(
         match params.get(key) {
             Some(value) => {
                 let val_str = scalar_to_string(value);
+                // An empty segment would silently address a different
+                // resource (`files/` is the collection, not a file).
+                if val_str.is_empty() {
+                    return Err(GwsError::Validation(format!(
+                        "Path parameter '{key}' must not be empty (URL template '{path_template}')"
+                    )));
+                }
                 let encoded = if is_plus {
-                    let validated = crate::validate::validate_resource_name(&val_str)?;
+                    let validated = crate::validate::validate_reserved_path_value(&val_str)?;
                     crate::validate::encode_path_preserving_slashes(validated)
                 } else {
                     crate::validate::encode_path_segment(&val_str)
@@ -311,6 +319,51 @@ mod tests {
         assert!(err.to_string().contains("path traversal"));
     }
 
+    /// `{+name}` values may contain any RFC 3986 path character. Chat
+    /// documents `users/user@example.com/...` (email alias for a user) and
+    /// `customEmojis/:example-emoji:` (emoji-name alias).
+    #[test]
+    fn plus_expansion_accepts_documented_aliases() {
+        let doc = doc_with_base("https://chat.googleapis.com/");
+        let m = method("v1/{+name}", path_params(&["name"]));
+        let cases = [
+            (
+                "users/user@example.com/spaces/AAAA/spaceNotificationSetting",
+                "v1/users/user@example.com/spaces/AAAA/spaceNotificationSetting",
+            ),
+            (
+                "customEmojis/:example-emoji:",
+                "v1/customEmojis/%3Aexample-emoji%3A",
+            ),
+            (
+                "spaces/AAAA/members/first+tag@example.com",
+                "v1/spaces/AAAA/members/first%2Btag@example.com",
+            ),
+        ];
+        for (name, path) in cases {
+            let mut params = Map::new();
+            params.insert("name".into(), json!(name));
+            let u = build_url(&doc, &m, &params, UrlTarget::Method, &google())
+                .unwrap_or_else(|e| panic!("{name}: {e}"));
+            assert_eq!(u.url, format!("https://chat.googleapis.com/{path}"));
+        }
+        // Still refused: query/fragment, percent, whitespace, traversal.
+        for name in [
+            "users/a b",
+            "users/a%40b",
+            "users/a?x",
+            "users/../x",
+            "users//x",
+        ] {
+            let mut params = Map::new();
+            params.insert("name".into(), json!(name));
+            assert!(
+                build_url(&doc, &m, &params, UrlTarget::Method, &google()).is_err(),
+                "{name} was accepted"
+            );
+        }
+    }
+
     #[test]
     fn upload_endpoints() {
         let doc = RestDescription {
@@ -394,6 +447,26 @@ mod tests {
             err.to_string()
                 .contains("Missing value for path parameter 'fileId'")
         );
+    }
+
+    /// An empty ID must not collapse `files/{fileId}` into the collection
+    /// URL `files/` (or `users//messages`), which addresses a different
+    /// resource than the one the caller named.
+    #[test]
+    fn empty_path_value_is_rejected() {
+        let doc = doc_with_base("https://api.googleapis.com/");
+        for template in ["files/{fileId}", "users/{fileId}/messages", "v1/{+fileId}"] {
+            let m = method(template, path_params(&["fileId"]));
+            let mut params = Map::new();
+            params.insert("fileId".into(), json!(""));
+            let result = build_url(&doc, &m, &params, UrlTarget::Method, &google());
+            let err = match result {
+                Ok(u) => panic!("{template}: empty fileId was accepted as {}", u.url),
+                Err(e) => e.to_string(),
+            };
+            assert!(err.contains("fileId"), "{template}: {err}");
+            assert!(err.contains("empty"), "{template}: {err}");
+        }
     }
 
     #[test]

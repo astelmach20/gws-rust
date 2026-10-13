@@ -71,7 +71,10 @@ EXAMPLES:
 TIPS:
   Read-only. One row per response; one column per question (grid rows get
   their own column). Multiple answers in a cell are joined with '; ';
-  file uploads are listed by file name.",
+  file uploads are listed by file name. A repeated question title gets the
+  question ID appended, e.g. 'Comments (1a2b3c4d)'. In CSV, cells starting
+  with =, +, - or @ get a leading ' so spreadsheets do not run them as
+  formulas.",
                 ),
         )
     }
@@ -176,6 +179,17 @@ fn columns(form: &Value) -> Vec<Column> {
             }
         }
     }
+    // JSON rows are keyed by header, so a repeated title (common in
+    // multi-section forms) or one equal to a fixed column would overwrite
+    // another answer. Disambiguate repeats with the question ID.
+    let mut seen: std::collections::HashSet<String> =
+        FIXED_COLUMNS.iter().map(|s| s.to_string()).collect();
+    for c in &mut cols {
+        if !seen.insert(c.title.clone()) {
+            c.title = format!("{} ({})", c.title, c.id);
+            seen.insert(c.title.clone());
+        }
+    }
     cols
 }
 
@@ -262,9 +276,17 @@ impl Table {
     fn to_csv(&self) -> Result<String, GwsError> {
         let mut w = csv::Writer::from_writer(Vec::new());
         let enc = |e: csv::Error| http::other_err(anyhow::anyhow!("Failed to encode CSV: {e}"));
-        w.write_record(self.headers()).map_err(enc)?;
+        // Answers come from untrusted respondents: guard against formula
+        // injection when the CSV is opened in a spreadsheet.
+        let guard = |cells: &[String]| -> Vec<String> {
+            cells
+                .iter()
+                .map(|c| crate::formatter::csv_text_cell(c))
+                .collect()
+        };
+        w.write_record(guard(&self.headers())).map_err(enc)?;
         for r in &self.rows {
-            w.write_record(r).map_err(enc)?;
+            w.write_record(guard(r)).map_err(enc)?;
         }
         let bytes = w
             .into_inner()
@@ -337,6 +359,67 @@ mod tests {
         let j = t.to_json();
         assert_eq!(j["responses"][0]["Colors"], "red; blue");
         assert_eq!(j["count"], 1);
+    }
+
+    #[test]
+    fn csv_neutralises_formula_injection_from_respondents() {
+        // Respondents are untrusted: an answer or a question title starting
+        // with =, +, -, @ must not become a live formula when the exported
+        // CSV is opened in a spreadsheet (same guard as `--format csv`).
+        let form = json!({"items": [
+            {"title": "=cmd", "questionItem": {"question": {"questionId": "q1"}}},
+            {"title": "Plain", "questionItem": {"question": {"questionId": "q2"}}}
+        ]});
+        let responses = vec![json!({
+            "responseId": "r1",
+            "answers": {
+                "q1": {"textAnswers": {"answers": [{"value": "=HYPERLINK(\"http://x.test\",\"y\")"}]}},
+                "q2": {"textAnswers": {"answers": [{"value": "@SUM(A1)"}]}}
+            }
+        })];
+        let csv = build_table(&form, &responses).to_csv().unwrap();
+        let lines: Vec<&str> = csv.lines().collect();
+        assert_eq!(
+            lines[1],
+            "r1,,,,\"'=HYPERLINK(\"\"http://x.test\"\",\"\"y\"\")\",'@SUM(A1)"
+        );
+        assert_eq!(
+            lines[0],
+            "responseId,createTime,lastSubmittedTime,respondentEmail,'=cmd,Plain"
+        );
+        // The JSON output keeps answers verbatim.
+        let j = build_table(&form, &responses).to_json();
+        assert_eq!(j["responses"][0]["Plain"], "@SUM(A1)");
+    }
+
+    #[test]
+    fn duplicate_question_titles_do_not_lose_answers() {
+        // Multi-section forms often repeat a title ("Comments"); a question can
+        // also be titled like a fixed column. Every answer must survive in the
+        // JSON rows, which are keyed by column header.
+        let form = json!({"items": [
+            {"title": "Comments", "questionItem": {"question": {"questionId": "q1"}}},
+            {"title": "Comments", "questionItem": {"question": {"questionId": "q2"}}},
+            {"title": "responseId", "questionItem": {"question": {"questionId": "q3"}}}
+        ]});
+        let responses = vec![json!({
+            "responseId": "r1",
+            "answers": {
+                "q1": {"textAnswers": {"answers": [{"value": "first"}]}},
+                "q2": {"textAnswers": {"answers": [{"value": "second"}]}},
+                "q3": {"textAnswers": {"answers": [{"value": "third"}]}}
+            }
+        })];
+        let j = build_table(&form, &responses).to_json();
+        let row = j["responses"][0].as_object().unwrap();
+        assert_eq!(row["responseId"], "r1");
+        let mut values: Vec<&str> = row.values().map(|v| v.as_str().unwrap()).collect();
+        values.sort_unstable();
+        assert_eq!(values, ["", "", "", "first", "r1", "second", "third"]);
+        // Headers are unique, so CSV consumers can tell the columns apart.
+        let headers = build_table(&form, &responses).headers();
+        let unique: std::collections::HashSet<&String> = headers.iter().collect();
+        assert_eq!(unique.len(), headers.len(), "{headers:?}");
     }
 
     #[tokio::test]

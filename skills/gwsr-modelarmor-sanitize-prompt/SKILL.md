@@ -8,13 +8,15 @@ metadata:
     requires:
       bins:
         - gwsr
+      skills:
+        - gwsr-shared
     cliHelp: "gwsr modelarmor +sanitize-prompt --help"
 ---
 <!-- gwsr generated skill: do not edit by hand -->
 
 # modelarmor +sanitize-prompt
 
-> **PREREQUISITE:** Read `../gwsr-shared/SKILL.md` for auth, global flags, and security rules.
+> **PREREQUISITE:** Read `../gwsr-shared/SKILL.md` for auth, global flags, and security rules. If it is missing, install it with `npx skills add https://github.com/astelmach20/gws-rust/tree/main/skills/gwsr-shared`.
 
 Sanitize a user prompt through a Model Armor template
 
@@ -35,7 +37,7 @@ gwsr modelarmor +sanitize-prompt --template <NAME>
 ## Examples
 
 ```bash
-gwsr modelarmor +sanitize-prompt --template projects/P/locations/L/templates/T --text 'user input'
+gwsr modelarmor +sanitize-prompt --template projects/my-project/locations/us-central1/templates/my-tmpl --text 'user input'
 echo 'prompt' | gwsr modelarmor +sanitize-prompt --template ...
 ```
 

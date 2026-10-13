@@ -98,7 +98,12 @@ struct ClientSecretFile {
 ///
 /// See [`super::profiles::try_config_dir`].
 pub fn client_config_path() -> anyhow::Result<PathBuf> {
-    Ok(super::profiles::try_config_dir()?.join("client_secret.json"))
+    Ok(client_config_path_in(&super::profiles::try_config_dir()?))
+}
+
+/// Path of the saved client configuration inside the config directory `base`.
+pub fn client_config_path_in(base: &Path) -> PathBuf {
+    base.join("client_secret.json")
 }
 
 /// Save a client in the Google Cloud Console format (0600 file, 0700 dir).
@@ -112,6 +117,8 @@ pub fn save_client_config(
     client_secret: &SecretString,
     project_id: Option<&str>,
 ) -> anyhow::Result<()> {
+    check_field(path, "client_id", client_id)?;
+    check_field(path, "client_secret", client_secret.expose_secret())?;
     let file = ClientSecretFile {
         installed: InstalledConfig {
             client_id: client_id.to_string(),
@@ -131,6 +138,27 @@ pub fn save_client_config(
     );
     crate::fs_util::atomic_write(path, &json)
         .with_context(|| format!("cannot write '{}'", path.display()))
+}
+
+/// Reject an empty client ID/secret or one with whitespace, control or
+/// non-ASCII characters (the same rule as `GWSR_CLIENT_ID`). A stray pasted
+/// space otherwise reaches Google and fails as `invalid_client` ("The OAuth
+/// client was not found"), which does not point at the file. The value itself
+/// is never echoed.
+fn check_field(path: &Path, field: &str, value: &str) -> anyhow::Result<()> {
+    let problem = if value.is_empty() {
+        "is empty".to_string()
+    } else {
+        match crate::env::check_printable(value) {
+            Ok(()) => return Ok(()),
+            Err(p) => p,
+        }
+    };
+    anyhow::bail!(
+        "\"{field}\" in '{}' {problem}; edit the file (for example remove a stray space pasted \
+         with the value), or delete it and run `gwsr auth setup` again",
+        path.display()
+    )
 }
 
 /// Load a saved client configuration; `Ok(None)` if the file does not exist.
@@ -154,6 +182,8 @@ pub fn load_from(path: &Path) -> anyhow::Result<Option<ClientConfig>> {
             path.display()
         )
     })?;
+    check_field(path, "client_id", &file.installed.client_id)?;
+    check_field(path, "client_secret", &file.installed.client_secret)?;
     Ok(Some(ClientConfig {
         client_id: file.installed.client_id.clone(),
         client_secret: SecretString::from(file.installed.client_secret.clone()),
@@ -204,24 +234,53 @@ fn resolve_pair(
 /// (with instructions for every way to provide one).
 pub fn resolve() -> anyhow::Result<ClientConfig> {
     let path = client_config_path()?;
-    let saved = load_from(&path)?;
+    resolve_optional()?.ok_or_else(|| anyhow::anyhow!("{}", no_client_message(&path)))
+}
+
+/// Like [`resolve`], but `Ok(None)` when no client is configured at all
+/// (`gwsr auth status` reports that instead of failing).
+///
+/// # Errors
+///
+/// A half-configured source or an unreadable saved file.
+pub fn resolve_optional() -> anyhow::Result<Option<ClientConfig>> {
+    resolve_optional_in(&super::profiles::try_config_dir()?)
+}
+
+/// [`resolve_optional`] with the saved client read from the config directory
+/// `base`.
+///
+/// # Errors
+///
+/// A half-configured source or an unreadable saved file.
+pub fn resolve_optional_in(base: &Path) -> anyhow::Result<Option<ClientConfig>> {
+    let saved = load_from(&client_config_path_in(base))?;
     let vars = crate::env::get()?;
     let env = resolve_pair(
         vars.client_id.clone(),
         vars.client_secret.clone(),
         "only one of GWSR_CLIENT_ID / GWSR_CLIENT_SECRET is set; set both or neither",
     )?;
-    resolve_from(env, saved, builtin_client()?, &path)
+    Ok(select(env, saved, builtin_client()?))
 }
 
+#[cfg(test)]
 fn resolve_from(
     env: Option<(String, SecretString)>,
     saved: Option<ClientConfig>,
     builtin: Option<(String, SecretString)>,
     path: &Path,
 ) -> anyhow::Result<ClientConfig> {
+    select(env, saved, builtin).ok_or_else(|| anyhow::anyhow!("{}", no_client_message(path)))
+}
+
+fn select(
+    env: Option<(String, SecretString)>,
+    saved: Option<ClientConfig>,
+    builtin: Option<(String, SecretString)>,
+) -> Option<ClientConfig> {
     if let Some((client_id, client_secret)) = env {
-        return Ok(ClientConfig {
+        return Some(ClientConfig {
             client_id,
             client_secret,
             project_id: saved.and_then(|s| s.project_id),
@@ -229,17 +288,14 @@ fn resolve_from(
         });
     }
     if let Some(saved) = saved {
-        return Ok(saved);
+        return Some(saved);
     }
-    if let Some((client_id, client_secret)) = builtin {
-        return Ok(ClientConfig {
-            client_id,
-            client_secret,
-            project_id: None,
-            source: ClientSource::BuiltIn,
-        });
-    }
-    anyhow::bail!("{}", no_client_message(path))
+    builtin.map(|(client_id, client_secret)| ClientConfig {
+        client_id,
+        client_secret,
+        project_id: None,
+        source: ClientSource::BuiltIn,
+    })
 }
 
 /// Instructions for providing an OAuth client.
@@ -315,6 +371,45 @@ mod tests {
             load_from(&dir.path().join("missing.json"))
                 .unwrap()
                 .is_none()
+        );
+    }
+
+    /// A pasted client ID with a trailing space produced `invalid_client`
+    /// ("The OAuth client was not found") at login; it must be rejected when
+    /// the file is loaded, naming the field.
+    #[test]
+    fn whitespace_in_client_credentials_is_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("client_secret.json");
+        for (json, field) in [
+            (
+                r#"{"installed":{"client_id":"123-abc.apps.googleusercontent.com ","client_secret":"cs"}}"#,
+                "client_id",
+            ),
+            (
+                r#"{"installed":{"client_id":"\t123-abc.apps.googleusercontent.com","client_secret":"cs"}}"#,
+                "client_id",
+            ),
+            (
+                r#"{"installed":{"client_id":"123-abc.apps.googleusercontent.com","client_secret":"cs\n"}}"#,
+                "client_secret",
+            ),
+            (
+                r#"{"installed":{"client_id":"","client_secret":"cs"}}"#,
+                "client_id",
+            ),
+        ] {
+            crate::fs_util::atomic_write(&path, json.as_bytes()).unwrap();
+            let err = match load_from(&path) {
+                Ok(c) => panic!("accepted {:?} from {json}", c.map(|c| c.client_id)),
+                Err(e) => format!("{e:#}"),
+            };
+            assert!(err.contains(field), "{err}");
+            assert!(!err.contains("\"cs"), "secret must not be echoed: {err}");
+        }
+        assert!(
+            save_client_config(&path, "cid ", &secret("cs"), None).is_err(),
+            "a dirty client ID must never be written"
         );
     }
 

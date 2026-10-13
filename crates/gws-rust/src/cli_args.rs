@@ -242,7 +242,7 @@ pub enum DevCommand {
     Man {
         /// Directory to write `*.1` files into (created if missing)
         #[arg(long, value_name = "DIR", required = true)]
-        output_dir: std::path::PathBuf,
+        output_dir: String,
     },
 }
 

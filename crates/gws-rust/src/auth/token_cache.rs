@@ -111,20 +111,13 @@ impl TokenCache {
         F: FnOnce() -> Fut,
         Fut: Future<Output = Result<AccessToken, AuthError>>,
     {
-        let _lock = crate::fs_util::FileLock::acquire_async(&self.lock_path, LOCK_TIMEOUT)
-            .await
-            .map_err(|e| {
-                AuthError::Storage(format!(
-                    "cannot lock token cache '{}': {e}",
-                    self.lock_path.display()
-                ))
-            })?;
+        let _lock = self.lock().await?;
 
         let mut cache = self.read_blocking().await?;
         let now = chrono::Utc::now().timestamp();
         if freshness == Freshness::Cached
             && let Some(entry) = cache.entries.get(key)
-            && entry.expires_at - EXPIRY_MARGIN_SECS > now
+            && entry.expires_at.saturating_sub(EXPIRY_MARGIN_SECS) > now
         {
             tracing::debug!(key, "using cached access token");
             return Ok(SecretString::from(entry.access_token.clone()));
@@ -148,6 +141,40 @@ impl TokenCache {
         Ok(fresh.token)
     }
 
+    /// Delete the cache file while holding the cross-process lock, so a
+    /// concurrent `get_or_fetch` cannot write a token back between our delete
+    /// and its own read-modify-write. Returns whether a file was removed; a
+    /// missing cache is not an error.
+    ///
+    /// # Errors
+    ///
+    /// Lock timeouts and any IO error other than the file not existing.
+    pub async fn clear(&self) -> Result<bool, AuthError> {
+        let _lock = self.lock().await?;
+        let path = self.path.clone();
+        tokio::task::spawn_blocking(move || match std::fs::remove_file(&path) {
+            Ok(()) => Ok(true),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(e) => Err(AuthError::Storage(format!(
+                "cannot clear the token cache '{}': {e}",
+                path.display()
+            ))),
+        })
+        .await
+        .map_err(|e| AuthError::Storage(format!("token cache task failed: {e}")))?
+    }
+
+    async fn lock(&self) -> Result<crate::fs_util::FileLock, AuthError> {
+        crate::fs_util::FileLock::acquire_async(&self.lock_path, LOCK_TIMEOUT)
+            .await
+            .map_err(|e| {
+                AuthError::Storage(format!(
+                    "cannot lock token cache '{}': {e}",
+                    self.lock_path.display()
+                ))
+            })
+    }
+
     async fn read_blocking(&self) -> Result<CacheFile, AuthError> {
         let path = self.path.clone();
         let keystore = Arc::clone(&self.keystore);
@@ -163,6 +190,25 @@ impl TokenCache {
             .await
             .map_err(|e| AuthError::Storage(format!("token cache task failed: {e}")))?
     }
+}
+
+/// A short, non-reversible fingerprint of the secret behind a grant (a
+/// user's refresh token), for use in cache keys.
+///
+/// Cache keys must identify the grant, not just the OAuth client: after a
+/// re-login, a command that loaded the previous refresh token before the
+/// cache was cleared can still cache that grant's access token. With the
+/// fingerprint in the key, that entry is never served to the new grant.
+/// The secret itself never appears in the key.
+pub fn grant_fingerprint(secret: &SecretString) -> String {
+    let mut ctx = aws_lc_rs::digest::Context::new(&aws_lc_rs::digest::SHA256);
+    ctx.update(b"gwsr token-cache grant v1\0");
+    ctx.update(secret.expose_secret().as_bytes());
+    let digest = ctx.finish();
+    digest.as_ref()[..12]
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
 }
 
 fn read_cache(path: &Path, keystore: &Keystore) -> Result<CacheFile, AuthError> {
@@ -292,6 +338,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn extreme_expiry_times_do_not_overflow() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = cache_in(dir.path());
+        let at = |value: &str, expires_at: i64| AccessToken {
+            token: SecretString::from(value.to_string()),
+            expires_at: Some(expires_at),
+            scopes: None,
+        };
+        // A token that expired at the earliest representable time is stale.
+        cache
+            .get_or_fetch("k", Freshness::Cached, || async {
+                Ok(at("ya29.old", i64::MIN))
+            })
+            .await
+            .unwrap();
+        let t = cache
+            .get_or_fetch("k", Freshness::Cached, || async {
+                Ok(at("ya29.new", i64::MAX))
+            })
+            .await
+            .unwrap();
+        assert_eq!(t.expose_secret(), "ya29.new");
+        // One that expires at the latest representable time is reused.
+        let t = cache
+            .get_or_fetch("k", Freshness::Cached, || async { Ok(at("ya29.x", 0)) })
+            .await
+            .unwrap();
+        assert_eq!(t.expose_secret(), "ya29.new");
+    }
+
+    #[tokio::test]
     async fn force_refresh_bypasses_and_replaces_the_cached_token() {
         let dir = tempfile::tempdir().unwrap();
         let cache = cache_in(dir.path());
@@ -377,6 +454,120 @@ mod tests {
         assert_eq!(
             std::fs::read(dir.path().join(&quarantined[0])).unwrap(),
             b"garbage"
+        );
+    }
+
+    #[test]
+    fn grant_fingerprint_is_stable_distinct_and_hides_the_secret() {
+        let a = SecretString::from("1//refresh-a".to_string());
+        let b = SecretString::from("1//refresh-b".to_string());
+        let fa = grant_fingerprint(&a);
+        assert_eq!(fa, grant_fingerprint(&a));
+        assert_ne!(fa, grant_fingerprint(&b));
+        assert_eq!(fa.len(), 24);
+        assert!(fa.bytes().all(|c| c.is_ascii_hexdigit()));
+        assert!(!fa.contains("refresh"));
+    }
+
+    #[tokio::test]
+    async fn clear_waits_for_the_lock_holder() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = cache_in(dir.path());
+        cache
+            .get_or_fetch("k", Freshness::Cached, || async {
+                Ok(token("ya29.old", 3600))
+            })
+            .await
+            .unwrap();
+        let cache_path = dir.path().join("token_cache.enc");
+        let held = crate::fs_util::FileLock::acquire(
+            &dir.path().join("token_cache.lock"),
+            Duration::from_secs(1),
+        )
+        .unwrap();
+
+        let clearing = tokio::spawn(async move { cache.clear().await });
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(
+            !clearing.is_finished(),
+            "clear must wait while another process holds the lock"
+        );
+        assert!(cache_path.exists());
+
+        drop(held);
+        assert!(clearing.await.unwrap().unwrap(), "the file was removed");
+        assert!(!cache_path.exists());
+    }
+
+    #[tokio::test]
+    async fn clear_after_an_in_flight_refresh_leaves_no_stale_token() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ks, _) = memory_keystore(dir.path());
+        let ks = Arc::new(ks);
+        let new_cache = || {
+            TokenCache::new(
+                &dir.path().join("token_cache.enc"),
+                &dir.path().join("token_cache.lock"),
+                Arc::clone(&ks),
+            )
+        };
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let refresher = new_cache();
+        let refresh = tokio::spawn(async move {
+            refresher
+                .get_or_fetch("user:client|*", Freshness::Cached, || async move {
+                    started_tx.send(()).unwrap();
+                    tokio::time::sleep(Duration::from_millis(300)).await;
+                    Ok(token("ya29.previous-grant", 3600))
+                })
+                .await
+        });
+        // The refresh holds the lock and is mid-fetch when login clears.
+        started_rx.await.unwrap();
+        new_cache().clear().await.unwrap();
+        refresh.await.unwrap().unwrap();
+        assert!(
+            !dir.path().join("token_cache.enc").exists(),
+            "the previous grant's token was written back after the clear"
+        );
+    }
+
+    #[tokio::test]
+    async fn clear_of_a_missing_cache_is_ok() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = cache_in(dir.path());
+        assert!(!cache.clear().await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn clear_reports_io_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = cache_in(dir.path());
+        // A directory where the cache file should be cannot be removed as a file.
+        std::fs::create_dir(dir.path().join("token_cache.enc")).unwrap();
+        std::fs::write(dir.path().join("token_cache.enc").join("x"), b"x").unwrap();
+        let err = cache.clear().await.unwrap_err();
+        assert!(
+            matches!(&err, AuthError::Storage(m) if m.contains("cannot clear the token cache")),
+            "{err}"
+        );
+        assert!(dir.path().join("token_cache.enc").exists());
+    }
+
+    #[tokio::test]
+    async fn clear_reports_lock_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ks, _) = memory_keystore(dir.path());
+        let missing = dir.path().join("no-such-profile");
+        let cache = TokenCache::new(
+            &missing.join("token_cache.enc"),
+            &missing.join("token_cache.lock"),
+            Arc::new(ks),
+        );
+        let err = cache.clear().await.unwrap_err();
+        assert!(
+            matches!(&err, AuthError::Storage(m) if m.contains("cannot lock token cache")),
+            "{err}"
         );
     }
 

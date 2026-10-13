@@ -50,6 +50,13 @@ fn now_unix() -> i64 {
     chrono::Utc::now().timestamp()
 }
 
+/// Unix expiry time of a token issued now with an `expires_in` lifetime.
+/// Saturating: an absurd lifetime clamps to the far future and a negative one
+/// means already expired, instead of overflowing the addition.
+fn expiry_after(expires_in: i64) -> i64 {
+    now_unix().saturating_add(expires_in.max(0))
+}
+
 /// Build an `oauth2` client for Google with `client_secret` sent in the body.
 pub(crate) fn oauth_client(
     client_id: &str,
@@ -77,8 +84,8 @@ pub(crate) fn oauth_client(
 }
 
 /// Convert an `oauth2` token-request error into an [`AuthError`].
-pub(crate) fn map_token_error<RE: std::error::Error + 'static>(
-    err: RequestTokenError<RE, oauth2::basic::BasicErrorResponse>,
+pub(crate) fn map_token_error(
+    err: RequestTokenError<http::HttpError, oauth2::basic::BasicErrorResponse>,
     login_command: &str,
     requested: &[String],
 ) -> AuthError {
@@ -99,6 +106,9 @@ pub(crate) fn map_token_error<RE: std::error::Error + 'static>(
                 },
                 other => AuthError::TokenEndpoint(format!("{other}: {description}")),
             }
+        }
+        RequestTokenError::Request(http::HttpError::Unavailable { status, detail }) => {
+            AuthError::TokenEndpointUnavailable { status, detail }
         }
         RequestTokenError::Request(e) => AuthError::Network(format!("{e}")),
         RequestTokenError::Parse(e, _) => {
@@ -138,11 +148,9 @@ pub async fn refresh_user(
         .map_err(|e| map_token_error(e, login_command, &requested))?;
     Ok(AccessToken {
         token: SecretString::from(response.access_token().secret().to_string()),
-        // Saturating: an absurd lifetime clamps far in the future (without
-        // overflowing the addition) instead of being dropped.
         expires_at: response
             .expires_in()
-            .map(|d| now_unix() + i64::try_from(d.as_secs()).unwrap_or(i64::MAX / 2)),
+            .map(|d| expiry_after(i64::try_from(d.as_secs()).unwrap_or(i64::MAX))),
         scopes: response
             .scopes()
             .map(|s| s.iter().map(|x| x.as_str().to_string()).collect()),
@@ -273,6 +281,12 @@ pub async fn service_account_token(
         .bytes()
         .await
         .map_err(|e| AuthError::Network(format!("cannot read token response: {e}")))?;
+    if http::is_unavailable(status) {
+        return Err(AuthError::TokenEndpointUnavailable {
+            status: status.as_u16(),
+            detail: http::body_excerpt(&body),
+        });
+    }
     if !status.is_success() {
         let detail = match serde_json::from_slice::<EndpointError>(&body) {
             Ok(err) => {
@@ -300,10 +314,7 @@ pub async fn service_account_token(
                 }
                 format!("{}: {desc}", err.error)
             }
-            Err(_) => format!(
-                "HTTP {status}: {}",
-                crate::output::sanitize_for_terminal(&String::from_utf8_lossy(&body))
-            ),
+            Err(_) => format!("HTTP {status}: {}", http::body_excerpt(&body)),
         };
         return Err(AuthError::TokenEndpoint(detail));
     }
@@ -311,7 +322,7 @@ pub async fn service_account_token(
         .map_err(|e| AuthError::TokenEndpoint(format!("unparseable token response: {e}")))?;
     Ok(AccessToken {
         token: SecretString::from(parsed.access_token),
-        expires_at: parsed.expires_in.map(|s| now_unix() + s),
+        expires_at: parsed.expires_in.map(expiry_after),
         scopes: Some(scopes.to_vec()),
     })
 }
@@ -451,6 +462,24 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn refresh_extreme_expires_in_does_not_overflow() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "access_token": "ya29.new",
+                "expires_in": i64::MAX,
+                "token_type": "Bearer"
+            })))
+            .mount(&server)
+            .await;
+        let t = refresh_user(&user(), None, &endpoints(&server), "gwsr auth login")
+            .await
+            .unwrap();
+        assert!(t.expires_at.unwrap() > now_unix() + 3600);
+    }
+
+    #[tokio::test]
     async fn invalid_grant_maps_to_actionable_error() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
@@ -521,6 +550,34 @@ pub(crate) mod tests {
         assert_eq!(t.token.expose_secret(), "ya29.sa");
     }
 
+    async fn sa_token_with_expires_in(expires_in: i64) -> AccessToken {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "access_token": "ya29.sa",
+                "expires_in": expires_in,
+                "token_type": "Bearer"
+            })))
+            .mount(&server)
+            .await;
+        service_account_token(&test_sa_key(), &["s".into()], None, &endpoints(&server))
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn service_account_extreme_expires_in_does_not_overflow() {
+        // An absurd lifetime clamps far in the future, like refresh_user,
+        // instead of overflowing (a panic in debug, a wrap into the past in
+        // release).
+        let t = sa_token_with_expires_in(i64::MAX).await;
+        assert!(t.expires_at.unwrap() > now_unix() + 3600);
+        // A negative lifetime is already expired; it must not underflow.
+        let t = sa_token_with_expires_in(i64::MIN).await;
+        assert!(t.expires_at.unwrap() <= now_unix());
+    }
+
     #[tokio::test]
     async fn service_account_delegation_error_explains_setup() {
         let server = MockServer::start().await;
@@ -542,6 +599,57 @@ pub(crate) mod tests {
         .unwrap_err()
         .to_string();
         assert!(err.contains("domain-wide delegation"), "{err}");
+    }
+
+    /// A 5xx, 429 or non-OAuth body from the token endpoint is a transient
+    /// server problem, not a rejected credential: it must exit 6 (retry with
+    /// backoff), never 2 ("sign in again").
+    #[tokio::test]
+    async fn token_endpoint_server_errors_are_retryable_not_auth_errors() {
+        use crate::error::GwsError;
+        let cases = [
+            (
+                503,
+                ResponseTemplate::new(503).set_body_string("<html>Service Unavailable</html>"),
+            ),
+            (
+                500,
+                ResponseTemplate::new(500).set_body_json(serde_json::json!({
+                    "error": "internal_failure",
+                    "error_description": "Backend Error"
+                })),
+            ),
+            (502, ResponseTemplate::new(502)),
+            (
+                429,
+                ResponseTemplate::new(429).set_body_string("Too Many Requests"),
+            ),
+        ];
+        for (status, template) in cases {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/token"))
+                .respond_with(template)
+                .mount(&server)
+                .await;
+            let refresh = refresh_user(&user(), None, &endpoints(&server), "gwsr auth login")
+                .await
+                .unwrap_err();
+            let sa =
+                service_account_token(&test_sa_key(), &["s".into()], None, &endpoints(&server))
+                    .await
+                    .unwrap_err();
+            for err in [refresh, sa] {
+                let text = err.to_string();
+                let gws = GwsError::from(err);
+                assert_eq!(
+                    gws.exit_code(),
+                    GwsError::EXIT_CODE_API_RETRYABLE,
+                    "HTTP {status}: {text} -> {gws:?}"
+                );
+                assert!(gws.is_retryable(), "{text}");
+            }
+        }
     }
 
     #[tokio::test]

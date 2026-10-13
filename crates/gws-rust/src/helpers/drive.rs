@@ -31,7 +31,8 @@ use std::pin::Pin;
 const SCOPE_DRIVE: &str = "https://www.googleapis.com/auth/drive";
 const SCOPE_DRIVE_READONLY: &str = "https://www.googleapis.com/auth/drive.readonly";
 const FOLDER_MIME: &str = "application/vnd.google-apps.folder";
-const FILE_FIELDS: &str = "id,name,mimeType,parents,size,modifiedTime,webViewLink,driveId";
+const FILE_FIELDS: &str =
+    "id,name,mimeType,parents,size,modifiedTime,webViewLink,driveId,shortcutDetails";
 
 pub struct DriveHelper;
 
@@ -274,12 +275,12 @@ EXAMPLES:
 TIPS:
   Recurses into sub-folders. Regular files are downloaded; Google
   Docs/Sheets/Slides/Drawings are exported as docx/xlsx/pptx/pdf.
-  Downloaded files carry the Drive modification time. A local file is
-  replaced whenever its modification time or size differs from the Drive
-  copy, so a mirrored file edited locally is overwritten on the next run.
-  Local files that are not in Drive are left untouched (nothing is ever
-  deleted).
-  Other Google-native types (Forms, Sites, shortcuts...) are reported as skipped.",
+  Local files are replaced only when the Drive copy is newer; local files
+  that are not in Drive are left untouched (nothing is ever deleted).
+  Other Google-native types (Forms, Sites, shortcuts...) are reported as skipped.
+  A file the API refuses (download restricted, export too large) is listed
+  under \"failed\" and the rest are still mirrored; the report is printed and
+  the command then exits 1 with reason syncPartialFailure.",
                 ),
         )
     }
@@ -343,7 +344,11 @@ TIPS:
                     let dir = crate::validate::validate_safe_output_dir(required(m, "dir")?)?;
                     let api = Api::new(doc, &[SCOPE_DRIVE_READONLY], dry, sanitize).await?;
                     let v = sync(&api, required(m, "folder-id")?, &dir).await?;
-                    (api, v)
+                    api.emit(m, &v).await?;
+                    return match sync_failure(&v) {
+                        Some(err) => Err(err),
+                        None => Ok(true),
+                    };
                 }
                 _ => return Ok(false),
             };
@@ -505,10 +510,7 @@ async fn download(
         let meta = get_metadata(api, file_id).await?;
         let mime = str_field(&meta, "mimeType")?;
         if mime.starts_with("application/vnd.google-apps.") {
-            return Err(GwsError::Validation(format!(
-                "'{}' is a Google-native file ({mime}) with no binary content; use `gwsr drive +export --file-id {file_id} --to <format>`",
-                str_field(&meta, "name")?
-            )));
+            return Err(native_download_error(&meta, file_id, mime)?);
         }
         let name = str_field(&meta, "name")?.to_string();
         let target = resolve_target(output, &name, overwrite)?;
@@ -525,6 +527,42 @@ async fn download(
     let mut out = download_result(file_id, &target, bytes);
     out["name"] = json!(name);
     Ok(out)
+}
+
+const SHORTCUT: &str = "application/vnd.google-apps.shortcut";
+
+/// The error for `+download` of a Google-native file (`meta` has `mimeType`
+/// `mime`). It points only at a command that can work: `+export` with the
+/// formats valid for the type, the shortcut's target, or nothing.
+fn native_download_error(meta: &Value, file_id: &str, mime: &str) -> Result<GwsError, GwsError> {
+    let name = str_field(meta, "name")?;
+    if mime == SHORTCUT {
+        let target = meta
+            .get("shortcutDetails")
+            .and_then(|d| d.get("targetId"))
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                http::other_err(anyhow::anyhow!(
+                    "Drive response for shortcut '{file_id}' is missing 'shortcutDetails.targetId'"
+                ))
+            })?;
+        return Ok(GwsError::Validation(format!(
+            "'{name}' is a shortcut; download its target with `gwsr drive +download --file-id {target}`"
+        )));
+    }
+    let formats: Vec<&str> = EXPORT_FORMATS
+        .iter()
+        .filter(|f| f.sources.contains(&mime))
+        .map(|f| f.name)
+        .collect();
+    Ok(GwsError::Validation(if formats.is_empty() {
+        format!("'{name}' is a Google-native file ({mime}) that cannot be downloaded or exported")
+    } else {
+        format!(
+            "'{name}' is a Google-native file ({mime}) with no binary content; use `gwsr drive +export --file-id {file_id} --to <format>` (formats: {})",
+            formats.join(", ")
+        )
+    }))
 }
 
 struct ExportFormat {
@@ -896,6 +934,12 @@ fn sync_export(mime: &str) -> Option<&'static ExportFormat> {
     EXPORT_FORMATS.iter().find(|f| f.name == name)
 }
 
+/// NFC form of a name. macOS file systems treat the NFC and NFD spellings
+/// of a name as the same file, while Drive keeps them distinct.
+fn nfc(name: &str) -> std::borrow::Cow<'_, str> {
+    icu_normalizer::ComposingNormalizerBorrowed::new_nfc().normalize(name)
+}
+
 async fn list_children(api: &Api, folder_id: &str) -> Result<Vec<Value>, GwsError> {
     if folder_id.contains('\'') || folder_id.contains('\\') {
         return Err(GwsError::Validation(format!(
@@ -920,48 +964,13 @@ async fn list_children(api: &Api, folder_id: &str) -> Result<Vec<Value>, GwsErro
     Ok(page.items)
 }
 
-/// Tolerance when comparing a local mtime with Drive's `modifiedTime`, for
-/// file systems that store coarse timestamps (HFS+: 1 s, FAT: 2 s).
-const MTIME_TOLERANCE: chrono::TimeDelta = chrono::TimeDelta::seconds(2);
-
-/// Parse a Drive `modifiedTime`. A missing or unparseable value is `None`,
-/// which means "always download" (the safe answer).
-fn remote_mtime(child: &Value) -> Option<chrono::DateTime<chrono::Utc>> {
-    child
-        .get("modifiedTime")
-        .and_then(Value::as_str)
-        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
-        .map(|t| t.with_timezone(&chrono::Utc))
-}
-
-/// Parse a Drive `size` (an int64 string). Google-native files have none.
-fn remote_size(child: &Value) -> Result<Option<u64>, GwsError> {
-    match child.get("size") {
-        None | Some(Value::Null) => Ok(None),
-        Some(v) => v
-            .as_str()
-            .and_then(|s| s.parse().ok())
-            .or_else(|| v.as_u64())
-            .map(Some)
-            .ok_or_else(|| GwsError::other(anyhow::anyhow!("Drive returned an invalid size {v}"))),
-    }
-}
-
-/// Whether the local copy matches the Drive item. `+sync` stamps every
-/// download with the item's `modifiedTime`, so a local file matches when its
-/// mtime equals that time (within [`MTIME_TOLERANCE`]) and, for items with a
-/// size, its length is the same. Any difference (the Drive file was edited,
-/// replaced by another file of the same name, or restored with an older
-/// timestamp; or the local copy was edited) means "download it". A missing
-/// local file or missing remote `modifiedTime` also means "download it"; a
-/// local file that exists but cannot be inspected is an error rather than a
-/// silent re-download over it.
-fn is_up_to_date(
-    local: &Path,
-    remote_modified: Option<chrono::DateTime<chrono::Utc>>,
-    remote_size: Option<u64>,
-) -> Result<bool, GwsError> {
-    let Some(remote) = remote_modified else {
+/// Whether the local copy is at least as new as the Drive item. A missing
+/// local file or a missing/unparseable remote `modifiedTime` means "download
+/// it" (the safe answer); a local file that exists but cannot be inspected is
+/// an error rather than a silent re-download over it.
+fn is_up_to_date(local: &Path, remote_modified: Option<&str>) -> Result<bool, GwsError> {
+    let Some(remote) = remote_modified.and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+    else {
         return Ok(false);
     };
     let meta = match std::fs::metadata(local) {
@@ -980,30 +989,77 @@ fn is_up_to_date(
             local.display()
         ))
     })?;
-    let local_time = chrono::DateTime::<chrono::Utc>::from(modified);
-    let same_time = (local_time - remote).abs() < MTIME_TOLERANCE;
-    let same_size = remote_size.is_none_or(|n| meta.len() == n);
-    Ok(same_time && same_size)
+    Ok(chrono::DateTime::<chrono::Utc>::from(modified) >= remote.with_timezone(&chrono::Utc))
 }
 
-/// Stamp a downloaded file with the Drive item's `modifiedTime`.
-fn set_local_mtime(path: &Path, time: chrono::DateTime<chrono::Utc>) -> Result<(), GwsError> {
-    std::fs::File::options()
-        .write(true)
-        .open(path)
-        .and_then(|f| f.set_modified(time.into()))
-        .map_err(|e| {
-            GwsError::other(anyhow::anyhow!(
-                "cannot set the modification time of '{}': {e}",
-                path.display()
-            ))
-        })
+/// What `+sync` does with one Drive child.
+#[derive(Clone, Copy)]
+enum SyncKind {
+    Folder,
+    Export(&'static ExportFormat),
+    Media,
+}
+
+/// Final local names for the children of one folder, in input order.
+///
+/// Files and sub-folders share one namespace on disk, so a name claimed by
+/// more than one child (after sanitizing and adding export extensions) is
+/// given to none of them: every claimant becomes `{id}-{name}`. This keeps
+/// the layout independent of the order Drive lists children in, and a plain
+/// name always belongs to the only item that has it, so a later run never
+/// mistakes one item's local copy for another's. A prefixed name that still
+/// collides (an item literally named `{other id}-{name}`) is an error rather
+/// than a silent overwrite.
+///
+/// Names are compared case-insensitively: Drive names are case-sensitive,
+/// but the default macOS and Windows file systems are not, so `Report.txt`
+/// and `report.txt` would otherwise share one local file.
+fn disambiguate(children: &[(&str, &str)]) -> Result<Vec<String>, GwsError> {
+    let mut claims: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for &(_, name) in children {
+        *claims.entry(name.to_lowercase()).or_insert(0) += 1;
+    }
+    let mut used = std::collections::HashSet::new();
+    let mut out = Vec::with_capacity(children.len());
+    for &(id, name) in children {
+        let local = if matches!(claims.get(&name.to_lowercase()), Some(&n) if n > 1) {
+            safe_filename(&format!("{id}-{name}"), id)
+        } else {
+            name.to_string()
+        };
+        if !used.insert(local.to_lowercase()) {
+            return Err(GwsError::other(anyhow::anyhow!(
+                "cannot sync: more than one Drive item in the same folder maps to the local name '{local}' (item '{id}'); rename one in Drive"
+            )));
+        }
+        out.push(local);
+    }
+    Ok(out)
+}
+
+/// The error `+sync` exits with after printing its report, when any file
+/// failed. Like `gwsr batch`'s `batchPartialFailure`: the report on stdout
+/// says what was mirrored and what failed, and the exit code is still `1`.
+fn sync_failure(report: &Value) -> Option<GwsError> {
+    let failed = report
+        .get("failed")
+        .and_then(Value::as_array)
+        .map_or(0, Vec::len);
+    (failed > 0).then(|| GwsError::Api {
+        code: 207,
+        message: format!(
+            "{failed} file(s) could not be synced; see \"failed\" in the report on stdout"
+        ),
+        reason: "syncPartialFailure".to_string(),
+        enable_url: None,
+    })
 }
 
 async fn sync(api: &Api, folder_id: &str, dir: &Path) -> Result<Value, GwsError> {
     let mut downloaded = Vec::new();
     let mut unchanged = Vec::new();
     let mut skipped = Vec::new();
+    let mut failed = Vec::new();
     let mut stack: Vec<(String, PathBuf)> = vec![(folder_id.to_string(), dir.to_path_buf())];
     let mut visited = std::collections::HashSet::new();
 
@@ -1020,44 +1076,50 @@ async fn sync(api: &Api, folder_id: &str, dir: &Path) -> Result<Value, GwsError>
         if !visited.insert(id.clone()) {
             continue;
         }
-        let mut used_names = std::collections::HashSet::new();
+        let mut entries = Vec::new();
         for child in list_children(api, &id).await? {
             let child_id = str_field(&child, "id")?;
             let name = str_field(&child, "name")?;
             let mime = str_field(&child, "mimeType")?;
-            let modified = remote_mtime(&child);
-            let mut local_name = safe_filename(name, child_id);
-            if mime == FOLDER_MIME {
-                stack.push((child_id.to_string(), local_dir.join(&local_name)));
-                continue;
-            }
-            let export = if mime.starts_with("application/vnd.google-apps.") {
+            // NFC so that names equal on macOS file systems compare equal below.
+            let local_name = nfc(&safe_filename(name, child_id)).into_owned();
+            let kind = if mime == FOLDER_MIME {
+                SyncKind::Folder
+            } else if mime.starts_with("application/vnd.google-apps.") {
                 match sync_export(mime) {
-                    Some(f) => {
-                        local_name = with_extension(&local_name, f.ext);
-                        Some(f)
-                    }
+                    Some(f) => SyncKind::Export(f),
                     None => {
                         skipped.push(json!({"id": child_id, "name": name, "mimeType": mime, "reason": "Google-native type with no export"}));
                         continue;
                     }
                 }
             } else {
-                None
+                SyncKind::Media
             };
-            // Two Drive items can share a name; disambiguate with the ID.
-            if !used_names.insert(local_name.clone()) {
-                local_name = format!("{child_id}-{local_name}");
-                used_names.insert(local_name.clone());
-            }
+            let local_name = match kind {
+                SyncKind::Export(f) => with_extension(&local_name, f.ext),
+                SyncKind::Folder | SyncKind::Media => local_name,
+            };
+            entries.push((child_id.to_string(), local_name, kind, child));
+        }
+        let keys: Vec<(&str, &str)> = entries
+            .iter()
+            .map(|(cid, n, _, _)| (cid.as_str(), n.as_str()))
+            .collect();
+        let names = disambiguate(&keys)?;
+        for ((child_id, _, kind, child), local_name) in entries.iter().zip(names) {
+            let child_id = child_id.as_str();
+            let modified = child.get("modifiedTime").and_then(Value::as_str);
+            let export = match kind {
+                SyncKind::Folder => {
+                    stack.push((child_id.to_string(), local_dir.join(&local_name)));
+                    continue;
+                }
+                SyncKind::Export(f) => Some(*f),
+                SyncKind::Media => None,
+            };
             let path = local_dir.join(&local_name);
-            // Exports have no Drive size; only the timestamp is compared.
-            let size = if export.is_some() {
-                None
-            } else {
-                remote_size(&child)?
-            };
-            if is_up_to_date(&path, modified, size)? {
+            if is_up_to_date(&path, modified)? {
                 unchanged.push(path.display().to_string());
                 continue;
             }
@@ -1076,18 +1138,28 @@ async fn sync(api: &Api, folder_id: &str, dir: &Path) -> Result<Value, GwsError>
                         .query("supportsAllDrives", "true")
                 }
             };
-            let bytes = api.download(req, &target).await?;
-            if let Some(t) = modified {
-                set_local_mtime(&path, t)?;
+            match api.download(req, &target).await {
+                Ok(bytes) => downloaded.push(
+                    json!({"id": child_id, "path": path.display().to_string(), "bytes": bytes}),
+                ),
+                // The API refused this one file (restricted download, export
+                // size limit...): record it and mirror the rest. Anything
+                // else (auth, network, local I/O) affects every file, so it
+                // aborts the sync.
+                Err(err @ GwsError::Api { .. }) => failed.push(json!({
+                    "id": child_id,
+                    "path": path.display().to_string(),
+                    "error": err.to_json()["error"],
+                })),
+                Err(err) => return Err(err),
             }
-            downloaded
-                .push(json!({"id": child_id, "path": path.display().to_string(), "bytes": bytes}));
         }
     }
     Ok(json!({
         "downloaded": downloaded,
         "unchanged": unchanged,
         "skipped": skipped,
+        "failed": failed,
     }))
 }
 
@@ -1194,6 +1266,41 @@ mod tests {
         let api = api(&server.uri(), "drive/v3/");
         let err = download(&api, "DOC1", Some("-"), false).await.unwrap_err();
         assert!(err.to_string().contains("+export"));
+    }
+
+    /// Google-native types `+export` cannot handle must not be sent there:
+    /// a shortcut points at its target, anything else is plainly refused.
+    #[tokio::test]
+    async fn download_of_non_exportable_native_files_does_not_suggest_export() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/drive/v3/files/SC1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id": "SC1", "name": "Link", "mimeType": "application/vnd.google-apps.shortcut",
+                "shortcutDetails": {"targetId": "TARGET1", "targetMimeType": "application/pdf"}
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/drive/v3/files/FORM1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id": "FORM1", "name": "Survey", "mimeType": "application/vnd.google-apps.form"
+            })))
+            .mount(&server)
+            .await;
+        let api = api(&server.uri(), "drive/v3/");
+
+        let err = download(&api, "SC1", Some("-"), false).await.unwrap_err();
+        let msg = err.to_string();
+        assert!(matches!(err, GwsError::Validation(_)), "{err:?}");
+        assert!(!msg.contains("+export"), "{msg}");
+        assert!(msg.contains("--file-id TARGET1"), "{msg}");
+
+        let err = download(&api, "FORM1", Some("-"), false).await.unwrap_err();
+        let msg = err.to_string();
+        assert!(matches!(err, GwsError::Validation(_)), "{err:?}");
+        assert!(!msg.contains("+export"), "{msg}");
+        assert!(msg.contains("cannot be downloaded or exported"), "{msg}");
     }
 
     #[tokio::test]
@@ -1482,55 +1589,389 @@ mod tests {
         );
         assert_eq!(std::fs::read(dir.path().join("sub/b.bin")).unwrap(), b"B");
 
-        // Second run: downloads carry the Drive timestamps, so the two items
-        // with a modifiedTime are unchanged; the one without is fetched again.
+        // Second run: local copies are newer than the 2020 remote timestamps.
         let v = sync(&api, "ROOT", dir.path()).await.unwrap();
         assert_eq!(v["unchanged"].as_array().unwrap().len(), 2);
-        assert_eq!(v["downloaded"].as_array().unwrap().len(), 1);
     }
 
-    /// A Drive file replaced by a different one with the same name and an
-    /// older modifiedTime (moved in, or uploaded with its original timestamp)
-    /// must be downloaded, not reported as unchanged.
     #[tokio::test]
-    async fn sync_replaced_file_with_older_mtime_is_downloaded() {
+    async fn sync_reports_a_failed_file_and_still_mirrors_the_rest() {
         let server = MockServer::start().await;
+        // A restricted file the owner blocked from download, listed first.
         Mock::given(method("GET"))
-            .and(path("/drive/v3/files"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"files": [
-                {"id": "A", "name": "budget.xlsx", "mimeType": "application/octet-stream", "modifiedTime": "2026-01-01T00:00:00Z", "size": "5"}
-            ]})))
-            .up_to_n_times(1)
+            .and(path("/drive/v3/files/R"))
+            .and(query_param("alt", "media"))
+            .respond_with(ResponseTemplate::new(403).set_body_json(json!({"error": {
+                "code": 403,
+                "message": "The user does not have sufficient permissions to download this file.",
+                "errors": [{"reason": "cannotDownloadFile"}]
+            }})))
+            .mount(&server)
+            .await;
+        // A Doc too large to export.
+        Mock::given(method("GET"))
+            .and(path("/drive/v3/files/BIG/export"))
+            .respond_with(ResponseTemplate::new(403).set_body_json(json!({"error": {
+                "code": 403,
+                "message": "This file is too large to be exported.",
+                "errors": [{"reason": "exportSizeLimitExceeded"}]
+            }})))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/drive/v3/files/OK"))
+            .and(query_param("alt", "media"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(b"OK".to_vec()))
             .mount(&server)
             .await;
         Mock::given(method("GET"))
             .and(path("/drive/v3/files"))
+            .and(query_param("q", "'ROOT' in parents and trashed = false"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({"files": [
-                {"id": "B", "name": "budget.xlsx", "mimeType": "application/octet-stream", "modifiedTime": "2025-06-01T00:00:00Z", "size": "12"}
+                {"id": "R", "name": "restricted.pdf", "mimeType": "application/pdf"},
+                {"id": "BIG", "name": "Huge", "mimeType": DOC},
+                {"id": "OK", "name": "ok.txt", "mimeType": "text/plain"}
+            ]})))
+            .mount(&server)
+            .await;
+        let api = api(&server.uri(), "drive/v3/");
+        let dir = tempfile::tempdir().unwrap();
+        let v = sync(&api, "ROOT", dir.path()).await.unwrap();
+
+        // The good file is mirrored and reported despite the failures.
+        assert_eq!(std::fs::read(dir.path().join("ok.txt")).unwrap(), b"OK");
+        let downloaded = v["downloaded"].as_array().unwrap();
+        assert_eq!(downloaded.len(), 1);
+        assert_eq!(downloaded[0]["id"], "OK");
+        // Each failure names the item and the API's reason.
+        let failed = v["failed"].as_array().unwrap();
+        let mut reasons: Vec<(&str, &str)> = failed
+            .iter()
+            .map(|f| {
+                (
+                    f["id"].as_str().unwrap(),
+                    f["error"]["reason"].as_str().unwrap(),
+                )
+            })
+            .collect();
+        reasons.sort_unstable();
+        assert_eq!(
+            reasons,
+            [
+                ("BIG", "exportSizeLimitExceeded"),
+                ("R", "cannotDownloadFile")
+            ]
+        );
+        assert!(!dir.path().join("restricted.pdf").exists());
+        assert!(!dir.path().join("Huge.docx").exists());
+
+        // The command still fails loudly, like `gwsr batch`, after the report.
+        let err = sync_failure(&v).unwrap();
+        assert_eq!(err.exit_code(), GwsError::EXIT_CODE_API);
+        assert_eq!(err.to_json()["error"]["reason"], "syncPartialFailure");
+        assert!(err.to_string().contains("2 file(s)"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn sync_aborts_on_errors_that_are_not_per_file() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/drive/v3/files"))
+            .and(query_param("q", "'ROOT' in parents and trashed = false"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"files": [
+                {"id": "A", "name": "a.txt", "mimeType": "text/plain"}
+            ]})))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/drive/v3/files/A"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(b"A".to_vec()))
+            .mount(&server)
+            .await;
+        let api = api(&server.uri(), "drive/v3/");
+        let dir = tempfile::tempdir().unwrap();
+        // The local target can't be written: a directory sits at its path.
+        std::fs::create_dir(dir.path().join("a.txt")).unwrap();
+        assert!(sync(&api, "ROOT", dir.path()).await.is_err());
+
+        // A clean run is not a partial failure.
+        assert!(sync_failure(&json!({"failed": []})).is_none());
+    }
+
+    /// Mounts a `files.list` response for `parent` and an `alt=media`
+    /// download returning `id` as the body for each plain file listed.
+    async fn mount_listing(server: &MockServer, parent: &str, files: Value) {
+        for f in files.as_array().unwrap() {
+            if f["mimeType"] != FOLDER_MIME {
+                let id = f["id"].as_str().unwrap().to_string();
+                Mock::given(method("GET"))
+                    .and(path(format!("/drive/v3/files/{id}")))
+                    .and(query_param("alt", "media"))
+                    .respond_with(ResponseTemplate::new(200).set_body_bytes(id.into_bytes()))
+                    .mount(server)
+                    .await;
+            }
+        }
+        Mock::given(method("GET"))
+            .and(path("/drive/v3/files"))
+            .and(query_param(
+                "q",
+                format!("'{parent}' in parents and trashed = false"),
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "files": files })))
+            .mount(server)
+            .await;
+    }
+
+    #[tokio::test]
+    async fn sync_keeps_same_named_sibling_folders_apart() {
+        let server = MockServer::start().await;
+        mount_listing(
+            &server,
+            "ROOT",
+            json!([
+                {"id": "R1", "name": "Reports", "mimeType": FOLDER_MIME},
+                {"id": "R2", "name": "Reports", "mimeType": FOLDER_MIME}
+            ]),
+        )
+        .await;
+        for (parent, file) in [("R1", "F1"), ("R2", "F2")] {
+            mount_listing(
+                &server,
+                parent,
+                json!([{"id": file, "name": "a.txt", "mimeType": "text/plain",
+                        "modifiedTime": "2020-01-01T00:00:00Z"}]),
+            )
+            .await;
+        }
+        let api = api(&server.uri(), "drive/v3/");
+        let dir = tempfile::tempdir().unwrap();
+        let v = sync(&api, "ROOT", dir.path()).await.unwrap();
+        assert_eq!(v["downloaded"].as_array().unwrap().len(), 2, "{v}");
+        assert!(v["unchanged"].as_array().unwrap().is_empty(), "{v}");
+        // Colliding names are all prefixed, so neither folder owns the plain
+        // name and the layout does not depend on listing order.
+        assert!(!dir.path().join("Reports").exists());
+        assert_eq!(
+            std::fs::read(dir.path().join("R1-Reports/a.txt")).unwrap(),
+            b"F1"
+        );
+        assert_eq!(
+            std::fs::read(dir.path().join("R2-Reports/a.txt")).unwrap(),
+            b"F2"
+        );
+    }
+
+    #[tokio::test]
+    async fn sync_keeps_a_folder_and_file_with_one_name_apart() {
+        let server = MockServer::start().await;
+        mount_listing(
+            &server,
+            "ROOT",
+            json!([
+                {"id": "FILE", "name": "Reports", "mimeType": "text/plain"},
+                {"id": "DIR", "name": "Reports", "mimeType": FOLDER_MIME}
+            ]),
+        )
+        .await;
+        mount_listing(
+            &server,
+            "DIR",
+            json!([{"id": "IN", "name": "a.txt", "mimeType": "text/plain"}]),
+        )
+        .await;
+        let api = api(&server.uri(), "drive/v3/");
+        let dir = tempfile::tempdir().unwrap();
+        let v = sync(&api, "ROOT", dir.path()).await.unwrap();
+        assert_eq!(v["downloaded"].as_array().unwrap().len(), 2, "{v}");
+        assert_eq!(
+            std::fs::read(dir.path().join("FILE-Reports")).unwrap(),
+            b"FILE"
+        );
+        assert_eq!(
+            std::fs::read(dir.path().join("DIR-Reports/a.txt")).unwrap(),
+            b"IN"
+        );
+    }
+
+    #[tokio::test]
+    async fn sync_names_do_not_depend_on_listing_order() {
+        let listing = |first: &str, second: &str| {
+            json!([
+                {"id": first, "name": "a.txt", "mimeType": "text/plain"},
+                {"id": second, "name": "a.txt", "mimeType": "text/plain"},
+                {"id": "U", "name": "unique.txt", "mimeType": "text/plain"}
+            ])
+        };
+        let mut layouts = Vec::new();
+        for (first, second) in [("P", "Q"), ("Q", "P")] {
+            let server = MockServer::start().await;
+            mount_listing(&server, "ROOT", listing(first, second)).await;
+            let api = api(&server.uri(), "drive/v3/");
+            let dir = tempfile::tempdir().unwrap();
+            sync(&api, "ROOT", dir.path()).await.unwrap();
+            let mut names: Vec<String> = std::fs::read_dir(dir.path())
+                .unwrap()
+                .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+                .collect();
+            names.sort();
+            layouts.push(names);
+        }
+        assert_eq!(layouts[0], ["P-a.txt", "Q-a.txt", "unique.txt"]);
+        assert_eq!(layouts[0], layouts[1]);
+    }
+
+    #[tokio::test]
+    async fn sync_rejects_a_prefixed_name_that_collides_with_a_real_one() {
+        let server = MockServer::start().await;
+        mount_listing(
+            &server,
+            "ROOT",
+            json!([
+                {"id": "P", "name": "a.txt", "mimeType": "text/plain"},
+                {"id": "Q", "name": "a.txt", "mimeType": "text/plain"},
+                {"id": "Z", "name": "P-a.txt", "mimeType": "text/plain"}
+            ]),
+        )
+        .await;
+        let api = api(&server.uri(), "drive/v3/");
+        let dir = tempfile::tempdir().unwrap();
+        let err = sync(&api, "ROOT", dir.path()).await.unwrap_err();
+        assert!(err.to_string().contains("P-a.txt"), "{err}");
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+    }
+
+    /// File systems cap a name at 255 bytes, not characters: a long non-ASCII
+    /// Drive name (plus the export extension) must still be writable.
+    #[tokio::test]
+    async fn sync_fits_long_multibyte_names_in_the_file_system_limit() {
+        // 150 chars: 300 UTF-16 units (APFS limit 255) and 600 UTF-8 bytes
+        // (ext4 limit 255).
+        let long_name = "\u{1F4C4}".repeat(150);
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/drive/v3/files"))
+            .and(query_param("q", "'ROOT' in parents and trashed = false"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"files": [
+                {"id": "D", "name": long_name, "mimeType": DOC},
+                {"id": "A", "name": "a.txt", "mimeType": "text/plain"}
             ]})))
             .mount(&server)
             .await;
         Mock::given(method("GET"))
             .and(path("/drive/v3/files/A"))
             .and(query_param("alt", "media"))
-            .respond_with(ResponseTemplate::new(200).set_body_bytes(b"old-A".to_vec()))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(b"A".to_vec()))
             .mount(&server)
             .await;
         Mock::given(method("GET"))
-            .and(path("/drive/v3/files/B"))
-            .and(query_param("alt", "media"))
-            .respond_with(ResponseTemplate::new(200).set_body_bytes(b"new-B-12byte".to_vec()))
+            .and(path("/drive/v3/files/D/export"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(b"DOCX".to_vec()))
             .mount(&server)
             .await;
         let api = api(&server.uri(), "drive/v3/");
         let dir = tempfile::tempdir().unwrap();
-        sync(&api, "ROOT", dir.path()).await.unwrap();
         let v = sync(&api, "ROOT", dir.path()).await.unwrap();
-        assert_eq!(v["downloaded"][0]["id"], "B", "{v}");
+        assert_eq!(v["downloaded"].as_array().unwrap().len(), 2, "{v}");
+        let doc = PathBuf::from(v["downloaded"][0]["path"].as_str().unwrap());
+        let file_name = doc.file_name().unwrap().to_str().unwrap();
+        assert!(file_name.len() <= 255, "{file_name}");
+        assert!(file_name.starts_with('\u{1F4C4}'), "{file_name}");
+        assert!(file_name.ends_with(".docx"), "{file_name}");
+        assert_eq!(std::fs::read(&doc).unwrap(), b"DOCX");
+    }
+
+    /// Drive names are case-sensitive but the default macOS and Windows
+    /// file systems are not: `Report.txt` and `report.txt` must not share a
+    /// local path, or the second one is silently reported "unchanged" (or
+    /// overwrites the first).
+    #[tokio::test]
+    async fn sync_disambiguates_names_differing_only_by_case() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/drive/v3/files"))
+            .and(query_param("q", "'ROOT' in parents and trashed = false"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"files": [
+                {"id": "U", "name": "Report.txt", "mimeType": "text/plain", "modifiedTime": "2020-01-01T00:00:00Z"},
+                {"id": "L", "name": "report.txt", "mimeType": "text/plain", "modifiedTime": "2020-01-01T00:00:00Z"}
+            ]})))
+            .mount(&server)
+            .await;
+        for id in ["U", "L"] {
+            Mock::given(method("GET"))
+                .and(path(format!("/drive/v3/files/{id}")))
+                .and(query_param("alt", "media"))
+                .respond_with(ResponseTemplate::new(200).set_body_bytes(id.as_bytes().to_vec()))
+                .mount(&server)
+                .await;
+        }
+        let api = api(&server.uri(), "drive/v3/");
+        let dir = tempfile::tempdir().unwrap();
+        let v = sync(&api, "ROOT", dir.path()).await.unwrap();
+        assert_eq!(v["unchanged"], json!([]), "{v}");
+        let paths: Vec<PathBuf> = v["downloaded"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|d| PathBuf::from(d["path"].as_str().unwrap()))
+            .collect();
+        assert_eq!(paths.len(), 2, "{v}");
+        let folded: std::collections::HashSet<String> = paths
+            .iter()
+            .map(|p| p.to_string_lossy().to_lowercase())
+            .collect();
+        assert_eq!(folded.len(), 2, "paths collide case-insensitively: {v}");
+        let mut contents: Vec<Vec<u8>> = paths.iter().map(|p| std::fs::read(p).unwrap()).collect();
+        contents.sort();
+        assert_eq!(contents, vec![b"L".to_vec(), b"U".to_vec()]);
+    }
+
+    /// Drive keeps names byte-for-byte, but APFS (the macOS default) treats
+    /// the NFC and NFD spellings of a name as the same file. `café.txt`
+    /// (precomposed) and `cafe\u{301}.txt` (decomposed) must not share a local
+    /// path, or the second is silently reported "unchanged" (or overwrites
+    /// the first).
+    #[tokio::test]
+    async fn sync_disambiguates_names_differing_only_by_unicode_normalization() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/drive/v3/files"))
+            .and(query_param("q", "'ROOT' in parents and trashed = false"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"files": [
+                {"id": "C", "name": "caf\u{e9}.txt", "mimeType": "text/plain", "modifiedTime": "2020-01-01T00:00:00Z"},
+                {"id": "D", "name": "cafe\u{301}.txt", "mimeType": "text/plain", "modifiedTime": "2020-01-01T00:00:00Z"}
+            ]})))
+            .mount(&server)
+            .await;
+        for id in ["C", "D"] {
+            Mock::given(method("GET"))
+                .and(path(format!("/drive/v3/files/{id}")))
+                .and(query_param("alt", "media"))
+                .respond_with(ResponseTemplate::new(200).set_body_bytes(id.as_bytes().to_vec()))
+                .mount(&server)
+                .await;
+        }
+        let api = api(&server.uri(), "drive/v3/");
+        let dir = tempfile::tempdir().unwrap();
+        let v = sync(&api, "ROOT", dir.path()).await.unwrap();
+        assert_eq!(v["unchanged"], json!([]), "{v}");
+        let paths: Vec<String> = v["downloaded"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|d| d["path"].as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(paths.len(), 2, "{v}");
+        let normalized: std::collections::HashSet<String> =
+            paths.iter().map(|p| nfc(p).into_owned()).collect();
         assert_eq!(
-            std::fs::read(dir.path().join("budget.xlsx")).unwrap(),
-            b"new-B-12byte"
+            normalized.len(),
+            2,
+            "paths collide after NFC normalization: {v}"
         );
+        let mut contents: Vec<Vec<u8>> = paths.iter().map(|p| std::fs::read(p).unwrap()).collect();
+        contents.sort();
+        assert_eq!(contents, vec![b"C".to_vec(), b"D".to_vec()]);
     }
 
     #[test]
@@ -1553,30 +1994,14 @@ mod tests {
     }
 
     #[test]
-    fn up_to_date_requires_matching_mtime_and_size() {
-        let t = |s: &str| remote_mtime(&json!({ "modifiedTime": s }));
+    fn up_to_date_compares_mtimes_and_treats_missing_as_stale() {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("f");
-        assert!(!is_up_to_date(&p, t("2000-01-01T00:00:00Z"), None).unwrap());
+        assert!(!is_up_to_date(&p, Some("2000-01-01T00:00:00Z")).unwrap());
         std::fs::write(&p, b"x").unwrap();
-        // Freshly written: its mtime is "now", not the Drive time.
-        assert!(!is_up_to_date(&p, t("2000-01-01T00:00:00Z"), None).unwrap());
-        set_local_mtime(&p, t("2000-01-01T00:00:00.250Z").unwrap()).unwrap();
-        assert!(is_up_to_date(&p, t("2000-01-01T00:00:00.250Z"), None).unwrap());
-        assert!(is_up_to_date(&p, t("2000-01-01T00:00:01Z"), Some(1)).unwrap());
-        // Older or newer Drive time, or a different size: stale.
-        assert!(!is_up_to_date(&p, t("1999-01-01T00:00:00Z"), None).unwrap());
-        assert!(!is_up_to_date(&p, t("2999-01-01T00:00:00Z"), None).unwrap());
-        assert!(!is_up_to_date(&p, t("2000-01-01T00:00:00Z"), Some(2)).unwrap());
-        assert!(!is_up_to_date(&p, None, None).unwrap());
-        assert!(t("not a time").is_none());
-    }
-
-    #[test]
-    fn remote_size_parses_int64_strings() {
-        assert_eq!(remote_size(&json!({})).unwrap(), None);
-        assert_eq!(remote_size(&json!({ "size": "12" })).unwrap(), Some(12));
-        assert!(remote_size(&json!({ "size": "twelve" })).is_err());
+        assert!(is_up_to_date(&p, Some("2000-01-01T00:00:00Z")).unwrap());
+        assert!(!is_up_to_date(&p, Some("2999-01-01T00:00:00Z")).unwrap());
+        assert!(!is_up_to_date(&p, None).unwrap());
     }
 
     #[cfg(unix)]
@@ -1586,8 +2011,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("f");
         std::fs::write(&file, b"x").unwrap();
-        let when = remote_mtime(&json!({ "modifiedTime": "2000-01-01T00:00:00Z" }));
-        let err = is_up_to_date(&file.join("child"), when, None).unwrap_err();
+        let err = is_up_to_date(&file.join("child"), Some("2000-01-01T00:00:00Z")).unwrap_err();
         assert!(err.to_string().contains("cannot inspect"), "{err}");
     }
 }

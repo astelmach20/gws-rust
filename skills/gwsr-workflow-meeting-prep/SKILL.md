@@ -8,13 +8,15 @@ metadata:
     requires:
       bins:
         - gwsr
+      skills:
+        - gwsr-shared
     cliHelp: "gwsr workflow +meeting-prep --help"
 ---
 <!-- gwsr generated skill: do not edit by hand -->
 
 # workflow +meeting-prep
 
-> **PREREQUISITE:** Read `../gwsr-shared/SKILL.md` for auth, global flags, and security rules.
+> **PREREQUISITE:** Read `../gwsr-shared/SKILL.md` for auth, global flags, and security rules. If it is missing, install it with `npx skills add https://github.com/astelmach20/gws-rust/tree/main/skills/gwsr-shared`.
 
 Prepare for your next meeting: agenda, attendees, and links
 
@@ -39,7 +41,8 @@ gwsr workflow +meeting-prep --calendar-id team@example.com
 
 ## Tips
 
-- Read-only. Shows the next upcoming event with attendees and description.
+- Read-only. Shows the next timed event that has not started yet, skipping
+- all-day, cancelled and declined events, with attendees and description.
 
 ## See Also
 

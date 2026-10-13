@@ -1465,16 +1465,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "gethostname"
-version = "1.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1bd49230192a3797a9a4d6abe9b3eed6f7fa4c8a8a4947977c6f80025f92cbd8"
-dependencies = [
- "rustix",
- "windows-link",
-]
-
-[[package]]
 name = "getrandom"
 version = "0.2.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1556,6 +1546,7 @@ dependencies = [
  "gws-rust-core",
  "html2text",
  "iana-time-zone",
+ "icu_normalizer",
  "insta",
  "jaq-core",
  "jaq-json",
@@ -1569,6 +1560,7 @@ dependencies = [
  "pulldown-cmark",
  "rand 0.10.3",
  "ratatui",
+ "regex",
  "reqwest",
  "rustix",
  "secrecy",
@@ -1587,6 +1579,8 @@ dependencies = [
  "tracing",
  "tracing-appender",
  "tracing-subscriber",
+ "unicode-segmentation",
+ "unicode-width",
  "uuid",
  "webbrowser",
  "wiremock",
@@ -2371,9 +2365,6 @@ name = "mail-builder"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ccbc27cb02a58a311a404769a22f5abf63fe3173b290d80be7c534f9c7023151"
-dependencies = [
- "gethostname",
-]
 
 [[package]]
 name = "markup5ever"
@@ -5258,9 +5249,9 @@ dependencies = [
 
 [[package]]
 name = "yoke-derive"
-version = "0.8.3"
+version = "0.8.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "33811428bee40dbceb6d545e95754741d17a6aef9a4849f0fd62e2ba4f412a78"
+checksum = "ec8ebde2db3681e8c9980cc27822030e68752690ddfa9473e739aeb4dbde6d71"
 dependencies = [
  "proc-macro2",
  "quote",

@@ -84,8 +84,24 @@ impl Checker<'_> {
             return;
         };
         if schema.schema_type.as_deref() == Some("object") || !schema.properties.is_empty() {
-            match value {
-                Value::Object(obj) => {
+            // A map schema (e.g. Admin Directory `UserCustomProperties`):
+            // its keys are chosen by the caller, only values are typed.
+            let map_values = schema
+                .additional_properties
+                .as_deref()
+                .filter(|_| schema.properties.is_empty());
+            match (value, map_values) {
+                (Value::Object(obj), Some(additional)) => {
+                    for (k, v) in obj {
+                        let current_path = if path == "$" {
+                            k.clone()
+                        } else {
+                            format!("{path}.{k}")
+                        };
+                        self.field(v, additional, &current_path);
+                    }
+                }
+                (Value::Object(obj), None) => {
                     self.properties(obj, &schema.properties, &schema.required, path);
                 }
                 _ => self.errors.push(format!("{path}: Expected object")),
@@ -113,7 +129,7 @@ impl Checker<'_> {
                 format!("{path}.{key}")
             };
             match properties.get(key) {
-                Some(prop) => self.property(val, prop, &current_path),
+                Some(prop) => self.field(val, prop, &current_path),
                 None if self.allow_unknown_fields => self.unknown.push(current_path),
                 None => {
                     let mut valid: Vec<&str> = properties.keys().map(String::as_str).collect();
@@ -127,6 +143,14 @@ impl Checker<'_> {
                     ));
                 }
             }
+        }
+    }
+
+    /// An object field or map entry: `null` clears it whatever its type
+    /// (patch semantics; Drive clears `appProperties` entries set to null).
+    fn field(&mut self, value: &Value, prop: &JsonSchemaProperty, path: &str) {
+        if !value.is_null() {
+            self.property(value, prop, path);
         }
     }
 
@@ -172,7 +196,7 @@ impl Checker<'_> {
                 self.properties(obj, &prop.properties, &[], path);
             } else if let Some(additional) = &prop.additional_properties {
                 for (k, v) in obj {
-                    self.property(v, additional, &format!("{path}.{k}"));
+                    self.field(v, additional, &format!("{path}.{k}"));
                 }
             }
         }
@@ -322,6 +346,59 @@ mod tests {
         check(json!({"name": "f", "previewField": 1}), true).unwrap();
         // Other errors still fail with the escape hatch.
         assert!(check(json!({"name": 1, "previewField": 1}), true).is_err());
+    }
+
+    /// `null` clears a field or map entry (Drive: "Entries with null values
+    /// are cleared in update and copy requests" for `appProperties`;
+    /// patch semantics in general), so it is valid for any field type.
+    #[test]
+    fn null_clears_fields_and_map_entries() {
+        check(
+            json!({"name": "f", "status": null, "count": null, "tags": null,
+                   "labels": {"stale": null, "k": "v"}, "parent": null}),
+            false,
+        )
+        .unwrap();
+        // The body itself and array elements are not clearable fields.
+        for body in [json!(null), json!({"name": "f", "tags": [null]})] {
+            assert!(check(body.clone(), false).is_err(), "{body}");
+        }
+    }
+
+    /// A named schema that is a map (`additionalProperties`, no
+    /// `properties`), like Admin Directory `UserCustomProperties`, which
+    /// `User.customSchemas` maps to: its keys are user-chosen, not unknown.
+    #[test]
+    fn named_map_schema_accepts_arbitrary_keys() {
+        let doc: RestDescription = serde_json::from_value(json!({
+            "name": "admin", "version": "directory_v1", "rootUrl": "https://admin.googleapis.com/",
+            "schemas": {
+                "User": { "id": "User", "type": "object", "properties": {
+                    "customSchemas": { "type": "object",
+                        "additionalProperties": { "$ref": "UserCustomProperties" } }
+                } },
+                "UserCustomProperties": { "id": "UserCustomProperties", "type": "object",
+                    "additionalProperties": { "type": "any" } },
+                "Counts": { "id": "Counts", "type": "object",
+                    "additionalProperties": { "type": "integer" } }
+            }
+        }))
+        .unwrap();
+        validate_body(
+            &json!({"customSchemas": {"Employment": {"costCenter": "42", "level": 3}}}),
+            "User",
+            &doc,
+            false,
+        )
+        .unwrap();
+        validate_body(&json!({"a": 1, "b": 2}), "Counts", &doc, false).unwrap();
+        // A null entry clears it, as for any map.
+        validate_body(&json!({"a": null}), "Counts", &doc, false).unwrap();
+        // Map values are still checked against additionalProperties.
+        let msg = validate_body(&json!({"a": "x"}), "Counts", &doc, false)
+            .unwrap_err()
+            .to_string();
+        assert!(msg.contains("a: Expected type 'integer'"), "{msg}");
     }
 
     #[test]

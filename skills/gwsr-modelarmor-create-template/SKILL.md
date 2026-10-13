@@ -8,13 +8,15 @@ metadata:
     requires:
       bins:
         - gwsr
+      skills:
+        - gwsr-shared
     cliHelp: "gwsr modelarmor +create-template --help"
 ---
 <!-- gwsr generated skill: do not edit by hand -->
 
 # modelarmor +create-template
 
-> **PREREQUISITE:** Read `../gwsr-shared/SKILL.md` for auth, global flags, and security rules.
+> **PREREQUISITE:** Read `../gwsr-shared/SKILL.md` for auth, global flags, and security rules. If it is missing, install it with `npx skills add https://github.com/astelmach20/gws-rust/tree/main/skills/gwsr-shared`.
 
 Create a new Model Armor template
 
@@ -37,8 +39,8 @@ gwsr modelarmor +create-template --project <PROJECT> --location <LOCATION> --tem
 ## Examples
 
 ```bash
-gwsr modelarmor +create-template --project P --location us-central1 --template-id my-tmpl --preset jailbreak
-gwsr modelarmor +create-template --project P --location us-central1 --template-id my-tmpl --json '{...}'
+gwsr modelarmor +create-template --project my-project --location us-central1 --template-id my-tmpl --preset jailbreak
+gwsr modelarmor +create-template --project my-project --location us-central1 --template-id my-tmpl --json '{...}'
 ```
 
 ## Tips
