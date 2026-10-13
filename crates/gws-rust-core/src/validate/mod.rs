@@ -46,12 +46,18 @@ use crate::error::GwsError;
 // ── Dangerous character detection ─────────────────────────────────────
 
 /// Returns `true` for Unicode characters that are dangerous in terminal
-/// output but not caught by `char::is_control()`: zero-width chars, bidi
-/// overrides, Unicode line/paragraph separators, and directional isolates.
+/// output but not caught by `char::is_control()`: zero-width chars and
+/// invisible operators, bidi marks and overrides, Unicode line/paragraph
+/// separators, and directional isolates.
 pub fn is_dangerous_unicode(c: char) -> bool {
     matches!(c,
-        // zero-width: ZWSP, ZWNJ, ZWJ, BOM/ZWNBSP
-        '\u{200B}'..='\u{200D}' | '\u{FEFF}' |
+        // zero-width: ZWSP, ZWNJ, ZWJ, BOM/ZWNBSP, Mongolian vowel separator
+        '\u{200B}'..='\u{200D}' | '\u{FEFF}' | '\u{180E}' |
+        // word joiner and invisible operators (function application, times,
+        // separator, plus)
+        '\u{2060}'..='\u{2064}' |
+        // bidi marks: LRM, RLM, ALM
+        '\u{200E}' | '\u{200F}' | '\u{061C}' |
         // bidi: LRE, RLE, PDF, LRO, RLO
         '\u{202A}'..='\u{202E}' |
         // line / paragraph separators
@@ -63,7 +69,8 @@ pub fn is_dangerous_unicode(c: char) -> bool {
 
 /// Rejects strings containing control characters (C0: U+0000–U+001F,
 /// C1: U+0080–U+009F, and DEL: U+007F) or dangerous Unicode characters
-/// such as zero-width chars, bidi overrides, and line/paragraph separators.
+/// such as zero-width chars, bidi marks and overrides, and line/paragraph
+/// separators.
 ///
 /// Used for validating argument values at the parse boundary.
 pub fn reject_dangerous_chars(value: &str, flag_name: &str) -> Result<(), GwsError> {
@@ -294,6 +301,26 @@ mod tests {
     #[test]
     fn test_reject_dangerous_chars_del() {
         assert!(reject_dangerous_chars("hello\x7Fworld", "test").is_err());
+    }
+
+    /// Invisible bidi marks (LRM, RLM, ALM) and zero-width joiners/invisible
+    /// operators are as invisible as ZWSP and can reorder or hide text.
+    #[test]
+    fn test_reject_dangerous_chars_invisible_marks() {
+        for c in [
+            '\u{061C}', '\u{180E}', '\u{200E}', '\u{200F}', '\u{2060}', '\u{2061}', '\u{2062}',
+            '\u{2063}', '\u{2064}',
+        ] {
+            assert!(is_dangerous_unicode(c), "U+{:04X}", u32::from(c));
+            let value = format!("file{c}id");
+            assert!(
+                reject_dangerous_chars(&value, "test").is_err(),
+                "U+{:04X}",
+                u32::from(c)
+            );
+        }
+        // Visible non-ASCII text is still fine.
+        assert!(reject_dangerous_chars("café שלום", "test").is_ok());
     }
 
     // -- encode_path_segment --------------------------------------------------
