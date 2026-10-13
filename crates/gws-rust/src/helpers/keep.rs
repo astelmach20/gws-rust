@@ -95,10 +95,13 @@ fn build_filter(trashed: bool, changed_since: Option<&str>) -> Result<String, Gw
         let ts = chrono::DateTime::parse_from_rfc3339(t).map_err(|_| {
             GwsError::Validation(format!("--changed-since '{t}' is not an RFC 3339 time"))
         })?;
+        // Keep the fractional seconds: truncating them would move the bound
+        // earlier and return notes changed before --changed-since (passing a
+        // note's own updateTime would return that note again).
         parts.push(format!(
             "update_time > \"{}\"",
             ts.with_timezone(&chrono::Utc)
-                .to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+                .to_rfc3339_opts(chrono::SecondsFormat::AutoSi, true)
         ));
     }
     Ok(parts.join(" AND "))
@@ -126,6 +129,18 @@ mod tests {
             "trashed = true AND update_time > \"2026-01-01T00:00:00Z\""
         );
         assert!(build_filter(false, Some("yesterday")).is_err());
+    }
+
+    #[test]
+    fn filter_keeps_fractional_seconds() {
+        assert_eq!(
+            build_filter(false, Some("2026-01-01T12:34:56.789123Z")).unwrap(),
+            "trashed = false AND update_time > \"2026-01-01T12:34:56.789123Z\""
+        );
+        assert_eq!(
+            build_filter(false, Some("2026-01-01T13:34:56.5+01:00")).unwrap(),
+            "trashed = false AND update_time > \"2026-01-01T12:34:56.500Z\""
+        );
     }
 
     #[tokio::test]
