@@ -748,63 +748,20 @@ metadata:
 
     // Usage
     out.push_str("## Usage\n\n");
-    out.push_str(&format!("```bash\ngwsr {alias} {cmd_name}"));
-
-    // Show required args inline
-    let args: Vec<_> = cmd
-        .get_arguments()
-        .filter(|a| a.get_id() != "help")
-        .collect();
-    for arg in &args {
-        if arg.is_required_set() {
-            if let Some(long) = arg.get_long() {
-                let val_name = arg
-                    .get_value_names()
-                    .and_then(|v| v.first())
-                    .map(|s| s.to_string())
-                    .unwrap_or_else(|| "VALUE".to_string());
-                out.push_str(&format!(" --{long} <{val_name}>"));
-            } else {
-                let id = arg.get_id().as_str();
-                out.push_str(&format!(" <{id}>"));
-            }
+    let invocation = format!("gwsr {alias} {cmd_name}");
+    if cmd.get_subcommands().next().is_none() {
+        push_usage_and_flags(&mut out, &invocation, cmd, "##");
+    } else {
+        // A helper group runs only through one of its subcommands, each
+        // with its own flags.
+        out.push_str(&format!("```bash\n{invocation} <command>\n```\n\n"));
+        for sub in cmd.get_subcommands() {
+            let name = sub.get_name();
+            let sub_about = sub.get_about().map(|s| s.to_string()).unwrap_or_default();
+            out.push_str(&format!("### {name}\n\n{sub_about}\n\n"));
+            push_usage_and_flags(&mut out, &format!("{invocation} {name}"), sub, "####");
         }
     }
-
-    out.push_str("\n```\n\n");
-
-    // Flags table
-    if !args.is_empty() {
-        out.push_str("## Flags\n\n");
-        out.push_str("| Flag | Required | Default | Description |\n");
-        out.push_str("|------|----------|---------|-------------|\n");
-
-        for arg in &args {
-            let flag = if let Some(long) = arg.get_long() {
-                format!("`--{long}`")
-            } else {
-                format!("`<{}>`", arg.get_id().as_str())
-            };
-
-            let required = if arg.is_required_set() { "✓" } else { "—" };
-
-            // Get default value
-            let default = arg
-                .get_default_values()
-                .first()
-                .map(|v| v.to_string_lossy().to_string())
-                .unwrap_or_else(|| "—".to_string());
-
-            let help = arg
-                .get_help()
-                .map(|s| s.to_string())
-                .unwrap_or_else(|| "—".to_string());
-
-            out.push_str(&format!("| {flag} | {required} | {default} | {help} |\n"));
-        }
-        out.push('\n');
-    }
-
     // After-help (examples, tips) — format as proper markdown
     if let Some(after) = cmd.get_after_help() {
         let after_str = after.to_string();
@@ -866,6 +823,68 @@ metadata:
     ));
 
     out
+}
+
+/// The usage line (`invocation` plus its required arguments) and the flags
+/// table of one runnable helper command; the table heading is at `level`
+/// (`##` for a helper, `####` for a subcommand of a helper group).
+fn push_usage_and_flags(out: &mut String, invocation: &str, cmd: &Command, level: &str) {
+    out.push_str(&format!("```bash\n{invocation}"));
+
+    // Show required args inline
+    let args: Vec<_> = cmd
+        .get_arguments()
+        .filter(|a| a.get_id() != "help")
+        .collect();
+    for arg in &args {
+        if arg.is_required_set() {
+            if let Some(long) = arg.get_long() {
+                let val_name = arg
+                    .get_value_names()
+                    .and_then(|v| v.first())
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| "VALUE".to_string());
+                out.push_str(&format!(" --{long} <{val_name}>"));
+            } else {
+                let id = arg.get_id().as_str();
+                out.push_str(&format!(" <{id}>"));
+            }
+        }
+    }
+
+    out.push_str("\n```\n\n");
+
+    // Flags table
+    if !args.is_empty() {
+        out.push_str(&format!("{level} Flags\n\n"));
+        out.push_str("| Flag | Required | Default | Description |\n");
+        out.push_str("|------|----------|---------|-------------|\n");
+
+        for arg in &args {
+            let flag = if let Some(long) = arg.get_long() {
+                format!("`--{long}`")
+            } else {
+                format!("`<{}>`", arg.get_id().as_str())
+            };
+
+            let required = if arg.is_required_set() { "✓" } else { "—" };
+
+            // Get default value
+            let default = arg
+                .get_default_values()
+                .first()
+                .map(|v| v.to_string_lossy().to_string())
+                .unwrap_or_else(|| "—".to_string());
+
+            let help = arg
+                .get_help()
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| "—".to_string());
+
+            out.push_str(&format!("| {flag} | {required} | {default} | {help} |\n"));
+        }
+        out.push('\n');
+    }
 }
 
 fn generate_shared_skill(base: &Path, dry_run: bool) -> Result<(), GwsError> {
@@ -1769,6 +1788,45 @@ mod tests {
             fm.contains("- gwsr"),
             "frontmatter should contain '- gwsr' block entry"
         );
+    }
+
+    /// Render the generated skill for one `gmail` helper, as a full run would.
+    fn render_gmail_helper(name: &str) -> String {
+        let entry = services::SERVICES
+            .iter()
+            .find(|s| s.aliases[0] == "gmail")
+            .unwrap();
+        let doc = crate::discovery::RestDescription {
+            name: entry.api_name.to_string(),
+            title: Some("Gmail API".to_string()),
+            ..Default::default()
+        };
+        let cli = crate::commands::build_cli(&doc);
+        let helper = cli.find_subcommand(name).unwrap();
+        render_helper_skill(
+            entry.aliases[0],
+            name,
+            helper,
+            entry,
+            &product_name_from_title("Gmail API"),
+        )
+    }
+
+    /// A helper group (`gmail +filter create|list|delete`) documents each
+    /// subcommand's usage and flags; the group alone takes none of them.
+    #[test]
+    fn helper_group_skill_documents_each_subcommand() {
+        let md = render_gmail_helper("+filter");
+        for usage in [
+            "gwsr gmail +filter create",
+            "gwsr gmail +filter list",
+            "gwsr gmail +filter delete --filter-id <ID>",
+        ] {
+            assert!(md.contains(usage), "missing usage {usage}:\n{md}");
+        }
+        for flag in ["`--from`", "`--forward`", "`--filter-id`", "`--yes`"] {
+            assert!(md.contains(flag), "missing flag {flag}:\n{md}");
+        }
     }
 
     const SHARED_INSTALL: &str =
