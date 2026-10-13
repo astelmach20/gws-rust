@@ -741,6 +741,61 @@ fn gmail_helper_output_honors_sanitize_block_mode() {
     );
 }
 
+/// `gmail +read` prints its JSON through the shared formatter, so `--jq`,
+/// `--format` and `--compact` apply as they do for every other helper.
+#[tokio::test(flavor = "multi_thread")]
+async fn gmail_read_honors_jq_and_format() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/gmail/v1/users/me/messages/M1"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "M1",
+            "threadId": "T1",
+            "payload": {
+                "mimeType": "text/plain",
+                "headers": [
+                    {"name": "From", "value": "a@example.com"},
+                    {"name": "To", "value": "b@example.com"},
+                    {"name": "Subject", "value": "Hello"},
+                    {"name": "Message-ID", "value": "<m1@example.com>"}
+                ],
+                "body": {"data": "aGk"}
+            }
+        })))
+        .mount(&server)
+        .await;
+    let dir = setup();
+    seed(dir.path(), "gmail", "v1", "");
+    let run = |extra: &[&str]| {
+        gwsr(dir.path())
+            .env("GWSR_TOKEN", "test-token")
+            .env("GWSR_API_BASE_URL", server.uri())
+            .env("HTTPS_PROXY", "http://127.0.0.1:9")
+            .args(["gmail", "+read", "--message-id", "M1"])
+            .args(extra)
+            .output()
+            .unwrap()
+    };
+
+    let out = run(&["--jq", ".subject"]);
+    assert!(out.status.success(), "{out:?}");
+    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "Hello");
+
+    let out = run(&["--format", "yaml"]);
+    assert!(out.status.success(), "{out:?}");
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains("subject: Hello"), "{text}");
+
+    let out = run(&["--compact"]);
+    assert!(out.status.success(), "{out:?}");
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(text.trim_end().lines().count(), 1, "{text}");
+    assert_eq!(stdout_json(&out)["subject"], "Hello");
+}
+
 /// `GWSR_API_BASE_URL` routes workflow requests to the configured endpoint,
 /// exactly like generated methods and the app helpers.
 #[test]
