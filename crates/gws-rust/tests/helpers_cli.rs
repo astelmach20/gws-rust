@@ -279,6 +279,110 @@ fn agenda_dry_run_shows_calendar_list_page_size() {
 }
 
 #[test]
+fn calendar_helpers_validate_times_before_confirm_and_auth() {
+    // No credentials exist here. Times, zones and "nothing to change" are
+    // known from the command line alone, so each is a validation error
+    // (exit 3), never a confirmation (7) or authentication (2) error.
+    let dir = setup();
+    let insert = [
+        "calendar",
+        "+insert",
+        "--summary",
+        "S",
+        "--attendee",
+        "guest@example.com",
+    ];
+    let cases: [(&[&str], &[&str], &str); 11] = [
+        (
+            &insert,
+            &["--start", "tomorrow", "--duration", "1h"],
+            "--start 'tomorrow' is not a date",
+        ),
+        (
+            &insert,
+            &["--start", "2026-01-01T10:00", "--end", "2026-01-01T09:00"],
+            "--end must be after --start",
+        ),
+        (
+            &insert,
+            &["--start", "2026-01-01T10:00:00Z"],
+            "Timed events need --end or --duration",
+        ),
+        (
+            &insert,
+            &["--start", "2026-01-01", "--duration", "1h"],
+            "--duration cannot be used with an all-day --start",
+        ),
+        (
+            &insert,
+            &[
+                "--start",
+                "2026-01-01T10:00",
+                "--duration",
+                "1h",
+                "--timezone",
+                "Mars/Base",
+            ],
+            "Invalid timezone 'Mars/Base'",
+        ),
+        (
+            &["calendar", "+agenda"],
+            &["--timezone", "Mars/Base"],
+            "Invalid timezone 'Mars/Base'",
+        ),
+        (
+            &["calendar", "+freebusy", "--start", "2026-01-01T10:00:00Z"],
+            &[
+                "--duration",
+                "8h",
+                "--slot",
+                "30m",
+                "--working-hours",
+                "9-5",
+            ],
+            "Invalid --working-hours '9-5'",
+        ),
+        (
+            &["calendar", "+freebusy", "--start", "2026-01-01T10:00:00Z"],
+            &["--duration", "8h", "--slot", "5x"],
+            "Invalid duration '5x'",
+        ),
+        (
+            &["calendar", "+update", "--event-id", "E1"],
+            &[],
+            "Nothing to update",
+        ),
+        (
+            &["calendar", "+update", "--event-id", "E1"],
+            &["--start", "2026-01-01T10:00:00Z", "--end", "soon"],
+            "--end 'soon' is not a date",
+        ),
+        (
+            &["calendar", "+update", "--event-id", "E1"],
+            &["--summary", "S", "--timezone", "Mars/Base"],
+            "Invalid timezone 'Mars/Base'",
+        ),
+    ];
+    for (base, args, expected) in cases {
+        for policy in ["0", "1"] {
+            let out = gwsr(dir.path())
+                .env("GWSR_REQUIRE_CONFIRM", policy)
+                .args(base)
+                .args(args)
+                .output()
+                .unwrap();
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            assert_eq!(
+                out.status.code(),
+                Some(3),
+                "{base:?} {args:?} policy {policy}: {stderr}"
+            );
+            assert!(stderr.contains(expected), "{base:?} {args:?}: {stderr}");
+        }
+    }
+}
+
+#[test]
 fn dry_run_bypasses_gate_and_prints_json() {
     let dir = setup();
     let out = gwsr(dir.path())
