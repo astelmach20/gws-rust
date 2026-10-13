@@ -60,7 +60,46 @@ pub(crate) fn pubsub_api_base(endpoints: &gws_rust_core::validate::EndpointPolic
     api_base(endpoints, "https://pubsub.googleapis.com/", "v1")
 }
 
-/// Returns a future that completes when a shutdown signal is received.
+/// A one-way shutdown latch: once [`Shutdown::request`] is called, every
+/// current and future [`Shutdown::requested`] completes.
+///
+/// The request is latched rather than broadcast to whoever happens to be
+/// waiting: a pull loop is not waiting between iterations (while it handles
+/// a response or writes output), and a signal arriving then must still stop
+/// it at its next wait instead of being lost.
+struct Shutdown {
+    requested: tokio::sync::Notify,
+    latched: std::sync::atomic::AtomicBool,
+}
+
+impl Shutdown {
+    const fn new() -> Self {
+        Self {
+            requested: tokio::sync::Notify::const_new(),
+            latched: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
+
+    fn request(&self) {
+        self.latched
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        self.requested.notify_waiters();
+    }
+
+    async fn requested(&self) {
+        let notified = self.requested.notified();
+        tokio::pin!(notified);
+        // Register as a waiter before checking the latch, so a request made
+        // between the check and the wait still wakes us.
+        notified.as_mut().enable();
+        if self.latched.load(std::sync::atomic::Ordering::SeqCst) {
+            return;
+        }
+        notified.await;
+    }
+}
+
+/// Returns a future that completes when a shutdown signal has been received.
 ///
 /// On Unix this listens for both SIGINT (Ctrl+C) and SIGTERM; on other
 /// platforms only SIGINT is handled. Used by long-running pull loops
@@ -68,17 +107,16 @@ pub(crate) fn pubsub_api_base(endpoints: &gws_rust_core::validate::EndpointPolic
 /// orchestrators (Kubernetes, Docker, systemd) that send SIGTERM.
 ///
 /// The signal handler is registered once in a background task on first call
-/// so it remains active for the lifetime of the process — no gap between
-/// loop iterations.
+/// so it remains active for the lifetime of the process, and the signal is
+/// latched: one received while no loop is waiting (between iterations) still
+/// completes the next call.
 pub(crate) async fn shutdown_signal() {
-    use std::sync::OnceLock;
-    use tokio::sync::Notify;
+    use std::sync::Once;
 
-    static NOTIFY: OnceLock<std::sync::Arc<Notify>> = OnceLock::new();
+    static SHUTDOWN: Shutdown = Shutdown::new();
+    static LISTEN: Once = Once::new();
 
-    let notify = NOTIFY.get_or_init(|| {
-        let n = std::sync::Arc::new(Notify::new());
-        let n2 = n.clone();
+    LISTEN.call_once(|| {
         tokio::spawn(async move {
             #[cfg(unix)]
             {
@@ -111,12 +149,11 @@ pub(crate) async fn shutdown_signal() {
                     tracing::error!("could not listen for Ctrl+C: {e}; shutting down");
                 }
             }
-            n2.notify_waiters();
+            SHUTDOWN.request();
         });
-        n
     });
 
-    notify.notified().await;
+    SHUTDOWN.requested().await;
 }
 
 /// A trait for service-specific CLI helpers that inject custom commands.
@@ -203,6 +240,29 @@ mod tests {
             root_url: "https://example.googleapis.com/".into(),
             ..Default::default()
         }
+    }
+
+    /// A shutdown requested while nobody is waiting (a pull loop between
+    /// iterations) is not lost: the next wait completes at once.
+    #[tokio::test]
+    async fn a_shutdown_requested_between_waits_is_not_lost() {
+        let shutdown = Shutdown::new();
+        shutdown.request();
+        tokio::time::timeout(std::time::Duration::from_secs(5), shutdown.requested())
+            .await
+            .expect("a latched shutdown completes later waits");
+        // A waiter registered before the request is woken too.
+        let shutdown = std::sync::Arc::new(Shutdown::new());
+        let waiter = tokio::spawn({
+            let shutdown = shutdown.clone();
+            async move { shutdown.requested().await }
+        });
+        tokio::task::yield_now().await;
+        shutdown.request();
+        tokio::time::timeout(std::time::Duration::from_secs(5), waiter)
+            .await
+            .expect("a waiting loop is woken")
+            .unwrap();
     }
 
     /// Every helper key is the API name of a registered service, so no entry
