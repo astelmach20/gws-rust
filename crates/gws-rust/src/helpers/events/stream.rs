@@ -42,19 +42,15 @@ pub(crate) enum StepError {
     Fatal(GwsError),
 }
 
-/// Whether an HTTP status is worth retrying.
-pub(crate) fn is_transient_status(status: u16) -> bool {
-    gws_rust_core::error::is_retryable_status_code(status)
-}
-
 impl From<GwsError> for StepError {
-    /// API errors are transient only for retryable statuses; validation and
+    /// API errors are transient exactly when they are retryable (exit code 6:
+    /// a retryable status or a 403 rate-limit reason); validation and
     /// discovery errors are permanent; anything else (network failures,
     /// token refresh failures, unreadable bodies) is treated as transient and
     /// bounded by the failure budget.
     fn from(e: GwsError) -> Self {
         match &e {
-            GwsError::Api { code, .. } if is_transient_status(*code) => StepError::Transient {
+            GwsError::Api { code, .. } if e.is_retryable() => StepError::Transient {
                 status: Some(*code),
                 message: e.to_string(),
             },
@@ -468,11 +464,20 @@ mod tests {
 
     #[test]
     fn transient_classification() {
+        let api = |code: u16| GwsError::Api {
+            code,
+            message: "x".into(),
+            reason: "r".into(),
+            enable_url: None,
+        };
         for code in [408, 429, 500, 502, 503, 504] {
-            assert!(is_transient_status(code));
+            assert!(matches!(
+                StepError::from(api(code)),
+                StepError::Transient { .. }
+            ));
         }
-        for code in [400, 401, 403, 404, 409] {
-            assert!(!is_transient_status(code));
+        for code in [400, 401, 403, 404, 409, 501] {
+            assert!(matches!(StepError::from(api(code)), StepError::Fatal(_)));
         }
         let e = GwsError::Api {
             code: 503,
@@ -502,6 +507,35 @@ mod tests {
             StepError::from(GwsError::other("net")),
             StepError::Transient { status: None, .. }
         ));
+    }
+
+    /// A 403 rate limit exits 6 (retryable) and is retried by the client, so
+    /// the stream must treat it as transient too instead of exiting on it.
+    #[test]
+    fn rate_limited_403_is_transient() {
+        for reason in [
+            "rateLimitExceeded",
+            "userRateLimitExceeded",
+            "RATE_LIMIT_EXCEEDED",
+        ] {
+            let e = GwsError::Api {
+                code: 403,
+                message: "x".into(),
+                reason: reason.into(),
+                enable_url: None,
+            };
+            assert!(e.is_retryable(), "{reason}");
+            assert!(
+                matches!(
+                    StepError::from(e),
+                    StepError::Transient {
+                        status: Some(403),
+                        ..
+                    }
+                ),
+                "{reason}"
+            );
+        }
     }
 
     #[test]

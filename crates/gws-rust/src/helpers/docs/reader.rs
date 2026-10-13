@@ -29,7 +29,16 @@ pub(super) fn render(document: &Value, markdown: bool) -> String {
 }
 
 fn render_elements(elements: &[Value], document: &Value, markdown: bool, out: &mut String) {
+    let mut in_list = false;
     for el in elements {
+        let is_item = el.pointer("/paragraph/bullet").is_some();
+        // List items are written one per line; a block that follows them
+        // needs a blank line, or CommonMark reads a paragraph as a lazy
+        // continuation of the last item.
+        if markdown && in_list && !is_item && !out.ends_with("\n\n") {
+            out.push('\n');
+        }
+        in_list = is_item;
         if let Some(p) = el.get("paragraph") {
             render_paragraph(p, document, markdown, out);
         } else if let Some(t) = el.get("table") {
@@ -431,6 +440,34 @@ mod tests {
         assert_eq!(list_depth(&md), 3, "nesting lost in:\n{md}");
         // Bullet parents keep the two-space indent.
         assert!(md.contains("\n  1. number under bullet\n"), "{md}");
+    }
+
+    #[test]
+    fn paragraph_after_a_list_is_not_merged_into_the_last_item() {
+        let para = |t: &str| json!({"paragraph": {"elements": [{"textRun": {"content": t}}]}});
+        let table = json!({"table": {"tableRows": [{"tableCells": [
+            {"content": [para("A\n")]}, {"content": [para("B\n")]}
+        ]}]}});
+        for after in [para("After the list\n"), table] {
+            let document = json!({
+                "lists": doc()["lists"].clone(),
+                "body": {"content": [
+                    {"paragraph": {"bullet": {"listId": "L1"},
+                        "elements": [{"textRun": {"content": "item\n"}}]}},
+                    after,
+                ]}
+            });
+            let md = render(&document, true);
+            let (tags, _) = parse_back(&md);
+            // The block after the list is a sibling of the list, not part of its item.
+            let block = tags
+                .iter()
+                .any(|t| t == "Paragraph" || t.starts_with("Table"));
+            assert!(
+                block && tags.iter().filter(|t| t.starts_with("Item")).count() == 1,
+                "list item swallowed the next block: {tags:?} from:\n{md}"
+            );
+        }
     }
 
     #[test]

@@ -334,6 +334,7 @@ TIPS:
             let dry = crate::args::dry_run(m)?;
             let (api, value) = match name {
                 "+insert" => {
+                    precheck_range(m, false)?;
                     let attendees = many(m, "attendee")?;
                     let send_updates = required(m, "send-updates")?;
                     if !attendees.is_empty() && send_updates != "none" {
@@ -349,18 +350,26 @@ TIPS:
                     (api, v)
                 }
                 "+agenda" => {
+                    check_timezone(m)?;
                     let api = Api::new(doc, &[SCOPE_CALENDAR_READONLY], dry, sanitize).await?;
                     let tz = TzInfo::resolve(&api, optional(m, "timezone")?).await?;
                     let v = agenda(&api, &AgendaArgs::parse(m)?, &tz).await?;
                     (api, v)
                 }
                 "+freebusy" => {
+                    precheck_range(m, false)?;
+                    optional(m, "slot")?.map(time::parse_duration).transpose()?;
+                    optional(m, "working-hours")?
+                        .map(time::parse_working_hours)
+                        .transpose()?;
                     let api = Api::new(doc, &[SCOPE_FREEBUSY], dry, sanitize).await?;
                     let tz = TzInfo::resolve(&api, optional(m, "timezone")?).await?;
                     let v = freebusy(&api, m, &tz).await?;
                     (api, v)
                 }
                 "+update" => {
+                    check_has_changes(m)?;
+                    precheck_range(m, true)?;
                     confirm::confirm(
                         m,
                         Impact::Outbound,
@@ -473,6 +482,71 @@ fn event_url(api: &Api, calendar_id: &str, event_id: &str) -> String {
         encode_path_segment(calendar_id),
         encode_path_segment(event_id)
     ))
+}
+
+/// Parse `--timezone`, if given.
+fn check_timezone(m: &ArgMatches) -> Result<Option<Tz>, GwsError> {
+    optional(m, "timezone")?
+        .map(crate::timezone::parse_timezone)
+        .transpose()
+}
+
+/// Check `--timezone`, `--start`, `--end` and `--duration` from the command
+/// line alone, before the confirmation prompt and before credentials are
+/// loaded; the real run checks the range again in the resolved zone. With
+/// `keeps_length` (`+update`), `--start` alone is valid: the end then comes
+/// from the current event.
+fn precheck_range(m: &ArgMatches, keeps_length: bool) -> Result<(), GwsError> {
+    let zone = check_timezone(m)?;
+    let (start, end, duration) = (
+        optional(m, "start")?,
+        optional(m, "end")?,
+        optional(m, "duration")?,
+    );
+    let end_when = end.map(|e| time::parse_when(e, "--end")).transpose()?;
+    if let Some(d) = duration {
+        time::parse_duration(d)?;
+    }
+    let Some(start) = start else {
+        return Ok(());
+    };
+    let start_when = time::parse_when(start, "--start")?;
+    if keeps_length && end.is_none() && duration.is_none() {
+        return Ok(());
+    }
+    let zone = match (zone, &start_when, &end_when) {
+        (Some(zone), _, _) => zone,
+        // Without --timezone a local time is read in the account time zone,
+        // known only after sign-in, so its order against a time with an
+        // offset waits for the real run. Two local times order the same in
+        // every zone.
+        (None, When::Local(_), Some(When::Instant(_)))
+        | (None, When::Instant(_), Some(When::Local(_))) => return Ok(()),
+        (None, _, _) => chrono_tz::UTC,
+    };
+    resolve_range(start, end, duration, zone).map(|_| ())
+}
+
+const NOTHING_TO_UPDATE: &str = "Nothing to update: pass at least one of --summary, --location, --description, --start, --end, --duration, --add-attendee, --remove-attendee";
+
+/// `+update` with no change at all, rejected before confirmation and auth.
+fn check_has_changes(m: &ArgMatches) -> Result<(), GwsError> {
+    for name in [
+        "summary",
+        "location",
+        "description",
+        "start",
+        "end",
+        "duration",
+    ] {
+        if optional(m, name)?.is_some() {
+            return Ok(());
+        }
+    }
+    if many(m, "add-attendee")?.is_empty() && many(m, "remove-attendee")?.is_empty() {
+        return Err(GwsError::Validation(NOTHING_TO_UPDATE.into()));
+    }
+    Ok(())
 }
 
 /// Resolve `--start` plus `--end`/`--duration` into a validated pair.
@@ -1005,9 +1079,7 @@ async fn update(api: &Api, m: &ArgMatches, tz: &TzInfo) -> Result<Value, GwsErro
     }
 
     if patch.is_empty() {
-        return Err(GwsError::Validation(
-            "Nothing to update: pass at least one of --summary, --location, --description, --start, --end, --duration, --add-attendee, --remove-attendee".into(),
-        ));
+        return Err(GwsError::Validation(NOTHING_TO_UPDATE.into()));
     }
     api.send(
         ApiRequest::patch(event_url(api, calendar_id, event_id))

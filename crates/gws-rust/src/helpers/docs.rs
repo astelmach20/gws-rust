@@ -212,7 +212,6 @@ TIPS:
                     api.emit(m, &v).await?;
                 }
                 "+read" => {
-                    let api = Api::new(doc, &[SCOPE_DOCS_READONLY], dry, sanitize).await?;
                     let format = required(m, "body-format")?;
                     let target = optional(m, "output")?
                         .map(|o| http::OutputTarget::parse(o, flag(m, "overwrite")?))
@@ -222,6 +221,7 @@ TIPS:
                             "--output needs --body-format markdown or text".into(),
                         ));
                     }
+                    let api = Api::new(doc, &[SCOPE_DOCS_READONLY], dry, sanitize).await?;
                     let id = required(m, "document-id")?;
                     let document = get_document(&api, id).await?;
                     if api.is_dry_run() || format == "raw" {
@@ -261,6 +261,7 @@ TIPS:
                     api.emit(m, &v).await?;
                 }
                 "+replace" => {
+                    check_find(required(m, "find")?)?;
                     let api = Api::new(doc, &[SCOPE_DOCS], dry, sanitize).await?;
                     let v = replace(
                         &api,
@@ -303,10 +304,13 @@ impl Content {
         if text.is_empty() {
             return Err(GwsError::Validation("Content is empty".into()));
         }
-        Ok(Some(Self {
-            text,
-            markdown: flag(m, "markdown")?,
-        }))
+        let markdown = flag(m, "markdown")?;
+        if markdown {
+            // Reject unsupported Markdown before credentials are loaded and,
+            // for +create, before the document is created.
+            markdown::render(&text)?;
+        }
+        Ok(Some(Self { text, markdown }))
     }
 }
 
@@ -424,6 +428,13 @@ async fn create(api: &Api, title: &str, content: Option<&Content>) -> Result<Val
     }))
 }
 
+fn check_find(find: &str) -> Result<(), GwsError> {
+    if find.is_empty() {
+        return Err(GwsError::Validation("--find must not be empty".into()));
+    }
+    Ok(())
+}
+
 async fn replace(
     api: &Api,
     document_id: &str,
@@ -431,9 +442,7 @@ async fn replace(
     replace_with: &str,
     match_case: bool,
 ) -> Result<Value, GwsError> {
-    if find.is_empty() {
-        return Err(GwsError::Validation("--find must not be empty".into()));
-    }
+    check_find(find)?;
     let resp = api
         .send(batch_update_request(
             api,

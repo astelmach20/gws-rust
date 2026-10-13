@@ -76,7 +76,7 @@ fn is_deprecated(method: &RestMethod) -> bool {
 }
 
 /// The response schema looks like a long-running Operation.
-fn returns_operation(method: &RestMethod) -> bool {
+pub(crate) fn returns_operation(method: &RestMethod) -> bool {
     method
         .response
         .as_ref()

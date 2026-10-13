@@ -85,12 +85,7 @@ fn walk(cmd: &Command, doc: &RestDescription, path: &mut Vec<String>, out: &mut 
         path.push(name.clone());
         let is_leaf = sub.get_subcommands().next().is_none();
         if name.starts_with('+') {
-            out.push(json!({
-                "path": path.join(" "),
-                "kind": "helper",
-                "about": sub.get_about().map(|a| a.to_string()),
-                "flags": flags_of(sub),
-            }));
+            walk_helper(sub, path, out);
         } else if is_leaf {
             let parents: Vec<&str> = path[..path.len() - 1].iter().map(String::as_str).collect();
             let method = find_resource(doc, &parents).and_then(|r| r.methods.get(&name));
@@ -106,6 +101,25 @@ fn walk(cmd: &Command, doc: &RestDescription, path: &mut Vec<String>, out: &mut 
         } else {
             walk(sub, doc, path, out);
         }
+        path.pop();
+    }
+}
+
+/// Record a helper, or each runnable subcommand of a helper group such as
+/// `gmail +filter create`.
+fn walk_helper(cmd: &Command, path: &mut Vec<String>, out: &mut Vec<Value>) {
+    if cmd.get_subcommands().next().is_none() {
+        out.push(json!({
+            "path": path.join(" "),
+            "kind": "helper",
+            "about": cmd.get_about().map(|a| a.to_string()),
+            "flags": flags_of(cmd),
+        }));
+        return;
+    }
+    for sub in cmd.get_subcommands() {
+        path.push(sub.get_name().to_string());
+        walk_helper(sub, path, out);
         path.pop();
     }
 }
@@ -285,6 +299,38 @@ mod tests {
             .expect("drive has helper commands");
         assert!(helper["path"].as_str().unwrap().starts_with('+'));
         assert!(helper["flags"].is_array());
+    }
+
+    /// Helpers with their own subcommands (`gmail +filter create|list|delete`)
+    /// list each runnable subcommand with its flags, not just the group.
+    #[test]
+    fn helper_subcommands_are_listed_with_their_flags() {
+        let entry = SERVICES.iter().find(|e| e.aliases[0] == "gmail").unwrap();
+        let doc = RestDescription {
+            name: "gmail".into(),
+            version: "v1".into(),
+            ..Default::default()
+        };
+        let inv = service_inventory(entry, &doc);
+        let cmds = inv["commands"].as_array().unwrap();
+        let paths: Vec<&str> = cmds.iter().map(|c| c["path"].as_str().unwrap()).collect();
+        for p in ["+filter create", "+filter list", "+filter delete"] {
+            assert!(paths.contains(&p), "missing {p}: {paths:?}");
+        }
+        assert!(
+            !paths.contains(&"+filter"),
+            "a helper group is not itself runnable: {paths:?}"
+        );
+        let create = cmds.iter().find(|c| c["path"] == "+filter create").unwrap();
+        assert_eq!(create["kind"], "helper");
+        let flags: Vec<&str> = create["flags"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|f| f["name"].as_str().unwrap())
+            .collect();
+        assert!(flags.contains(&"--from"), "{flags:?}");
+        assert!(flags.contains(&"--yes"), "{flags:?}");
     }
 
     #[test]
