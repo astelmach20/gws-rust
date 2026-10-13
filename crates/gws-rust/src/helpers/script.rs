@@ -374,9 +374,11 @@ fn local_path_for(name: &str, file_type: &str) -> Result<PathBuf, GwsError> {
             )));
         }
         // The name maps back to the path on +push, so it cannot be renamed
-        // on disk; refuse names Windows would treat as a device (`CON.gs`)
+        // on disk; refuse names Windows would treat as a device (`CON.gs`),
+        // as a drive-relative path or alternate data stream (`C:x`, `a:b`),
         // or silently change (a trailing dot or space on a directory).
         if crate::helpers::http::is_windows_device_name(part)
+            || part.contains(['<', '>', ':', '"', '|', '?', '*'])
             || (i != last && part.ends_with(['.', ' ']))
         {
             return Err(GwsError::Validation(format!(
@@ -671,6 +673,19 @@ mod tests {
         // renamed on disk because +push maps the path back to the name.
         for name in [
             "CON", "con", "lib/nul", "aux/util", "COM1", "lpt9.x", "dir./a", "dir /a",
+        ] {
+            let err = local_path_for(name, "SERVER_JS").unwrap_err().to_string();
+            assert!(err.contains("Windows"), "{name}: {err}");
+        }
+        for name in [
+            "C:evil",
+            "lib/D:x",
+            "a:b",
+            "q?",
+            "a*b",
+            "x|y",
+            "<t>",
+            "say\"hi\"",
         ] {
             let err = local_path_for(name, "SERVER_JS").unwrap_err().to_string();
             assert!(err.contains("Windows"), "{name}: {err}");
