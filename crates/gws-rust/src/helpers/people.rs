@@ -78,13 +78,17 @@ TIPS:
             };
             let directory = flag(m, "directory")?;
             let limit = http::limit(m, "limit")?;
+            let query = required(m, "query")?;
+            // Reject bad input before loading credentials, so it is a
+            // validation error rather than an authentication failure.
+            validate(query, directory, limit)?;
             let scope = if directory {
                 SCOPE_DIRECTORY_READONLY
             } else {
                 SCOPE_CONTACTS_READONLY
             };
             let api = Api::new(doc, &[scope], crate::args::dry_run(m)?, sanitize).await?;
-            let v = find(&api, required(m, "query")?, directory, limit).await?;
+            let v = find(&api, query, directory, limit).await?;
             api.emit(m, &v).await?;
             Ok(true)
         })
@@ -110,15 +114,28 @@ fn summarize(person: &Value) -> Value {
     })
 }
 
+/// Contact search returns at most this many results.
+const MAX_CONTACT_RESULTS: usize = 30;
+
+fn validate(query: &str, directory: bool, limit: Option<usize>) -> Result<(), GwsError> {
+    if query.trim().is_empty() {
+        return Err(GwsError::Validation("--query must not be empty".into()));
+    }
+    if !directory && limit.is_some_and(|l| l > MAX_CONTACT_RESULTS) {
+        return Err(GwsError::Validation(format!(
+            "Contact search returns at most {MAX_CONTACT_RESULTS} results; use --limit {MAX_CONTACT_RESULTS} or less"
+        )));
+    }
+    Ok(())
+}
+
 async fn find(
     api: &Api,
     query: &str,
     directory: bool,
     limit: Option<usize>,
 ) -> Result<Value, GwsError> {
-    if query.trim().is_empty() {
-        return Err(GwsError::Validation("--query must not be empty".into()));
-    }
+    validate(query, directory, limit)?;
     if directory {
         let req = ApiRequest::get(api.url("v1/people:searchDirectoryPeople"))
             .query("query", query)
@@ -130,12 +147,7 @@ async fn find(
         page.items = page.items.iter().map(summarize).collect();
         return Ok(page.into_json("people"));
     }
-    let size = limit.unwrap_or(30);
-    if size > 30 {
-        return Err(GwsError::Validation(
-            "Contact search returns at most 30 results; use --limit 30 or less".into(),
-        ));
-    }
+    let size = limit.unwrap_or(MAX_CONTACT_RESULTS);
     // The API requires a warm-up request with an empty query to refresh its
     // cache before the real search returns current results.
     api.send(
