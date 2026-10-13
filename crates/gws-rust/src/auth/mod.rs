@@ -92,13 +92,22 @@ pub enum AuthError {
     /// The token endpoint returned an error.
     #[error("token request failed: {0}")]
     TokenEndpoint(String),
-    /// The token endpoint answered 429 or 5xx: a transient failure on
-    /// Google's side. The credential itself was not rejected.
+    /// The token endpoint answered a retryable status (408, 429, 500, 502,
+    /// 503, 504): a transient failure on Google's side. The credential itself
+    /// was not rejected.
     #[error(
         "Google's OAuth token endpoint is temporarily unavailable (HTTP {status}): {detail}. \
          The credentials were not rejected; retry later"
     )]
     TokenEndpointUnavailable { status: u16, detail: String },
+    /// The token endpoint answered a 5xx that is not retryable (501, 505,
+    /// ...): a permanent failure on Google's side. The credential itself was
+    /// not rejected, and retrying unchanged will not help.
+    #[error(
+        "Google's OAuth token endpoint failed (HTTP {status}): {detail}. The credentials were \
+         not rejected; this status is not retryable"
+    )]
+    TokenEndpointFailed { status: u16, detail: String },
     /// Network failure talking to Google's OAuth endpoints.
     #[error("{0}")]
     Network(String),
@@ -123,6 +132,8 @@ enum Category {
     Network,
     /// A retryable HTTP status from the token endpoint.
     Unavailable(u16),
+    /// A permanent (non-retryable) 5xx from the token endpoint.
+    EndpointFailed(u16),
     Input,
     Internal,
 }
@@ -141,6 +152,7 @@ impl Category {
             AuthError::Storage(_) => Category::Store,
             AuthError::Network(_) => Category::Network,
             AuthError::TokenEndpointUnavailable { status, .. } => Category::Unavailable(*status),
+            AuthError::TokenEndpointFailed { status, .. } => Category::EndpointFailed(*status),
             AuthError::Input(_) => Category::Input,
             AuthError::Internal(_) => Category::Internal,
         }
@@ -156,6 +168,12 @@ impl Category {
                 code,
                 message,
                 reason: "tokenEndpointUnavailable".to_string(),
+                enable_url: None,
+            },
+            Category::EndpointFailed(code) => GwsError::Api {
+                code,
+                message,
+                reason: "tokenEndpointError".to_string(),
                 enable_url: None,
             },
             Category::Input => GwsError::Validation(message),
@@ -731,6 +749,22 @@ mod tests {
                 },
                 6,
                 "tokenEndpointUnavailable",
+            ),
+            (
+                AuthError::TokenEndpointUnavailable {
+                    status: 408,
+                    detail: "Request Timeout".into(),
+                },
+                6,
+                "tokenEndpointUnavailable",
+            ),
+            (
+                AuthError::TokenEndpointFailed {
+                    status: 501,
+                    detail: "Not Implemented".into(),
+                },
+                1,
+                "tokenEndpointError",
             ),
             (AuthError::Denied("access_denied".into()), 2, "authError"),
             (AuthError::Config("bad file".into()), 8, "configError"),

@@ -305,7 +305,7 @@ The fields are `code`, `message`, `reason` and `retryable`, plus `hint` when the
 | `3` | Validation error: bad arguments, flags, config or input |
 | `4` | Discovery error: could not fetch or parse the API schema |
 | `5` | Internal error: I/O, serialization, or other unexpected failure |
-| `6` | Retryable API error: 408, 429, 500, 502, 503, 504, or 403 `rateLimitExceeded`/`userRateLimitExceeded` (the statuses `gwsr` itself retries); retry with backoff. Other 5xx statuses, such as 501, are permanent and exit `1` |
+| `6` | Retryable API error: 408, 429, 500, 502, 503, 504, or 403 `rateLimitExceeded`/`userRateLimitExceeded` (the statuses `gwsr` itself retries); retry with backoff. Other 5xx statuses, such as 501, are permanent and exit `1`. The same rule applies to Google's OAuth token endpoint (`tokenEndpointUnavailable` / `tokenEndpointError`) |
 | `7` | Confirmation required: a gated action ran without `--yes` and without a terminal, or the prompt was declined. Nothing was sent |
 | `8` | Configuration error (`configError`): an invalid environment variable, `config.toml`, profile name or OAuth client file |
 | `9` | Credential store error (`credentialStoreError`): the OS keyring, key file or stored credentials can't be read, written or decrypted |
