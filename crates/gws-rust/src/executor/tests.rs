@@ -254,6 +254,7 @@ fn doc(root: &str) -> RestDescription {
         version: "v3".into(),
         root_url: format!("{root}/"),
         service_path: "drive/v3/".into(),
+        batch_path: Some("batch/drive/v3".into()),
         schemas,
         ..Default::default()
     };
@@ -1985,6 +1986,58 @@ async fn batch_round_trip_reports_partial_failure() {
     let sent = server.received_requests().await.unwrap();
     let body = String::from_utf8_lossy(&sent[0].body);
     assert!(body.contains("GET /drive/v3/files/1 HTTP/1.1"));
+}
+
+/// The batch endpoint is the Discovery document's `batchPath` (Google's
+/// newer APIs use plain `batch` on their own host), not a guessed
+/// `batch/<name>/<version>`; an API without one does not support batching.
+#[tokio::test]
+async fn batch_posts_to_the_discovery_batch_path() {
+    let server = MockServer::start().await;
+    let response_body = "--b\r\nContent-Type: application/http\r\nContent-ID: <response-item-a>\r\n\r\n\
+                         HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{\"id\":\"1\"}\r\n--b--\r\n";
+    Mock::given(method("POST"))
+        .and(path("/batch"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_raw(response_body, "multipart/mixed; boundary=b"),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    let mut d = doc(&server.uri());
+    d.batch_path = Some("batch".into());
+    let opts = options(&server);
+    let input = "{\"id\":\"a\",\"method\":\"files.get\",\"params\":{\"fileId\":\"1\"}}";
+    let calls = batch::parse_calls(&d, input, &opts).unwrap();
+    let em = Emitter::capturing();
+    batch::run_batch(
+        &d,
+        &calls,
+        Credentials::Static("tok".into()),
+        &opts,
+        &SanitizeConfig::default(),
+        &em,
+    )
+    .await
+    .unwrap();
+    assert_eq!(lines(&em)[0]["status"], 200);
+
+    d.batch_path = None;
+    let calls = batch::parse_calls(&d, input, &opts).unwrap();
+    let err = batch::run_batch(
+        &d,
+        &calls,
+        Credentials::Static("tok".into()),
+        &opts,
+        &SanitizeConfig::default(),
+        &Emitter::capturing(),
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        matches!(err, GwsError::Validation(_)) && err.to_string().contains("batchPath"),
+        "{err}"
+    );
 }
 
 #[tokio::test]
