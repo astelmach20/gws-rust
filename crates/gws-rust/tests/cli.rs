@@ -540,6 +540,50 @@ fn schema_paths_accept_dotted_api_versions() {
         .stdout(predicate::str::contains("\"name\""));
 }
 
+/// `--api-version` selects the schema's API version, as it does for the
+/// method itself; it was accepted and silently ignored.
+#[test]
+fn schema_honors_api_version_flag() {
+    let env = Env::new();
+    env.seed_drive("v3 listing");
+    env.seed_doc(&json!({
+        "name": "drive",
+        "version": "v2",
+        "rootUrl": "https://www.googleapis.com/",
+        "servicePath": "drive/v2/",
+        "resources": {
+            "files": {
+                "methods": {
+                    "list": {
+                        "id": "drive.files.list",
+                        "httpMethod": "GET",
+                        "path": "files",
+                        "description": "v2 listing"
+                    }
+                }
+            }
+        }
+    }));
+    for args in [
+        &["schema", "drive.files.list", "--api-version", "v2"][..],
+        &["--api-version=v2", "schema", "drive.files.list"],
+        // The flag wins over the `:version` suffix, as for the method.
+        &["schema", "drive:v3.files.list", "--api-version", "v2"],
+    ] {
+        let out = env.cmd().args(args).output().unwrap();
+        assert!(out.status.success(), "{args:?}: {}", stderr_of(&out));
+        let v: Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert_eq!(v["description"], "v2 listing", "{args:?}");
+    }
+    let out = env
+        .cmd()
+        .args(["schema", "drive.files.list"])
+        .output()
+        .unwrap();
+    let v: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["description"], "v3 listing");
+}
+
 // ── Errors ──────────────────────────────────────────────────────────────
 
 /// Parse stderr as exactly one JSON error object.
