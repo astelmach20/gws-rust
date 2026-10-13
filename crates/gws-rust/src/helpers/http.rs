@@ -595,9 +595,9 @@ pub(crate) const SAFE_FILENAME_MAX_BYTES: usize = 200;
 /// Turn a remote (untrusted) file name into a safe single path component.
 ///
 /// Path separators, control characters and characters that are invalid on
-/// Windows are replaced with `_`; leading dots are stripped so the result can
-/// never be `.`/`..` or a hidden file, and trailing dots and spaces (which
-/// Windows drops) are stripped too. Windows device names such as `CON.pdf`
+/// Windows are replaced with `_`; leading dots (and any whitespace mixed in
+/// with them) are stripped so the result can never be `.`/`..` or a hidden
+/// file, and trailing dots and spaces (which Windows drops) are stripped too. Windows device names such as `CON.pdf`
 /// get a `_` prefix on every platform, so the same remote file gets the same
 /// local name everywhere. Falls back to `fallback` when nothing usable
 /// remains.
@@ -617,7 +617,10 @@ pub(crate) fn safe_filename(raw: &str, fallback: &str) -> String {
             }
         })
         .collect();
-    let cleaned = avoid_windows_device_name(trim_name(cleaned.trim_start_matches('.')));
+    // Strip leading dots together with any whitespace around them: trimming
+    // the whitespace only afterwards would expose a dot (` .bashrc`).
+    let unhidden = cleaned.trim_start_matches(|c: char| c == '.' || c.is_whitespace());
+    let cleaned = avoid_windows_device_name(trim_name(unhidden));
     let mut truncated = String::new();
     for c in cleaned.chars() {
         if truncated.len() + c.len_utf8() > SAFE_FILENAME_MAX_BYTES {
@@ -1140,6 +1143,20 @@ mod tests {
         assert_eq!(safe_filename(".bashrc", "x"), "bashrc");
         assert_eq!(safe_filename("a\nb:c", "x"), "a_b_c");
         assert_eq!(safe_filename("Report Q1.pdf", "x"), "Report Q1.pdf");
+    }
+
+    /// Whitespace before the leading dots must not keep the name hidden:
+    /// trimming it afterwards would expose the dot.
+    #[test]
+    fn safe_filename_never_returns_a_hidden_name() {
+        assert_eq!(safe_filename(" .bashrc", "x"), "bashrc");
+        assert_eq!(safe_filename(". .bashrc", "x"), "bashrc");
+        assert_eq!(safe_filename("\u{3000}.profile", "x"), "profile");
+        assert_eq!(safe_filename(" . . ", "x"), "x");
+        for raw in [" .bashrc", ". .ssh", "\t..x", " . . .zshrc"] {
+            let out = safe_filename(raw, "x");
+            assert!(!out.starts_with('.'), "{raw:?} -> {out:?}");
+        }
     }
 
     #[test]
