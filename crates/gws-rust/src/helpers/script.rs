@@ -679,6 +679,32 @@ mod tests {
         assert!(local_path_for("lib/console", "SERVER_JS").is_ok());
     }
 
+    /// On Windows a component such as `C:evil` is a drive-relative path:
+    /// `PathBuf::push`/`join` replaces everything before it, so the pulled
+    /// file would land in drive C's current directory instead of `--dir`.
+    #[test]
+    fn local_paths_never_escape_the_directory() {
+        let dir = PathBuf::from("pulled");
+        for name in ["C:evil", "lib/D:x", "a:b", "z:"] {
+            if let Ok(relative) = local_path_for(name, "SERVER_JS") {
+                let joined = dir.join(&relative);
+                assert!(
+                    joined.starts_with(&dir),
+                    "{name} -> {} escapes {}",
+                    joined.display(),
+                    dir.display()
+                );
+                assert!(
+                    relative
+                        .components()
+                        .all(|c| matches!(c, std::path::Component::Normal(_))),
+                    "{name} -> {}",
+                    relative.display()
+                );
+            }
+        }
+    }
+
     #[tokio::test]
     async fn run_keeps_unreserved_chars_in_script_id() {
         // Regression (#842): '-' and '_' must not be percent-encoded.
