@@ -155,6 +155,78 @@ fn docs_markdown_write_dry_run_builds_native_requests() {
 }
 
 #[test]
+fn docs_helpers_validate_input_before_auth() {
+    // No credentials exist here. Input the helper can reject on its own is a
+    // validation error (exit 3), not an authentication error (exit 2); for
+    // `+create --markdown` the real run would otherwise create an empty
+    // document before failing on the Markdown.
+    let dir = setup();
+    let table = "| a | b |\n|---|---|\n| 1 | 2 |";
+    let cases: [(&[&str], &str); 5] = [
+        (
+            &[
+                "docs",
+                "+create",
+                "--title",
+                "T",
+                "--markdown",
+                "--text",
+                table,
+            ],
+            "Markdown tables are not supported",
+        ),
+        (
+            &[
+                "docs",
+                "+write",
+                "--document-id",
+                "D",
+                "--markdown",
+                "--text",
+                table,
+            ],
+            "Markdown tables are not supported",
+        ),
+        (
+            &[
+                "docs",
+                "+read",
+                "--document-id",
+                "D",
+                "--body-format",
+                "raw",
+                "--output",
+                "doc.json",
+            ],
+            "--output needs --body-format markdown or text",
+        ),
+        (
+            &["docs", "+read", "--document-id", "D", "--output", "."],
+            "is a directory",
+        ),
+        (
+            &[
+                "docs",
+                "+replace",
+                "--document-id",
+                "D",
+                "--find",
+                "",
+                "--replace-with",
+                "x",
+            ],
+            "--find must not be empty",
+        ),
+    ];
+    for (args, expected) in cases {
+        let out = gwsr(dir.path()).args(args).output().unwrap();
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(3), "{args:?}: {stderr}");
+        assert!(stderr.contains(expected), "{args:?}: {stderr}");
+    }
+}
+
+#[test]
 fn sheets_append_dry_run_is_json() {
     let dir = setup();
     let out = gwsr(dir.path())
