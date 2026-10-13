@@ -1254,3 +1254,78 @@ fn gmail_filter_forward_is_gated_under_policy() {
         String::from_utf8_lossy(&out.stderr)
     );
 }
+
+/// `drive +download --output -` and `drive +export --output -` stream the raw
+/// payload to stdout; nothing else may follow it there (a JSON summary after
+/// the bytes would corrupt `| sha256sum` or a redirected file).
+#[tokio::test(flavor = "multi_thread")]
+async fn drive_download_and_export_to_stdout_print_only_the_payload() {
+    use wiremock::matchers::{method, path, query_param};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/drive/v3/files/F1"))
+        .and(query_param("alt", "media"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_raw(b"raw-bytes".to_vec(), "application/pdf"),
+        )
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/drive/v3/files/F1"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "F1", "name": "f.pdf", "mimeType": "application/pdf"
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/drive/v3/files/D1"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "D1", "name": "Doc", "mimeType": "application/vnd.google-apps.document"
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/drive/v3/files/D1/export"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_raw(b"# exported".to_vec(), "text/markdown"),
+        )
+        .mount(&server)
+        .await;
+
+    let dir = setup();
+    for (args, expected) in [
+        (
+            vec!["drive", "+download", "--file-id", "F1", "--output", "-"],
+            "raw-bytes",
+        ),
+        (
+            vec![
+                "drive",
+                "+export",
+                "--file-id",
+                "D1",
+                "--to",
+                "md",
+                "--output",
+                "-",
+            ],
+            "# exported",
+        ),
+    ] {
+        let out = gwsr(dir.path())
+            .env("GWSR_TOKEN", "test-token")
+            .env("GWSR_API_BASE_URL", server.uri())
+            .args(&args)
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(out.status.success(), "{args:?}: {stderr}");
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout),
+            expected,
+            "{args:?}: stdout must hold only the payload"
+        );
+    }
+}

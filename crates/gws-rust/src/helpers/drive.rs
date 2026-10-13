@@ -312,6 +312,9 @@ TIPS:
                         flag(m, "overwrite")?,
                     )
                     .await?;
+                    if streamed_to_stdout(&api, m)? {
+                        return Ok(true);
+                    }
                     (api, v)
                 }
                 "+export" => {
@@ -324,6 +327,9 @@ TIPS:
                         flag(m, "overwrite")?,
                     )
                     .await?;
+                    if streamed_to_stdout(&api, m)? {
+                        return Ok(true);
+                    }
                     (api, v)
                 }
                 "+move" => {
@@ -489,6 +495,13 @@ fn resolve_target(
         Some(o) => OutputTarget::parse(o, overwrite),
         None => OutputTarget::parse(&safe_filename(default_name, "download"), overwrite),
     }
+}
+
+/// Whether `--output -` sent the payload to stdout, which must then carry
+/// nothing else: no JSON summary after the raw bytes. A dry run still
+/// prints its plan.
+fn streamed_to_stdout(api: &Api, m: &ArgMatches) -> Result<bool, GwsError> {
+    Ok(!api.is_dry_run() && optional(m, "output")? == Some("-"))
 }
 
 fn download_result(file_id: &str, target: &OutputTarget, bytes: Option<u64>) -> Value {
