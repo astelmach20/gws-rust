@@ -37,7 +37,14 @@ pub(super) async fn build_report(env: &AuthEnv, offline: bool) -> Value {
     });
 
     match profiles::list_profiles(&env.base) {
-        Ok(list) => out["profiles"] = json!(list),
+        Ok(dirs) => {
+            out["profiles"] = json!(dirs.valid);
+            let (invalid, warning) = super::profile::invalid_profiles_report(&dirs);
+            out["invalid_profiles"] = invalid;
+            if let Some(w) = warning {
+                out["invalid_profiles_warning"] = json!(w);
+            }
+        }
         Err(e) => out["profiles_error"] = json!(format!("{e:#}")),
     }
 
@@ -223,6 +230,22 @@ mod tests {
                 .contains("No credentials")
         );
         assert_eq!(r["profile"], "default");
+        assert_eq!(r["invalid_profiles"], json!([]));
+        assert!(r.get("invalid_profiles_warning").is_none(), "{r}");
+    }
+
+    /// A profile directory with a name gwsr no longer accepts is reported,
+    /// not silently left out of `profiles`.
+    #[tokio::test]
+    async fn invalid_profile_directories_are_reported() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("profiles").join("Work")).unwrap();
+        let r = build_report(&env(dir.path()), true).await;
+        assert_eq!(r["profiles"], json!([]));
+        assert_eq!(r["invalid_profiles"][0]["name"], "Work");
+        assert_eq!(r["invalid_profiles"][0]["suggested_name"], "work");
+        let w = r["invalid_profiles_warning"].as_str().unwrap();
+        assert!(w.contains("'Work' (rename to 'work')"), "{w}");
     }
 
     #[tokio::test]
