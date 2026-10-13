@@ -65,7 +65,7 @@ pub const EXIT_CODE_DOCUMENTATION: &[(i32, &str)] = &[
     ),
     (
         GwsError::EXIT_CODE_API_RETRYABLE,
-        "API retryable  — rate limit (429/403 rateLimitExceeded) or server error (5xx); retry with backoff",
+        "API retryable  — rate limit (429/403 rateLimitExceeded), timeout (408) or transient server error (500/502/503/504); retry with backoff",
     ),
     (
         GwsError::EXIT_CODE_CONFIRMATION_REQUIRED,
@@ -283,8 +283,8 @@ fn api_hint(
              check GWSR_TOKEN if you set it."
                 .to_string(),
         ),
-        _ if code >= 500 => Some(
-            "Google returned a server error. It is usually transient: retry after a \
+        _ if gws_rust_core::error::is_retryable_status_code(code) => Some(
+            "Google returned a transient error (timeout or server error): retry after a \
              backoff (exit code 6 marks retryable errors)."
                 .to_string(),
         ),

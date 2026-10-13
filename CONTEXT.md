@@ -23,7 +23,7 @@
 | 3 | Validation error | Fix the arguments; see `gwsr schema …` |
 | 4 | Discovery error | Check the service name or network |
 | 5 | Internal error | Report it |
-| 6 | Retryable API error (429/5xx/rate limit) | Retry with backoff |
+| 6 | Retryable API error (408/429/500/502/503/504/rate limit) | Retry with backoff |
 | 7 | Confirmation required | Ask the user, then re-run with `--yes` |
 | 8 | Configuration error | Ask the user to fix the setting the message names. Every `GWSR_*` variable is checked at startup, so a bad or unknown one (e.g. a typo like `GWSR_TIMEOUT_SECS`) fails every command until it is fixed or unset |
 | 9 | Credential store error (keyring, stored credentials) | Ask the user; `gwsr auth status` shows the stored credential state |

@@ -363,9 +363,10 @@ pub fn is_rate_limit_body(body: &[u8]) -> bool {
         .any(|r| RATE_LIMIT_REASONS.contains(&r))
 }
 
-/// HTTP statuses retried for idempotent requests.
+/// HTTP statuses retried for idempotent requests (the same set that exits
+/// with code 6; see [`crate::error::is_retryable_status_code`]).
 pub fn is_retryable_status(status: StatusCode) -> bool {
-    matches!(status.as_u16(), 408 | 429 | 500 | 502 | 503 | 504)
+    crate::error::is_retryable_status_code(status.as_u16())
 }
 
 /// Parse a `Retry-After` header: delta-seconds or an HTTP-date. An invalid
