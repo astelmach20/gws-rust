@@ -34,16 +34,11 @@ use crate::services::resolve_service_spec;
 /// `service.method` for a method declared outside any resource,
 /// where `service` is a registered alias, `alias:version`, or any Discovery
 /// API as `<api>:<version>`.
-/// Examples: `drive.files.list`, `drive.File`, `admin:directory_v1.users.list`.
+/// Examples: `drive.files.list`, `drive.File`, `admin:directory_v1.users.list`,
+/// `dfareporting:v3.4.ads.list` (a dotted version stays whole).
 pub async fn handle_schema_command(path: &str, resolve_refs: bool) -> Result<Value, GwsError> {
-    let parts: Vec<&str> = path.split('.').collect();
-    if parts.len() < 2 || parts.iter().any(|p| p.is_empty()) {
-        return Err(GwsError::Validation(format!(
-            "Schema path must be 'service.Type' or 'service.resource.method' (e.g. 'drive.files.list', 'youtube:v3.videos.list'), got '{path}'"
-        )));
-    }
-
-    let service_name = parts[0];
+    let (service_name, rest) = split_schema_path(path)?;
+    let parts: Vec<&str> = std::iter::once(service_name).chain(rest).collect();
     let resolved = resolve_service_spec(service_name, None)?;
     let doc = fetch_discovery_document(&resolved.api_name, &resolved.version).await?;
 
@@ -93,6 +88,38 @@ pub async fn handle_schema_command(path: &str, resolve_refs: bool) -> Result<Val
         resolve_schema_refs(&mut output, &doc, &mut seen);
     }
     Ok(output)
+}
+
+/// Split a schema path into its service spec and the remaining dotted names.
+///
+/// An `<api>:<version>` spec keeps a dotted version whole (`dfareporting:v3.4`
+/// in `dfareporting:v3.4.ads.list`): the segments after the version that
+/// start with a digit continue it, since Discovery resource, method and
+/// schema names start with a letter.
+fn split_schema_path(path: &str) -> Result<(&str, Vec<&str>), GwsError> {
+    let invalid = || {
+        GwsError::Validation(format!(
+            "Schema path must be 'service.Type' or 'service.resource.method' (e.g. 'drive.files.list', 'youtube:v3.videos.list'), got '{path}'"
+        ))
+    };
+    let parts: Vec<&str> = path.split('.').collect();
+    if parts.len() < 2 || parts.iter().any(|p| p.is_empty()) {
+        return Err(invalid());
+    }
+    let mut spec_parts = 1;
+    if parts[0].contains(':') {
+        while parts
+            .get(spec_parts)
+            .is_some_and(|p| p.starts_with(|c: char| c.is_ascii_digit()))
+        {
+            spec_parts += 1;
+        }
+    }
+    if spec_parts == parts.len() {
+        return Err(invalid());
+    }
+    let spec_len = parts[..spec_parts].iter().map(|p| p.len()).sum::<usize>() + spec_parts - 1;
+    Ok((&path[..spec_len], parts[spec_parts..].to_vec()))
 }
 
 /// The `gwsr schema` argument that shows `method` of `doc`, e.g.
@@ -829,6 +856,31 @@ mod tests {
         let err = find_method(&doc, &["a"], "list").unwrap_err().to_string();
         assert!(err.contains(r#"["y", "z"]"#), "{err}");
         assert!(find_method(&doc, &[], "list").is_err());
+    }
+
+    #[test]
+    fn split_schema_path_keeps_dotted_versions_whole() {
+        let ok = |p| split_schema_path(p).unwrap();
+        assert_eq!(ok("drive.files.list"), ("drive", vec!["files", "list"]));
+        assert_eq!(ok("drive:v2.File"), ("drive:v2", vec!["File"]));
+        assert_eq!(
+            ok("admin:directory_v1.users.list"),
+            ("admin:directory_v1", vec!["users", "list"])
+        );
+        assert_eq!(
+            ok("dfareporting:v3.4.ads.list"),
+            ("dfareporting:v3.4", vec!["ads", "list"])
+        );
+        assert_eq!(ok("x:v1.1.2.Type"), ("x:v1.1.2", vec!["Type"]));
+        // Without a `:version` there is no version to continue.
+        assert_eq!(ok("drive.4.list"), ("drive", vec!["4", "list"]));
+        // A version with nothing after it is not a schema path.
+        for bad in ["dfareporting:v3.4", "x:v1.1.2", "x:v1."] {
+            assert!(
+                matches!(split_schema_path(bad), Err(GwsError::Validation(_))),
+                "{bad}"
+            );
+        }
     }
 
     #[tokio::test]

@@ -486,6 +486,60 @@ fn top_level_discovery_methods_are_commands() {
         .stdout(predicate::str::contains("Tokeninfo"));
 }
 
+/// API versions may contain dots (`<api>:v3.4`): `gwsr schema` must keep
+/// them in the service spec instead of splitting the version apart, so the
+/// path printed in method help is one that runs.
+#[test]
+fn schema_paths_accept_dotted_api_versions() {
+    let env = Env::new();
+    env.seed_doc(&json!({
+        "name": "dfareporting",
+        "version": "v3.4",
+        "rootUrl": "https://dfareporting.googleapis.com/",
+        "servicePath": "dfareporting/v3.4/",
+        "resources": {
+            "ads": {
+                "methods": {
+                    "list": {
+                        "id": "dfareporting.ads.list",
+                        "httpMethod": "GET",
+                        "path": "ads",
+                        "description": "Lists ads.",
+                        "parameters": {
+                            "maxResults": {"type": "integer", "location": "query"}
+                        },
+                        "response": {"$ref": "Ad"}
+                    }
+                }
+            }
+        },
+        "schemas": {
+            "Ad": {"id": "Ad", "type": "object", "properties": {"name": {"type": "string"}}}
+        }
+    }));
+
+    env.cmd()
+        .args(["dfareporting:v3.4", "ads", "list", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Full request/response schema: gwsr schema dfareporting:v3.4.ads.list",
+        ));
+
+    env.cmd()
+        .args(["schema", "dfareporting:v3.4.ads.list"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"httpMethod\":\"GET\""))
+        .stdout(predicate::str::contains("\"schemaRef\":\"Ad\""));
+
+    env.cmd()
+        .args(["schema", "dfareporting:v3.4.Ad"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"name\""));
+}
+
 // ── Errors ──────────────────────────────────────────────────────────────
 
 /// Parse stderr as exactly one JSON error object.
