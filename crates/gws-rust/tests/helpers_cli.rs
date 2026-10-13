@@ -1834,3 +1834,87 @@ async fn drive_sync_keeps_local_files_and_exits_with_sync_conflict() {
     assert!(out.status.success());
     assert_eq!(stdout_json(&out)["unchanged"].as_array().unwrap().len(), 1);
 }
+
+/// A helper that writes straight to stdout (`--output -` payloads, `gmail
+/// +read`) ends quietly with status 0 when the reader has gone away
+/// (`gwsr ... | head`), like every other command, instead of reporting an
+/// internal error (exit 5).
+#[tokio::test(flavor = "multi_thread")]
+async fn helpers_writing_raw_stdout_exit_cleanly_on_a_closed_pipe() {
+    use wiremock::matchers::{method, path, query_param};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/drive/v3/files/F1"))
+        .and(query_param("alt", "media"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_raw(vec![b'x'; 1024 * 1024], "application/pdf"),
+        )
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/drive/v3/files/F1"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "F1", "name": "f.pdf", "mimeType": "application/pdf"
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/gmail/v1/users/me/messages/M1"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "M1",
+            "threadId": "T1",
+            "snippet": "hello",
+            "payload": {
+                "mimeType": "text/plain",
+                "body": {"data": "aGVsbG8"},
+                "headers": [
+                    {"name": "From", "value": "a@example.com"},
+                    {"name": "Message-ID", "value": "<m1@example.com>"},
+                ],
+            },
+        })))
+        .mount(&server)
+        .await;
+
+    let dir = setup();
+    seed(dir.path(), "gmail", "v1", "");
+    for args in [
+        &["drive", "+download", "--file-id", "F1", "--output", "-"][..],
+        &["gmail", "+read", "--message-id", "M1"],
+        &[
+            "gmail",
+            "+read",
+            "--message-id",
+            "M1",
+            "--body-format",
+            "json",
+        ],
+    ] {
+        let mut cmd = std::process::Command::new(assert_cmd::cargo::cargo_bin("gwsr"));
+        cmd.env_clear()
+            .env("GWSR_CONFIG_DIR", dir.path())
+            .env("GWSR_CACHE_DIR", dir.path().join("cache"))
+            .env("HOME", dir.path())
+            .env("GWSR_TOKEN", "test-token")
+            .env("GWSR_API_BASE_URL", server.uri())
+            .current_dir(dir.path());
+        for key in ["SystemRoot", "SSL_CERT_FILE", "NIX_SSL_CERT_FILE"] {
+            if let Some(value) = std::env::var_os(key) {
+                cmd.env(key, value);
+            }
+        }
+        let mut child = cmd
+            .args(args)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        drop(child.stdout.take());
+        let out = child.wait_with_output().unwrap();
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(0), "{args:?}: {stderr}");
+        assert!(stderr.is_empty(), "{args:?}: {stderr}");
+    }
+}
