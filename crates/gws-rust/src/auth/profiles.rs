@@ -99,17 +99,37 @@ pub fn try_config_dir() -> anyhow::Result<PathBuf> {
 ///
 /// Returns a message describing the allowed characters.
 pub fn validate_profile_name(name: &str) -> anyhow::Result<()> {
+    if is_valid_profile_name(name) {
+        return Ok(());
+    }
+    let rule = format!(
+        "invalid profile name '{name}': use 1-{MAX_PROFILE_NAME_LEN} lowercase letters, digits, \
+         '-', '_' or '.', not starting with '.'"
+    );
+    match lowercase_suggestion(name) {
+        // An older gwsr accepted uppercase names, so a directory with this
+        // name may hold credentials; say how to make it usable again.
+        Some(lower) => anyhow::bail!(
+            "{rule}. A profile directory named '{name}' cannot be selected: rename it to \
+             '{lower}' to use it or to log out of it (`gwsr auth logout --profile {lower}`); \
+             `gwsr auth list` shows its path"
+        ),
+        None => anyhow::bail!("{rule}"),
+    }
+}
+
+fn is_valid_profile_name(name: &str) -> bool {
     let valid_chars = name
         .chars()
         .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '-' | '_' | '.'));
-    if name.is_empty() || name.len() > MAX_PROFILE_NAME_LEN || !valid_chars || name.starts_with('.')
-    {
-        anyhow::bail!(
-            "invalid profile name '{name}': use 1-{MAX_PROFILE_NAME_LEN} lowercase letters, \
-             digits, '-', '_' or '.', not starting with '.'"
-        );
-    }
-    Ok(())
+    !name.is_empty() && name.len() <= MAX_PROFILE_NAME_LEN && valid_chars && !name.starts_with('.')
+}
+
+/// The valid lowercase spelling of a name that is invalid only because of
+/// ASCII uppercase letters (`Work` -> `work`).
+pub fn lowercase_suggestion(name: &str) -> Option<String> {
+    let lower = name.to_ascii_lowercase();
+    (lower != name && is_valid_profile_name(&lower)).then_some(lower)
 }
 
 /// Where the active profile name came from.
@@ -242,19 +262,31 @@ pub fn active_profile_paths() -> anyhow::Result<(PathBuf, ActiveProfile, Profile
     Ok((base, active, paths))
 }
 
-/// Names of all profiles that exist on disk, sorted.
+/// The directories under `profiles/`.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct ProfileDirs {
+    /// Names of the usable profiles, sorted.
+    pub valid: Vec<String>,
+    /// Directories whose names are not valid profile names (such as the
+    /// uppercase names an older gwsr allowed), sorted. They cannot be
+    /// selected, so they are reported rather than hidden: they may still
+    /// hold credentials.
+    pub invalid: Vec<PathBuf>,
+}
+
+/// All profile directories that exist on disk.
 ///
 /// # Errors
 ///
 /// Fails if the profiles directory exists but cannot be read.
-pub fn list_profiles(base: &Path) -> anyhow::Result<Vec<String>> {
+pub fn list_profiles(base: &Path) -> anyhow::Result<ProfileDirs> {
     let dir = base.join(PROFILES_DIR);
     let entries = match std::fs::read_dir(&dir) {
         Ok(entries) => entries,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(ProfileDirs::default()),
         Err(e) => return Err(e).with_context(|| format!("cannot read '{}'", dir.display())),
     };
-    let mut names = Vec::new();
+    let mut found = ProfileDirs::default();
     for entry in entries {
         let entry = entry.with_context(|| format!("cannot read '{}'", dir.display()))?;
         if !entry
@@ -264,13 +296,14 @@ pub fn list_profiles(base: &Path) -> anyhow::Result<Vec<String>> {
         {
             continue;
         }
-        let name = entry.file_name().to_string_lossy().into_owned();
-        if validate_profile_name(&name).is_ok() {
-            names.push(name);
+        match entry.file_name().to_str() {
+            Some(name) if is_valid_profile_name(name) => found.valid.push(name.to_string()),
+            _ => found.invalid.push(entry.path()),
         }
     }
-    names.sort();
-    Ok(names)
+    found.valid.sort();
+    found.invalid.sort();
+    Ok(found)
 }
 
 /// Non-secret facts about a logged-in profile, stored as `profile.json`.
@@ -353,6 +386,19 @@ mod tests {
         assert!(resolve_active_profile(dir.path(), Some("Work".into()), None).is_err());
     }
 
+    /// `--profile Work` names a directory an older gwsr may have created; the
+    /// error must say how to make it usable (or remove it), not only that
+    /// the name is invalid.
+    #[test]
+    fn uppercase_profile_name_error_explains_the_rename() {
+        let err = format!("{:#}", validate_profile_name("Work").unwrap_err());
+        assert!(err.contains("'work'"), "{err}");
+        assert!(err.contains("gwsr auth list"), "{err}");
+        // Names that are invalid for other reasons get no rename advice.
+        let err = format!("{:#}", validate_profile_name("Bad Name").unwrap_err());
+        assert!(!err.contains("rename"), "{err}");
+    }
+
     #[test]
     fn resolve_profile_priority() {
         let dir = tempfile::tempdir().unwrap();
@@ -397,12 +443,18 @@ mod tests {
     #[test]
     fn list_profiles_and_metadata_round_trip() {
         let dir = tempfile::tempdir().unwrap();
-        assert!(list_profiles(dir.path()).unwrap().is_empty());
+        assert_eq!(list_profiles(dir.path()).unwrap(), ProfileDirs::default());
 
         let paths = ProfilePaths::new(dir.path(), "work");
         paths.ensure_dir().unwrap();
         ProfilePaths::new(dir.path(), "home").ensure_dir().unwrap();
-        assert_eq!(list_profiles(dir.path()).unwrap(), vec!["home", "work"]);
+        std::fs::create_dir(dir.path().join("profiles").join("Old")).unwrap();
+        let listed = list_profiles(dir.path()).unwrap();
+        assert_eq!(listed.valid, vec!["home", "work"]);
+        assert_eq!(
+            listed.invalid,
+            vec![dir.path().join("profiles").join("Old")]
+        );
 
         assert_eq!(load_metadata(&paths.metadata).unwrap(), None);
         let meta = ProfileMetadata {
