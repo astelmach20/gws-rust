@@ -633,8 +633,12 @@ pub(crate) async fn execute_to(
         };
         pages += 1;
 
-        // Long-running operations.
-        let auto_wait = output.is_some() && operation::is_operation(&value);
+        // Long-running operations. `-o` waits on its own only for a method
+        // declared to return one: other resources can look like an operation
+        // (a People ContactGroup has a string `name` and a `metadata` object).
+        let auto_wait = output.is_some()
+            && crate::commands::returns_operation(method)
+            && operation::is_operation(&value);
         if operation::is_operation(&value) && (options.wait.is_some() || auto_wait) {
             let cfg = options.wait.clone().unwrap_or_default();
             let done = operation::wait(&transport, doc, value, &cfg).await?;
