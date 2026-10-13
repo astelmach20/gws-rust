@@ -645,7 +645,11 @@ metadata:
                         lookup_method_description(doc, res_name, &mname).unwrap_or_else(|| {
                             m.get_about().map(|s| s.to_string()).unwrap_or_default()
                         });
-                    format!("  - `{mname}` — {mabout}")
+                    if mabout.is_empty() {
+                        format!("  - `{mname}`")
+                    } else {
+                        format!("  - `{mname}` — {mabout}")
+                    }
                 })
                 .collect();
 
@@ -1164,6 +1168,11 @@ fn truncate_desc(desc: &str) -> String {
 
 /// Looks up a method's full description from the Discovery Document and
 /// truncates it at the skill-body limit (longer than CLI help).
+///
+/// The description becomes one Markdown list item, so its line breaks
+/// (Discovery descriptions often contain paragraphs and bullet lists) are
+/// collapsed to single spaces: a raw newline would end the item, and a line
+/// starting with `- ` would become a list item of its own.
 fn lookup_method_description(
     doc: &crate::discovery::RestDescription,
     resource_name: &str,
@@ -1174,8 +1183,9 @@ fn lookup_method_description(
     if let Some(method) = resource.methods.get(method_name)
         && let Some(desc) = &method.description
     {
+        let one_line = desc.split_whitespace().collect::<Vec<_>>().join(" ");
         return Some(crate::text::truncate_description(
-            desc,
+            &one_line,
             crate::text::SKILL_BODY_DESCRIPTION_LIMIT,
             false,
         ));
@@ -1506,6 +1516,64 @@ mod tests {
         let result = lookup_method_description(&doc, "files", "list");
         assert!(result.is_some());
         assert!(result.unwrap().contains("Lists all the files"));
+    }
+
+    /// Each method is one Markdown list item in the service skill, even when
+    /// its Discovery description has paragraphs and a bullet list (calendar
+    /// `calendars.transferOwnership`) or is empty (script `scripts.run`), and
+    /// no line ends in whitespace.
+    #[test]
+    fn service_skill_lists_each_method_on_one_line() {
+        let entry = services::SERVICES
+            .iter()
+            .find(|s| s.aliases[0] == "calendar")
+            .unwrap();
+        let doc: crate::discovery::RestDescription = serde_json::from_value(serde_json::json!({
+            "name": "calendar",
+            "version": "v3",
+            "rootUrl": "https://www.googleapis.com/",
+            "servicePath": "calendar/v3/",
+            "resources": {"calendars": {"methods": {
+                "transferOwnership": {
+                    "httpMethod": "POST",
+                    "path": "calendars/{calendarId}/transferOwnership",
+                    "description": "Transfers a calendar. Requires one of these scopes: \n- https://www.googleapis.com/auth/calendar \n- https://www.googleapis.com/auth/calendar.calendars\n\nNote: the calendar must be active."
+                },
+                "run": {"httpMethod": "POST", "path": "run", "description": ""}
+            }}}
+        }))
+        .unwrap();
+        let cli = crate::commands::build_cli(&doc);
+        let (helpers, resources): (Vec<&Command>, Vec<&Command>) = cli
+            .get_subcommands()
+            .partition(|sub| sub.get_name().starts_with('+'));
+        let md = render_service_skill(
+            entry.aliases[0],
+            entry,
+            &helpers,
+            &resources,
+            "Google Calendar",
+            &doc,
+        );
+        let section = md
+            .split("## API Resources\n")
+            .nth(1)
+            .and_then(|s| s.split("\n## ").next())
+            .expect("API Resources section");
+        for line in section.lines().filter(|l| !l.is_empty()) {
+            assert!(
+                line.starts_with("  - `") || line.starts_with("### "),
+                "line outside a list item: {line:?}\n{md}"
+            );
+        }
+        assert!(section.contains(
+            "  - `transferOwnership` — Transfers a calendar. Requires one of these scopes: - https://www.googleapis.com/auth/calendar - https://www.googleapis.com/auth/calendar.calendars Note: the calendar must be active.\n"
+        ), "{md}");
+        assert!(section.contains("  - `run`\n"), "{md}");
+        assert!(
+            md.lines().all(|l| l == l.trim_end()),
+            "trailing whitespace:\n{md}"
+        );
     }
 
     #[test]
