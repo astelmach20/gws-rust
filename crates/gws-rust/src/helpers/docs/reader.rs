@@ -55,17 +55,35 @@ fn is_ordered(document: &Value, list_id: &str, level: u64) -> bool {
 
 fn render_paragraph(p: &Value, document: &Value, markdown: bool, out: &mut String) {
     let mut line = String::new();
+    // Markdown: consecutive runs with the same marks, buffered so they are
+    // wrapped once (`*xy*`, not `*x**y*`, which reads as literal asterisks).
+    let mut pending: Option<(Marks, String)> = None;
+    let flush = |line: &mut String, pending: &mut Option<(Marks, String)>| {
+        if let Some((marks, text)) = pending.take() {
+            line.push_str(&styled(&text, &marks));
+        }
+    };
     if let Some(elements) = p.get("elements").and_then(Value::as_array) {
         for e in elements {
             if let Some(run) = e.get("textRun") {
                 let text = run.get("content").and_then(Value::as_str).unwrap_or("");
                 let text = text.trim_end_matches('\n');
                 if markdown {
-                    line.push_str(&styled(text, run.get("textStyle")));
+                    let marks = Marks::of(run.get("textStyle"));
+                    match &mut pending {
+                        Some((open, buf)) if *open == marks => buf.push_str(text),
+                        _ => {
+                            flush(&mut line, &mut pending);
+                            pending = Some((marks, text.to_string()));
+                        }
+                    }
                 } else {
                     line.push_str(text);
                 }
-            } else if e.get("inlineObjectElement").is_some() {
+                continue;
+            }
+            flush(&mut line, &mut pending);
+            if e.get("inlineObjectElement").is_some() {
                 line.push_str("[image]");
             } else if let Some(person) = e.get("person") {
                 let name = person
@@ -95,6 +113,7 @@ fn render_paragraph(p: &Value, document: &Value, markdown: bool, out: &mut Strin
             }
         }
     }
+    flush(&mut line, &mut pending);
     // A vertical tab is a line break inside the paragraph (Shift+Enter).
     // Markdown needs a hard break (`\` before the newline) to keep it; a
     // trailing one has nothing to break and would leave a literal `\`.
@@ -173,61 +192,89 @@ fn escape_markdown(text: &str) -> String {
     out
 }
 
-/// Escape block markers that only mean something at the start of a line:
-/// `-`/`+` bullets, `=` setext underlines and `1.`/`1)` ordered items.
+/// Drop leading indentation and escape block markers that only mean
+/// something at the start of a line: `-`/`+` bullets, `=` setext underlines
+/// and `1.`/`1)` ordered items.
+///
+/// Markdown has no indented paragraphs: a line starting with a tab or four
+/// spaces is an indented code block, which would show the escaped text
+/// verbatim in monospace, so the indentation is removed.
 fn escape_line_starts(text: &str) -> String {
     text.split('\n')
         .map(|l| {
-            let body = l.trim_start_matches(' ');
-            let indent = &l[..l.len() - body.len()];
+            let body = l.trim_start_matches([' ', '\t']);
             let digits = body.len() - body.trim_start_matches(|c: char| c.is_ascii_digit()).len();
             if body.starts_with(['-', '+', '=']) {
-                format!("{indent}\\{body}")
+                format!("\\{body}")
             } else if digits > 0 && body[digits..].starts_with(['.', ')']) {
-                format!("{indent}{}\\{}", &body[..digits], &body[digits..])
+                format!("{}\\{}", &body[..digits], &body[digits..])
             } else {
-                l.to_string()
+                body.to_string()
             }
         })
         .collect::<Vec<_>>()
         .join("\n")
 }
 
-/// Wrap a run in Markdown marks, keeping surrounding whitespace outside.
-/// Literal text is escaped; code (monospace) runs are kept verbatim.
-fn styled(text: &str, style: Option<&Value>) -> String {
-    let Some(style) = style else {
-        return escape_markdown(text);
-    };
+/// The Markdown-visible part of a run's `textStyle`.
+#[derive(Debug, Default, PartialEq)]
+struct Marks {
+    bold: bool,
+    italic: bool,
+    strikethrough: bool,
+    mono: bool,
+    link: Option<String>,
+}
+
+impl Marks {
+    fn of(style: Option<&Value>) -> Self {
+        let Some(style) = style else {
+            return Self::default();
+        };
+        let on = |k: &str| style.get(k).and_then(Value::as_bool).unwrap_or(false);
+        Self {
+            bold: on("bold"),
+            italic: on("italic"),
+            strikethrough: on("strikethrough"),
+            mono: style
+                .pointer("/weightedFontFamily/fontFamily")
+                .and_then(Value::as_str)
+                .is_some_and(|f| {
+                    let f = f.to_lowercase();
+                    f.contains("mono") || f.contains("courier") || f.contains("consolas")
+                }),
+            link: style
+                .pointer("/link/url")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+        }
+    }
+}
+
+/// Wrap text in Markdown marks, keeping surrounding whitespace outside.
+/// Literal text is escaped; code (monospace) text is kept verbatim.
+fn styled(text: &str, marks: &Marks) -> String {
     let trimmed = text.trim();
     if trimmed.is_empty() {
         return text.to_string();
     }
     let lead = &text[..text.len() - text.trim_start().len()];
     let trail = &text[text.trim_end().len()..];
-    let on = |k: &str| style.get(k).and_then(Value::as_bool).unwrap_or(false);
-    let mono = style
-        .pointer("/weightedFontFamily/fontFamily")
-        .and_then(Value::as_str)
-        .is_some_and(|f| {
-            let f = f.to_lowercase();
-            f.contains("mono") || f.contains("courier") || f.contains("consolas")
-        });
-    let mut core = if mono {
+    let mut core = if marks.mono {
         format!("`{trimmed}`")
     } else {
         escape_markdown(trimmed)
     };
-    if on("strikethrough") {
+    if marks.strikethrough {
         core = format!("~~{core}~~");
     }
-    if on("italic") {
+    if marks.italic {
         core = format!("*{core}*");
     }
-    if on("bold") {
+    if marks.bold {
         core = format!("**{core}**");
     }
-    if let Some(url) = style.pointer("/link/url").and_then(Value::as_str) {
+    if let Some(url) = &marks.link {
         core = format!("[{core}]({url})");
     }
     format!("{lead}{core}{trail}")
@@ -459,6 +506,26 @@ mod tests {
     }
 
     #[test]
+    fn indented_paragraphs_do_not_become_code_blocks() {
+        let para = |t: &str| json!({"paragraph": {"elements": [{"textRun": {"content": t}}]}});
+        let document = json!({"body": {"content": [
+            para("\tTabbed snake_case\n"),
+            para("    Four spaces\n"),
+            para("Line one\u{000b}    indented line two\n"),
+        ]}});
+        let md = render(&document, true);
+        let (tags, text) = parse_back(&md);
+        assert!(
+            tags.iter().all(|t| t == "Paragraph"),
+            "indented text parsed as {tags:?} from:\n{md:?}"
+        );
+        assert_eq!(
+            text, "Tabbed snake_case\nFour spaces\nLine one\nindented line two\n",
+            "from:\n{md:?}"
+        );
+    }
+
+    #[test]
     fn text_rendering() {
         let txt = render(&doc(), false);
         assert!(txt.starts_with("Title\nSome bold link\n"));
@@ -467,11 +534,12 @@ mod tests {
 
     #[test]
     fn styled_keeps_whitespace_outside_marks() {
-        assert_eq!(styled(" x ", Some(&json!({"italic": true}))), " *x* ");
+        let marks = |style: Value| Marks::of(Some(&style));
+        assert_eq!(styled(" x ", &marks(json!({"italic": true}))), " *x* ");
         assert_eq!(
             styled(
                 "f()",
-                Some(&json!({"weightedFontFamily": {"fontFamily": "Courier New"}}))
+                &marks(json!({"weightedFontFamily": {"fontFamily": "Courier New"}}))
             ),
             "`f()`"
         );
@@ -511,6 +579,33 @@ mod tests {
         assert_eq!(
             render(&document, false),
             "one\ntwo\ntrailing\n\n- item\n- more\n"
+        );
+    }
+
+    #[test]
+    fn adjacent_runs_with_the_same_marks_share_one_span() {
+        // Docs splits runs on any style change (colour, underline, size), so
+        // one bold or italic phrase often arrives as several runs.
+        let document = json!({"body": {"content": [{"paragraph": {"elements": [
+            {"textRun": {"content": "Read ", "textStyle": {}}},
+            {"textRun": {"content": "x", "textStyle": {"italic": true}}},
+            {"textRun": {"content": "y", "textStyle": {"italic": true, "underline": true}}},
+            {"textRun": {"content": " and ", "textStyle": {}}},
+            {"textRun": {"content": "im", "textStyle": {"bold": true}}},
+            {"textRun": {"content": "portant", "textStyle": {"bold": true, "fontSize": {"magnitude": 14, "unit": "PT"}}}},
+            {"textRun": {"content": " ", "textStyle": {}}},
+            {"textRun": {"content": "f(", "textStyle": {"weightedFontFamily": {"fontFamily": "Courier New"}}}},
+            {"textRun": {"content": ")", "textStyle": {"weightedFontFamily": {"fontFamily": "Courier New"}, "bold": false}}},
+            {"textRun": {"content": "\n"}}
+        ]}}]}});
+        let md = render(&document, true);
+        let (tags, text) = parse_back(&md);
+        // Code span text is reported in `tags`, not `text`.
+        assert_eq!(text, "Read xy and important \n", "from:\n{md}");
+        assert_eq!(
+            tags,
+            ["Paragraph", "Emphasis", "Strong", "Code(Borrowed(\"f()\"))"],
+            "from:\n{md}"
         );
     }
 }

@@ -329,6 +329,18 @@ impl Output<'_> {
         self.emitter.page(&value, self.format, &mut self.pages)
     }
 
+    /// Write a stream marker (`_truncated`) as one compact JSON line. It is
+    /// not a page or item, so neither `--jq` nor the page layout applies.
+    fn marker(&mut self, value: Value) -> Result<(), GwsError> {
+        if self.capture {
+            self.captured.push(value);
+            return Ok(());
+        }
+        let line = serde_json::to_string(&value)
+            .map_err(|e| GwsError::other(anyhow::anyhow!("cannot serialize stream marker: {e}")))?;
+        self.emitter.line(&line)
+    }
+
     fn finish(mut self) -> Option<Value> {
         match self.captured.len() {
             0 => None,
@@ -537,10 +549,12 @@ pub(crate) async fn execute_to(
             ));
         }
         // Empty success responses still produce a JSON document on stdout
-        // (and never create an --output file).
+        // (and never create an --output file); an empty later page of a
+        // --page-all stream ends the stream instead (`pages` counts parsed
+        // pages, so it is non-zero only there).
         let empty_success = json!({"status": "success", "httpStatus": status.as_u16()});
         if status == reqwest::StatusCode::NO_CONTENT {
-            out.single(empty_success)?;
+            end_on_empty_response(&mut out, empty_success, pages)?;
             break;
         }
 
@@ -586,7 +600,7 @@ pub(crate) async fn execute_to(
 
         let raw = read_body(sent.response, options.idle_timeout()).await?;
         if raw.iter().all(u8::is_ascii_whitespace) {
-            out.single(empty_success)?;
+            end_on_empty_response(&mut out, empty_success, pages)?;
             break;
         }
         let mut value: Value = match serde_json::from_slice(&raw) {
@@ -740,7 +754,7 @@ pub(crate) async fn execute_to(
                 pagination.page_limit
             );
             if format == OutputFormat::Json {
-                out.stream(json!({"_truncated": {"pagesFetched": pages, "nextPageToken": token}}))?;
+                out.marker(json!({"_truncated": {"pagesFetched": pages, "nextPageToken": token}}))?;
             }
             break;
         }
@@ -759,6 +773,25 @@ pub(crate) async fn execute_to(
     }
 
     Ok(out.finish())
+}
+
+/// Report an empty success response (204, or no body). The first response
+/// prints `empty_success`; an empty later page of a `--page-all` stream
+/// (`pages_done > 0`) just ends the stream, which stays one page or item per
+/// line.
+fn end_on_empty_response(
+    out: &mut Output<'_>,
+    empty_success: Value,
+    pages_done: u32,
+) -> Result<(), GwsError> {
+    if pages_done == 0 {
+        return out.single(empty_success);
+    }
+    tracing::warn!(
+        "page {} returned an empty response; treating it as the end of the list",
+        pages_done + 1
+    );
+    Ok(())
 }
 
 /// Screen a text response inlined into the JSON output with Model Armor, like
