@@ -348,6 +348,8 @@ fn agenda_dry_run_shows_calendar_list_page_size() {
     );
     // The real request asks for 250 calendars per page; the plan must too.
     assert_eq!(list["query_params"]["maxResults"], "250", "{v}");
+    // Hidden calendars are listed so --calendar-id can name one.
+    assert_eq!(list["query_params"]["showHidden"], "true", "{v}");
 }
 
 #[test]

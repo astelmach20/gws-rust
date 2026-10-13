@@ -752,8 +752,14 @@ async fn agenda(api: &Api, args: &AgendaArgs, tz: &TzInfo) -> Result<Value, GwsE
     let (time_min, time_max) = (min.to_rfc3339(), max.to_rfc3339());
 
     // One request for both paths, so the dry-run plan shows what is sent.
-    let calendar_list =
-        || ApiRequest::get(api.url("users/me/calendarList")).query("maxResults", "250");
+    // Hidden calendars are listed too (calendarList omits them by default),
+    // so one named with --calendar-id is found; without --calendar-id they
+    // are left out, as in the Calendar UI.
+    let calendar_list = || {
+        ApiRequest::get(api.url("users/me/calendarList"))
+            .query("maxResults", "250")
+            .query("showHidden", "true")
+    };
     let calendars: Vec<(String, String)> = if api.is_dry_run() {
         api.paginate(calendar_list(), "items", None).await?;
         vec![("<each calendar>".into(), String::new())]
@@ -778,7 +784,12 @@ async fn agenda(api: &Api, args: &AgendaArgs, tz: &TzInfo) -> Result<Value, GwsE
                     *c == id || (*c == "primary" && cal.get("primary") == Some(&json!(true)))
                 })
                 .collect();
-            let id_ok = args.calendar_ids.is_empty() || !requested.is_empty();
+            let hidden = cal.get("hidden").and_then(Value::as_bool) == Some(true);
+            let id_ok = if args.calendar_ids.is_empty() {
+                !hidden
+            } else {
+                !requested.is_empty()
+            };
             found_ids.extend(requested);
             let name_ok = args
                 .calendar_name
@@ -1520,6 +1531,56 @@ mod tests {
             agenda(&api, &found, &tz("UTC", false)).await.unwrap()["count"],
             1
         );
+    }
+
+    /// calendarList omits hidden calendars unless `showHidden=true`; one
+    /// named with --calendar-id must still be found, while the default
+    /// agenda leaves hidden calendars out.
+    #[tokio::test]
+    async fn agenda_finds_hidden_calendars_by_id_only() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/users/me/calendarList"))
+            .and(query_param("showHidden", "true"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"items": [
+                {"id": "me@x", "summary": "Me", "primary": true},
+                {"id": "h@x", "summary": "Hidden", "hidden": true},
+            ]})))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/users/me/calendarList"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"items": [
+                {"id": "me@x", "summary": "Me", "primary": true},
+            ]})))
+            .mount(&server)
+            .await;
+        for id in ["me@x", "h@x"] {
+            Mock::given(method("GET"))
+                .and(path(format!("/calendars/{id}/events")))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({"items": [
+                    {"id": format!("e-{id}"), "start": {"dateTime": "2026-01-05T09:00:00Z"}},
+                ]})))
+                .mount(&server)
+                .await;
+        }
+        let api = api(&server.uri(), "");
+        let by_id = AgendaArgs {
+            window: Window::Today,
+            calendar_ids: vec!["h@x".into()],
+            calendar_name: None,
+        };
+        let v = agenda(&api, &by_id, &tz("UTC", false)).await.unwrap();
+        assert_eq!(v["count"], 1, "{v}");
+        assert_eq!(v["events"][0]["calendarId"], "h@x", "{v}");
+        let all = AgendaArgs {
+            window: Window::Today,
+            calendar_ids: vec![],
+            calendar_name: None,
+        };
+        let v = agenda(&api, &all, &tz("UTC", false)).await.unwrap();
+        assert_eq!(v["count"], 1, "{v}");
+        assert_eq!(v["events"][0]["calendarId"], "me@x", "{v}");
     }
 
     #[tokio::test]
