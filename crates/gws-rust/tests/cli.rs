@@ -740,6 +740,8 @@ fn auth_configuration_errors_exit_with_the_config_code() {
 #[test]
 fn impersonate_flag_rejects_values_that_are_not_email_addresses() {
     let env = Env::new();
+    // No Discovery download: the sandboxed test run has no network.
+    env.seed_drive("Lists files.");
     for bad in [
         "",
         "not-an-email",
