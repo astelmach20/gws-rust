@@ -329,6 +329,18 @@ impl Output<'_> {
         self.emitter.page(&value, self.format, &mut self.pages)
     }
 
+    /// Write a stream marker (`_truncated`) as one compact JSON line. It is
+    /// not a page or item, so neither `--jq` nor the page layout applies.
+    fn marker(&mut self, value: Value) -> Result<(), GwsError> {
+        if self.capture {
+            self.captured.push(value);
+            return Ok(());
+        }
+        let line = serde_json::to_string(&value)
+            .map_err(|e| GwsError::other(anyhow::anyhow!("cannot serialize stream marker: {e}")))?;
+        self.emitter.line(&line)
+    }
+
     fn finish(mut self) -> Option<Value> {
         match self.captured.len() {
             0 => None,
@@ -742,7 +754,7 @@ pub(crate) async fn execute_to(
                 pagination.page_limit
             );
             if format == OutputFormat::Json {
-                out.stream(json!({"_truncated": {"pagesFetched": pages, "nextPageToken": token}}))?;
+                out.marker(json!({"_truncated": {"pagesFetched": pages, "nextPageToken": token}}))?;
             }
             break;
         }

@@ -354,7 +354,7 @@ Requests carry an `x-goog-user-project` header naming the project that is billed
 |---|---|
 | `--page-all` | Fetch every page, one JSON line per page (NDJSON) |
 | `--page-items[=FIELD]` | Fetch every page, one JSON line per item. The list field is detected, or name it, e.g. `--page-items=files` |
-| `--page-limit N` | Stop after N pages (default `0`, unlimited). A truncated run warns on stderr and ends with `{"_truncated":{"pagesFetched":N,"nextPageToken":"..."}}` |
+| `--page-limit N` | Stop after N pages (default `0`, unlimited). A truncated run warns on stderr and, in JSON, ends with `{"_truncated":{"pagesFetched":N,"nextPageToken":"..."}}` (printed as is, not passed through `--jq`) |
 | `--page-delay MS` | Delay between pages (default 100) |
 
 `page_limit` and `page_delay_ms` in `config.toml` (or `GWSR_PAGE_LIMIT`, `GWSR_PAGE_DELAY_MS`) set the defaults. Methods that take the page token in the request body (for example `driveactivity activity query`) are handled automatically.
