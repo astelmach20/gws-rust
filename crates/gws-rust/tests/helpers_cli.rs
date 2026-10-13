@@ -1110,6 +1110,23 @@ fn dry_run_plan_keeps_repeated_query_keys() {
 }
 
 #[test]
+fn people_find_rejects_bad_input_before_auth() {
+    // No credentials exist here: a bad --limit or --query must be a
+    // validation error (exit 3), not an authentication failure (exit 2).
+    let dir = setup();
+    seed(dir.path(), "people", "v1", "");
+    let cases: [&[&str]; 2] = [
+        &["people", "+find", "--query", "ann", "--limit", "31"],
+        &["people", "+find", "--query", " "],
+    ];
+    for args in cases {
+        let out = gwsr(dir.path()).args(args).output().unwrap();
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(3), "{args:?}: {stderr}");
+    }
+}
+
+#[test]
 fn gmail_unsubscribe_dry_run_needs_no_credentials() {
     // README/CONTEXT: `--dry-run` loads no credentials and sends nothing.
     // No credential source exists in this isolated environment.
