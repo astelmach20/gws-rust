@@ -488,11 +488,20 @@ pub(crate) async fn run_batch(
         .filter(|c| c.impact == Some(crate::confirm::Impact::Outbound))
         .map(|c| c.id.as_str())
         .collect();
+    // The Discovery document names the batch endpoint (`batch/drive/v3` on
+    // www.googleapis.com, plain `batch` on the newer per-API hosts); an API
+    // without a `batchPath` does not accept batch requests. The path was
+    // checked to be relative when the document was loaded.
+    let batch_path = doc.batch_path.as_deref().ok_or_else(|| {
+        GwsError::Validation(format!(
+            "the {} {} API does not support batch requests (its Discovery document has no batchPath)",
+            doc.name, doc.version
+        ))
+    })?;
     let batch_url = format!(
-        "{}batch/{}/{}",
+        "{}{}",
         doc.api_root(options.endpoints.override_base())?,
-        doc.name,
-        doc.version
+        batch_path.trim_start_matches('/')
     );
 
     // Every line honours --format, --jq and --columns like a paginated
