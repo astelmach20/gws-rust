@@ -619,9 +619,30 @@ static PROCESS: OnceLock<Result<Env, String>> = OnceLock::new();
 /// [`GwsError::Config`] if any variable is invalid or unknown.
 pub fn get() -> Result<&'static Env, GwsError> {
     PROCESS
-        .get_or_init(|| Env::from_vars(std::env::vars_os()).map_err(|e| e.to_string()))
+        .get_or_init(|| Env::from_vars(process_vars()).map_err(|e| e.to_string()))
         .as_ref()
         .map_err(|message| GwsError::Config(message.clone()))
+}
+
+#[cfg(not(test))]
+fn process_vars() -> impl Iterator<Item = (OsString, OsString)> {
+    std::env::vars_os()
+}
+
+/// Unit tests never see the developer's environment: config and cache live in
+/// a private temporary directory and keys in a file there, so no test can read
+/// or write the real `~/.config/gwsr`, cache directory or OS keyring, and no
+/// stray `GWSR_TOKEN` changes a result.
+#[cfg(test)]
+fn process_vars() -> impl Iterator<Item = (OsString, OsString)> {
+    let root = std::env::temp_dir().join(format!("gwsr-unit-tests-{}", std::process::id()));
+    [
+        ("GWSR_CONFIG_DIR", root.join("config").into_os_string()),
+        ("GWSR_CACHE_DIR", root.join("cache").into_os_string()),
+        ("GWSR_KEYRING_BACKEND", OsString::from("file")),
+    ]
+    .into_iter()
+    .map(|(k, v)| (OsString::from(k), v))
 }
 
 #[cfg(test)]
@@ -653,6 +674,37 @@ mod tests {
             Err(GwsError::Config(message)) => message,
             Err(other) => panic!("{pairs:?}: expected a config error, got {other:?}"),
         }
+    }
+
+    /// Unit tests share one process environment and must never resolve the
+    /// developer's real config, cache or keyring: `get()` is hermetic in test
+    /// builds, so a path that falls back to the process-wide directories
+    /// lands in a private temporary directory instead.
+    #[test]
+    fn unit_tests_never_use_real_user_dirs() {
+        let env = get().unwrap();
+        let sandbox = std::env::temp_dir();
+        let config = crate::auth::try_config_dir().unwrap();
+        let cache = crate::discovery::gwsr_cache_root().unwrap();
+        for path in [&config, &cache] {
+            assert!(
+                path.starts_with(&sandbox),
+                "{} is outside {}",
+                path.display(),
+                sandbox.display()
+            );
+        }
+        assert_eq!(env.keyring_backend, Some(BackendKind::File));
+        assert!(env.token.is_none() && env.credentials_file.is_none());
+
+        let auth = crate::auth::credentials::AuthEnv::from_process().unwrap();
+        assert!(auth.base.starts_with(&sandbox), "{}", auth.base.display());
+        assert!(auth.adc_env.is_none() && auth.adc_well_known.is_none());
+        assert!(
+            !auth.keystore().describe().contains("OS keyring"),
+            "{}",
+            auth.keystore().describe()
+        );
     }
 
     /// A valid and an invalid value for every registered variable.

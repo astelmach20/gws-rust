@@ -1127,6 +1127,24 @@ fn people_find_rejects_bad_input_before_auth() {
 }
 
 #[test]
+fn chat_send_rejects_empty_text_before_confirm_and_auth() {
+    // No credentials exist here: an empty message is a validation error
+    // (exit 3), not a confirmation (exit 7) or authentication (exit 2) one.
+    let dir = setup();
+    seed(dir.path(), "chat", "v1", "");
+    for policy in ["0", "1"] {
+        let out = gwsr(dir.path())
+            .env("GWSR_REQUIRE_CONFIRM", policy)
+            .args(["chat", "+send", "--space-id", "AAAA", "--text", " "])
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(3), "policy {policy}: {stderr}");
+        assert!(stderr.contains("--text must not be empty"), "{stderr}");
+    }
+}
+
+#[test]
 fn gmail_unsubscribe_dry_run_needs_no_credentials() {
     // README/CONTEXT: `--dry-run` loads no credentials and sends nothing.
     // No credential source exists in this isolated environment.

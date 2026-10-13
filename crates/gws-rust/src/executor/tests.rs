@@ -540,6 +540,55 @@ async fn page_all_table_skips_pages_without_items() {
     );
 }
 
+/// A later page that comes back empty (204, or 200 with no body) ends the
+/// stream: the NDJSON output stays one page (or item) per line, with no
+/// `{"status":"success"}` object (pretty-printed across lines) mixed in.
+#[tokio::test]
+async fn page_all_empty_later_page_ends_the_stream_without_a_success_object() {
+    for empty in [
+        ResponseTemplate::new(204),
+        ResponseTemplate::new(200).insert_header("content-type", "application/json"),
+    ] {
+        for page_items in [false, true] {
+            let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .and(path("/drive/v3/files"))
+                .and(query_param_is_missing("pageToken"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(
+                    json!({"files": [{"id": "1"}, {"id": "2"}], "nextPageToken": "p2"}),
+                ))
+                .mount(&server)
+                .await;
+            Mock::given(method("GET"))
+                .and(path("/drive/v3/files"))
+                .and(query_param("pageToken", "p2"))
+                .respond_with(empty.clone())
+                .mount(&server)
+                .await;
+            let d = doc(&server.uri());
+            let mut call = Call::new(&d, "list", &server);
+            call.pagination.page_all = true;
+            call.pagination.page_delay_ms = 0;
+            if page_items {
+                call.options.page_items = Some(ItemsMode::Auto);
+            }
+            let em = Emitter::capturing();
+            call.run(&em).await.unwrap();
+            let text = em.captured_text();
+            let parsed: Vec<Value> = text
+                .lines()
+                .map(|l| serde_json::from_str(l).unwrap_or_else(|e| panic!("{e}: {text}")))
+                .collect();
+            let expected = if page_items {
+                vec![json!({"id": "1"}), json!({"id": "2"})]
+            } else {
+                vec![json!({"files": [{"id": "1"}, {"id": "2"}], "nextPageToken": "p2"})]
+            };
+            assert_eq!(parsed, expected, "page_items={page_items}: {text}");
+        }
+    }
+}
+
 #[tokio::test]
 async fn page_limit_truncation_is_marked() {
     let server = MockServer::start().await;

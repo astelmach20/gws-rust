@@ -163,9 +163,10 @@ TIPS:
                     let thread = optional(m, "thread")?
                         .map(|t| thread_name(t, &space))
                         .transpose()?;
+                    let text = message_text(required(m, "text")?)?;
                     confirm::confirm(m, Impact::Outbound, &format!("post a message to {space}"))?;
                     let api = Api::new(doc, &[SCOPE_MESSAGES_CREATE], dry, sanitize).await?;
-                    let v = send(&api, &space, required(m, "text")?, thread.as_deref()).await?;
+                    let v = send(&api, &space, text, thread.as_deref()).await?;
                     (api, v)
                 }
                 "+spaces" => {
@@ -188,10 +189,17 @@ TIPS:
     }
 }
 
-async fn send(api: &Api, space: &str, text: &str, thread: Option<&str>) -> Result<Value, GwsError> {
+/// Reject an empty message before confirmation and credentials, so it is a
+/// validation error rather than a prompt or an authentication failure.
+fn message_text(text: &str) -> Result<&str, GwsError> {
     if text.trim().is_empty() {
         return Err(GwsError::Validation("--text must not be empty".into()));
     }
+    Ok(text)
+}
+
+async fn send(api: &Api, space: &str, text: &str, thread: Option<&str>) -> Result<Value, GwsError> {
+    let text = message_text(text)?;
     let mut body = json!({ "text": text });
     let mut req = ApiRequest::post(api.url(&format!("v1/{space}/messages")));
     if let Some(t) = thread {

@@ -98,7 +98,12 @@ struct ClientSecretFile {
 ///
 /// See [`super::profiles::try_config_dir`].
 pub fn client_config_path() -> anyhow::Result<PathBuf> {
-    Ok(super::profiles::try_config_dir()?.join("client_secret.json"))
+    Ok(client_config_path_in(&super::profiles::try_config_dir()?))
+}
+
+/// Path of the saved client configuration inside the config directory `base`.
+pub fn client_config_path_in(base: &Path) -> PathBuf {
+    base.join("client_secret.json")
 }
 
 /// Save a client in the Google Cloud Console format (0600 file, 0700 dir).
@@ -239,8 +244,17 @@ pub fn resolve() -> anyhow::Result<ClientConfig> {
 ///
 /// A half-configured source or an unreadable saved file.
 pub fn resolve_optional() -> anyhow::Result<Option<ClientConfig>> {
-    let path = client_config_path()?;
-    let saved = load_from(&path)?;
+    resolve_optional_in(&super::profiles::try_config_dir()?)
+}
+
+/// [`resolve_optional`] with the saved client read from the config directory
+/// `base`.
+///
+/// # Errors
+///
+/// A half-configured source or an unreadable saved file.
+pub fn resolve_optional_in(base: &Path) -> anyhow::Result<Option<ClientConfig>> {
+    let saved = load_from(&client_config_path_in(base))?;
     let vars = crate::env::get()?;
     let env = resolve_pair(
         vars.client_id.clone(),
