@@ -524,7 +524,11 @@ fn format_table(
                         missing.join(", ")
                     )));
                 }
-                flat.retain(|(k, _)| selected.contains(k));
+                // In the order given, like CSV and multi-row tables.
+                flat = selected
+                    .iter()
+                    .filter_map(|c| flat.iter().find(|(k, _)| k == c).cloned())
+                    .collect();
             }
             let width = flat
                 .iter()
@@ -1028,6 +1032,25 @@ mod tests {
         ───────────  ──
         x@y          1
         z@y          2
+        ");
+    }
+
+    #[test]
+    fn single_object_table_keeps_columns_order() {
+        let val = json!({"b": 1, "a": {"x": 2}, "c": 3});
+        let settings = OutputSettings {
+            columns: Some(vec!["c".into(), "a.x".into(), "c".into()]),
+            ..Default::default()
+        };
+        // Same order (and repetition) as CSV and multi-row tables.
+        insta::assert_snapshot!(fmt_with(&val, OutputFormat::Table, &settings), @r"
+        c    3
+        a.x  2
+        c    3
+        ");
+        insta::assert_snapshot!(fmt_with(&val, OutputFormat::Csv, &settings), @r"
+        c,a.x,c
+        3,2,3
         ");
     }
 
