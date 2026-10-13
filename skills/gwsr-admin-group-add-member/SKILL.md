@@ -46,6 +46,9 @@ gwsr admin +group-add-member --group eng@example.com --member lead@example.com -
 
 - Adding someone who is already a member fails with the API's 409 error.
 
+> [!CAUTION]
+> This is a **write** command — confirm with the user before executing.
+
 ## See Also
 
 - [gwsr-shared](../gwsr-shared/SKILL.md) — Global flags and auth

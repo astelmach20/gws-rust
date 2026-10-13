@@ -96,6 +96,9 @@ gwsr gmail +filter delete --filter-id ANe1Bmj... --yes
 - With --sanitize, create screens the new filter before creating it (block mode:
 - a match or a Model Armor failure creates nothing); list screens its output.
 
+> [!CAUTION]
+> This is a **write** command — confirm with the user before executing.
+
 ## See Also
 
 - [gwsr-shared](../gwsr-shared/SKILL.md) — Global flags and auth

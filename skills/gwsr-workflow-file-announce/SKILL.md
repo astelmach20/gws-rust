@@ -47,6 +47,9 @@ gwsr workflow +file-announce --file-id FILE_ID --space-id spaces/ABC123 --messag
 - Sends a Chat message. With GWSR_REQUIRE_CONFIRM=1 it requires --yes.
 - Upload the file first with gwsr drive +upload, then announce it here.
 
+> [!CAUTION]
+> This is a **write** command — confirm with the user before executing.
+
 ## See Also
 
 - [gwsr-shared](../gwsr-shared/SKILL.md) — Global flags and auth

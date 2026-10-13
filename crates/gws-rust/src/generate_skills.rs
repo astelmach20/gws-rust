@@ -700,7 +700,8 @@ fn render_helper_skill(
     let capitalized_about = capitalize_first(about);
     let trigger_desc = truncate_desc(&format!("{}: {}", product_name, capitalized_about));
 
-    // Determine if write command
+    // A write command: a known writing verb, or any command the CLI itself
+    // gates behind a confirmation (`-y/--yes`: destructive or outbound).
     let is_write = matches!(
         short,
         "send"
@@ -711,7 +712,7 @@ fn render_helper_skill(
             | "append"
             | "create-template"
             | "subscribe"
-    );
+    ) || is_confirmation_gated(cmd);
     let category = if alias == "modelarmor" {
         "security"
     } else {
@@ -823,6 +824,13 @@ metadata:
     ));
 
     out
+}
+
+/// Whether `cmd`, or any subcommand of a helper group, asks for confirmation
+/// (`confirm::with_yes` registers the `yes` argument on every gated command).
+fn is_confirmation_gated(cmd: &Command) -> bool {
+    cmd.get_arguments().any(|a| a.get_id() == "yes")
+        || cmd.get_subcommands().any(is_confirmation_gated)
 }
 
 /// The usage line (`invocation` plus its required arguments) and the flags
@@ -1826,6 +1834,22 @@ mod tests {
         }
         for flag in ["`--from`", "`--forward`", "`--filter-id`", "`--yes`"] {
             assert!(md.contains(flag), "missing flag {flag}:\n{md}");
+        }
+    }
+
+    /// Every helper the CLI gates behind a confirmation (`--yes`) is a write
+    /// command, and its skill tells the agent to confirm with the user first,
+    /// whatever the helper is called. Read-only helpers carry no such warning.
+    #[test]
+    fn confirmation_gated_helper_skills_carry_the_write_caution() {
+        const CAUTION: &str = "This is a **write** command";
+        for gated in ["+reply", "+forward", "+unsubscribe", "+filter", "+send"] {
+            let md = render_gmail_helper(gated);
+            assert!(md.contains(CAUTION), "{gated} lacks the caution:\n{md}");
+        }
+        for read_only in ["+read", "+search", "+triage"] {
+            let md = render_gmail_helper(read_only);
+            assert!(!md.contains(CAUTION), "{read_only} has a caution:\n{md}");
         }
     }
 
