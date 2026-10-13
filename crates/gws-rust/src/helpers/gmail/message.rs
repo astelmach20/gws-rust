@@ -78,6 +78,10 @@ pub(super) struct OriginalMessage {
     pub message_id: String,
     /// Bare message IDs (no angle brackets) forming the references chain.
     pub references: Vec<String>,
+    /// Bare message IDs from the `In-Reply-To` header. Used to start the
+    /// references chain when the message has no `References` header.
+    #[serde(skip_serializing)]
+    pub in_reply_to: Vec<String>,
     pub from: Mailbox,
     /// Multiple Reply-To addresses are allowed per RFC 5322.
     pub reply_to: Option<Vec<Mailbox>>,
@@ -122,6 +126,7 @@ struct ParsedMessageHeaders {
     date: String,
     message_id: String,
     references: String,
+    in_reply_to: String,
 }
 
 fn append_header_value(existing: &mut String, value: &str) {
@@ -159,6 +164,7 @@ fn parse_message_headers(headers: &[Value]) -> ParsedMessageHeaders {
             "date" => parsed.date = value.to_string(),
             "message-id" => parsed.message_id = value.to_string(),
             "references" => append_header_value(&mut parsed.references, value),
+            "in-reply-to" => append_header_value(&mut parsed.in_reply_to, value),
             _ => {}
         }
     }
@@ -233,6 +239,7 @@ pub(super) fn parse_original_message(msg: &Value) -> Result<OriginalMessage, Gws
     };
 
     let references = parse_msg_ids(&parsed_headers.references);
+    let in_reply_to = parse_msg_ids(&parsed_headers.in_reply_to);
 
     let reply_to = non_empty_then(&parsed_headers.reply_to, Mailbox::parse_header_list);
     let cc = non_empty_then(&parsed_headers.cc, Mailbox::parse_header_list);
@@ -242,6 +249,7 @@ pub(super) fn parse_original_message(msg: &Value) -> Result<OriginalMessage, Gws
         thread_id,
         message_id,
         references,
+        in_reply_to,
         from: Mailbox::parse(&parsed_headers.from),
         reply_to,
         to: Mailbox::parse_header_list(&parsed_headers.to),
@@ -543,6 +551,37 @@ mod tests {
     /// RFC 5322 §3.6.4: `References` is `1*msg-id` with *optional* folding
     /// white space between IDs, so `<a@x><b@x>` is two IDs. Splitting on
     /// white space alone glued them into one ID containing `><`.
+    #[test]
+    fn test_parse_original_message_in_reply_to_starts_references_chain() {
+        // A reply whose client wrote In-Reply-To but no References.
+        let msg = json!({
+            "threadId": "t1",
+            "payload": {
+                "mimeType": "text/plain",
+                "headers": [
+                    { "name": "From", "value": "alice@example.com" },
+                    { "name": "Message-ID", "value": "<msg@example.com>" },
+                    { "name": "In-Reply-To", "value": "<parent@example.com>" }
+                ],
+                "body": { "data": URL_SAFE.encode("text") }
+            }
+        });
+        let original = parse_original_message(&msg).unwrap();
+        assert!(original.references.is_empty());
+        assert_eq!(original.in_reply_to, vec!["parent@example.com"]);
+        assert_eq!(
+            crate::helpers::gmail::mime::build_references_chain(&original),
+            vec!["parent@example.com", "msg@example.com"]
+        );
+        // Not part of the +read JSON output.
+        assert!(
+            serde_json::to_value(&original)
+                .unwrap()
+                .get("in_reply_to")
+                .is_none()
+        );
+    }
+
     #[test]
     fn test_parse_original_message_references_without_spaces() {
         let msg = json!({

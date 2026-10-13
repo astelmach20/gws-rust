@@ -664,7 +664,7 @@ EXAMPLES:
   gwsr gmail +filter delete --filter-id ANe1Bmj... --yes
 
 TIPS:
-  Requires the gmail.settings.basic scope (gwsr auth login -s gmail).
+  Requires the gmail.settings.basic scope (gwsr auth login --scopes gmail.settings.basic).
   Label names must already exist. Deleting a filter always requires --yes;
   a filter with --forward requires it when GWSR_REQUIRE_CONFIRM=1.
   With --sanitize, create screens the new filter before creating it (block mode:
@@ -886,6 +886,28 @@ mod tests {
             name: "gmail".to_string(),
             ..Default::default()
         })
+    }
+
+    /// The `+filter` tip names a login that grants the scope every `+filter`
+    /// subcommand requests (`-s gmail` alone grants only read-only scopes).
+    #[test]
+    fn filter_tip_login_grants_the_settings_scope() {
+        let help = filter_cmd()
+            .get_after_help()
+            .map(ToString::to_string)
+            .unwrap();
+        let login = help
+            .split("gwsr auth login ")
+            .nth(1)
+            .and_then(|rest| rest.split(')').next())
+            .unwrap();
+        let scope = login
+            .strip_prefix("--scopes ")
+            .unwrap_or_else(|| panic!("the +filter tip must request the scope exactly: {login}"));
+        assert_eq!(
+            crate::auth::scopes::normalize_scope(scope),
+            super::super::GMAIL_SETTINGS_SCOPE
+        );
     }
 
     #[test]

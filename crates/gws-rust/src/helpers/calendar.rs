@@ -752,8 +752,14 @@ async fn agenda(api: &Api, args: &AgendaArgs, tz: &TzInfo) -> Result<Value, GwsE
     let (time_min, time_max) = (min.to_rfc3339(), max.to_rfc3339());
 
     // One request for both paths, so the dry-run plan shows what is sent.
-    let calendar_list =
-        || ApiRequest::get(api.url("users/me/calendarList")).query("maxResults", "250");
+    // Hidden calendars are listed too (calendarList omits them by default),
+    // so one named with --calendar-id is found; without --calendar-id they
+    // are left out, as in the Calendar UI.
+    let calendar_list = || {
+        ApiRequest::get(api.url("users/me/calendarList"))
+            .query("maxResults", "250")
+            .query("showHidden", "true")
+    };
     let calendars: Vec<(String, String)> = if api.is_dry_run() {
         api.paginate(calendar_list(), "items", None).await?;
         vec![("<each calendar>".into(), String::new())]
@@ -778,7 +784,12 @@ async fn agenda(api: &Api, args: &AgendaArgs, tz: &TzInfo) -> Result<Value, GwsE
                     *c == id || (*c == "primary" && cal.get("primary") == Some(&json!(true)))
                 })
                 .collect();
-            let id_ok = args.calendar_ids.is_empty() || !requested.is_empty();
+            let hidden = cal.get("hidden").and_then(Value::as_bool) == Some(true);
+            let id_ok = if args.calendar_ids.is_empty() {
+                !hidden
+            } else {
+                !requested.is_empty()
+            };
             found_ids.extend(requested);
             let name_ok = args
                 .calendar_name
@@ -892,6 +903,9 @@ async fn freebusy(api: &Api, m: &ArgMatches, tz: &TzInfo) -> Result<Value, GwsEr
         .ok_or_else(|| http::other_err(anyhow::anyhow!("freeBusy response has no 'calendars'")))?;
     let mut all_busy = Vec::new();
     let mut failures = Vec::new();
+    // Google's own per-calendar failures, as opposed to a calendar the
+    // caller can't see: retry later rather than fix the input.
+    let mut transient = false;
     for (id, info) in cals {
         if let Some(errors) = info.get("errors").and_then(Value::as_array)
             && !errors.is_empty()
@@ -900,6 +914,9 @@ async fn freebusy(api: &Api, m: &ArgMatches, tz: &TzInfo) -> Result<Value, GwsEr
                 .iter()
                 .filter_map(|e| e.get("reason").and_then(Value::as_str))
                 .collect();
+            transient |= reasons
+                .iter()
+                .any(|r| matches!(*r, "backendError" | "internalError"));
             failures.push(format!("{id} ({})", reasons.join(", ")));
             continue;
         }
@@ -920,6 +937,17 @@ async fn freebusy(api: &Api, m: &ArgMatches, tz: &TzInfo) -> Result<Value, GwsEr
             };
             all_busy.push((parse("start")?, parse("end")?));
         }
+    }
+    if transient {
+        return Err(GwsError::Api {
+            code: 503,
+            message: format!(
+                "Free/busy temporarily unavailable for: {}; retry later",
+                failures.join("; ")
+            ),
+            reason: "backendError".to_string(),
+            enable_url: None,
+        });
     }
     if !failures.is_empty() {
         return Err(GwsError::Validation(format!(
@@ -1505,6 +1533,56 @@ mod tests {
         );
     }
 
+    /// calendarList omits hidden calendars unless `showHidden=true`; one
+    /// named with --calendar-id must still be found, while the default
+    /// agenda leaves hidden calendars out.
+    #[tokio::test]
+    async fn agenda_finds_hidden_calendars_by_id_only() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/users/me/calendarList"))
+            .and(query_param("showHidden", "true"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"items": [
+                {"id": "me@x", "summary": "Me", "primary": true},
+                {"id": "h@x", "summary": "Hidden", "hidden": true},
+            ]})))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/users/me/calendarList"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"items": [
+                {"id": "me@x", "summary": "Me", "primary": true},
+            ]})))
+            .mount(&server)
+            .await;
+        for id in ["me@x", "h@x"] {
+            Mock::given(method("GET"))
+                .and(path(format!("/calendars/{id}/events")))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({"items": [
+                    {"id": format!("e-{id}"), "start": {"dateTime": "2026-01-05T09:00:00Z"}},
+                ]})))
+                .mount(&server)
+                .await;
+        }
+        let api = api(&server.uri(), "");
+        let by_id = AgendaArgs {
+            window: Window::Today,
+            calendar_ids: vec!["h@x".into()],
+            calendar_name: None,
+        };
+        let v = agenda(&api, &by_id, &tz("UTC", false)).await.unwrap();
+        assert_eq!(v["count"], 1, "{v}");
+        assert_eq!(v["events"][0]["calendarId"], "h@x", "{v}");
+        let all = AgendaArgs {
+            window: Window::Today,
+            calendar_ids: vec![],
+            calendar_name: None,
+        };
+        let v = agenda(&api, &all, &tz("UTC", false)).await.unwrap();
+        assert_eq!(v["count"], 1, "{v}");
+        assert_eq!(v["events"][0]["calendarId"], "me@x", "{v}");
+    }
+
     #[tokio::test]
     async fn agenda_surfaces_calendar_errors() {
         let server = MockServer::start().await;
@@ -1629,6 +1707,97 @@ mod tests {
         .await
         .unwrap_err();
         assert!(err.to_string().contains("c@x"));
+    }
+
+    /// A per-calendar `backendError`/`internalError` is a transient Google
+    /// failure: it exits 6 (retry later), not 3 (bad input). Bad calendars
+    /// stay a validation error.
+    #[tokio::test]
+    async fn freebusy_transient_calendar_errors_are_retryable() {
+        for (reason, exit) in [
+            ("backendError", GwsError::EXIT_CODE_API_RETRYABLE),
+            ("internalError", GwsError::EXIT_CODE_API_RETRYABLE),
+            ("notFound", GwsError::EXIT_CODE_VALIDATION),
+        ] {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/freeBusy"))
+                .respond_with(
+                    ResponseTemplate::new(200).set_body_json(json!({"calendars": {
+                        "primary": {"busy": []},
+                        "c@x": {"errors": [{"domain": "global", "reason": reason}]}
+                    }})),
+                )
+                .mount(&server)
+                .await;
+            let api = api(&server.uri(), "");
+            let m = parse(&[
+                "gwsr",
+                "+freebusy",
+                "--start",
+                "2026-01-05T09:00:00Z",
+                "--end",
+                "2026-01-05T17:00:00Z",
+                "--calendar-id",
+                "primary",
+                "--calendar-id",
+                "c@x",
+            ]);
+            let err = freebusy(
+                &api,
+                m.subcommand_matches("+freebusy").unwrap(),
+                &tz("UTC", false),
+            )
+            .await
+            .unwrap_err();
+            assert!(err.to_string().contains("c@x"), "{reason}: {err}");
+            assert_eq!(err.exit_code(), exit, "{reason}: {err}");
+        }
+    }
+
+    #[tokio::test]
+    async fn freebusy_all_day_range_starts_after_a_skipped_midnight() {
+        // America/Santiago springs forward at midnight on 2026-09-06, so that
+        // day starts at 01:00 -03:00. An all-day range over it must query from
+        // there, not fail because 00:00 does not exist.
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/freeBusy"))
+            .and(body_partial_json(json!({
+                "timeMin": "2026-09-06T04:00:00+00:00",
+                "timeMax": "2026-09-07T03:00:00+00:00",
+            })))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(json!({"calendars": {
+                    "primary": {"busy": []}
+                }})),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        let api = api(&server.uri(), "");
+        let m = parse(&[
+            "gwsr",
+            "+freebusy",
+            "--start",
+            "2026-09-06",
+            "--end",
+            "2026-09-07",
+        ]);
+        let v = freebusy(
+            &api,
+            m.subcommand_matches("+freebusy").unwrap(),
+            &tz("America/Santiago", true),
+        )
+        .await
+        .unwrap();
+        assert_eq!(v["timeMin"], "2026-09-06T01:00:00-03:00");
+        assert_eq!(v["timeMax"], "2026-09-07T00:00:00-03:00");
+        // An all-day event on that day still sorts before its timed events.
+        let santiago: Tz = "America/Santiago".parse().unwrap();
+        let all_day = json!({"start": "2026-09-06"});
+        let timed = json!({"start": "2026-09-06T09:00:00-03:00"});
+        assert!(start_key(&all_day, santiago) < start_key(&timed, santiago));
     }
 
     #[tokio::test]

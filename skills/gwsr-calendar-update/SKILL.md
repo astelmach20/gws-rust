@@ -57,6 +57,9 @@ gwsr calendar +update --event-id EVENT_ID --add-attendee carol@example.com --rem
 - Only the given fields change. Moving --start without --end/--duration keeps
 - the event's current length.
 
+> [!CAUTION]
+> This is a **write** command — confirm with the user before executing.
+
 ## See Also
 
 - [gwsr-shared](../gwsr-shared/SKILL.md) — Global flags and auth

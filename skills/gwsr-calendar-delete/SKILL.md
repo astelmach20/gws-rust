@@ -47,6 +47,9 @@ gwsr calendar +delete --event-id EVENT_ID --send-updates none --yes
 - Destructive: requires --yes (or a confirmation prompt on a terminal).
 - Attendees are notified of the cancellation unless --send-updates none.
 
+> [!CAUTION]
+> This is a **write** command — confirm with the user before executing.
+
 ## See Also
 
 - [gwsr-shared](../gwsr-shared/SKILL.md) — Global flags and auth

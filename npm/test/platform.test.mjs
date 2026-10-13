@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import { createRequire } from "node:module";
 import os from "node:os";
@@ -153,6 +153,70 @@ describe("bin/gwsr.js", { skip: process.platform === "win32" && "uses a POSIX sh
     const res = spawnSync(process.execPath, [shim], { input: '{"k":1}', encoding: "utf8" });
     assert.equal(res.stdout, '{"k":1}');
     assert.equal(res.status, 0);
+  });
+
+  /** Run the shim asynchronously; calls `onReady` once the binary has printed `ready <pid>`. */
+  function runUntilExit(shim, onReady) {
+    return new Promise((resolve, reject) => {
+      const proc = spawn(process.execPath, [shim], { stdio: ["ignore", "pipe", "pipe"] });
+      let stdout = "";
+      let childPid;
+      proc.stdout.setEncoding("utf8");
+      proc.stdout.on("data", (chunk) => {
+        stdout += chunk;
+        const ready = /^ready (\d+)\n/.exec(stdout);
+        if (ready && childPid === undefined) {
+          childPid = Number(ready[1]);
+          onReady(proc);
+        }
+      });
+      proc.on("error", reject);
+      // An orphaned binary keeps the stdout pipe open, so 'close' may never
+      // fire: settle on the launcher's own exit, then give stdout a moment to drain.
+      proc.on("exit", (status, signal) => {
+        const done = () => resolve({ status, signal, stdout, childPid });
+        const timer = setTimeout(done, 2000);
+        proc.stdout.on("end", () => {
+          clearTimeout(timer);
+          done();
+        });
+      });
+    });
+  }
+
+  function killOrphan(pid) {
+    if (pid === undefined) return;
+    try {
+      process.kill(pid, "SIGKILL");
+    } catch (err) {
+      if (err.code !== "ESRCH") throw err;
+    }
+  }
+
+  it("forwards SIGTERM sent to the launcher and exits with the binary's status", { skip: !host && "unsupported host" }, async () => {
+    const script = "#!/bin/sh\ntrap 'echo stopped; exit 3' TERM\necho \"ready $$\"\nwhile :; do sleep 0.05; done\n";
+    const shim = install({ withPlatform: true, script });
+    const res = await runUntilExit(shim, (proc) => proc.kill("SIGTERM"));
+    try {
+      assert.equal(res.signal, null, "the launcher must not die before the binary");
+      assert.equal(res.status, 3);
+      assert.match(res.stdout, /stopped\n$/);
+    } finally {
+      killOrphan(res.childPid);
+    }
+  });
+
+  it("re-raises the binary's terminating signal", { skip: !host && "unsupported host" }, async () => {
+    const shim = install({ withPlatform: true, script: '#!/bin/sh\necho "ready $$"\nkill -TERM $$\n' });
+    const res = await runUntilExit(shim, () => {});
+    assert.equal(res.signal, "SIGTERM");
+  });
+
+  it("exits 128 + signal number when the binary dies from a signal Node ignores", { skip: !host && "unsupported host" }, async () => {
+    const shim = install({ withPlatform: true, script: '#!/bin/sh\necho "ready $$"\nkill -PIPE $$\n' });
+    const res = await runUntilExit(shim, () => {});
+    assert.equal(res.signal, null);
+    assert.equal(res.status, 128 + os.constants.signals.SIGPIPE);
   });
 
   it("exits non-zero with guidance and never downloads when the platform package is missing", { skip: !host && "unsupported host" }, () => {

@@ -16,8 +16,8 @@
 //! subscription and stream CloudEvents as NDJSON.
 
 use super::stream::{
-    PubSubClient, StepError, StreamOptions, StreamStep, cleanup_resources, emit_diagnostic,
-    run_stream,
+    PubSubClient, StepError, StreamOptions, StreamPrinter, StreamStep, cleanup_resources,
+    emit_diagnostic, run_stream,
 };
 use super::{PUBSUB_SCOPE, parse_event_types, scopes_for_event_types, workspace_events_api_base};
 
@@ -28,7 +28,6 @@ use base64::Engine as _;
 use clap::ArgMatches;
 use gws_rust_core::client::Idempotency;
 use serde_json::{Value, json};
-use std::io::Write;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -229,15 +228,32 @@ fn subscription_from_operation(op: &Value) -> Result<String, GwsError> {
     op.get("response")
         .and_then(|r| r.get("name"))
         .and_then(Value::as_str)
-        .or_else(|| op.get("metadata").and_then(|m| m.get("subscription")).and_then(Value::as_str))
-        .or_else(|| op.get("name").and_then(Value::as_str).filter(|n| n.starts_with("subscriptions/")))
-        .map(str::to_string)
-        .ok_or_else(|| {
-            GwsError::other(format!(
-                "Workspace Events operation {} did not report a subscription name yet; check it with                  gwsr events operations get",
-                op.get("name").and_then(Value::as_str).unwrap_or("(unnamed)")
-            ))
+        .or_else(|| {
+            op.get("metadata")
+                .and_then(|m| m.get("subscription"))
+                .and_then(Value::as_str)
         })
+        .or_else(|| {
+            op.get("name")
+                .and_then(Value::as_str)
+                .filter(|n| n.starts_with("subscriptions/"))
+        })
+        .map(str::to_string)
+        .ok_or_else(|| GwsError::other(pending_subscription_message(op)))
+}
+
+/// The error for a finished operation that names no subscription, with the
+/// command that shows the operation.
+fn pending_subscription_message(op: &Value) -> String {
+    match op.get("name").and_then(Value::as_str) {
+        Some(name) => format!(
+            "Workspace Events operation {name} did not report a subscription name yet; check \
+             it with: gwsr events operations get --params '{}'",
+            json!({ "name": name })
+        ),
+        None => "Workspace Events operation (unnamed) did not report a subscription name yet"
+            .to_string(),
+    }
 }
 
 struct SubscribeStep<'a> {
@@ -247,6 +263,7 @@ struct SubscribeStep<'a> {
     sanitize: &'a SanitizeConfig,
     pull_timeout: Duration,
     file_counter: u64,
+    printer: StreamPrinter,
 }
 
 impl SubscribeStep<'_> {
@@ -270,14 +287,7 @@ impl SubscribeStep<'_> {
                     json!({ "path": path.display().to_string() }),
                 );
             }
-            None => {
-                let line = serde_json::to_string(event)
-                    .map_err(|e| fatal(format!("Failed to serialize event: {e}")))?;
-                let mut out = std::io::stdout().lock();
-                writeln!(out, "{line}")
-                    .and_then(|()| out.flush())
-                    .map_err(|e| fatal(format!("Failed to write to stdout: {e}")))?;
-            }
+            None => self.printer.print(event)?,
         }
         Ok(())
     }
@@ -464,6 +474,7 @@ pub(super) async fn handle_subscribe(
         config: config.clone(),
         sanitize: sanitize_config,
         file_counter: 0,
+        printer: StreamPrinter::new(crate::helpers::http::output_format(matches)?),
     };
     let result = run_stream(&opts, &mut step).await;
 
@@ -675,7 +686,18 @@ mod tests {
             subscription_from_operation(&json!({"name": "subscriptions/direct"})).unwrap(),
             "subscriptions/direct"
         );
-        assert!(subscription_from_operation(&json!({"name": "operations/pending"})).is_err());
+        // A pending operation names the full command that shows it (the
+        // operation name is a required parameter of `operations get`).
+        let err = subscription_from_operation(&json!({"name": "operations/pending"}))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains(
+                r#"check it with: gwsr events operations get --params '{"name":"operations/pending"}'"#
+            ),
+            "{err}"
+        );
+        assert!(!err.contains("  "), "{err}");
         // The operation's error code is a gRPC code: 7 PERMISSION_DENIED is
         // HTTP 403, 14 UNAVAILABLE is a retryable 503.
         let err = subscription_from_operation(&json!({"error": {"code": 7, "message": "denied"}}))
@@ -715,6 +737,7 @@ mod tests {
             config: cfg,
             sanitize: &sanitize,
             file_counter: 0,
+            printer: StreamPrinter::new(crate::formatter::OutputFormat::Json),
         };
         let mut opts = StreamOptions::new(true, 1, 2);
         opts.backoff_base = Duration::from_millis(1);

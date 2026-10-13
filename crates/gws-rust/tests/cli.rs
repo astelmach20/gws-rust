@@ -540,6 +540,50 @@ fn schema_paths_accept_dotted_api_versions() {
         .stdout(predicate::str::contains("\"name\""));
 }
 
+/// `--api-version` selects the schema's API version, as it does for the
+/// method itself; it was accepted and silently ignored.
+#[test]
+fn schema_honors_api_version_flag() {
+    let env = Env::new();
+    env.seed_drive("v3 listing");
+    env.seed_doc(&json!({
+        "name": "drive",
+        "version": "v2",
+        "rootUrl": "https://www.googleapis.com/",
+        "servicePath": "drive/v2/",
+        "resources": {
+            "files": {
+                "methods": {
+                    "list": {
+                        "id": "drive.files.list",
+                        "httpMethod": "GET",
+                        "path": "files",
+                        "description": "v2 listing"
+                    }
+                }
+            }
+        }
+    }));
+    for args in [
+        &["schema", "drive.files.list", "--api-version", "v2"][..],
+        &["--api-version=v2", "schema", "drive.files.list"],
+        // The flag wins over the `:version` suffix, as for the method.
+        &["schema", "drive:v3.files.list", "--api-version", "v2"],
+    ] {
+        let out = env.cmd().args(args).output().unwrap();
+        assert!(out.status.success(), "{args:?}: {}", stderr_of(&out));
+        let v: Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert_eq!(v["description"], "v2 listing", "{args:?}");
+    }
+    let out = env
+        .cmd()
+        .args(["schema", "drive.files.list"])
+        .output()
+        .unwrap();
+    let v: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["description"], "v3 listing");
+}
+
 // ── Errors ──────────────────────────────────────────────────────────────
 
 /// Parse stderr as exactly one JSON error object.
@@ -760,6 +804,71 @@ fn generated_methods_validate_and_confirm_before_loading_credentials() {
         .unwrap();
     assert_eq!(out.status.code(), Some(8), "{}", stderr_of(&out));
     assert!(stderr_of(&out).contains("GWSR_CREDENTIALS_FILE"));
+}
+
+/// JSON input read from a file or stdin may start with a UTF-8 byte order
+/// mark (Windows editors, Windows PowerShell `Set-Content -Encoding UTF8`):
+/// `--params`/`--json` `@file` and `-`, and `gwsr batch` input, accept it.
+#[test]
+fn json_input_with_utf8_bom_is_accepted() {
+    let env = Env::new();
+    env.seed_doc(&json!({
+        "name": "drive",
+        "version": "v3",
+        "rootUrl": "https://www.googleapis.com/",
+        "servicePath": "drive/v3/",
+        "batchPath": "batch/drive/v3",
+        "resources": {
+            "files": {
+                "methods": {
+                    "list": {
+                        "id": "drive.files.list",
+                        "httpMethod": "GET",
+                        "path": "files",
+                        "parameters": {
+                            "pageSize": {"type": "integer", "location": "query"}
+                        }
+                    }
+                }
+            }
+        }
+    }));
+    let params = env.work_dir().join("params.json");
+    std::fs::write(&params, "\u{feff}{\"pageSize\": 5}\r\n").unwrap();
+
+    let from_file = env
+        .cmd()
+        .args(["drive", "files", "list", "--dry-run", "--params"])
+        .arg(format!("@{}", params.display()))
+        .output()
+        .unwrap();
+    let from_stdin = env
+        .cmd()
+        .args(["drive", "files", "list", "--dry-run", "--params", "-"])
+        .write_stdin("\u{feff}{\"pageSize\": 5}")
+        .output()
+        .unwrap();
+    for out in [from_file, from_stdin] {
+        assert!(out.status.success(), "{}", stderr_of(&out));
+        let v: Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert_eq!(v["query_params"], json!([["pageSize", "5"]]));
+    }
+
+    let calls = env.work_dir().join("calls.ndjson");
+    std::fs::write(
+        &calls,
+        "\u{feff}{\"method\": \"files.list\", \"params\": {\"pageSize\": 5}}\r\n",
+    )
+    .unwrap();
+    let out = env
+        .cmd()
+        .args(["batch", "drive", "--dry-run", "--input"])
+        .arg(&calls)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    let v: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["dry_run"], true);
 }
 
 // ── Output formats ──────────────────────────────────────────────────────
@@ -1031,6 +1140,32 @@ fn explicit_profile_is_never_silently_replaced_by_gwsr_token() {
     );
 }
 
+/// The hint's `gwsr auth login` command must sign in to the profile the
+/// failed command used. Plain `gwsr auth login --scopes ...` would sign in to
+/// the config/default profile instead, leaving `--profile work` broken and
+/// replacing another profile's login.
+#[test]
+fn auth_error_hint_names_the_profile_chosen_by_flag() {
+    let env = Env::new();
+    env.seed_drive("Lists files.");
+    let out = env
+        .cmd()
+        .args(["--profile", "work", "drive", "files", "list"])
+        .assert()
+        .code(2)
+        .stdout("")
+        .get_output()
+        .clone();
+    let err = stderr_error(&out);
+    let message = err["error"]["message"].as_str().unwrap();
+    assert!(message.contains("gwsr auth login --profile work"), "{err}");
+    let hint = err["error"]["hint"].as_str().unwrap();
+    assert!(
+        hint.contains("`gwsr auth login --profile work --scopes drive.readonly`"),
+        "{err}"
+    );
+}
+
 #[test]
 fn cache_clear_dry_run_reports_and_keeps_the_cache() {
     let env = Env::new();
@@ -1130,6 +1265,21 @@ fn unknown_gwsr_variable_fails_with_a_suggestion() {
         "{message}"
     );
     assert!(message.contains("did you mean GWSR_TIMEOUT?"), "{message}");
+
+    // The variable is checked before argument parsing, so `gwsr --help` fails
+    // the same way while it is set: the message must not offer it as an
+    // alternative to unsetting the variable.
+    env.cmd()
+        .arg("--help")
+        .env("GWSR_TIMEOUT_SECS", "30")
+        .assert()
+        .code(8)
+        .stdout("");
+    assert!(!message.contains("or run `gwsr --help`"), "{message}");
+    assert!(
+        message.contains("with it unset, `gwsr --help` lists the supported variables"),
+        "{message}"
+    );
 }
 
 #[test]
@@ -2287,6 +2437,60 @@ async fn truncation_marker_is_not_passed_through_jq() {
             serde_json::from_str::<Value>(marker).unwrap_or_else(|e| panic!("{e}: {stdout}")),
             json!({"_truncated": {"pagesFetched": 1, "nextPageToken": "p2"}}),
             "{mode}"
+        );
+    }
+}
+
+/// `--sanitize` in warn mode screens each `--page-all` page; `--page-items`
+/// must carry that page's `_sanitization` annotation onto every item it
+/// prints instead of dropping it with the page envelope.
+#[tokio::test(flavor = "multi_thread")]
+async fn page_items_keep_the_sanitization_annotation() {
+    use wiremock::matchers::any;
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    Mock::given(any())
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({"files": [{"id": "a"}, {"id": "b"}]})),
+        )
+        .mount(&server)
+        .await;
+    let env = Env::new();
+    std::fs::create_dir_all(env.cache_dir().join("discovery")).unwrap();
+    env.seed_doc(&json!({
+        "name": "drive",
+        "version": "v3",
+        "title": "Google Drive API",
+        "rootUrl": "https://www.googleapis.com/",
+        "servicePath": "drive/v3/",
+        "resources": {"files": {"methods": {"list": {
+            "id": "drive.files.list",
+            "httpMethod": "GET",
+            "path": "files",
+            "parameters": {"pageToken": {"type": "string", "location": "query"}},
+            "scopes": ["https://www.googleapis.com/auth/drive.readonly"]
+        }}}}
+    }));
+    // Model Armor is unreachable (https goes to a closed port), so warn mode
+    // annotates every screened page with `_sanitization.error`.
+    let out = blocking_sanitize_cmd(&env, &server.uri())
+        .env("GWSR_SANITIZE_MODE", "warn")
+        .args(["drive", "files", "list", "--page-items"])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    let stdout = stdout_of(&out);
+    let items: Vec<Value> = stdout
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap_or_else(|e| panic!("{e}: {stdout}")))
+        .collect();
+    assert_eq!(items.len(), 2, "{stdout}");
+    for (item, id) in items.iter().zip(["a", "b"]) {
+        assert_eq!(item["id"], id, "{stdout}");
+        assert!(
+            item["_sanitization"]["error"].is_string(),
+            "item lost the page's _sanitization annotation: {stdout}"
         );
     }
 }

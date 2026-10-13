@@ -348,6 +348,8 @@ fn agenda_dry_run_shows_calendar_list_page_size() {
     );
     // The real request asks for 250 calendars per page; the plan must too.
     assert_eq!(list["query_params"]["maxResults"], "250", "{v}");
+    // Hidden calendars are listed so --calendar-id can name one.
+    assert_eq!(list["query_params"]["showHidden"], "true", "{v}");
 }
 
 #[test]
@@ -615,6 +617,89 @@ fn upload_rejects_paths_outside_cwd() {
 }
 
 #[test]
+fn drive_share_rejects_bad_flag_combinations_before_confirm_and_auth() {
+    // No credentials exist here, and ownership transfers always need
+    // confirmation: a flag combination the helper can never send is a
+    // validation error (exit 3), not a prompt (exit 7) or an auth error (2).
+    let dir = setup();
+    let base = ["drive", "+share", "--file-id", "F1"];
+    let cases: [(&[&str], &str); 4] = [
+        (
+            &[
+                "--domain",
+                "example.com",
+                "--role",
+                "reader",
+                "--message",
+                "hi",
+            ],
+            "--message only applies to --email grants",
+        ),
+        (
+            &["--anyone", "--role", "commenter", "--message", "hi"],
+            "--message only applies to --email grants",
+        ),
+        (
+            &["--email", "team@example.com", "--group", "--role", "owner"],
+            "--role owner can only be granted to a single user",
+        ),
+        (
+            &[
+                "--email",
+                "user@example.com",
+                "--role",
+                "owner",
+                "--no-notify",
+            ],
+            "--no-notify cannot be used with --role owner",
+        ),
+    ];
+    for (args, expected) in cases {
+        for policy in ["0", "1"] {
+            let out = gwsr(dir.path())
+                .env("GWSR_REQUIRE_CONFIRM", policy)
+                .args(base)
+                .args(args)
+                .output()
+                .unwrap();
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            assert_eq!(
+                out.status.code(),
+                Some(3),
+                "{args:?} policy {policy}: {stderr}"
+            );
+            assert!(stderr.contains(expected), "{args:?}: {stderr}");
+            assert!(!stderr.contains("confirm"), "{args:?}: {stderr}");
+        }
+    }
+}
+
+#[test]
+fn drive_download_and_export_check_output_before_auth() {
+    // `--output .` names a directory, which no download can write to. The
+    // helper must say so before loading (absent) credentials.
+    let dir = setup();
+    for args in [
+        &["drive", "+download", "--file-id", "F1", "--output", "."][..],
+        &[
+            "drive",
+            "+export",
+            "--file-id",
+            "F1",
+            "--to",
+            "pdf",
+            "--output",
+            ".",
+        ][..],
+    ] {
+        let out = gwsr(dir.path()).args(args).output().unwrap();
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(3), "{args:?}: {stderr}");
+        assert!(stderr.contains("is a directory"), "{args:?}: {stderr}");
+    }
+}
+
+#[test]
 fn gmail_helper_output_honors_sanitize_block_mode() {
     let dir = setup();
     seed(dir.path(), "gmail", "v1", "");
@@ -656,6 +741,61 @@ fn gmail_helper_output_honors_sanitize_block_mode() {
         "{}",
         String::from_utf8_lossy(&out.stdout)
     );
+}
+
+/// `gmail +read` prints its JSON through the shared formatter, so `--jq`,
+/// `--format` and `--compact` apply as they do for every other helper.
+#[tokio::test(flavor = "multi_thread")]
+async fn gmail_read_honors_jq_and_format() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/gmail/v1/users/me/messages/M1"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "M1",
+            "threadId": "T1",
+            "payload": {
+                "mimeType": "text/plain",
+                "headers": [
+                    {"name": "From", "value": "a@example.com"},
+                    {"name": "To", "value": "b@example.com"},
+                    {"name": "Subject", "value": "Hello"},
+                    {"name": "Message-ID", "value": "<m1@example.com>"}
+                ],
+                "body": {"data": "aGk"}
+            }
+        })))
+        .mount(&server)
+        .await;
+    let dir = setup();
+    seed(dir.path(), "gmail", "v1", "");
+    let run = |extra: &[&str]| {
+        gwsr(dir.path())
+            .env("GWSR_TOKEN", "test-token")
+            .env("GWSR_API_BASE_URL", server.uri())
+            .env("HTTPS_PROXY", "http://127.0.0.1:9")
+            .args(["gmail", "+read", "--message-id", "M1"])
+            .args(extra)
+            .output()
+            .unwrap()
+    };
+
+    let out = run(&["--jq", ".subject"]);
+    assert!(out.status.success(), "{out:?}");
+    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "Hello");
+
+    let out = run(&["--format", "yaml"]);
+    assert!(out.status.success(), "{out:?}");
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains("subject: Hello"), "{text}");
+
+    let out = run(&["--compact"]);
+    assert!(out.status.success(), "{out:?}");
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(text.trim_end().lines().count(), 1, "{text}");
+    assert_eq!(stdout_json(&out)["subject"], "Hello");
 }
 
 /// `GWSR_API_BASE_URL` routes workflow requests to the configured endpoint,
@@ -915,6 +1055,112 @@ async fn events_helpers_honour_api_base_override() {
         .output()
         .unwrap();
     assert!(out.status.success(), "events +renew: {out:?}");
+}
+
+/// The NDJSON streams of `events +subscribe` and `gmail +watch` go through
+/// the shared formatter: `--jq` and `--format` apply to every record, as they
+/// do to a generated method's `--page-all` stream.
+#[tokio::test(flavor = "multi_thread")]
+async fn stream_helpers_honor_jq_and_format() {
+    use base64::Engine as _;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let b64 = |s: &str| base64::engine::general_purpose::STANDARD.encode(s);
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/projects/p/subscriptions/ev:pull"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "receivedMessages": [{ "ackId": "a1", "message": {
+                "attributes": { "ce-type": "t" },
+                "data": b64(r#"{"id":"evt-1"}"#)
+            }}]
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/projects/p/subscriptions/gm:pull"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "receivedMessages": [{ "ackId": "a2", "message": {
+                "data": b64(r#"{"emailAddress":"me@example.com","historyId":"5"}"#)
+            }}]
+        })))
+        .mount(&server)
+        .await;
+    for sub in ["ev", "gm"] {
+        Mock::given(method("POST"))
+            .and(path(format!(
+                "/v1/projects/p/subscriptions/{sub}:acknowledge"
+            )))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+            .mount(&server)
+            .await;
+    }
+    Mock::given(method("GET"))
+        .and(path("/gmail/v1/users/me/profile"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"historyId": "1"})))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/gmail/v1/users/me/history"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "history": [{ "messagesAdded": [{ "message": { "id": "M1" } }] }]
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/gmail/v1/users/me/messages/M1"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({"id": "M1", "snippet": "hi"})),
+        )
+        .mount(&server)
+        .await;
+
+    let dir = tempfile::tempdir().unwrap();
+    seed(dir.path(), "workspaceevents", "v1", "");
+    seed(dir.path(), "gmail", "v1", "");
+    let run = |args: &[&str]| {
+        gwsr(dir.path())
+            .env("GWSR_TOKEN", "test-token")
+            .env("GWSR_API_BASE_URL", format!("{}/", server.uri()))
+            .env("HTTPS_PROXY", "http://127.0.0.1:9")
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    let events = [
+        "events",
+        "+subscribe",
+        "--subscription",
+        "projects/p/subscriptions/ev",
+        "--once",
+    ];
+    let gmail = [
+        "gmail",
+        "+watch",
+        "--subscription",
+        "projects/p/subscriptions/gm",
+        "--once",
+    ];
+
+    for (base, field, want) in [
+        (&events[..], ".data.id", "evt-1"),
+        (&gmail[..], ".snippet", "hi"),
+    ] {
+        let out = run(&[base, &["--jq", field]].concat());
+        assert!(out.status.success(), "{base:?}: {out:?}");
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout).trim(),
+            want,
+            "{base:?}"
+        );
+
+        let out = run(&[base, &["--format", "csv"]].concat());
+        assert!(out.status.success(), "{base:?}: {out:?}");
+        let text = String::from_utf8_lossy(&out.stdout);
+        assert!(!text.trim_start().starts_with('{'), "{base:?}: {text}");
+        assert!(text.contains(want), "{base:?}: {text}");
+    }
 }
 
 // ── Dot-segment path parameters ─────────────────────────────────────────
@@ -1520,6 +1766,156 @@ async fn drive_download_and_export_to_stdout_print_only_the_payload() {
             expected,
             "{args:?}: stdout must hold only the payload"
         );
+    }
+}
+
+/// `drive +sync` keeps a local file it did not write and exits 1 with
+/// `syncConflict` after printing the report; `--overwrite` replaces it and
+/// exits 0. The sync-state file is written next to the mirrored files.
+#[tokio::test(flavor = "multi_thread")]
+async fn drive_sync_keeps_local_files_and_exits_with_sync_conflict() {
+    use wiremock::matchers::{method, path, query_param};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/drive/v3/files"))
+        .and(query_param("q", "'ROOT' in parents and trashed = false"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"files": [
+            {"id": "A", "name": "a.txt", "mimeType": "text/plain",
+             "modifiedTime": "2024-01-01T00:00:00Z", "version": "3", "size": "6"}
+        ]})))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/drive/v3/files/A"))
+        .and(query_param("alt", "media"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(b"remote".to_vec()))
+        .mount(&server)
+        .await;
+
+    let dir = setup();
+    let mirror = dir.path().join("mirror");
+    std::fs::create_dir(&mirror).unwrap();
+    std::fs::write(mirror.join("a.txt"), b"mine").unwrap();
+    let run = |extra: &[&str]| {
+        gwsr(dir.path())
+            .env("GWSR_TOKEN", "test-token")
+            .env("GWSR_API_BASE_URL", server.uri())
+            .args(["drive", "+sync", "--folder-id", "ROOT", "--dir", "mirror"])
+            .args(extra)
+            .output()
+            .unwrap()
+    };
+
+    let out = run(&[]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(1), "{stderr}");
+    let err: Value = serde_json::from_str(stderr.lines().last().unwrap()).unwrap();
+    assert_eq!(err["error"]["reason"], "syncConflict", "{stderr}");
+    let report = stdout_json(&out);
+    assert_eq!(report["conflicts"][0]["id"], "A", "{report}");
+    assert_eq!(report["conflicts"][0]["reason"], "untracked", "{report}");
+    assert_eq!(std::fs::read(mirror.join("a.txt")).unwrap(), b"mine");
+
+    let out = run(&["--overwrite"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(std::fs::read(mirror.join("a.txt")).unwrap(), b"remote");
+    let state: Value =
+        serde_json::from_slice(&std::fs::read(mirror.join(".gwsr-sync.json")).unwrap()).unwrap();
+    assert_eq!(state["files"]["A"]["path"], "a.txt", "{state}");
+
+    // In sync now: a plain run succeeds and downloads nothing.
+    let out = run(&[]);
+    assert!(out.status.success());
+    assert_eq!(stdout_json(&out)["unchanged"].as_array().unwrap().len(), 1);
+}
+
+/// A helper that writes straight to stdout (`--output -` payloads, `gmail
+/// +read`) ends quietly with status 0 when the reader has gone away
+/// (`gwsr ... | head`), like every other command, instead of reporting an
+/// internal error (exit 5).
+#[tokio::test(flavor = "multi_thread")]
+async fn helpers_writing_raw_stdout_exit_cleanly_on_a_closed_pipe() {
+    use wiremock::matchers::{method, path, query_param};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/drive/v3/files/F1"))
+        .and(query_param("alt", "media"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_raw(vec![b'x'; 1024 * 1024], "application/pdf"),
+        )
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/drive/v3/files/F1"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "F1", "name": "f.pdf", "mimeType": "application/pdf"
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/gmail/v1/users/me/messages/M1"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "M1",
+            "threadId": "T1",
+            "snippet": "hello",
+            "payload": {
+                "mimeType": "text/plain",
+                "body": {"data": "aGVsbG8"},
+                "headers": [
+                    {"name": "From", "value": "a@example.com"},
+                    {"name": "Message-ID", "value": "<m1@example.com>"},
+                ],
+            },
+        })))
+        .mount(&server)
+        .await;
+
+    let dir = setup();
+    seed(dir.path(), "gmail", "v1", "");
+    for args in [
+        &["drive", "+download", "--file-id", "F1", "--output", "-"][..],
+        &["gmail", "+read", "--message-id", "M1"],
+        &[
+            "gmail",
+            "+read",
+            "--message-id",
+            "M1",
+            "--body-format",
+            "json",
+        ],
+    ] {
+        let mut cmd = std::process::Command::new(assert_cmd::cargo::cargo_bin("gwsr"));
+        cmd.env_clear()
+            .env("GWSR_CONFIG_DIR", dir.path())
+            .env("GWSR_CACHE_DIR", dir.path().join("cache"))
+            .env("HOME", dir.path())
+            .env("GWSR_TOKEN", "test-token")
+            .env("GWSR_API_BASE_URL", server.uri())
+            .current_dir(dir.path());
+        for key in ["SystemRoot", "SSL_CERT_FILE", "NIX_SSL_CERT_FILE"] {
+            if let Some(value) = std::env::var_os(key) {
+                cmd.env(key, value);
+            }
+        }
+        let mut child = cmd
+            .args(args)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        drop(child.stdout.take());
+        let out = child.wait_with_output().unwrap();
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(0), "{args:?}: {stderr}");
+        assert!(stderr.is_empty(), "{args:?}: {stderr}");
     }
 }
 

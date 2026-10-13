@@ -73,9 +73,10 @@ async fn resolve(arg: JsonArg<'_>, flag: &str) -> Result<String, GwsError> {
         JsonArg::Inline(s) => Ok(s.to_string()),
         JsonArg::File(path) => {
             let safe = crate::validate::validate_safe_file_path(path, flag)?;
-            tokio::fs::read_to_string(&safe)
-                .await
-                .map_err(|e| GwsError::Validation(format!("{flag}: failed to read '{path}': {e}")))
+            let text = tokio::fs::read_to_string(&safe).await.map_err(|e| {
+                GwsError::Validation(format!("{flag}: failed to read '{path}': {e}"))
+            })?;
+            Ok(strip_utf8_bom(text))
         }
         JsonArg::Stdin => {
             let mut buf = String::new();
@@ -83,8 +84,20 @@ async fn resolve(arg: JsonArg<'_>, flag: &str) -> Result<String, GwsError> {
                 .read_to_string(&mut buf)
                 .await
                 .map_err(|e| GwsError::Validation(format!("{flag}: failed to read stdin: {e}")))?;
-            Ok(buf)
+            Ok(strip_utf8_bom(buf))
         }
+    }
+}
+
+/// Drop a leading UTF-8 byte order mark from JSON read from a file or stdin.
+///
+/// Windows editors and Windows PowerShell (`Set-Content -Encoding UTF8`)
+/// write one; RFC 8259 lets a parser ignore it, but `serde_json` rejects it
+/// as an unexpected character at line 1 column 1.
+pub(crate) fn strip_utf8_bom(text: String) -> String {
+    match text.strip_prefix('\u{feff}') {
+        Some(rest) => rest.to_string(),
+        None => text,
     }
 }
 

@@ -51,6 +51,9 @@ gwsr gmail +unsubscribe --message-id 18f1a2b3c4d --dry-run
 - --dry-run loads no credentials and reads nothing: it shows the metadata
 - read and the one-click POST, with the URL as a placeholder.
 
+> [!CAUTION]
+> This is a **write** command — confirm with the user before executing.
+
 ## See Also
 
 - [gwsr-shared](../gwsr-shared/SKILL.md) — Global flags and auth

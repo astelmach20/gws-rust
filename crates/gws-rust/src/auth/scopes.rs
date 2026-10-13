@@ -231,15 +231,16 @@ pub fn select_for_method(
         .unwrap_or_else(|| ScopeChoice::Default(first.clone()))
 }
 
-/// Build a `gwsr auth login` command line that adds `scopes` to the current
-/// grant (login uses incremental authorization).
-pub fn login_command_hint(scopes: &[String]) -> String {
+/// Build a command line that adds `scopes` to the current grant (login uses
+/// incremental authorization). `login` is the `gwsr auth login` command for
+/// the profile in use (see [`crate::auth::login_command`]).
+pub fn login_command_hint(login: &str, scopes: &[String]) -> String {
     let list = scopes
         .iter()
         .map(|s| short_name(s).to_string())
         .collect::<Vec<_>>()
         .join(",");
-    format!("gwsr auth login --scopes {list}")
+    format!("{login} --scopes {list}")
 }
 
 /// Map a user-facing service name to OAuth scope short-name prefixes.
@@ -542,8 +543,15 @@ mod tests {
         assert_eq!(normalize_scope(GMAIL_FULL_SCOPE), GMAIL_FULL_SCOPE);
         assert_eq!(normalize_scope("openid"), "openid");
         assert_eq!(
-            login_command_hint(&[a("gmail.modify"), GMAIL_FULL_SCOPE.to_string()]),
+            login_command_hint(
+                "gwsr auth login",
+                &[a("gmail.modify"), GMAIL_FULL_SCOPE.to_string()]
+            ),
             "gwsr auth login --scopes gmail.modify,https://mail.google.com/"
+        );
+        assert_eq!(
+            login_command_hint("gwsr auth login --profile work", &[a("drive")]),
+            "gwsr auth login --profile work --scopes drive"
         );
     }
 

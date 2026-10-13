@@ -36,10 +36,16 @@ use crate::services::resolve_service_spec;
 /// API as `<api>:<version>`.
 /// Examples: `drive.files.list`, `drive.File`, `admin:directory_v1.users.list`,
 /// `dfareporting:v3.4.ads.list` (a dotted version stays whole).
-pub async fn handle_schema_command(path: &str, resolve_refs: bool) -> Result<Value, GwsError> {
+/// `api_version` (`--api-version`) wins over the `:version` suffix, as it
+/// does when the method itself runs.
+pub async fn handle_schema_command(
+    path: &str,
+    api_version: Option<&str>,
+    resolve_refs: bool,
+) -> Result<Value, GwsError> {
     let (service_name, rest) = split_schema_path(path)?;
     let parts: Vec<&str> = std::iter::once(service_name).chain(rest).collect();
-    let resolved = resolve_service_spec(service_name, None)?;
+    let resolved = resolve_service_spec(service_name, api_version)?;
     let doc = fetch_discovery_document(&resolved.api_name, &resolved.version).await?;
 
     // Case 1: Schema lookup (e.g., "drive.File")
@@ -887,19 +893,19 @@ mod tests {
     async fn test_handle_schema_command_rejects_malformed_paths() {
         for bad in ["drive", "drive.", ".files.list", "drive..list"] {
             assert!(matches!(
-                handle_schema_command(bad, false).await,
+                handle_schema_command(bad, None, false).await,
                 Err(GwsError::Validation(_))
             ));
         }
         // Unknown services fail before any network access, with a suggestion.
-        let err = handle_schema_command("drvie.files.list", false)
+        let err = handle_schema_command("drvie.files.list", None, false)
             .await
             .unwrap_err()
             .to_string();
         assert!(err.contains("Did you mean 'drive'?"), "{err}");
         // Invalid <api>:<version> identifiers are rejected up front.
         assert!(matches!(
-            handle_schema_command("../x:v1.a.b", false).await,
+            handle_schema_command("../x:v1.a.b", None, false).await,
             Err(GwsError::Validation(_))
         ));
     }

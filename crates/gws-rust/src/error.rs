@@ -129,6 +129,10 @@ pub struct ErrorContext {
     pub required_scopes: Vec<String>,
     /// Scopes the active credentials were granted, when known.
     pub granted_scopes: Option<Vec<String>>,
+    /// The `gwsr auth login` command for the active profile (names it with
+    /// `--profile` unless it is the implicit default). `None`: plain
+    /// `gwsr auth login`.
+    pub login_command: Option<String>,
 }
 
 static CONTEXT: Mutex<Option<ErrorContext>> = Mutex::new(None);
@@ -185,7 +189,8 @@ pub fn hint_for(err: &GwsError, ctx: &ErrorContext) -> Option<String> {
         ),
         GwsError::Network(_) => Some(
             "No response was received. Check the network connection and proxy settings, and \
-             raise --timeout for slow links. Before re-running a create or other \
+             raise the request timeout for slow links (GWSR_TIMEOUT or `timeout_secs` in \
+             config.toml; API methods also take --timeout). Before re-running a create or other \
              non-idempotent call, check whether it was applied. Exit code 10 marks network \
              failures."
                 .to_string(),
@@ -240,8 +245,8 @@ fn api_hint(
         return Some(
             "Google refused the quota project sent as x-goog-user-project: you lack \
              serviceusage.services.use on it (common when the OAuth client belongs to a \
-             project you are not a member of). Pass --no-quota-project (or set \
-             GWSR_NO_QUOTA_PROJECT=1) to send no quota project, set GWSR_PROJECT_ID to a \
+             project you are not a member of). Set GWSR_NO_QUOTA_PROJECT=1 (API methods \
+             also take --no-quota-project) to send no quota project, set GWSR_PROJECT_ID to a \
              project you can use, or ask the project owner for \
              roles/serviceusage.serviceUsageConsumer."
                 .to_string(),
@@ -258,8 +263,9 @@ fn api_hint(
                 .to_string(),
         }),
         "rateLimitExceeded" | "userRateLimitExceeded" | "RATE_LIMIT_EXCEEDED" => Some(
-            "Rate limited by Google. Retry after an exponential backoff; for bulk work \
-             add --page-delay or lower concurrency. Exit code 6 marks retryable errors."
+            "Rate limited by Google. Retry after an exponential backoff; for bulk work, run \
+             fewer calls in parallel, or raise --page-delay (or GWSR_PAGE_DELAY_MS) when \
+             paginating. Exit code 6 marks retryable errors."
                 .to_string(),
         ),
         "quotaExceeded" | "dailyLimitExceeded" => Some(
@@ -278,11 +284,11 @@ fn api_hint(
              marks retryable errors."
                 .to_string(),
         ),
-        _ if code == 401 => Some(
-            "The access token was rejected. Sign in again with `gwsr auth login`, or \
-             check GWSR_TOKEN if you set it."
-                .to_string(),
-        ),
+        _ if code == 401 => Some(format!(
+            "The access token was rejected. Sign in again with `{}`, or check GWSR_TOKEN if \
+             you set it.",
+            login_base(ctx)
+        )),
         _ if gws_rust_core::error::is_retryable_status_code(code) => Some(
             "Google returned a transient error (timeout or server error): retry after a \
              backoff (exit code 6 marks retryable errors)."
@@ -315,12 +321,21 @@ fn scope_hint(ctx: &ErrorContext) -> String {
     hint
 }
 
-/// The `gwsr auth login` command that grants what the failed call needed.
+/// The `gwsr auth login` command for the active profile.
+fn login_base(ctx: &ErrorContext) -> &str {
+    ctx.login_command.as_deref().unwrap_or("gwsr auth login")
+}
+
+/// The `gwsr auth login` command that grants what the failed call needed,
+/// for the profile the failed command used.
 fn login_fix(ctx: &ErrorContext) -> String {
+    let login = login_base(ctx);
     match (ctx.required_scopes.first(), ctx.service.as_deref()) {
-        (Some(scope), _) => crate::auth::scopes::login_command_hint(std::slice::from_ref(scope)),
-        (None, Some(service)) => format!("gwsr auth login -s {service}"),
-        (None, None) => "gwsr auth login -s <service>".to_string(),
+        (Some(scope), _) => {
+            crate::auth::scopes::login_command_hint(login, std::slice::from_ref(scope))
+        }
+        (None, Some(service)) => format!("{login} -s {service}"),
+        (None, None) => format!("{login} -s <service>"),
     }
 }
 
@@ -474,6 +489,14 @@ pub fn report(err: &CliError, human: bool) {
             Err(e) => tracing::debug!(error = %format!("{e:#}"), "granted scopes unavailable"),
         }
     }
+    if ctx.login_command.is_none() {
+        // Best effort, like the granted scopes: without it the hint names
+        // plain `gwsr auth login`.
+        match crate::auth::active_login_command() {
+            Ok(login) => ctx.login_command = Some(login),
+            Err(e) => tracing::debug!(error = %format!("{e:#}"), "active profile unavailable"),
+        }
+    }
     let color = crate::output::stderr_supports_color();
     crate::output::eprint_line(&render(err, &ctx, human, color));
 }
@@ -571,6 +594,7 @@ mod tests {
             granted_scopes: Some(vec![
                 "https://www.googleapis.com/auth/gmail.readonly".into(),
             ]),
+            login_command: None,
         };
         let hint = hint_for(&api(403, "insufficientPermissions"), &ctx).unwrap();
         assert!(
@@ -593,6 +617,42 @@ mod tests {
         let hint = hint_for(&api(403, "ACCESS_TOKEN_SCOPE_INSUFFICIENT"), &ctx).unwrap();
         assert!(hint.contains("gwsr auth status"), "{hint}");
         assert!(hint.contains("`gwsr auth login -s drive`"), "{hint}");
+    }
+
+    /// The fix in a hint signs in to the profile the failed command used.
+    #[test]
+    fn hints_name_the_active_profile() {
+        let ctx = ErrorContext {
+            service: Some("drive".into()),
+            required_scopes: vec!["https://www.googleapis.com/auth/drive.readonly".into()],
+            login_command: Some("gwsr auth login --profile work".into()),
+            ..Default::default()
+        };
+        let scope = hint_for(&api(403, "insufficientPermissions"), &ctx).unwrap();
+        assert!(
+            scope.contains("`gwsr auth login --profile work --scopes drive.readonly`"),
+            "{scope}"
+        );
+        let auth = hint_for(&GwsError::Auth("x".into()), &ctx).unwrap();
+        assert!(
+            auth.contains("`gwsr auth login --profile work --scopes drive.readonly`"),
+            "{auth}"
+        );
+        let ctx = ErrorContext {
+            service: Some("drive".into()),
+            login_command: Some("gwsr auth login --profile work".into()),
+            ..Default::default()
+        };
+        let auth = hint_for(&GwsError::Auth("x".into()), &ctx).unwrap();
+        assert!(
+            auth.contains("`gwsr auth login --profile work -s drive`"),
+            "{auth}"
+        );
+        let rejected = hint_for(&api(401, "authError"), &ctx).unwrap();
+        assert!(
+            rejected.contains("`gwsr auth login --profile work`"),
+            "{rejected}"
+        );
     }
 
     #[test]
@@ -626,6 +686,24 @@ mod tests {
         );
         assert!(hint_for(&api(404, "notFound"), &ctx).is_none());
         assert!(hint_for(&GwsError::Validation("x".into()), &ctx).is_none());
+    }
+
+    /// `--timeout`, `--no-quota-project` and `--page-delay` exist only on
+    /// generated API methods (and `--page-delay` only on paginated ones), so a
+    /// hint that names one also names a setting that works for every command
+    /// (helpers, `gwsr batch`), and never a setting gwsr does not have.
+    #[test]
+    fn hints_name_settings_that_every_command_honors() {
+        let ctx = ErrorContext::default();
+        let network = hint_for(&GwsError::Network("timed out".into()), &ctx).unwrap();
+        assert!(network.contains("GWSR_TIMEOUT"), "{network}");
+        assert!(network.contains("timeout_secs"), "{network}");
+        let quota = hint_for(&api(403, "USER_PROJECT_DENIED"), &ctx).unwrap();
+        assert!(quota.contains("Set GWSR_NO_QUOTA_PROJECT=1"), "{quota}");
+        assert!(!quota.contains("Pass --no-quota-project"), "{quota}");
+        let rate = hint_for(&api(429, "rateLimitExceeded"), &ctx).unwrap();
+        assert!(rate.contains("GWSR_PAGE_DELAY_MS"), "{rate}");
+        assert!(!rate.contains("concurrency"), "{rate}");
     }
 
     #[test]

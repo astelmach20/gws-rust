@@ -388,11 +388,21 @@ fn local_path_for(name: &str, file_type: &str) -> Result<PathBuf, GwsError> {
         }
         // Append the extension rather than `set_extension`, which would
         // replace everything after a dot in the name (`a.b` -> `a.gs`).
-        if i == last {
-            path.push(format!("{part}.{ext}"));
+        let component = if i == last {
+            format!("{part}.{ext}")
         } else {
-            path.push(part);
+            part.to_string()
+        };
+        // +push skips these and then replaces every file in the project, so
+        // writing one would make the next push delete it from the project.
+        if skip_name(&component) {
+            return Err(GwsError::Validation(format!(
+                "Refusing Apps Script file name '{name}': +push skips hidden files and \
+                 node_modules, so pushing the pulled directory would delete it from the \
+                 project; rename it in the Apps Script editor"
+            )));
         }
+        path.push(component);
     }
     Ok(path)
 }
@@ -665,6 +675,43 @@ mod tests {
         assert!(local_path_for("../evil", "HTML").is_err());
         assert!(local_path_for("/abs", "HTML").is_err());
         assert!(local_path_for("x", "WEIRD").is_err());
+    }
+
+    /// `+push` skips hidden files and `node_modules` and then replaces every
+    /// file in the project, so a pulled file it would skip is deleted from
+    /// the project by the next push. `+pull` refuses such names up front.
+    #[test]
+    fn local_paths_refuse_names_push_would_skip() {
+        for name in [".hidden", "lib/.x", ".config/settings", "node_modules/dep"] {
+            let err = local_path_for(name, "SERVER_JS").unwrap_err().to_string();
+            assert!(err.contains("+push"), "{name}: {err}");
+        }
+        // Everything +pull writes, +push reads back under the same name.
+        let dir = tempdir().unwrap();
+        let names = [
+            "Code",
+            "lib/util",
+            "node_modules_old/x",
+            "a.b",
+            "appsscript",
+        ];
+        for name in names {
+            let ty = if name == "appsscript" {
+                "JSON"
+            } else {
+                "SERVER_JS"
+            };
+            write(&dir.path().join(local_path_for(name, ty).unwrap()), "x");
+        }
+        let mut pushed: Vec<String> = collect_files(dir.path())
+            .unwrap()
+            .iter()
+            .map(|f| f["name"].as_str().unwrap().to_string())
+            .collect();
+        pushed.sort();
+        let mut expected: Vec<String> = names.iter().map(|n| n.to_string()).collect();
+        expected.sort();
+        assert_eq!(pushed, expected);
     }
 
     #[test]

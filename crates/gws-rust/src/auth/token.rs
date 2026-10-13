@@ -83,6 +83,18 @@ pub(crate) fn oauth_client(
         .set_token_uri(token_url))
 }
 
+/// The [`AuthError`] for a token-endpoint server failure
+/// ([`http::is_server_failure`]): retryable statuses, the same set as the API
+/// path, are [`AuthError::TokenEndpointUnavailable`] (exit 6); any other 5xx
+/// is the permanent [`AuthError::TokenEndpointFailed`] (exit 1).
+fn server_failure(status: u16, detail: String) -> AuthError {
+    if gws_rust_core::error::is_retryable_status_code(status) {
+        AuthError::TokenEndpointUnavailable { status, detail }
+    } else {
+        AuthError::TokenEndpointFailed { status, detail }
+    }
+}
+
 /// Convert an `oauth2` token-request error into an [`AuthError`].
 pub(crate) fn map_token_error(
     err: RequestTokenError<http::HttpError, oauth2::basic::BasicErrorResponse>,
@@ -103,12 +115,13 @@ pub(crate) fn map_token_error(
                 BasicErrorResponseType::InvalidScope => AuthError::InvalidScope {
                     requested: requested.to_vec(),
                     description,
+                    login_command: login_command.to_string(),
                 },
                 other => AuthError::TokenEndpoint(format!("{other}: {description}")),
             }
         }
-        RequestTokenError::Request(http::HttpError::Unavailable { status, detail }) => {
-            AuthError::TokenEndpointUnavailable { status, detail }
+        RequestTokenError::Request(http::HttpError::ServerFailure { status, detail }) => {
+            server_failure(status, detail)
         }
         RequestTokenError::Request(e) => AuthError::Network(format!("{e}")),
         RequestTokenError::Parse(e, _) => {
@@ -281,11 +294,8 @@ pub async fn service_account_token(
         .bytes()
         .await
         .map_err(|e| AuthError::Network(format!("cannot read token response: {e}")))?;
-    if http::is_unavailable(status) {
-        return Err(AuthError::TokenEndpointUnavailable {
-            status: status.as_u16(),
-            detail: http::body_excerpt(&body),
-        });
+    if http::is_server_failure(status) {
+        return Err(server_failure(status.as_u16(), http::body_excerpt(&body)));
     }
     if !status.is_success() {
         let detail = match serde_json::from_slice::<EndpointError>(&body) {
@@ -310,6 +320,8 @@ pub async fn service_account_token(
                     return Err(AuthError::InvalidScope {
                         requested: scopes.to_vec(),
                         description: desc,
+                        // A service account has no gwsr profile to sign in to.
+                        login_command: "gwsr auth login".to_string(),
                     });
                 }
                 format!("{}: {desc}", err.error)
@@ -601,9 +613,10 @@ pub(crate) mod tests {
         assert!(err.contains("domain-wide delegation"), "{err}");
     }
 
-    /// A 5xx, 429 or non-OAuth body from the token endpoint is a transient
-    /// server problem, not a rejected credential: it must exit 6 (retry with
-    /// backoff), never 2 ("sign in again").
+    /// A retryable status (408, 429, 500, 502, 503, 504: the same set as the
+    /// API path) from the token endpoint is a transient server problem, not a
+    /// rejected credential: it must exit 6 (retry with backoff), never 2
+    /// ("sign in again").
     #[tokio::test]
     async fn token_endpoint_server_errors_are_retryable_not_auth_errors() {
         use crate::error::GwsError;
@@ -623,6 +636,11 @@ pub(crate) mod tests {
             (
                 429,
                 ResponseTemplate::new(429).set_body_string("Too Many Requests"),
+            ),
+            (504, ResponseTemplate::new(504)),
+            (
+                408,
+                ResponseTemplate::new(408).set_body_string("Request Timeout"),
             ),
         ];
         for (status, template) in cases {
@@ -648,6 +666,43 @@ pub(crate) mod tests {
                     "HTTP {status}: {text} -> {gws:?}"
                 );
                 assert!(gws.is_retryable(), "{text}");
+            }
+        }
+    }
+
+    /// A permanent 5xx (501, 505) from the token endpoint is neither a
+    /// rejected credential nor retryable: it exits 1 like the same status
+    /// from an API, and the message must not promise that a retry helps.
+    #[tokio::test]
+    async fn token_endpoint_permanent_server_errors_are_not_retryable() {
+        use crate::error::GwsError;
+        for status in [501u16, 505] {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/token"))
+                .respond_with(ResponseTemplate::new(status).set_body_string("Not Implemented"))
+                .mount(&server)
+                .await;
+            let refresh = refresh_user(&user(), None, &endpoints(&server), "gwsr auth login")
+                .await
+                .unwrap_err();
+            let sa =
+                service_account_token(&test_sa_key(), &["s".into()], None, &endpoints(&server))
+                    .await
+                    .unwrap_err();
+            for err in [refresh, sa] {
+                let gws = GwsError::from(err);
+                let text = gws.to_string();
+                assert_eq!(
+                    gws.exit_code(),
+                    GwsError::EXIT_CODE_API,
+                    "HTTP {status}: {gws:?}"
+                );
+                assert!(!gws.is_retryable(), "{text}");
+                assert!(text.contains(&format!("HTTP {status}")), "{text}");
+                assert!(text.contains("Not Implemented"), "{text}");
+                assert!(!text.contains("temporarily unavailable"), "{text}");
+                assert!(!text.contains("retry later"), "{text}");
             }
         }
     }
