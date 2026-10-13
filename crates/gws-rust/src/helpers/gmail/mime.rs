@@ -277,6 +277,24 @@ mod tests {
     }
 
     #[test]
+    fn generated_message_id_does_not_reveal_the_local_host_name() {
+        // mail-builder's default `gethostname` feature puts the machine's host
+        // name (often the owner's name, e.g. "janes-macbook-pro.local") on the
+        // right of every Message-ID, which ends up in dry-run plans and drafts.
+        let mb = mail_builder::MessageBuilder::new()
+            .to(MbAddress::new_address(None::<&str>, "test@example.com"))
+            .subject("test");
+        let raw = finalize_message(mb, "Body", false, &[]).unwrap();
+        let id = extract_header(&raw, "Message-ID").unwrap();
+        let domain = id
+            .trim()
+            .strip_suffix('>')
+            .and_then(|id| id.rsplit_once('@'))
+            .map(|(_, domain)| domain);
+        assert_eq!(domain, Some("localhost"), "Message-ID: {id}");
+    }
+
+    #[test]
     fn test_attachment_single_file() {
         let att = Attachment {
             filename: "report.pdf".to_string(),
