@@ -2086,3 +2086,64 @@ fn restrict_paths_confines_dev_man_and_auth_export() {
     assert!(out.status.success(), "{out:?}");
     assert!(env.work_dir().join("man").join("gwsr.1").exists());
 }
+
+// ── -o/--output and long-running operations ─────────────────────────────
+
+/// `-o` waits for a long-running operation automatically, but only for a
+/// method that returns one. A People `ContactGroup` has a string `name` and a
+/// `metadata` object, like an Operation; saving it must not try to poll an
+/// `operations.get` the API does not have.
+#[tokio::test(flavor = "multi_thread")]
+async fn output_saves_a_resource_that_only_looks_like_an_operation() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let group = json!({
+        "resourceName": "contactGroups/g1",
+        "name": "Friends",
+        "metadata": {"updateTime": "2026-01-01T00:00:00Z"},
+        "groupType": "USER_CONTACT_GROUP"
+    });
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/contactGroups/g1"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(group.clone()))
+        .mount(&server)
+        .await;
+    let env = Env::new();
+    env.seed_doc(&json!({
+        "name": "people", "version": "v1",
+        "rootUrl": "https://people.googleapis.com/", "servicePath": "",
+        "schemas": {"ContactGroup": {"id": "ContactGroup", "type": "object"}},
+        "resources": {"contactGroups": {"methods": {"get": {
+            "id": "people.contactGroups.get", "httpMethod": "GET",
+            "path": "v1/{+resourceName}",
+            "parameters": {"resourceName": {
+                "type": "string", "location": "path", "required": true,
+                "pattern": "^contactGroups/[^/]+$"
+            }},
+            "parameterOrder": ["resourceName"],
+            "response": {"$ref": "ContactGroup"},
+            "scopes": ["https://www.googleapis.com/auth/contacts.readonly"]
+        }}}}
+    }));
+    let out = env
+        .cmd()
+        .env("GWSR_TOKEN", "test-token")
+        .env("GWSR_API_BASE_URL", server.uri())
+        .args([
+            "people",
+            "contactGroups",
+            "get",
+            "--params",
+            r#"{"resourceName": "contactGroups/g1"}"#,
+            "-o",
+            "group.json",
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    let saved: Value =
+        serde_json::from_slice(&std::fs::read(env.work_dir().join("group.json")).unwrap()).unwrap();
+    assert_eq!(saved, group);
+}

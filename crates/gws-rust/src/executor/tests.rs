@@ -1912,6 +1912,36 @@ async fn download_operation_is_waited_on_and_followed() {
 }
 
 #[tokio::test]
+async fn output_follows_an_operation_without_wait_flag() {
+    // `-o` alone still resolves an operation-returning method's result.
+    let server = MockServer::start().await;
+    let download_uri = format!("{}/download/f1", server.uri());
+    Mock::given(method("POST"))
+        .and(path("/drive/v3/files/f1/download"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "name": "op1", "done": true,
+            "response": {"downloadUri": download_uri}
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/download/f1"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(b"exported".to_vec(), "text/plain"))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("f1.txt");
+    let d = doc(&server.uri());
+    let mut call = Call::new(&d, "download", &server);
+    call.params = json!({"fileId": "f1"});
+    call.output = Some(OutputTarget::File(out.clone()));
+    call.run(&Emitter::capturing()).await.unwrap();
+    assert_eq!(std::fs::read(&out).unwrap(), b"exported");
+}
+
+#[tokio::test]
 async fn failed_operation_is_an_error() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
