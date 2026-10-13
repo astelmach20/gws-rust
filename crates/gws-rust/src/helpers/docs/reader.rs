@@ -263,6 +263,16 @@ impl Marks {
 /// Wrap text in Markdown marks, keeping surrounding whitespace outside.
 /// Literal text is escaped; code (monospace) text is kept verbatim.
 fn styled(text: &str, marks: &Marks) -> String {
+    // A code span cannot hold a line break: the hard break written for a
+    // vertical tab would be literal text inside it. Wrap each line on its
+    // own, so the breaks fall between the spans.
+    if marks.mono && text.contains('\u{000b}') {
+        return text
+            .split('\u{000b}')
+            .map(|line| styled(line, marks))
+            .collect::<Vec<_>>()
+            .join("\u{000b}");
+    }
     let trimmed = text.trim();
     if trimmed.is_empty() {
         return text.to_string();
@@ -617,6 +627,35 @@ mod tests {
             render(&document, false),
             "one\ntwo\ntrailing\n\n- item\n- more\n"
         );
+    }
+
+    /// A line break (Shift+Enter) inside monospace text, such as a code
+    /// snippet, must not put the hard break's `\` inside a code span, where
+    /// it is literal text.
+    #[test]
+    fn line_breaks_in_code_do_not_add_a_literal_backslash() {
+        use pulldown_cmark::{Event, Parser};
+        let mono = json!({"weightedFontFamily": {"fontFamily": "Courier New"}});
+        let document = json!({"body": {"content": [{"paragraph": {"elements": [
+            {"textRun": {"content": "let a = 1;\u{b}let b = 2;\u{b}", "textStyle": mono}},
+            {"textRun": {"content": "\n"}}
+        ]}}]}});
+        let md = render(&document, true);
+        let events: Vec<Event<'_>> = Parser::new(&md).collect();
+        let code: Vec<String> = events
+            .iter()
+            .filter_map(|e| match e {
+                Event::Code(c) => Some(c.to_string()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(code, ["let a = 1;", "let b = 2;"], "from:\n{md:?}");
+        let hard = events
+            .iter()
+            .filter(|e| matches!(e, Event::HardBreak))
+            .count();
+        assert_eq!(hard, 1, "from:\n{md:?}");
+        assert_eq!(md, "`let a = 1;`\\\n`let b = 2;`\n\n");
     }
 
     #[test]
