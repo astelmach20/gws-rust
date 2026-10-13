@@ -1254,3 +1254,69 @@ fn gmail_filter_forward_is_gated_under_policy() {
         String::from_utf8_lossy(&out.stderr)
     );
 }
+
+/// `drive +sync` keeps a local file it did not write and exits 1 with
+/// `syncConflict` after printing the report; `--overwrite` replaces it and
+/// exits 0. The sync-state file is written next to the mirrored files.
+#[tokio::test(flavor = "multi_thread")]
+async fn drive_sync_keeps_local_files_and_exits_with_sync_conflict() {
+    use wiremock::matchers::{method, path, query_param};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/drive/v3/files"))
+        .and(query_param("q", "'ROOT' in parents and trashed = false"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"files": [
+            {"id": "A", "name": "a.txt", "mimeType": "text/plain",
+             "modifiedTime": "2024-01-01T00:00:00Z", "version": "3", "size": "6"}
+        ]})))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/drive/v3/files/A"))
+        .and(query_param("alt", "media"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(b"remote".to_vec()))
+        .mount(&server)
+        .await;
+
+    let dir = setup();
+    let mirror = dir.path().join("mirror");
+    std::fs::create_dir(&mirror).unwrap();
+    std::fs::write(mirror.join("a.txt"), b"mine").unwrap();
+    let run = |extra: &[&str]| {
+        gwsr(dir.path())
+            .env("GWSR_TOKEN", "test-token")
+            .env("GWSR_API_BASE_URL", server.uri())
+            .args(["drive", "+sync", "--folder-id", "ROOT", "--dir", "mirror"])
+            .args(extra)
+            .output()
+            .unwrap()
+    };
+
+    let out = run(&[]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(1), "{stderr}");
+    let err: Value = serde_json::from_str(stderr.lines().last().unwrap()).unwrap();
+    assert_eq!(err["error"]["reason"], "syncConflict", "{stderr}");
+    let report = stdout_json(&out);
+    assert_eq!(report["conflicts"][0]["id"], "A", "{report}");
+    assert_eq!(report["conflicts"][0]["reason"], "untracked", "{report}");
+    assert_eq!(std::fs::read(mirror.join("a.txt")).unwrap(), b"mine");
+
+    let out = run(&["--overwrite"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(std::fs::read(mirror.join("a.txt")).unwrap(), b"remote");
+    let state: Value =
+        serde_json::from_slice(&std::fs::read(mirror.join(".gwsr-sync.json")).unwrap()).unwrap();
+    assert_eq!(state["files"]["A"]["path"], "a.txt", "{state}");
+
+    // In sync now: a plain run succeeds and downloads nothing.
+    let out = run(&[]);
+    assert!(out.status.success());
+    assert_eq!(stdout_json(&out)["unchanged"].as_array().unwrap().len(), 1);
+}
