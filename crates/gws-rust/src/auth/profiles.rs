@@ -58,10 +58,20 @@ static OVERRIDES: OnceLock<GlobalOverrides> = OnceLock::new();
 ///
 /// # Errors
 ///
-/// Fails if the profile name is invalid or the overrides were already set.
+/// Fails if the profile name or impersonated user is invalid, or the
+/// overrides were already set.
 pub fn set_global_overrides(overrides: GlobalOverrides) -> Result<(), GwsError> {
     if let Some(name) = &overrides.profile {
         validate_profile_name(name).map_err(|e| GwsError::Validation(format!("{e:#}")))?;
+    }
+    if let Some(subject) = &overrides.impersonate {
+        // The same rule as GWSR_IMPERSONATE; the value is never echoed.
+        crate::env::check_email(subject).map_err(|problem| {
+            GwsError::Validation(format!(
+                "invalid --impersonate value: {problem}; expected a user email address such as \
+                 user@example.com"
+            ))
+        })?;
     }
     OVERRIDES
         .set(overrides)

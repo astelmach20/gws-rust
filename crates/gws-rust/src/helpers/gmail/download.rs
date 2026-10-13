@@ -16,13 +16,13 @@
 //!
 //! Filenames come from the (untrusted) sender, so they are reduced to a single
 //! safe path component, de-duplicated, and never allowed to overwrite an
-//! existing file unless `--overwrite` is given. Files are written atomically.
+//! existing file unless `--overwrite` is given. Files are written through the
+//! shared output writer ([`crate::output_file`]).
 
 use super::cli::required_str;
 use super::prelude::*;
 use crate::helpers::modelarmor::SanitizeConfig;
 use std::collections::HashSet;
-use std::io::Write;
 use std::path::{Path, PathBuf};
 
 /// Maximum filename length in bytes (common filesystem limit is 255).
@@ -128,29 +128,6 @@ fn plan_paths(
     Ok(paths)
 }
 
-/// Write `data` to `path` atomically via a temp file in the same directory.
-fn write_atomically(path: &Path, data: &[u8], overwrite: bool) -> Result<(), GwsError> {
-    let dir = path
-        .parent()
-        .ok_or_else(|| GwsError::other(format!("{} has no parent directory", path.display())))?;
-    let mut tmp = tempfile::NamedTempFile::new_in(dir).map_err(|e| {
-        GwsError::other(format!(
-            "Failed to create temp file in {}: {e}",
-            dir.display()
-        ))
-    })?;
-    tmp.write_all(data)
-        .and_then(|()| tmp.as_file().sync_all())
-        .map_err(|e| GwsError::other(format!("Failed to write {}: {e}", path.display())))?;
-    let persisted = if overwrite {
-        tmp.persist(path).map(|_| ())
-    } else {
-        tmp.persist_noclobber(path).map(|_| ())
-    };
-    persisted
-        .map_err(|e| GwsError::other(format!("Failed to save {}: {}", path.display(), e.error)))
-}
-
 /// Select which parts to download.
 fn select_parts(parts: &[OriginalPart], include_inline: bool) -> Vec<OriginalPart> {
     parts
@@ -182,7 +159,7 @@ async fn download(
                 ))
             })?,
         };
-        write_atomically(&path, &data, overwrite)?;
+        crate::output_file::write_atomic(&path, &data, overwrite).await?;
         saved.push(json!({
             "filename": part.filename,
             "path": path.display().to_string(),
@@ -379,6 +356,35 @@ mod tests {
             .map(|s| std::fs::read(s["path"].as_str().unwrap()).unwrap())
             .collect();
         assert_eq!(contents, vec![b"A".to_vec(), b"B".to_vec()], "{saved:?}");
+    }
+
+    /// Attachments go through the shared output writer: a symlink planted at
+    /// a target name is replaced rather than followed, and files get the
+    /// default output mode (0666 minus the umask) like every other output.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn download_uses_the_shared_output_writer() {
+        use std::os::unix::fs::PermissionsExt;
+        let server = MockServer::start().await;
+        let root = tempfile::tempdir().unwrap();
+        let out = root.path().join("out");
+        std::fs::create_dir(&out).unwrap();
+        let victim = root.path().join("victim.txt");
+        std::fs::write(&victim, "keep me").unwrap();
+        std::os::unix::fs::symlink(&victim, out.join("a.txt")).unwrap();
+        let parts = vec![part("a.txt", PartData::Inline("aGk".into()), false)];
+        download(&mock_api(&server), "m1", &parts, &out, true)
+            .await
+            .unwrap();
+        assert_eq!(std::fs::read_to_string(&victim).unwrap(), "keep me");
+        let written = out.join("a.txt");
+        assert!(!written.symlink_metadata().unwrap().file_type().is_symlink());
+        assert_eq!(std::fs::read(&written).unwrap(), b"hi");
+
+        let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        let plain = root.path().join("plain.txt");
+        std::fs::write(&plain, b"x").unwrap();
+        assert_eq!(mode(&written), mode(&plain));
     }
 
     #[tokio::test]

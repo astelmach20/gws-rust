@@ -254,6 +254,7 @@ fn doc(root: &str) -> RestDescription {
         version: "v3".into(),
         root_url: format!("{root}/"),
         service_path: "drive/v3/".into(),
+        batch_path: Some("batch/drive/v3".into()),
         schemas,
         ..Default::default()
     };
@@ -338,7 +339,7 @@ impl<'a> Call<'a> {
                 method: rest_method(self.doc, self.method),
                 params: params(self.params),
                 body: self.body,
-                credentials: self.credentials,
+                credentials: Some(self.credentials),
                 upload: self.upload,
                 output: self.output,
                 pagination: self.pagination,
@@ -748,6 +749,46 @@ async fn fields_flag_keeps_next_page_token() {
     call.options.fields = Some("files(id)".into());
     call.pagination.page_all = true;
     call.run(&Emitter::capturing()).await.unwrap();
+}
+
+/// A `nextPageToken` nested inside a sub-selection (`files(id,nextPageToken)`)
+/// does not select the top-level token, so `--page-all` still adds it.
+#[tokio::test]
+async fn nested_next_page_token_in_fields_still_adds_top_level_token() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/drive/v3/files"))
+        .and(query_param(
+            "fields",
+            "nextPageToken,files(id,nextPageToken)",
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"files": []})))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let d = doc(&server.uri());
+    let mut call = Call::new(&d, "list", &server);
+    call.options.fields = Some("files(id,nextPageToken)".into());
+    call.pagination.page_all = true;
+    call.run(&Emitter::capturing()).await.unwrap();
+}
+
+#[test]
+fn selects_top_level_ignores_nested_names() {
+    for mask in [
+        "nextPageToken",
+        "files(id),nextPageToken",
+        " nextPageToken ,a",
+    ] {
+        assert!(super::selects_top_level(mask, "nextPageToken"), "{mask}");
+    }
+    for mask in [
+        "files(id,nextPageToken)",
+        "files/nextPageToken",
+        "nextPageTokens",
+    ] {
+        assert!(!super::selects_top_level(mask, "nextPageToken"), "{mask}");
+    }
 }
 
 #[tokio::test]
@@ -1912,6 +1953,36 @@ async fn download_operation_is_waited_on_and_followed() {
 }
 
 #[tokio::test]
+async fn output_follows_an_operation_without_wait_flag() {
+    // `-o` alone still resolves an operation-returning method's result.
+    let server = MockServer::start().await;
+    let download_uri = format!("{}/download/f1", server.uri());
+    Mock::given(method("POST"))
+        .and(path("/drive/v3/files/f1/download"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "name": "op1", "done": true,
+            "response": {"downloadUri": download_uri}
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/download/f1"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(b"exported".to_vec(), "text/plain"))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("f1.txt");
+    let d = doc(&server.uri());
+    let mut call = Call::new(&d, "download", &server);
+    call.params = json!({"fileId": "f1"});
+    call.output = Some(OutputTarget::File(out.clone()));
+    call.run(&Emitter::capturing()).await.unwrap();
+    assert_eq!(std::fs::read(&out).unwrap(), b"exported");
+}
+
+#[tokio::test]
 async fn failed_operation_is_an_error() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
@@ -1968,7 +2039,7 @@ async fn batch_round_trip_reports_partial_failure() {
     let err = batch::run_batch(
         &d,
         &calls,
-        Credentials::Static("tok".into()),
+        Some(Credentials::Static("tok".into())),
         &opts,
         &SanitizeConfig::default(),
         &em,
@@ -1985,6 +2056,58 @@ async fn batch_round_trip_reports_partial_failure() {
     let sent = server.received_requests().await.unwrap();
     let body = String::from_utf8_lossy(&sent[0].body);
     assert!(body.contains("GET /drive/v3/files/1 HTTP/1.1"));
+}
+
+/// The batch endpoint is the Discovery document's `batchPath` (Google's
+/// newer APIs use plain `batch` on their own host), not a guessed
+/// `batch/<name>/<version>`; an API without one does not support batching.
+#[tokio::test]
+async fn batch_posts_to_the_discovery_batch_path() {
+    let server = MockServer::start().await;
+    let response_body = "--b\r\nContent-Type: application/http\r\nContent-ID: <response-item-a>\r\n\r\n\
+                         HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{\"id\":\"1\"}\r\n--b--\r\n";
+    Mock::given(method("POST"))
+        .and(path("/batch"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_raw(response_body, "multipart/mixed; boundary=b"),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    let mut d = doc(&server.uri());
+    d.batch_path = Some("batch".into());
+    let opts = options(&server);
+    let input = "{\"id\":\"a\",\"method\":\"files.get\",\"params\":{\"fileId\":\"1\"}}";
+    let calls = batch::parse_calls(&d, input, &opts).unwrap();
+    let em = Emitter::capturing();
+    batch::run_batch(
+        &d,
+        &calls,
+        Credentials::Static("tok".into()),
+        &opts,
+        &SanitizeConfig::default(),
+        &em,
+    )
+    .await
+    .unwrap();
+    assert_eq!(lines(&em)[0]["status"], 200);
+
+    d.batch_path = None;
+    let calls = batch::parse_calls(&d, input, &opts).unwrap();
+    let err = batch::run_batch(
+        &d,
+        &calls,
+        Credentials::Static("tok".into()),
+        &opts,
+        &SanitizeConfig::default(),
+        &Emitter::capturing(),
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        matches!(err, GwsError::Validation(_)) && err.to_string().contains("batchPath"),
+        "{err}"
+    );
 }
 
 #[tokio::test]
@@ -2016,7 +2139,7 @@ async fn batch_results_follow_input_order_when_parts_are_reordered() {
     batch::run_batch(
         &d,
         &calls,
-        Credentials::Static("tok".into()),
+        Some(Credentials::Static("tok".into())),
         &opts,
         &SanitizeConfig::default(),
         &em,

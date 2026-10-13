@@ -23,8 +23,61 @@ List, create, or delete Gmail filters
 ## Usage
 
 ```bash
-gwsr gmail +filter
+gwsr gmail +filter <command>
 ```
+
+### list
+
+List filters
+
+```bash
+gwsr gmail +filter list
+```
+
+### create
+
+Create a filter
+
+```bash
+gwsr gmail +filter create
+```
+
+#### Flags
+
+| Flag | Required | Default | Description |
+|------|----------|---------|-------------|
+| `--yes` | — | — | Confirm this action without prompting (required when not on a terminal) |
+| `--from` | — | — | Match sender |
+| `--to` | — | — | Match recipient |
+| `--subject` | — | — | Match subject |
+| `--query` | — | — | Match a Gmail search query |
+| `--exclude` | — | — | Exclude messages matching this query |
+| `--has-attachment` | — | — | Match only messages with attachments |
+| `--add-label` | — | — | Label names or IDs to apply (repeatable or comma-separated) |
+| `--remove-label` | — | — | Label names or IDs to remove (repeatable or comma-separated) |
+| `--archive` | — | — | Skip the Inbox |
+| `--mark-read` | — | — | Mark as read |
+| `--star` | — | — | Star the message |
+| `--important` | — | — | Mark as important |
+| `--never-important` | — | — | Never mark as important |
+| `--trash` | — | — | Move to Trash |
+| `--never-spam` | — | — | Never send to Spam |
+| `--forward` | — | — | Forward to this verified forwarding address (needs --yes when GWSR_REQUIRE_CONFIRM=1) |
+
+### delete
+
+Delete a filter
+
+```bash
+gwsr gmail +filter delete --filter-id <ID>
+```
+
+#### Flags
+
+| Flag | Required | Default | Description |
+|------|----------|---------|-------------|
+| `--filter-id` | ✓ | — | ID of the filter to delete |
+| `--yes` | — | — | Confirm this action without prompting (required when not on a terminal) |
 
 ## Examples
 

@@ -29,7 +29,16 @@ pub(super) fn render(document: &Value, markdown: bool) -> String {
 }
 
 fn render_elements(elements: &[Value], document: &Value, markdown: bool, out: &mut String) {
+    let mut in_list = false;
     for el in elements {
+        let is_item = el.pointer("/paragraph/bullet").is_some();
+        // List items are written one per line; a block that follows them
+        // needs a blank line, or CommonMark reads a paragraph as a lazy
+        // continuation of the last item.
+        if markdown && in_list && !is_item && !out.ends_with("\n\n") {
+            out.push('\n');
+        }
+        in_list = is_item;
         if let Some(p) = el.get("paragraph") {
             render_paragraph(p, document, markdown, out);
         } else if let Some(t) = el.get("table") {
@@ -114,10 +123,18 @@ fn render_paragraph(p: &Value, document: &Value, markdown: bool, out: &mut Strin
         }
     }
     flush(&mut line, &mut pending);
-    let mut line = line.replace('\u{000b}', "\n");
-    if markdown {
-        line = escape_line_starts(&line);
-    }
+    // A vertical tab is a line break inside the paragraph (Shift+Enter).
+    // Markdown needs a hard break (`\` before the newline) to keep it; a
+    // trailing one has nothing to break and would leave a literal `\`.
+    let line = if markdown {
+        escape_line_starts(
+            &line
+                .trim_end_matches('\u{000b}')
+                .replace('\u{000b}', "\\\n"),
+        )
+    } else {
+        line.replace('\u{000b}', "\n")
+    };
     let style = p
         .pointer("/paragraphStyle/namedStyleType")
         .and_then(Value::as_str)
@@ -434,6 +451,34 @@ mod tests {
     }
 
     #[test]
+    fn paragraph_after_a_list_is_not_merged_into_the_last_item() {
+        let para = |t: &str| json!({"paragraph": {"elements": [{"textRun": {"content": t}}]}});
+        let table = json!({"table": {"tableRows": [{"tableCells": [
+            {"content": [para("A\n")]}, {"content": [para("B\n")]}
+        ]}]}});
+        for after in [para("After the list\n"), table] {
+            let document = json!({
+                "lists": doc()["lists"].clone(),
+                "body": {"content": [
+                    {"paragraph": {"bullet": {"listId": "L1"},
+                        "elements": [{"textRun": {"content": "item\n"}}]}},
+                    after,
+                ]}
+            });
+            let md = render(&document, true);
+            let (tags, _) = parse_back(&md);
+            // The block after the list is a sibling of the list, not part of its item.
+            let block = tags
+                .iter()
+                .any(|t| t == "Paragraph" || t.starts_with("Table"));
+            assert!(
+                block && tags.iter().filter(|t| t.starts_with("Item")).count() == 1,
+                "list item swallowed the next block: {tags:?} from:\n{md}"
+            );
+        }
+    }
+
+    #[test]
     fn markdown_table_cells_escape_pipes_once() {
         let cell = |run: Value| json!({"content": [{"paragraph": {"elements": [run]}}]});
         let document = json!({"body": {"content": [{"table": {"tableRows": [{"tableCells": [
@@ -534,6 +579,43 @@ mod tests {
                 &marks(json!({"weightedFontFamily": {"fontFamily": "Courier New"}}))
             ),
             "`f()`"
+        );
+    }
+
+    #[test]
+    fn line_breaks_stay_hard_breaks_in_markdown() {
+        use pulldown_cmark::{Event, Parser};
+        let para = |t: &str| json!({"paragraph": {"elements": [{"textRun": {"content": t}}]}});
+        let item = json!({"paragraph": {
+            "elements": [{"textRun": {"content": "item\u{000b}- more\n"}}],
+            "bullet": {"listId": "l"}
+        }});
+        let document = json!({"body": {"content": [
+            para("one\u{000b}two\n"),
+            para("trailing\u{000b}\n"),
+            item,
+        ]}});
+        let md = render(&document, true);
+        let events: Vec<Event<'_>> = Parser::new(&md).collect();
+        let hard = events
+            .iter()
+            .filter(|e| matches!(e, Event::HardBreak))
+            .count();
+        let soft = events
+            .iter()
+            .filter(|e| matches!(e, Event::SoftBreak))
+            .count();
+        assert_eq!((hard, soft), (2, 0), "from:\n{md:?}");
+        assert!(!md.contains("trailing\\"), "dangling break in:\n{md:?}");
+        // `docs +write --markdown` turns the item's hard break back into a line break.
+        let written = super::super::markdown::render(&md)
+            .unwrap()
+            .to_requests(1, false);
+        let text = written[0]["insertText"]["text"].as_str().unwrap();
+        assert!(text.ends_with("item\u{b}- more"), "{text:?}");
+        assert_eq!(
+            render(&document, false),
+            "one\ntwo\ntrailing\n\n- item\n- more\n"
         );
     }
 
