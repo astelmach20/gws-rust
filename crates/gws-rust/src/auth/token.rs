@@ -103,6 +103,7 @@ pub(crate) fn map_token_error(
                 BasicErrorResponseType::InvalidScope => AuthError::InvalidScope {
                     requested: requested.to_vec(),
                     description,
+                    login_command: login_command.to_string(),
                 },
                 other => AuthError::TokenEndpoint(format!("{other}: {description}")),
             }
@@ -310,6 +311,8 @@ pub async fn service_account_token(
                     return Err(AuthError::InvalidScope {
                         requested: scopes.to_vec(),
                         description: desc,
+                        // A service account has no gwsr profile to sign in to.
+                        login_command: "gwsr auth login".to_string(),
                     });
                 }
                 format!("{}: {desc}", err.error)

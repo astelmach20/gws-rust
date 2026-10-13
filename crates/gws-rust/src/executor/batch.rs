@@ -130,6 +130,8 @@ pub async fn handle_batch_command(args: &BatchArgs, ctx: &BatchContext) -> Resul
         }
     };
 
+    let text = super::input::strip_utf8_bom(text);
+
     let mut options = ExecOptions::from_env()?;
     options.dry_run = ctx.dry_run;
     options.assume_yes = args.yes;

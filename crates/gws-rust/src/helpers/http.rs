@@ -601,7 +601,7 @@ pub(crate) const SAFE_FILENAME_MAX_BYTES: usize = 200;
 /// remains.
 ///
 /// The result is at most [`SAFE_FILENAME_MAX_BYTES`] UTF-8 bytes (cut on a
-/// character boundary). File systems limit a name to 255 bytes (ext4) or 255
+/// character boundary, keeping a short extension). File systems limit a name to 255 bytes (ext4) or 255
 /// UTF-16 units (APFS, NTFS), and UTF-8 is never shorter than either; the
 /// headroom leaves room for callers to add an extension or an ID prefix.
 pub(crate) fn safe_filename(raw: &str, fallback: &str) -> String {
@@ -616,20 +616,44 @@ pub(crate) fn safe_filename(raw: &str, fallback: &str) -> String {
         })
         .collect();
     let cleaned = avoid_windows_device_name(trim_name(cleaned.trim_start_matches('.')));
-    let mut truncated = String::new();
-    for c in cleaned.chars() {
-        if truncated.len() + c.len_utf8() > SAFE_FILENAME_MAX_BYTES {
-            break;
-        }
-        truncated.push(c);
-    }
-    // Truncation can expose a trailing dot or space.
-    let truncated = trim_name(&truncated);
+    let truncated = truncate_keeping_extension(&cleaned);
     if truncated.is_empty() {
         fallback.to_string()
     } else {
-        truncated.to_string()
+        truncated
     }
+}
+
+/// Cut `name` to [`SAFE_FILENAME_MAX_BYTES`] on a character boundary. A short
+/// alphanumeric extension (`.pdf`, `.gz`) is kept and the stem shortened
+/// instead, so the file still opens with the right application.
+fn truncate_keeping_extension(name: &str) -> String {
+    if name.len() <= SAFE_FILENAME_MAX_BYTES {
+        return name.to_string();
+    }
+    let (stem, ext) = match name.rfind('.') {
+        Some(i)
+            if (2..=16).contains(&(name.len() - i))
+                && name[i + 1..].chars().all(|c| c.is_ascii_alphanumeric()) =>
+        {
+            (&name[..i], &name[i..])
+        }
+        _ => (name, ""),
+    };
+    let budget = SAFE_FILENAME_MAX_BYTES - ext.len();
+    let mut stem_cut = String::new();
+    for c in stem.chars() {
+        if stem_cut.len() + c.len_utf8() > budget {
+            break;
+        }
+        stem_cut.push(c);
+    }
+    // Truncation can expose a trailing dot or space.
+    let stem_cut = trim_name(&stem_cut);
+    if stem_cut.is_empty() {
+        return String::new();
+    }
+    format!("{stem_cut}{ext}")
 }
 
 /// Trim surrounding whitespace, and the trailing dots and spaces Windows
@@ -1183,5 +1207,24 @@ mod tests {
         let cjk = safe_filename(&"文".repeat(100), "x");
         assert_eq!(cjk, "文".repeat(66));
         assert!(cjk.len() <= SAFE_FILENAME_MAX_BYTES);
+    }
+
+    /// Shortening a long name must not cut off its extension, or the
+    /// downloaded file no longer opens with the right application.
+    #[test]
+    fn safe_filename_keeps_the_extension_when_shortening() {
+        let out = safe_filename(&format!("{}.pdf", "a".repeat(300)), "x");
+        assert_eq!(
+            out,
+            format!("{}.pdf", "a".repeat(SAFE_FILENAME_MAX_BYTES - 4))
+        );
+        let out = safe_filename(&format!("{}.gz", "\u{1F4C4}".repeat(100)), "x");
+        assert_eq!(out, format!("{}.gz", "\u{1F4C4}".repeat(49)));
+        // Not an extension: kept only as far as it fits.
+        let out = safe_filename(&format!("{}.not an extension", "a".repeat(300)), "x");
+        assert_eq!(out, "a".repeat(SAFE_FILENAME_MAX_BYTES));
+        // The cut never leaves a dot or space before the extension.
+        let out = safe_filename(&format!("{}. {}.pdf", "a".repeat(194), "b".repeat(50)), "x");
+        assert_eq!(out, format!("{}.pdf", "a".repeat(194)));
     }
 }

@@ -65,6 +65,31 @@ impl From<GwsError> for StepError {
     }
 }
 
+/// Prints a stream's records to stdout through the shared formatter, so
+/// `--format`, `--jq` and `--columns` apply to every record, as they do to a
+/// generated method's `--page-all` stream (JSON records are compact NDJSON;
+/// CSV and table print one header).
+pub(crate) struct StreamPrinter {
+    format: crate::formatter::OutputFormat,
+    pages: crate::formatter::PageStream,
+}
+
+impl StreamPrinter {
+    pub(crate) fn new(format: crate::formatter::OutputFormat) -> Self {
+        Self {
+            format,
+            pages: crate::formatter::PageStream::default(),
+        }
+    }
+
+    /// Print one record. A write or formatting failure stops the stream.
+    pub(crate) fn print(&mut self, record: &Value) -> Result<(), StepError> {
+        crate::formatter::format_value_paginated(record, &self.format, &mut self.pages)
+            .and_then(|text| crate::output::emit(&text))
+            .map_err(StepError::Fatal)
+    }
+}
+
 /// Write one diagnostic record to stderr as a single JSON line.
 pub(crate) fn emit_diagnostic(level: &str, event: &str, fields: Value) {
     let mut record = json!({ "level": level, "event": event });

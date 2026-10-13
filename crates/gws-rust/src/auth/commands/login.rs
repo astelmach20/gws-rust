@@ -183,6 +183,25 @@ pub(crate) fn finalize_scopes(scopes_in: Vec<String>) -> Vec<String> {
     out
 }
 
+/// After a login to `name`, record it as the active profile in `config.toml`
+/// when no profile is configured there yet. Returns whether it was recorded.
+///
+/// The default profile is never recorded: it is already active when nothing
+/// is configured, and recording it would make it an explicitly chosen
+/// profile, which never falls back to Application Default Credentials.
+fn make_active_if_unset(base: &std::path::Path, name: &str) -> Result<bool, GwsError> {
+    if name == profiles::DEFAULT_PROFILE {
+        return Ok(false);
+    }
+    let configured = crate::config::profile_in(&crate::config::config_path_in(base))?;
+    if configured.is_some() {
+        Ok(false)
+    } else {
+        profiles::set_active_profile(base, name).map_err(crate::auth::to_gws_error)?;
+        Ok(true)
+    }
+}
+
 /// Handle parsed `auth login` arguments.
 ///
 /// # Errors
@@ -286,18 +305,10 @@ pub(crate) async fn handle(m: &clap::ArgMatches) -> Result<(), GwsError> {
 
     let save_base = base.clone();
     let profile_name = active.name.clone();
-    let made_active = tokio::task::spawn_blocking(move || -> Result<bool, GwsError> {
-        let configured = crate::config::profile_in(&crate::config::config_path_in(&save_base))?;
-        if configured.is_some() {
-            Ok(false)
-        } else {
-            profiles::set_active_profile(&save_base, &profile_name)
-                .map_err(crate::auth::to_gws_error)?;
-            Ok(true)
-        }
-    })
-    .await
-    .map_err(|e| GwsError::other(format!("save task failed: {e}")))??;
+    let made_active =
+        tokio::task::spawn_blocking(move || make_active_if_unset(&save_base, &profile_name))
+            .await
+            .map_err(|e| GwsError::other(format!("save task failed: {e}")))??;
 
     crate::timezone::invalidate_cache()?;
 
@@ -338,6 +349,35 @@ pub(crate) async fn handle(m: &clap::ArgMatches) -> Result<(), GwsError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A login to the implicit default profile must not pin it in
+    /// `config.toml`: that would turn it into an explicitly chosen profile,
+    /// which never falls back to Application Default Credentials (so after
+    /// `gwsr auth logout`, ADC would be refused) and is named in every hint.
+    #[test]
+    fn login_to_default_profile_does_not_pin_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path();
+        assert!(!make_active_if_unset(base, profiles::DEFAULT_PROFILE).unwrap());
+        let active = profiles::active_profile(base).unwrap();
+        assert_eq!(active.name, profiles::DEFAULT_PROFILE);
+        assert_eq!(active.source, profiles::ProfileSource::Default);
+        assert!(!crate::config::config_path_in(base).exists());
+    }
+
+    /// A first login to a named profile makes it the active one, but never
+    /// replaces a profile already chosen in `config.toml`.
+    #[test]
+    fn first_login_to_named_profile_makes_it_active() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path();
+        assert!(make_active_if_unset(base, "work").unwrap());
+        let active = profiles::active_profile(base).unwrap();
+        assert_eq!(active.name, "work");
+        assert_eq!(active.source, profiles::ProfileSource::ConfigFile);
+        assert!(!make_active_if_unset(base, "home").unwrap());
+        assert_eq!(profiles::active_profile(base).unwrap().name, "work");
+    }
 
     fn matches(args: &[&str]) -> clap::ArgMatches {
         let mut v = vec!["login"];

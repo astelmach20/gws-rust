@@ -63,15 +63,13 @@ pub(super) async fn handle_read(
         .map_err(|e| GwsError::other(format!("Failed to serialize message: {e}")))?;
     let checked = require_pass(sanitize_value(sanitize_config, as_json).await?)?;
 
-    let mut stdout = io::stdout().lock();
     if opts.json {
-        let text = serde_json::to_string_pretty(&checked)
-            .map_err(|e| GwsError::other(format!("Failed to serialize message: {e}")))?;
-        writeln!(stdout, "{text}")
-            .and_then(|()| stdout.flush())
-            .map_err(crate::output::stdout_error)?;
-        return Ok(());
+        // The shared formatter applies --format, --jq, --columns and the
+        // JSON style, like every other helper's output.
+        let format = crate::helpers::http::output_format(matches)?;
+        return crate::output::emit(&crate::formatter::format_value(&checked, &format)?);
     }
+    let mut stdout = io::stdout().lock();
     render(&original, opts, &mut stdout)?;
     stdout.flush().map_err(crate::output::stdout_error)
 }

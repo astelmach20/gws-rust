@@ -28,9 +28,17 @@ pub(super) struct ThreadingHeaders<'a> {
     pub references: &'a [String],
 }
 
-/// Build the full references chain for threading: existing references + current message ID.
+/// Build the full references chain for threading (RFC 5322 §3.6.4): the
+/// parent's `References`, or, when it has none, its `In-Reply-To` if that
+/// names a single message; then the parent's own message ID.
 pub(super) fn build_references_chain(original: &OriginalMessage) -> Vec<String> {
-    let mut refs = original.references.clone();
+    let mut refs = if !original.references.is_empty() {
+        original.references.clone()
+    } else if let [single] = original.in_reply_to.as_slice() {
+        vec![single.clone()]
+    } else {
+        Vec::new()
+    };
     if !original.message_id.is_empty() {
         refs.push(original.message_id.clone());
     }
@@ -207,6 +215,42 @@ mod tests {
         let references = extract_header(&raw, "References").unwrap();
         assert!(references.contains("ref-1@example.com"));
         assert!(references.contains("ref-2@example.com"));
+    }
+
+    #[test]
+    fn references_chain_starts_from_in_reply_to_without_references() {
+        let original = OriginalMessage {
+            message_id: "parent@example.com".to_string(),
+            in_reply_to: vec!["grandparent@example.com".to_string()],
+            ..Default::default()
+        };
+        assert_eq!(
+            build_references_chain(&original),
+            vec!["grandparent@example.com", "parent@example.com"]
+        );
+
+        // References wins over In-Reply-To when both are present.
+        let original = OriginalMessage {
+            message_id: "parent@example.com".to_string(),
+            references: vec!["root@example.com".to_string()],
+            in_reply_to: vec!["grandparent@example.com".to_string()],
+            ..Default::default()
+        };
+        assert_eq!(
+            build_references_chain(&original),
+            vec!["root@example.com", "parent@example.com"]
+        );
+
+        // An In-Reply-To naming several messages is ambiguous: not used.
+        let original = OriginalMessage {
+            message_id: "parent@example.com".to_string(),
+            in_reply_to: vec!["a@example.com".to_string(), "b@example.com".to_string()],
+            ..Default::default()
+        };
+        assert_eq!(
+            build_references_chain(&original),
+            vec!["parent@example.com"]
+        );
     }
 
     #[test]

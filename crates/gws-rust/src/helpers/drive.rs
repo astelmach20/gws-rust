@@ -266,17 +266,32 @@ TIPS:
                         .required(true)
                         .value_name("DIR"),
                 )
+                .arg(
+                    Arg::new("overwrite")
+                        .long("overwrite")
+                        .help("Also replace local files that changed since the last sync, or that it did not write (default: keep them and report them under \"conflicts\")")
+                        .action(ArgAction::SetTrue),
+                )
                 .after_help(
                     "\
 EXAMPLES:
   gwsr drive +sync --folder-id FOLDER_ID --dir ./mirror
   gwsr drive +sync --folder-id FOLDER_ID --dir ./mirror --dry-run
+  gwsr drive +sync --folder-id FOLDER_ID --dir ./mirror --overwrite
 
 TIPS:
   Recurses into sub-folders. Regular files are downloaded; Google
   Docs/Sheets/Slides/Drawings are exported as docx/xlsx/pptx/pdf.
-  Local files are replaced only when the Drive copy is newer; local files
-  that are not in Drive are left untouched (nothing is ever deleted).
+  What was mirrored is recorded in DIR/.gwsr-sync.json, keyed by Drive file
+  ID (Drive version, checksums, modified time; local size, mtime, SHA-256).
+  A file is downloaded again only when Drive's copy changed, or another
+  Drive item now has its name. A local file that was edited since the last
+  sync, or that the sync did not write, is never overwritten without
+  --overwrite: it is listed under \"conflicts\" (reason modifiedLocally or
+  untracked) and the command exits 1 with reason syncConflict after printing
+  the report. A missing or corrupt state file makes every existing local
+  file untracked, except files whose Drive SHA-256 checksum matches. Local
+  files that are not in Drive are left untouched (nothing is ever deleted).
   Other Google-native types (Forms, Sites, shortcuts...) are reported as skipped.
   A file the API refuses (download restricted, export too large) is listed
   under \"failed\" and the rest are still mirrored; the report is printed and
@@ -304,6 +319,7 @@ TIPS:
                     (api, v)
                 }
                 "+download" => {
+                    check_output(m)?;
                     let api = Api::new(doc, &[SCOPE_DRIVE_READONLY], dry, sanitize).await?;
                     let v = download(
                         &api,
@@ -318,6 +334,7 @@ TIPS:
                     (api, v)
                 }
                 "+export" => {
+                    check_output(m)?;
                     let api = Api::new(doc, &[SCOPE_DRIVE_READONLY], dry, sanitize).await?;
                     let v = export(
                         &api,
@@ -348,8 +365,9 @@ TIPS:
                 }
                 "+sync" => {
                     let dir = crate::validate::validate_safe_output_dir(required(m, "dir")?)?;
+                    let overwrite = flag(m, "overwrite")?;
                     let api = Api::new(doc, &[SCOPE_DRIVE_READONLY], dry, sanitize).await?;
-                    let v = sync(&api, required(m, "folder-id")?, &dir).await?;
+                    let v = run_sync(&api, required(m, "folder-id")?, &dir, overwrite).await?;
                     api.emit(m, &v).await?;
                     return match sync_failure(&v) {
                         Some(err) => Err(err),
@@ -484,6 +502,16 @@ fn str_field<'v>(v: &'v Value, key: &str) -> Result<&'v str, GwsError> {
     v.get(key)
         .and_then(Value::as_str)
         .ok_or_else(|| http::other_err(anyhow::anyhow!("Drive response is missing '{key}'")))
+}
+
+/// Check an explicit `--output` before credentials are loaded, so a path the
+/// download could never write to is a validation error, not an auth error.
+/// Without `--output` the default file name comes from Drive at run time.
+fn check_output(m: &ArgMatches) -> Result<(), GwsError> {
+    if let Some(o) = optional(m, "output")? {
+        OutputTarget::parse(o, flag(m, "overwrite")?)?;
+    }
+    Ok(())
 }
 
 /// `--output`, or a local file named after the Drive file. `ext` (for an
@@ -841,13 +869,43 @@ impl ShareArgs {
                 "one of --email, --domain or --anyone is required".into(),
             ));
         };
-        Ok(Self {
+        let args = Self {
             file_id: required(m, "file-id")?.to_string(),
             role: required(m, "role")?.to_string(),
             grantee,
             notify: !flag(m, "no-notify")?,
             message: optional(m, "message")?.map(str::to_string),
-        })
+        };
+        args.check()?;
+        Ok(args)
+    }
+
+    /// Reject combinations Drive would refuse, before the confirmation
+    /// prompt and before credentials are loaded.
+    fn check(&self) -> Result<(), GwsError> {
+        let is_person = matches!(self.grantee, Grantee::User(_) | Grantee::Group(_));
+        if self.message.is_some() && !is_person {
+            return Err(GwsError::Validation(
+                "--message only applies to --email grants".into(),
+            ));
+        }
+        if self.role == "owner" {
+            if !matches!(self.grantee, Grantee::User(_)) {
+                return Err(GwsError::Validation(
+                    "--role owner can only be granted to a single user (--email without --group)"
+                        .into(),
+                ));
+            }
+            // permissions.create `sendNotificationEmail`: "It must not be
+            // disabled for ownership transfers."
+            if !self.notify {
+                return Err(GwsError::Validation(
+                    "--no-notify cannot be used with --role owner: Drive always notifies the new owner of an ownership transfer"
+                        .into(),
+                ));
+            }
+        }
+        Ok(())
     }
 
     fn grantee_label(&self) -> String {
@@ -889,7 +947,7 @@ impl ShareArgs {
         )
     }
 
-    fn body(&self) -> Result<Value, GwsError> {
+    fn body(&self) -> Value {
         let mut body = json!({ "role": self.role });
         match &self.grantee {
             Grantee::User(e) => {
@@ -906,34 +964,23 @@ impl ShareArgs {
             }
             Grantee::Anyone => body["type"] = json!("anyone"),
         }
-        if self.role == "owner" && !matches!(self.grantee, Grantee::User(_)) {
-            return Err(GwsError::Validation(
-                "--role owner can only be granted to a single user (--email without --group)"
-                    .into(),
-            ));
-        }
-        Ok(body)
+        body
     }
 }
 
 async fn share(api: &Api, args: &ShareArgs) -> Result<Value, GwsError> {
-    let body = args.body()?;
     let is_person = matches!(args.grantee, Grantee::User(_) | Grantee::Group(_));
     let mut req = ApiRequest::post(api.url(&format!(
         "files/{}/permissions",
         encode_path_segment(&args.file_id)
     )))
     .query("supportsAllDrives", "true")
-    .json(body);
+    .json(args.body());
     if is_person {
         req = req.query("sendNotificationEmail", args.notify.to_string());
         if let Some(msg) = &args.message {
             req = req.query("emailMessage", msg.clone());
         }
-    } else if args.message.is_some() {
-        return Err(GwsError::Validation(
-            "--message only applies to --email grants".into(),
-        ));
     }
     if args.role == "owner" {
         req = req.query("transferOwnership", "true");
@@ -976,7 +1023,7 @@ async fn list_children(api: &Api, folder_id: &str) -> Result<Vec<Value>, GwsErro
                 .query("pageSize", "1000")
                 .query(
                     "fields",
-                    "nextPageToken,files(id,name,mimeType,modifiedTime,size)",
+                    "nextPageToken,files(id,name,mimeType,modifiedTime,size,version,md5Checksum,sha256Checksum)",
                 ),
             "files",
             None,
@@ -985,32 +1032,389 @@ async fn list_children(api: &Api, folder_id: &str) -> Result<Vec<Value>, GwsErro
     Ok(page.items)
 }
 
-/// Whether the local copy is at least as new as the Drive item. A missing
-/// local file or a missing/unparseable remote `modifiedTime` means "download
-/// it" (the safe answer); a local file that exists but cannot be inspected is
-/// an error rather than a silent re-download over it.
-fn is_up_to_date(local: &Path, remote_modified: Option<&str>) -> Result<bool, GwsError> {
-    let Some(remote) = remote_modified.and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
-    else {
-        return Ok(false);
-    };
-    let meta = match std::fs::metadata(local) {
+/// The sync-state file `+sync` keeps in the root of `--dir`. No Drive item
+/// maps to it: `safe_filename` strips leading dots from Drive names, and a
+/// disambiguated name starts with the item's ID.
+const SYNC_STATE_FILE: &str = ".gwsr-sync.json";
+/// Schema version of [`SYNC_STATE_FILE`]. A file with any other version is
+/// treated like a corrupt one.
+const SYNC_STATE_VERSION: u32 = 1;
+/// A state file larger than this is treated as corrupt rather than read.
+const SYNC_STATE_MAX_BYTES: u64 = 64 * 1024 * 1024;
+
+/// What Drive said about an item's content when it was last mirrored.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RemoteFingerprint {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    modified_time: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    size: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    md5_checksum: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    sha256_checksum: Option<String>,
+}
+
+impl RemoteFingerprint {
+    fn of(item: &Value) -> Self {
+        // int64 fields (`size`, `version`) are JSON strings in Drive v3.
+        let field = |key: &str| match item.get(key) {
+            Some(Value::String(s)) => Some(s.clone()),
+            Some(Value::Number(n)) => Some(n.to_string()),
+            _ => None,
+        };
+        Self {
+            modified_time: field("modifiedTime"),
+            version: field("version"),
+            size: field("size"),
+            md5_checksum: field("md5Checksum"),
+            sha256_checksum: field("sha256Checksum"),
+        }
+    }
+
+    /// Whether the item now (`self`) has the content recorded in `then`.
+    /// Checksums decide when both sides have one; otherwise every field must
+    /// match and there must be a `modifiedTime` to go on (an item Drive says
+    /// nothing about is always fetched again).
+    fn same_content(&self, then: &Self) -> bool {
+        if let (Some(a), Some(b)) = (&self.sha256_checksum, &then.sha256_checksum) {
+            return a == b;
+        }
+        if let (Some(a), Some(b)) = (&self.md5_checksum, &then.md5_checksum) {
+            return a == b;
+        }
+        self.modified_time.is_some() && self == then
+    }
+}
+
+/// The local file as `+sync` last wrote (or verified) it.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct LocalFingerprint {
+    size: u64,
+    /// RFC 3339 modification time, nanosecond precision.
+    modified: String,
+    /// Lowercase hex SHA-256 of the content.
+    sha256: String,
+}
+
+/// One mirrored Drive item.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SyncRecord {
+    /// Local path relative to `--dir`, components joined by `/`. Only ever
+    /// compared with paths built from the listing, never opened.
+    path: String,
+    remote: RemoteFingerprint,
+    local: LocalFingerprint,
+}
+
+/// On-disk form of [`SYNC_STATE_FILE`].
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SyncStateFile {
+    version: u32,
+    folder_id: String,
+    /// Keyed by Drive file ID.
+    files: std::collections::BTreeMap<String, SyncRecord>,
+}
+
+/// The loaded sync state, with a path index.
+struct SyncState {
+    file: PathBuf,
+    folder_id: String,
+    records: std::collections::BTreeMap<String, SyncRecord>,
+    by_path: std::collections::HashMap<String, String>,
+    /// Records whose item moved to another path during this run, by their
+    /// old path: a pristine copy left there may still be replaced.
+    moved_from: std::collections::HashMap<String, (String, SyncRecord)>,
+    dirty: bool,
+}
+
+impl SyncState {
+    /// Load the state for `folder_id` from `dir`. A missing file is an empty
+    /// state. A file that is corrupt, too large, of another schema version or
+    /// for another folder is reported on stderr and replaced: every existing
+    /// local file is then untracked, so none is overwritten without
+    /// `--overwrite`. A file that exists but cannot be read is an error.
+    fn load(dir: &Path, folder_id: &str) -> Result<Self, GwsError> {
+        let mut state = Self {
+            file: dir.join(SYNC_STATE_FILE),
+            folder_id: folder_id.to_string(),
+            records: std::collections::BTreeMap::new(),
+            by_path: std::collections::HashMap::new(),
+            moved_from: std::collections::HashMap::new(),
+            dirty: false,
+        };
+        let Some(bytes) = Self::read(&state.file)? else {
+            return Ok(state);
+        };
+        let parsed = bytes
+            .and_then(|bytes| {
+                serde_json::from_slice::<SyncStateFile>(&bytes)
+                    .map_err(|e| format!("it is not valid sync state ({e})"))
+            })
+            .and_then(|f| {
+                if f.version != SYNC_STATE_VERSION {
+                    Err(format!(
+                        "it has schema version {}, expected {SYNC_STATE_VERSION}",
+                        f.version
+                    ))
+                } else if f.folder_id != folder_id {
+                    Err(format!("it belongs to folder '{}'", f.folder_id))
+                } else {
+                    Ok(f.files)
+                }
+            });
+        match parsed {
+            Ok(records) => {
+                for (id, rec) in records {
+                    state.insert(id, rec);
+                }
+                state.moved_from.clear();
+                state.dirty = false;
+            }
+            Err(why) => {
+                tracing::warn!(
+                    "ignoring sync state '{}': {why}; existing local files are treated as untracked and the state is rewritten",
+                    state.file.display()
+                );
+                state.dirty = true;
+            }
+        }
+        Ok(state)
+    }
+
+    /// The state file's bytes, `None` when it does not exist, or the reason
+    /// it is not worth parsing.
+    fn read(file: &Path) -> Result<Option<Result<Vec<u8>, String>>, GwsError> {
+        let io_err = |e: std::io::Error| {
+            GwsError::other(anyhow::anyhow!(
+                "cannot read sync state '{}': {e}",
+                file.display()
+            ))
+        };
+        let meta = match std::fs::metadata(file) {
+            Ok(m) => m,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(io_err(e)),
+        };
+        if !meta.is_file() {
+            return Err(GwsError::Validation(format!(
+                "sync state '{}' is not a regular file; move it out of the way",
+                file.display()
+            )));
+        }
+        if meta.len() > SYNC_STATE_MAX_BYTES {
+            return Ok(Some(Err(format!(
+                "it is larger than {SYNC_STATE_MAX_BYTES} bytes"
+            ))));
+        }
+        std::fs::read(file).map(|b| Some(Ok(b))).map_err(io_err)
+    }
+
+    /// The ID and record that last wrote `path`.
+    fn at_path(&self, path: &str) -> Option<(&str, &SyncRecord)> {
+        match self.by_path.get(path) {
+            Some(id) => self.records.get(id).map(|r| (id.as_str(), r)),
+            None => self.moved_from.get(path).map(|(id, r)| (id.as_str(), r)),
+        }
+    }
+
+    /// Record `id` at `rec.path`, superseding whatever was recorded for that
+    /// ID or that path before.
+    fn insert(&mut self, id: String, rec: SyncRecord) {
+        if self.records.get(&id) == Some(&rec) {
+            return;
+        }
+        if let Some(old) = self.records.remove(&id) {
+            self.by_path.remove(&old.path);
+            if old.path != rec.path {
+                self.moved_from.insert(old.path.clone(), (id.clone(), old));
+            }
+        }
+        if let Some(other) = self.by_path.remove(&rec.path) {
+            self.records.remove(&other);
+        }
+        self.moved_from.remove(&rec.path);
+        self.by_path.insert(rec.path.clone(), id.clone());
+        self.records.insert(id, rec);
+        self.dirty = true;
+    }
+
+    /// Write the state atomically if anything changed.
+    async fn save(&mut self) -> Result<(), GwsError> {
+        if !self.dirty {
+            return Ok(());
+        }
+        let body = SyncStateFile {
+            version: SYNC_STATE_VERSION,
+            folder_id: self.folder_id.clone(),
+            files: self.records.clone(),
+        };
+        let bytes = serde_json::to_vec_pretty(&body).map_err(|e| {
+            GwsError::other(anyhow::anyhow!("cannot serialize the sync state: {e}"))
+        })?;
+        crate::output_file::write_atomic(&self.file, &bytes, true).await?;
+        self.dirty = false;
+        Ok(())
+    }
+}
+
+/// Size and modification time of a local file, or `None` when it does not
+/// exist. A file that exists but cannot be inspected is an error rather
+/// than a reason to download over it.
+fn local_stat(path: &Path) -> Result<Option<(u64, String)>, GwsError> {
+    let meta = match std::fs::metadata(path) {
         Ok(m) => m,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(e) => {
             return Err(GwsError::other(anyhow::anyhow!(
                 "cannot inspect '{}': {e}",
-                local.display()
+                path.display()
             )));
         }
     };
     let modified = meta.modified().map_err(|e| {
         GwsError::other(anyhow::anyhow!(
             "cannot read the modification time of '{}': {e}",
-            local.display()
+            path.display()
         ))
     })?;
-    Ok(chrono::DateTime::<chrono::Utc>::from(modified) >= remote.with_timezone(&chrono::Utc))
+    let modified = chrono::DateTime::<chrono::Utc>::from(modified)
+        .to_rfc3339_opts(chrono::SecondsFormat::Nanos, true);
+    Ok(Some((meta.len(), modified)))
+}
+
+/// Lowercase hex SHA-256 of a local file.
+fn sha256_file(path: &Path) -> Result<String, GwsError> {
+    use std::io::Read;
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let err = |e: std::io::Error| {
+        GwsError::other(anyhow::anyhow!("cannot read '{}': {e}", path.display()))
+    };
+    let mut file = std::fs::File::open(path).map_err(err)?;
+    let mut ctx = aws_lc_rs::digest::Context::new(&aws_lc_rs::digest::SHA256);
+    let mut buf = vec![0u8; 64 * 1024];
+    loop {
+        let n = file.read(&mut buf).map_err(err)?;
+        if n == 0 {
+            break;
+        }
+        ctx.update(&buf[..n]);
+    }
+    let mut out = String::with_capacity(64);
+    for b in ctx.finish().as_ref() {
+        out.push(char::from(HEX[usize::from(b >> 4)]));
+        out.push(char::from(HEX[usize::from(b & 0x0f)]));
+    }
+    Ok(out)
+}
+
+/// The fingerprint of the local file at `path`, read after a download.
+fn local_fingerprint(path: &Path) -> Result<LocalFingerprint, GwsError> {
+    let (size, modified) = local_stat(path)?.ok_or_else(|| {
+        GwsError::other(anyhow::anyhow!(
+            "'{}' disappeared right after it was written",
+            path.display()
+        ))
+    })?;
+    Ok(LocalFingerprint {
+        size,
+        modified,
+        sha256: sha256_file(path)?,
+    })
+}
+
+/// Whether the local file still holds what `+sync` recorded, and its
+/// current fingerprint if so. Equal size and mtime are trusted; otherwise
+/// the content is hashed, so a `touch` or a copy that keeps the bytes is
+/// not mistaken for an edit.
+fn unchanged_locally(
+    path: &Path,
+    stat: (u64, String),
+    recorded: &LocalFingerprint,
+) -> Result<Option<LocalFingerprint>, GwsError> {
+    let (size, modified) = stat;
+    if size != recorded.size {
+        return Ok(None);
+    }
+    if modified == recorded.modified {
+        return Ok(Some(recorded.clone()));
+    }
+    let sha256 = sha256_file(path)?;
+    Ok((sha256 == recorded.sha256).then_some(LocalFingerprint {
+        size,
+        modified,
+        sha256,
+    }))
+}
+
+/// What `+sync` does with one Drive file.
+#[derive(Debug, PartialEq, Eq)]
+enum SyncAction {
+    Download,
+    /// Up to date; record this fingerprint (it may have a fresher mtime).
+    Unchanged(LocalFingerprint),
+    /// A local file that must not be overwritten is in the way.
+    Conflict {
+        reason: &'static str,
+        remote_changed: Option<bool>,
+    },
+}
+
+/// Decide what to do with Drive item `id` (fingerprint `remote`) whose
+/// local copy belongs at `path` (`rel` relative to `--dir`).
+fn plan_sync(
+    state: &SyncState,
+    id: &str,
+    remote: &RemoteFingerprint,
+    path: &Path,
+    rel: &str,
+) -> Result<SyncAction, GwsError> {
+    let Some(stat) = local_stat(path)? else {
+        return Ok(SyncAction::Download);
+    };
+    // A directory can never be replaced by a download.
+    crate::validate::reject_directory(path, "sync target")?;
+    match state.at_path(rel) {
+        Some((owner, rec)) => {
+            // Same item with the same content in Drive: nothing to fetch.
+            // Otherwise Drive changed, or another item (a replacement with
+            // the same name) now owns the path.
+            let remote_same = owner == id && remote.same_content(&rec.remote);
+            Ok(match unchanged_locally(path, stat, &rec.local)? {
+                Some(local) if remote_same => SyncAction::Unchanged(local),
+                Some(_) => SyncAction::Download,
+                None => SyncAction::Conflict {
+                    reason: "modifiedLocally",
+                    remote_changed: Some(!remote_same),
+                },
+            })
+        }
+        None => {
+            // Not written by a previous sync (or the state was lost). Adopt
+            // it when Drive's checksum proves it already is the same file.
+            if let Some(expected) = &remote.sha256_checksum {
+                let sha256 = sha256_file(path)?;
+                if sha256.eq_ignore_ascii_case(expected) {
+                    let (size, modified) = stat;
+                    return Ok(SyncAction::Unchanged(LocalFingerprint {
+                        size,
+                        modified,
+                        sha256,
+                    }));
+                }
+            }
+            Ok(SyncAction::Conflict {
+                reason: "untracked",
+                remote_changed: None,
+            })
+        }
+    }
 }
 
 /// What `+sync` does with one Drive child.
@@ -1059,41 +1463,101 @@ fn disambiguate(children: &[(&str, &str)]) -> Result<Vec<String>, GwsError> {
 }
 
 /// The error `+sync` exits with after printing its report, when any file
-/// failed. Like `gwsr batch`'s `batchPartialFailure`: the report on stdout
-/// says what was mirrored and what failed, and the exit code is still `1`.
+/// failed or was kept as a conflict. Like `gwsr batch`'s
+/// `batchPartialFailure`: the report on stdout says what was mirrored and
+/// what was not, and the exit code is still `1`.
 fn sync_failure(report: &Value) -> Option<GwsError> {
-    let failed = report
-        .get("failed")
-        .and_then(Value::as_array)
-        .map_or(0, Vec::len);
-    (failed > 0).then(|| GwsError::Api {
-        code: 207,
-        message: format!(
-            "{failed} file(s) could not be synced; see \"failed\" in the report on stdout"
-        ),
-        reason: "syncPartialFailure".to_string(),
-        enable_url: None,
-    })
+    let count = |key: &str| {
+        report
+            .get(key)
+            .and_then(Value::as_array)
+            .map_or(0, Vec::len)
+    };
+    let failed = count("failed");
+    let conflicts = count("conflicts");
+    let conflict_note = format!(
+        "{conflicts} local file(s) changed since the last sync or not written by it were kept; see \"conflicts\" in the report on stdout, and pass --overwrite to replace them with the Drive copy"
+    );
+    if failed > 0 {
+        let mut message =
+            format!("{failed} file(s) could not be synced; see \"failed\" in the report on stdout");
+        if conflicts > 0 {
+            message = format!("{message}. {conflict_note}");
+        }
+        Some(GwsError::Api {
+            code: 207,
+            message,
+            reason: "syncPartialFailure".to_string(),
+            enable_url: None,
+        })
+    } else if conflicts > 0 {
+        Some(GwsError::Api {
+            code: 409,
+            message: conflict_note,
+            reason: "syncConflict".to_string(),
+            enable_url: None,
+        })
+    } else {
+        None
+    }
 }
 
+/// `+sync` with the default of keeping conflicting local files.
+#[cfg(test)]
 async fn sync(api: &Api, folder_id: &str, dir: &Path) -> Result<Value, GwsError> {
-    let mut downloaded = Vec::new();
-    let mut unchanged = Vec::new();
-    let mut skipped = Vec::new();
-    let mut failed = Vec::new();
-    let mut stack: Vec<(String, PathBuf)> = vec![(folder_id.to_string(), dir.to_path_buf())];
-    let mut visited = std::collections::HashSet::new();
+    run_sync(api, folder_id, dir, false).await
+}
 
+/// Mirror `folder_id` into `dir`, then save the sync state, also when the
+/// walk was aborted part-way, so files already mirrored stay tracked.
+async fn run_sync(
+    api: &Api,
+    folder_id: &str,
+    dir: &Path,
+    overwrite: bool,
+) -> Result<Value, GwsError> {
     if api.is_dry_run() {
         list_children(api, folder_id).await?;
         api.plan_note(json!({
             "note": "each child file is downloaded (or exported) into the directory; sub-folders are recursed",
             "dir": dir.display().to_string(),
+            "state": dir.join(SYNC_STATE_FILE).display().to_string(),
         }))?;
         return Ok(Value::Null);
     }
+    let mut state = SyncState::load(dir, folder_id)?;
+    let walked = sync_walk(api, folder_id, dir, overwrite, &mut state).await;
+    let saved = state.save().await;
+    match (walked, saved) {
+        (Ok(report), Ok(())) => Ok(report),
+        (Err(err), Ok(())) | (Ok(_), Err(err)) => Err(err),
+        (Err(err), Err(save_err)) => {
+            // The walk's error is the one to exit with; say loudly that
+            // the state of this partial run could not be kept either.
+            tracing::error!("{save_err}");
+            Err(err)
+        }
+    }
+}
 
-    while let Some((id, local_dir)) = stack.pop() {
+async fn sync_walk(
+    api: &Api,
+    folder_id: &str,
+    dir: &Path,
+    overwrite: bool,
+    state: &mut SyncState,
+) -> Result<Value, GwsError> {
+    let mut downloaded = Vec::new();
+    let mut unchanged = Vec::new();
+    let mut skipped = Vec::new();
+    let mut failed = Vec::new();
+    let mut conflicts = Vec::new();
+    // (folder ID, local directory, path relative to `dir` joined by '/')
+    let mut stack: Vec<(String, PathBuf, String)> =
+        vec![(folder_id.to_string(), dir.to_path_buf(), String::new())];
+    let mut visited = std::collections::HashSet::new();
+
+    while let Some((id, local_dir, rel_dir)) = stack.pop() {
         if !visited.insert(id.clone()) {
             continue;
         }
@@ -1130,19 +1594,47 @@ async fn sync(api: &Api, folder_id: &str, dir: &Path) -> Result<Value, GwsError>
         let names = disambiguate(&keys)?;
         for ((child_id, _, kind, child), local_name) in entries.iter().zip(names) {
             let child_id = child_id.as_str();
-            let modified = child.get("modifiedTime").and_then(Value::as_str);
+            let rel = if rel_dir.is_empty() {
+                local_name.clone()
+            } else {
+                format!("{rel_dir}/{local_name}")
+            };
             let export = match kind {
                 SyncKind::Folder => {
-                    stack.push((child_id.to_string(), local_dir.join(&local_name)));
+                    stack.push((child_id.to_string(), local_dir.join(&local_name), rel));
                     continue;
                 }
                 SyncKind::Export(f) => Some(*f),
                 SyncKind::Media => None,
             };
             let path = local_dir.join(&local_name);
-            if is_up_to_date(&path, modified)? {
-                unchanged.push(path.display().to_string());
-                continue;
+            let remote = RemoteFingerprint::of(child);
+            match plan_sync(state, child_id, &remote, &path, &rel)? {
+                SyncAction::Download => {}
+                SyncAction::Unchanged(local) => {
+                    state.insert(
+                        child_id.to_string(),
+                        SyncRecord {
+                            path: rel,
+                            remote,
+                            local,
+                        },
+                    );
+                    unchanged.push(path.display().to_string());
+                    continue;
+                }
+                SyncAction::Conflict { .. } if overwrite => {}
+                SyncAction::Conflict {
+                    reason,
+                    remote_changed,
+                } => {
+                    let mut entry = json!({"id": child_id, "path": path.display().to_string(), "reason": reason});
+                    if let Some(changed) = remote_changed {
+                        entry["remoteChanged"] = json!(changed);
+                    }
+                    conflicts.push(entry);
+                    continue;
+                }
             }
             let target = OutputTarget::File {
                 path: path.clone(),
@@ -1160,9 +1652,20 @@ async fn sync(api: &Api, folder_id: &str, dir: &Path) -> Result<Value, GwsError>
                 }
             };
             match api.download(req, &target).await {
-                Ok(bytes) => downloaded.push(
-                    json!({"id": child_id, "path": path.display().to_string(), "bytes": bytes}),
-                ),
+                Ok(bytes) => {
+                    let local = local_fingerprint(&path)?;
+                    state.insert(
+                        child_id.to_string(),
+                        SyncRecord {
+                            path: rel,
+                            remote,
+                            local,
+                        },
+                    );
+                    downloaded.push(
+                        json!({"id": child_id, "path": path.display().to_string(), "bytes": bytes}),
+                    );
+                }
                 // The API refused this one file (restricted download, export
                 // size limit...): record it and mirror the rest. Anything
                 // else (auth, network, local I/O, and retryable API errors
@@ -1181,6 +1684,7 @@ async fn sync(api: &Api, folder_id: &str, dir: &Path) -> Result<Value, GwsError>
         "downloaded": downloaded,
         "unchanged": unchanged,
         "skipped": skipped,
+        "conflicts": conflicts,
         "failed": failed,
     }))
 }
@@ -1628,7 +2132,8 @@ mod tests {
         );
         assert_eq!(std::fs::read(dir.path().join("sub/b.bin")).unwrap(), b"B");
 
-        // Second run: local copies are newer than the 2020 remote timestamps.
+        // Second run: A and the Doc are recorded with an unchanged
+        // modifiedTime; B has no fingerprint, so it is fetched again.
         let v = sync(&api, "ROOT", dir.path()).await.unwrap();
         assert_eq!(v["unchanged"].as_array().unwrap().len(), 2);
     }
@@ -1903,7 +2408,10 @@ mod tests {
             names.sort();
             layouts.push(names);
         }
-        assert_eq!(layouts[0], ["P-a.txt", "Q-a.txt", "unique.txt"]);
+        assert_eq!(
+            layouts[0],
+            [SYNC_STATE_FILE, "P-a.txt", "Q-a.txt", "unique.txt"]
+        );
         assert_eq!(layouts[0], layouts[1]);
     }
 
@@ -1965,6 +2473,50 @@ mod tests {
         assert!(file_name.starts_with('\u{1F4C4}'), "{file_name}");
         assert!(file_name.ends_with(".docx"), "{file_name}");
         assert_eq!(std::fs::read(&doc).unwrap(), b"DOCX");
+    }
+
+    /// Long names that collide get an ID prefix; shortening the prefixed name
+    /// must keep the extension (here of a download and of an export).
+    #[tokio::test]
+    async fn sync_keeps_extensions_of_long_colliding_names() {
+        let long = "r".repeat(200);
+        let server = MockServer::start().await;
+        mount_listing(
+            &server,
+            "ROOT",
+            json!([
+                {"id": "P1", "name": format!("{long}.pdf"), "mimeType": "application/pdf"},
+                {"id": "P2", "name": format!("{long}.pdf"), "mimeType": "application/pdf"}
+            ]),
+        )
+        .await;
+        let api = api(&server.uri(), "drive/v3/");
+        let dir = tempfile::tempdir().unwrap();
+        let v = sync(&api, "ROOT", dir.path()).await.unwrap();
+        let names: Vec<String> = v["downloaded"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|d| {
+                let p = PathBuf::from(d["path"].as_str().unwrap());
+                p.file_name().unwrap().to_str().unwrap().to_string()
+            })
+            .collect();
+        assert_eq!(names.len(), 2, "{v}");
+        for (name, id) in names.iter().zip(["P1", "P2"]) {
+            assert!(name.starts_with(&format!("{id}-r")), "{name}");
+            assert!(name.ends_with("r.pdf"), "{name}");
+            assert!(name.len() <= 255, "{name}");
+        }
+    }
+
+    #[test]
+    fn download_default_name_keeps_the_extension_of_a_long_name() {
+        let name = format!("{}.pdf", "d".repeat(250));
+        let target = resolve_target(None, &name, None, false).unwrap();
+        let local = target.describe();
+        let local = Path::new(local.as_str().unwrap()).file_name().unwrap();
+        assert_eq!(local.to_str().unwrap(), format!("{}.pdf", "d".repeat(196)));
     }
 
     /// Drive names are case-sensitive but the default macOS and Windows
@@ -2079,25 +2631,359 @@ mod tests {
         }
     }
 
-    #[test]
-    fn up_to_date_compares_mtimes_and_treats_missing_as_stale() {
+    /// Mounts a fresh root listing with one plain file `name` (Drive `id`,
+    /// fingerprint fields from `extra`) whose download returns `body`.
+    async fn mount_one(server: &MockServer, id: &str, name: &str, extra: Value, body: &[u8]) {
+        server.reset().await;
+        let mut item = json!({"id": id, "name": name, "mimeType": "text/plain"});
+        for (k, v) in extra.as_object().unwrap() {
+            item[k] = v.clone();
+        }
+        Mock::given(method("GET"))
+            .and(path("/drive/v3/files"))
+            .and(query_param("q", "'ROOT' in parents and trashed = false"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"files": [item]})))
+            .mount(server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path(format!("/drive/v3/files/{id}")))
+            .and(query_param("alt", "media"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(body.to_vec()))
+            .mount(server)
+            .await;
+    }
+
+    fn v1() -> Value {
+        json!({"modifiedTime": "2024-01-01T00:00:00Z", "version": "1", "size": "2"})
+    }
+
+    fn v2() -> Value {
+        json!({"modifiedTime": "2024-02-01T00:00:00Z", "version": "2", "size": "2"})
+    }
+
+    fn read_state(dir: &Path) -> Value {
+        serde_json::from_slice(&std::fs::read(dir.join(SYNC_STATE_FILE)).unwrap()).unwrap()
+    }
+
+    fn ids(v: &Value, key: &str) -> Vec<String> {
+        v[key]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| e["id"].as_str().unwrap().to_string())
+            .collect()
+    }
+
+    /// Changes the local file and moves its mtime off the recorded one, as an
+    /// editor would.
+    fn edit_locally(p: &Path, content: &[u8]) {
+        std::fs::write(p, content).unwrap();
+        let f = std::fs::File::options().write(true).open(p).unwrap();
+        f.set_modified(std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1))
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn sync_first_run_downloads_and_records_state_then_is_unchanged() {
+        let server = MockServer::start().await;
+        mount_one(&server, "A", "a.txt", v1(), b"v1").await;
+        let api = api(&server.uri(), "drive/v3/");
         let dir = tempfile::tempdir().unwrap();
-        let p = dir.path().join("f");
-        assert!(!is_up_to_date(&p, Some("2000-01-01T00:00:00Z")).unwrap());
-        std::fs::write(&p, b"x").unwrap();
-        assert!(is_up_to_date(&p, Some("2000-01-01T00:00:00Z")).unwrap());
-        assert!(!is_up_to_date(&p, Some("2999-01-01T00:00:00Z")).unwrap());
-        assert!(!is_up_to_date(&p, None).unwrap());
+        let v = sync(&api, "ROOT", dir.path()).await.unwrap();
+        assert_eq!(ids(&v, "downloaded"), ["A"], "{v}");
+        let state = read_state(dir.path());
+        assert_eq!(state["version"], SYNC_STATE_VERSION);
+        assert_eq!(state["folderId"], "ROOT");
+        let rec = &state["files"]["A"];
+        assert_eq!(rec["path"], "a.txt");
+        assert_eq!(rec["remote"]["version"], "1");
+        assert_eq!(rec["remote"]["modifiedTime"], "2024-01-01T00:00:00Z");
+        assert_eq!(rec["local"]["size"], 2);
+        // SHA-256 of "v1".
+        assert_eq!(
+            rec["local"]["sha256"],
+            "3bfc269594ef649228e9a74bab00f042efc91d5acc6fbee31a382e80d42388fe"
+        );
+
+        // Nothing changed: no download (the server would serve it again,
+        // but the report must say unchanged).
+        let v = sync(&api, "ROOT", dir.path()).await.unwrap();
+        assert!(ids(&v, "downloaded").is_empty(), "{v}");
+        assert_eq!(v["unchanged"].as_array().unwrap().len(), 1, "{v}");
+        assert!(sync_failure(&v).is_none());
+        // The state file is never mirrored or reported as a Drive item.
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 2);
+    }
+
+    #[tokio::test]
+    async fn sync_updates_a_file_changed_in_drive_and_untouched_locally() {
+        let server = MockServer::start().await;
+        let api = api(&server.uri(), "drive/v3/");
+        let dir = tempfile::tempdir().unwrap();
+        mount_one(&server, "A", "a.txt", v1(), b"v1").await;
+        sync(&api, "ROOT", dir.path()).await.unwrap();
+        // A `touch` alone is not an edit: the content still matches.
+        let p = dir.path().join("a.txt");
+        std::fs::File::options()
+            .write(true)
+            .open(&p)
+            .unwrap()
+            .set_modified(std::time::SystemTime::UNIX_EPOCH)
+            .unwrap();
+
+        mount_one(&server, "A", "a.txt", v2(), b"v2").await;
+        let v = sync(&api, "ROOT", dir.path()).await.unwrap();
+        assert_eq!(ids(&v, "downloaded"), ["A"], "{v}");
+        assert_eq!(std::fs::read(&p).unwrap(), b"v2");
+        assert_eq!(
+            read_state(dir.path())["files"]["A"]["remote"]["version"],
+            "2"
+        );
+        assert!(sync_failure(&v).is_none());
+    }
+
+    #[tokio::test]
+    async fn sync_keeps_a_locally_edited_file_and_reports_a_conflict() {
+        let server = MockServer::start().await;
+        let api = api(&server.uri(), "drive/v3/");
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("a.txt");
+        mount_one(&server, "A", "a.txt", v1(), b"v1").await;
+        sync(&api, "ROOT", dir.path()).await.unwrap();
+        edit_locally(&p, b"mine");
+
+        // Drive unchanged: kept, reported.
+        let v = sync(&api, "ROOT", dir.path()).await.unwrap();
+        assert_eq!(ids(&v, "conflicts"), ["A"], "{v}");
+        assert_eq!(v["conflicts"][0]["reason"], "modifiedLocally");
+        assert_eq!(v["conflicts"][0]["remoteChanged"], false);
+
+        // Drive changed too: still kept, and the run fails loudly.
+        mount_one(&server, "A", "a.txt", v2(), b"v2").await;
+        let v = sync(&api, "ROOT", dir.path()).await.unwrap();
+        assert_eq!(std::fs::read(&p).unwrap(), b"mine");
+        assert!(ids(&v, "downloaded").is_empty(), "{v}");
+        assert_eq!(v["conflicts"][0]["remoteChanged"], true);
+        let err = sync_failure(&v).unwrap();
+        assert_eq!(err.exit_code(), GwsError::EXIT_CODE_API);
+        assert_eq!(err.to_json()["error"]["reason"], "syncConflict");
+        assert!(err.to_string().contains("--overwrite"), "{err}");
+        // The record still describes the last synced version.
+        assert_eq!(
+            read_state(dir.path())["files"]["A"]["remote"]["version"],
+            "1"
+        );
+    }
+
+    #[tokio::test]
+    async fn sync_overwrite_replaces_a_locally_edited_file() {
+        let server = MockServer::start().await;
+        let api = api(&server.uri(), "drive/v3/");
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("a.txt");
+        mount_one(&server, "A", "a.txt", v1(), b"v1").await;
+        sync(&api, "ROOT", dir.path()).await.unwrap();
+        edit_locally(&p, b"mine");
+        mount_one(&server, "A", "a.txt", v2(), b"v2").await;
+
+        let v = run_sync(&api, "ROOT", dir.path(), true).await.unwrap();
+        assert_eq!(ids(&v, "downloaded"), ["A"], "{v}");
+        assert!(ids(&v, "conflicts").is_empty(), "{v}");
+        assert_eq!(std::fs::read(&p).unwrap(), b"v2");
+        assert!(sync_failure(&v).is_none());
+        // Back in sync: the next plain run has nothing to do.
+        let v = sync(&api, "ROOT", dir.path()).await.unwrap();
+        assert_eq!(v["unchanged"].as_array().unwrap().len(), 1, "{v}");
+    }
+
+    /// The bug PR #33 started from: `budget.xlsx` is trashed in Drive and a
+    /// different file with the same name and an *older* `modifiedTime` is
+    /// moved in. It must replace the pristine mirror copy, and must not
+    /// replace an edited one.
+    #[tokio::test]
+    async fn sync_replaces_a_file_that_drive_replaced_under_the_same_name() {
+        let server = MockServer::start().await;
+        let api = api(&server.uri(), "drive/v3/");
+        let older = json!({"modifiedTime": "2023-06-01T00:00:00Z", "version": "7", "size": "12"});
+
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("budget.xlsx");
+        mount_one(&server, "A", "budget.xlsx", v1(), b"old-A").await;
+        sync(&api, "ROOT", dir.path()).await.unwrap();
+        mount_one(&server, "B", "budget.xlsx", older.clone(), b"new-B-12byte").await;
+        let v = sync(&api, "ROOT", dir.path()).await.unwrap();
+        assert_eq!(ids(&v, "downloaded"), ["B"], "{v}");
+        assert_eq!(std::fs::read(&p).unwrap(), b"new-B-12byte");
+        let state = read_state(dir.path());
+        assert!(state["files"].get("A").is_none(), "{state}");
+        assert_eq!(state["files"]["B"]["path"], "budget.xlsx");
+
+        // Same replacement over a locally edited copy: kept.
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("budget.xlsx");
+        mount_one(&server, "A", "budget.xlsx", v1(), b"old-A").await;
+        sync(&api, "ROOT", dir.path()).await.unwrap();
+        edit_locally(&p, b"my numbers");
+        mount_one(&server, "B", "budget.xlsx", older, b"new-B-12byte").await;
+        let v = sync(&api, "ROOT", dir.path()).await.unwrap();
+        assert_eq!(ids(&v, "conflicts"), ["B"], "{v}");
+        assert_eq!(v["conflicts"][0]["remoteChanged"], true);
+        assert_eq!(std::fs::read(&p).unwrap(), b"my numbers");
+    }
+
+    /// A renamed in Drive (x.txt -> y.txt) and B moved in as x.txt: B
+    /// replaces A's pristine copy whichever of the two is listed first.
+    #[tokio::test]
+    async fn sync_handles_a_rename_and_a_takeover_in_any_order() {
+        for order in [["A", "B"], ["B", "A"]] {
+            let server = MockServer::start().await;
+            let api = api(&server.uri(), "drive/v3/");
+            let dir = tempfile::tempdir().unwrap();
+            mount_listing(
+                &server,
+                "ROOT",
+                json!([{"id": "A", "name": "x.txt", "mimeType": "text/plain",
+                        "modifiedTime": "2024-01-01T00:00:00Z"}]),
+            )
+            .await;
+            sync(&api, "ROOT", dir.path()).await.unwrap();
+            server.reset().await;
+            let item = |id: &str| {
+                let name = if id == "A" { "y.txt" } else { "x.txt" };
+                json!({"id": id, "name": name, "mimeType": "text/plain",
+                       "modifiedTime": "2024-01-01T00:00:00Z"})
+            };
+            mount_listing(&server, "ROOT", json!([item(order[0]), item(order[1])])).await;
+            let v = sync(&api, "ROOT", dir.path()).await.unwrap();
+            assert!(ids(&v, "conflicts").is_empty(), "{order:?}: {v}");
+            assert_eq!(std::fs::read(dir.path().join("x.txt")).unwrap(), b"B");
+            assert_eq!(std::fs::read(dir.path().join("y.txt")).unwrap(), b"A");
+            let state = read_state(dir.path());
+            assert_eq!(state["files"]["A"]["path"], "y.txt", "{state}");
+            assert_eq!(state["files"]["B"]["path"], "x.txt", "{state}");
+        }
+    }
+
+    #[tokio::test]
+    async fn sync_with_a_corrupt_state_never_overwrites_existing_files() {
+        let server = MockServer::start().await;
+        let api = api(&server.uri(), "drive/v3/");
+        for garbage in [
+            &b"{not json"[..],
+            br#"{"version": 99, "folderId": "ROOT", "files": {}}"#,
+            br#"{"version": 1, "folderId": "OTHER", "files": {}}"#,
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let p = dir.path().join("a.txt");
+            mount_one(&server, "A", "a.txt", v1(), b"v1").await;
+            sync(&api, "ROOT", dir.path()).await.unwrap();
+            edit_locally(&p, b"mine");
+            std::fs::write(dir.path().join(SYNC_STATE_FILE), garbage).unwrap();
+
+            mount_one(&server, "A", "a.txt", v2(), b"v2").await;
+            let v = sync(&api, "ROOT", dir.path()).await.unwrap();
+            assert_eq!(ids(&v, "conflicts"), ["A"], "{v}");
+            assert_eq!(v["conflicts"][0]["reason"], "untracked");
+            assert_eq!(std::fs::read(&p).unwrap(), b"mine");
+            assert_eq!(
+                sync_failure(&v).unwrap().to_json()["error"]["reason"],
+                "syncConflict"
+            );
+            // The state is rewritten as valid (empty) state.
+            let state = read_state(dir.path());
+            assert_eq!(state["version"], SYNC_STATE_VERSION, "{state}");
+            assert_eq!(state["folderId"], "ROOT");
+        }
+
+        // An untracked file Drive's checksum proves identical is adopted.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.txt"), b"v1").unwrap();
+        std::fs::write(dir.path().join(SYNC_STATE_FILE), b"\0\0").unwrap();
+        let sha = "3bfc269594ef649228e9a74bab00f042efc91d5acc6fbee31a382e80d42388fe";
+        mount_one(&server, "A", "a.txt", json!({"sha256Checksum": sha}), b"v1").await;
+        let v = sync(&api, "ROOT", dir.path()).await.unwrap();
+        assert_eq!(v["unchanged"].as_array().unwrap().len(), 1, "{v}");
+        assert_eq!(read_state(dir.path())["files"]["A"]["local"]["sha256"], sha);
+    }
+
+    #[tokio::test]
+    async fn sync_saves_state_for_files_mirrored_before_an_abort() {
+        let server = MockServer::start().await;
+        mount_listing(
+            &server,
+            "ROOT",
+            json!([
+                {"id": "A", "name": "a.txt", "mimeType": "text/plain", "modifiedTime": "2024-01-01T00:00:00Z"},
+                {"id": "B", "name": "b.txt", "mimeType": "text/plain"}
+            ]),
+        )
+        .await;
+        let api = api(&server.uri(), "drive/v3/");
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("b.txt")).unwrap();
+        assert!(sync(&api, "ROOT", dir.path()).await.is_err());
+        assert_eq!(read_state(dir.path())["files"]["A"]["path"], "a.txt");
+    }
+
+    #[tokio::test]
+    async fn sync_never_maps_a_drive_item_onto_the_state_file() {
+        let server = MockServer::start().await;
+        mount_listing(
+            &server,
+            "ROOT",
+            json!([{"id": "S", "name": SYNC_STATE_FILE, "mimeType": "text/plain"}]),
+        )
+        .await;
+        let api = api(&server.uri(), "drive/v3/");
+        let dir = tempfile::tempdir().unwrap();
+        let v = sync(&api, "ROOT", dir.path()).await.unwrap();
+        assert_eq!(ids(&v, "downloaded"), ["S"], "{v}");
+        assert_ne!(
+            v["downloaded"][0]["path"].as_str().unwrap(),
+            dir.path().join(SYNC_STATE_FILE).display().to_string()
+        );
+        assert_eq!(
+            read_state(dir.path())["files"]["S"]["path"],
+            "gwsr-sync.json"
+        );
+    }
+
+    #[test]
+    fn remote_fingerprint_prefers_checksums_and_needs_a_modified_time() {
+        let a = RemoteFingerprint::of(&json!({"modifiedTime": "t1", "version": "1", "size": 3}));
+        assert_eq!(a.size.as_deref(), Some("3"));
+        assert!(a.same_content(&a.clone()));
+        let renamed = RemoteFingerprint::of(&json!({"modifiedTime": "t1", "version": "2"}));
+        assert!(!renamed.same_content(&a));
+        // Nothing to go on: always fetched again.
+        let blank = RemoteFingerprint::default();
+        assert!(!blank.same_content(&blank.clone()));
+        // A metadata-only change keeps the checksum: same content.
+        let c1 = RemoteFingerprint::of(
+            &json!({"modifiedTime": "t1", "version": "1", "md5Checksum": "m"}),
+        );
+        let c2 = RemoteFingerprint::of(
+            &json!({"modifiedTime": "t2", "version": "5", "md5Checksum": "m"}),
+        );
+        assert!(c2.same_content(&c1));
     }
 
     #[cfg(unix)]
     #[test]
-    fn up_to_date_surfaces_an_uninspectable_local_file() {
+    fn sync_plan_surfaces_an_uninspectable_local_file() {
         // A path through a regular file fails with NotADirectory, not NotFound.
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("f");
         std::fs::write(&file, b"x").unwrap();
-        let err = is_up_to_date(&file.join("child"), Some("2000-01-01T00:00:00Z")).unwrap_err();
+        let state = SyncState::load(dir.path(), "ROOT").unwrap();
+        let err = plan_sync(
+            &state,
+            "A",
+            &RemoteFingerprint::default(),
+            &file.join("child"),
+            "f/child",
+        )
+        .unwrap_err();
         assert!(err.to_string().contains("cannot inspect"), "{err}");
     }
 }

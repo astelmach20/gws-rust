@@ -131,13 +131,26 @@ fn plan_paths(
     Ok(paths)
 }
 
-/// Select which parts to download.
+/// Select which parts to download: every attachment, plus inline images
+/// (parts embedded in the HTML body by Content-ID) when `include_inline`.
+///
+/// Only images count as inline: some clients (Apple Mail) send ordinary files
+/// such as PDFs with `Content-Disposition: inline` and a Content-ID, and
+/// those are attachments the reader expects to get.
 fn select_parts(parts: &[OriginalPart], include_inline: bool) -> Vec<OriginalPart> {
     parts
         .iter()
-        .filter(|p| include_inline || !p.is_inline())
+        .filter(|p| include_inline || !is_inline_image(p))
         .cloned()
         .collect()
+}
+
+fn is_inline_image(part: &OriginalPart) -> bool {
+    part.is_inline()
+        && part
+            .content_type
+            .get(..6)
+            .is_some_and(|t| t.eq_ignore_ascii_case("image/"))
 }
 
 /// Download `parts` into `dir` and describe what was written.
@@ -308,12 +321,61 @@ mod tests {
 
     #[test]
     fn select_parts_excludes_inline_by_default() {
-        let parts = vec![
-            part("a", PartData::Inline(String::new()), false),
-            part("img", PartData::Inline(String::new()), true),
-        ];
+        let mut img = part("img", PartData::Inline(String::new()), true);
+        img.content_type = "image/png".to_string();
+        let parts = vec![part("a", PartData::Inline(String::new()), false), img];
         assert_eq!(select_parts(&parts, false).len(), 1);
         assert_eq!(select_parts(&parts, true).len(), 2);
+    }
+
+    /// Apple Mail sends ordinary files as `Content-Disposition: inline` with a
+    /// Content-ID. Only inline *images* are skipped by default; a PDF sent
+    /// that way is still an attachment.
+    #[test]
+    fn select_parts_keeps_inline_non_images() {
+        let header = |name: &str, value: &str| json!({ "name": name, "value": value });
+        let msg = json!({
+            "id": "m1",
+            "threadId": "t1",
+            "payload": {
+                "mimeType": "multipart/mixed",
+                "headers": [
+                    header("From", "a@example.com"),
+                    header("Subject", "s"),
+                    header("Message-ID", "<m1@example.com>"),
+                ],
+                "parts": [
+                    { "mimeType": "text/plain", "body": { "data": "aGk", "size": 2 } },
+                    {
+                        "mimeType": "application/pdf",
+                        "filename": "report.pdf",
+                        "headers": [
+                            header("Content-Disposition", "inline; filename=report.pdf"),
+                            header("Content-Id", "<pdf1@example.com>"),
+                        ],
+                        "body": { "attachmentId": "A1", "size": 10 }
+                    },
+                    {
+                        "mimeType": "image/png",
+                        "filename": "logo.png",
+                        "headers": [
+                            header("Content-Disposition", "inline; filename=logo.png"),
+                            header("Content-Id", "<logo@example.com>"),
+                        ],
+                        "body": { "attachmentId": "A2", "size": 10 }
+                    }
+                ]
+            }
+        });
+        let original = parse_original_message(&msg).unwrap();
+        let names = |parts: Vec<OriginalPart>| -> Vec<String> {
+            parts.into_iter().map(|p| p.filename).collect()
+        };
+        assert_eq!(names(select_parts(&original.parts, false)), ["report.pdf"]);
+        assert_eq!(
+            names(select_parts(&original.parts, true)),
+            ["report.pdf", "logo.png"]
+        );
     }
 
     #[tokio::test]

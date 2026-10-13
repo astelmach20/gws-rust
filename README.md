@@ -424,7 +424,7 @@ Helpers are hand-written commands prefixed with `+`, so they never collide with 
 | Service | Helpers |
 |---|---|
 | `gmail` | `+send`, `+reply`, `+reply-all`, `+forward` (all with `--attach`, `--html`, `--draft`, `--from`), `+read`, `+search`, `+triage`, `+label`, `+archive`, `+trash`, `+filter list\|create\|delete`, `+unsubscribe` (RFC 8058 one-click), `+resolve-url` (Gmail web URL to API ID), `+attachments`, `+watch` |
-| `drive` | `+upload`, `+download`, `+export`, `+move`, `+share`, `+sync` (one-way mirror to a local directory, never deletes) |
+| `drive` | `+upload`, `+download`, `+export`, `+move`, `+share`, `+sync` (one-way mirror to a local directory; never deletes, and keeps local edits unless `--overwrite`) |
 | `docs` | `+create`, `+read` (Markdown or text), `+write` (text or Markdown as native formatting), `+replace` |
 | `sheets` | `+append`, `+read` (CSV export with `--output`), `+write`, `+clear`, `+create` |
 | `calendar` | `+insert`, `+agenda`, `+freebusy` (with `--slot` to find free time), `+update`, `+delete`, `+rsvp` |
@@ -442,6 +442,8 @@ Helpers are hand-written commands prefixed with `+`, so they never collide with 
 | `events` | `+subscribe`, `+renew` |
 | `modelarmor` | `+sanitize-prompt`, `+sanitize-response`, `+create-template` |
 | `workflow` | `+standup-report`, `+meeting-prep`, `+email-to-task`, `+weekly-digest`, `+file-announce` |
+
+`drive +sync` records what it mirrored in `<dir>/.gwsr-sync.json`, keyed by Drive file ID (Drive version, checksums and modified time; local size, mtime and SHA-256). A file is downloaded again only when its Drive copy changed or another Drive item took its name. A local file edited since the last sync, or not written by it (including every existing file when the state file is missing or corrupt, unless its Drive SHA-256 matches), is not overwritten: it is listed under `conflicts` and the command exits `1` with reason `syncConflict` after printing the report. Pass `--overwrite` to replace such files with the Drive copy.
 
 ```bash
 gwsr gmail +send --to alice@example.com --subject 'Hello' --body 'Hi Alice' --attach report.pdf
@@ -461,7 +463,7 @@ Helper flag conventions: IDs are `--<noun>-id` (`--document-id`, `--spreadsheet-
 
 Calendar helpers interpret times without a UTC offset in `--timezone`, falling back to your Google account's time zone. It is fetched from the Calendar settings API and cached for 24 hours in the cache directory, separately for each profile, credentials file and `--impersonate` user (never for `GWSR_TOKEN`/`GWSR_TOKEN_FILE`). A date-only `--start` creates an all-day event. `calendar +insert` emails attendees by default (`--send-updates all`).
 
-`gmail +watch` and `events +subscribe` stream NDJSON on stdout. Transient failures (the retryable API errors that exit `6`, such as 429, 503 or a 403 rate limit, and network errors) back off with jitter, up to `--max-failures N` consecutive failures (default 10). Pub/Sub messages are acknowledged only after they are written.
+`gmail +watch` and `events +subscribe` stream NDJSON on stdout; `--jq` and `--format` apply to each record. Transient failures (the retryable API errors that exit `6`, such as 429, 503 or a 403 rate limit, and network errors) back off with jitter, up to `--max-failures N` consecutive failures (default 10). Pub/Sub messages are acknowledged only after they are written.
 
 ## Model Armor
 

@@ -333,12 +333,18 @@ pub(crate) const LIST_ENVELOPE_KEYS: &[&str] = &[
     "etag",
     "nextPageToken",
     "nextSyncToken",
+    // Drive `changes.list` (last page).
+    "newStartPageToken",
     "prevPageToken",
     "previousPageToken",
     "incompleteSearch",
     "resultSizeEstimate",
     "totalSize",
     "totalItems",
+    // People `connections.list`.
+    "totalPeople",
+    // Gmail `history.list`.
+    "historyId",
     "selfLink",
     "nextLink",
     "timeZone",
@@ -378,6 +384,16 @@ fn extract_items(value: &Value) -> Option<(&str, &Vec<Value>)> {
         }
     }
     found
+}
+
+/// The rows of a list envelope `value`. In a stream of items
+/// (`--page-items`, `gwsr batch`), every value is one row, even one shaped
+/// like an envelope (`{"kind": "drive#file", "parents": [..]}`).
+fn list_items<'a>(value: &'a Value, page: Option<&PageStream>) -> Option<&'a Vec<Value>> {
+    if page.is_some_and(|p| !p.list_pages) {
+        return None;
+    }
+    extract_items(value).map(|(_key, arr)| arr)
 }
 
 /// A list page whose (empty) items field was omitted: an object with only
@@ -500,7 +516,7 @@ fn format_table(
     columns: Option<&[String]>,
     page: Option<&mut PageStream>,
 ) -> Result<String, GwsError> {
-    if let Some((_key, arr)) = extract_items(value) {
+    if let Some(arr) = list_items(value, page.as_deref()) {
         return format_array_as_table(arr, columns, page);
     }
     match value {
@@ -686,7 +702,7 @@ fn format_csv(
     selected: Option<&[String]>,
     page: Option<&mut PageStream>,
 ) -> Result<String, GwsError> {
-    let arr: &[Value] = if let Some((_key, arr)) = extract_items(value) {
+    let arr: &[Value] = if let Some(arr) = list_items(value, page.as_deref()) {
         arr
     } else if let Value::Array(arr) = value {
         arr
@@ -803,16 +819,34 @@ mod tests {
         render(value, format, settings, None).unwrap()
     }
 
-    /// Render `pages` as one paginated stream; returns each page's output.
+    /// Render `pages` as one `--page-all` stream of list pages; returns each
+    /// page's output.
     fn stream(
         pages: &[Value],
         format: OutputFormat,
         settings: &OutputSettings,
     ) -> (Vec<String>, PageStream) {
-        let mut state = PageStream::default();
-        let out = pages
+        render_stream(PageStream::list_pages(), pages, format, settings)
+    }
+
+    /// Render `items` as one `--page-items` stream; returns each item's output.
+    fn stream_items(
+        items: &[Value],
+        format: OutputFormat,
+        settings: &OutputSettings,
+    ) -> (Vec<String>, PageStream) {
+        render_stream(PageStream::default(), items, format, settings)
+    }
+
+    fn render_stream(
+        mut state: PageStream,
+        values: &[Value],
+        format: OutputFormat,
+        settings: &OutputSettings,
+    ) -> (Vec<String>, PageStream) {
+        let out = values
             .iter()
-            .map(|p| render(p, format, settings, Some(&mut state)).unwrap())
+            .map(|v| render(v, format, settings, Some(&mut state)).unwrap())
             .collect();
         (out, state)
     }
@@ -1010,6 +1044,36 @@ mod tests {
         // gmail +search.
         let search = json!({"messages": [{"id": "m"}], "resultSizeEstimate": 1, "query": "q"});
         assert_eq!(fmt(&search, OutputFormat::Csv), "id\nm");
+    }
+
+    /// Workspace list responses whose envelopes carry list metadata beyond
+    /// `nextPageToken`: People `connections.list` (`totalPeople`), Gmail
+    /// `history.list` (`historyId`) and Drive `changes.list`
+    /// (`newStartPageToken`, on the last page).
+    #[test]
+    fn api_list_envelopes_with_extra_metadata_render_their_items_as_rows() {
+        let connections = json!({
+            "connections": [{"resourceName": "people/c1"}, {"resourceName": "people/c2"}],
+            "nextPageToken": "t", "totalPeople": 2, "totalItems": 2
+        });
+        assert_eq!(
+            fmt(&connections, OutputFormat::Csv),
+            "resourceName\npeople/c1\npeople/c2"
+        );
+        let history = json!({"history": [{"id": "h1"}], "historyId": "9"});
+        assert_eq!(fmt(&history, OutputFormat::Csv), "id\nh1");
+        assert_eq!(fmt(&history, OutputFormat::Table), "id\n──\nh1");
+        let changes = json!({
+            "kind": "drive#changeList", "newStartPageToken": "5", "changes": [{"fileId": "f"}]
+        });
+        assert_eq!(fmt(&changes, OutputFormat::Csv), "fileId\nf");
+        // A last page whose (empty) list field was omitted has no rows.
+        let mut pages = PageStream::list_pages();
+        let last = json!({"kind": "drive#changeList", "newStartPageToken": "5"});
+        assert_eq!(
+            render(&last, OutputFormat::Csv, &plain(), Some(&mut pages)).unwrap(),
+            ""
+        );
     }
 
     #[test]
@@ -1238,7 +1302,7 @@ mod tests {
             columns: Some(vec!["nope".into()]),
             ..OutputSettings::default()
         };
-        let mut state = PageStream::default();
+        let mut state = PageStream::list_pages();
         let err = render(
             &ragged_pages()[0],
             OutputFormat::Csv,
@@ -1255,9 +1319,9 @@ mod tests {
             json!({"id": "1", "name": "a"}),
             json!({"name": "b", "id": "2"}),
         ];
-        let (csv, _) = stream(&items, OutputFormat::Csv, &plain());
+        let (csv, _) = stream_items(&items, OutputFormat::Csv, &plain());
         assert_eq!(csv, ["id,name\n1,a", "2,b"]);
-        let (table, _) = stream(&items, OutputFormat::Table, &plain());
+        let (table, _) = stream_items(&items, OutputFormat::Table, &plain());
         assert_eq!(table, ["id  name\n──  ────\n1   a", "2   b"]);
     }
 
@@ -1294,8 +1358,40 @@ mod tests {
         );
         // A stream of items keeps an item that has only envelope-like fields.
         let item = json!({"summary": "s", "description": "d"});
-        let (csv, _) = stream(&[item], OutputFormat::Csv, &plain());
+        let (csv, _) = stream_items(&[item], OutputFormat::Csv, &plain());
         assert_eq!(csv, ["description,summary\nd,s"]);
+    }
+
+    /// An item of a `--page-items` stream (or a `gwsr batch` line) is one
+    /// row, even when it is shaped like a list envelope: a Drive file
+    /// selected with `--fields 'files(kind,parents)'` is
+    /// `{"kind": "drive#file", "parents": [...]}`, not a list of parents.
+    #[test]
+    fn stream_items_shaped_like_envelopes_are_one_row_each() {
+        let items = [
+            json!({"kind": "drive#file", "parents": ["p1", "p2"]}),
+            json!({"kind": "drive#file", "parents": ["p3"]}),
+        ];
+        let (csv, _) = stream_items(&items, OutputFormat::Csv, &plain());
+        assert_eq!(
+            csv,
+            ["kind,parents\ndrive#file,\"p1, p2\"", "drive#file,p3"]
+        );
+        let (table, _) = stream_items(&items, OutputFormat::Table, &plain());
+        assert_eq!(
+            table,
+            [
+                "kind        parents\n──────────  ───────\ndrive#file  p1, p2",
+                "drive#file  p3"
+            ]
+        );
+        // Whole list pages are still split into their items.
+        let mut pages = PageStream::list_pages();
+        let page = json!({"kind": "drive#fileList", "files": [{"id": "1"}]});
+        assert_eq!(
+            render(&page, OutputFormat::Csv, &plain(), Some(&mut pages)).unwrap(),
+            "id\n1"
+        );
     }
 
     #[test]

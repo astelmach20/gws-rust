@@ -156,20 +156,23 @@ impl When {
         matches!(self, When::Local(_))
     }
 
-    /// Resolve to an absolute instant in `tz` (dates are midnight).
+    /// Resolve to an absolute instant in `tz`. A date is the start of that
+    /// day: local midnight, or, where clocks spring forward across midnight
+    /// (America/Santiago, for one), the first local time that exists that
+    /// day. A local time inside a DST gap is rejected.
     pub(super) fn to_utc(&self, tz: Tz) -> Result<DateTime<Utc>, GwsError> {
-        let local = |n: NaiveDateTime| {
-            tz.from_local_datetime(&n)
+        match self {
+            When::Date(d) => first_valid_local(tz, d.and_time(NaiveTime::MIN)).ok_or_else(|| {
+                GwsError::Validation(format!("{d} has no start of day in time zone {tz}"))
+            }),
+            When::Instant(t) => Ok(t.with_timezone(&Utc)),
+            When::Local(n) => tz
+                .from_local_datetime(n)
                 .earliest()
                 .map(|t| t.with_timezone(&Utc))
                 .ok_or_else(|| {
                     GwsError::Validation(format!("{n} does not exist in time zone {tz}"))
-                })
-        };
-        match self {
-            When::Date(d) => local(d.and_time(NaiveTime::MIN)),
-            When::Instant(t) => Ok(t.with_timezone(&Utc)),
-            When::Local(n) => local(*n),
+                }),
         }
     }
 }
@@ -431,6 +434,22 @@ mod tests {
         );
         assert!(slots.is_empty());
     }
+    #[test]
+    fn dates_start_at_the_first_valid_time_when_midnight_is_skipped() {
+        // America/Santiago springs forward at midnight: 2026-09-06 00:00 does
+        // not exist, and the day starts at 01:00 -03:00 (04:00Z).
+        let tz: Tz = "America/Santiago".parse().unwrap();
+        let t = |s: &str| DateTime::parse_from_rfc3339(s).unwrap().with_timezone(&Utc);
+        let day = parse_when("2026-09-06", "--start").unwrap();
+        assert_eq!(day.to_utc(tz).unwrap(), t("2026-09-06T04:00:00Z"));
+        // An ordinary day still starts at midnight.
+        let day = parse_when("2026-09-07", "--end").unwrap();
+        assert_eq!(day.to_utc(tz).unwrap(), t("2026-09-07T03:00:00Z"));
+        // A wall-clock time inside the gap is still rejected.
+        let gap = parse_when("2026-09-06T00:30", "--start").unwrap();
+        assert!(gap.to_utc(tz).is_err());
+    }
+
     #[test]
     fn working_hours_in_a_dst_gap_shift_to_the_first_valid_time() {
         // America/New_York springs forward at 02:00 on 2026-03-08: 02:00-02:59

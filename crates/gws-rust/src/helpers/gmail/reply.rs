@@ -243,11 +243,12 @@ fn build_reply_all_recipients(
     from_alias: Option<&str>,
 ) -> Result<ReplyRecipients, GwsError> {
     let excluded = collect_excluded_emails(remove, self_email, from_alias);
+    let self_reply = is_self_reply(original, self_email, from_alias);
 
     // When replying to your own message, the original sender (you) would be
     // excluded from To, leaving it empty. Gmail web uses the original To
     // recipients as the reply targets instead (see `is_self_reply`).
-    let (to_candidates, mut cc_candidates) = if is_self_reply(original, self_email, from_alias) {
+    let (to_candidates, mut cc_candidates) = if self_reply {
         // Self-reply: To = original To, CC = original CC
         let cc = original.cc.clone().unwrap_or_default();
         (original.to.clone(), cc)
@@ -261,16 +262,13 @@ fn build_reply_all_recipients(
     };
 
     let mut to_emails = std::collections::HashSet::new();
-    let to: Vec<Mailbox> = to_candidates
-        .into_iter()
-        .filter(|m| {
-            let email = m.email_lowercase();
-            if email.is_empty() || excluded.contains(&email) {
-                return false;
-            }
-            to_emails.insert(email)
-        })
-        .collect();
+    let mut to = filter_to(&to_candidates, &excluded, &mut to_emails);
+    // A note-to-self has no one else in To to reply to: keep the original To
+    // recipients (yourself), as `+reply` does, minus anyone named in --remove.
+    if to.is_empty() && self_reply {
+        let removed = collect_excluded_emails(remove, None, None);
+        to = filter_to(&to_candidates, &removed, &mut to_emails);
+    }
 
     // Add extra CC if provided
     if let Some(extra) = extra_cc {
@@ -293,6 +291,23 @@ fn build_reply_all_recipients(
     let cc = if cc.is_empty() { None } else { Some(cc) };
 
     Ok(ReplyRecipients { to, cc })
+}
+
+/// The To candidates that are not excluded, without duplicates; their
+/// lowercased emails are recorded in `to_emails`.
+fn filter_to(
+    candidates: &[Mailbox],
+    excluded: &std::collections::HashSet<String>,
+    to_emails: &mut std::collections::HashSet<String>,
+) -> Vec<Mailbox> {
+    candidates
+        .iter()
+        .filter(|m| {
+            let email = m.email_lowercase();
+            !email.is_empty() && !excluded.contains(&email) && to_emails.insert(email)
+        })
+        .cloned()
+        .collect()
 }
 
 /// Deduplicate recipients across To, CC, and BCC fields.
@@ -1264,6 +1279,38 @@ mod tests {
         // Self should still be excluded from To
         assert_eq!(recipients.to.len(), 1);
         assert_eq!(recipients.to[0].email, "alice@example.com");
+    }
+
+    #[test]
+    fn test_reply_all_to_note_to_self_stays_with_self() {
+        // A message you sent only to yourself: reply-all, like +reply, goes
+        // back to you instead of leaving To empty. Others in Cc stay in Cc.
+        let original = OriginalMessage {
+            from: Mailbox::parse("me@example.com"),
+            to: vec![Mailbox::parse("Me <ME@example.com>")],
+            cc: Some(vec![Mailbox::parse("carol@example.com")]),
+            ..Default::default()
+        };
+        let recipients =
+            build_reply_all_recipients(&original, None, None, Some("me@example.com"), None)
+                .unwrap();
+        assert_eq!(recipients.to.len(), 1);
+        assert_eq!(recipients.to[0].email, "ME@example.com");
+        let cc = recipients.cc.unwrap();
+        assert_eq!(cc.len(), 1);
+        assert_eq!(cc[0].email, "carol@example.com");
+
+        // --remove still wins: removing yourself leaves no To recipient.
+        let remove = Mailbox::parse_list("me@example.com");
+        let recipients = build_reply_all_recipients(
+            &original,
+            None,
+            Some(&remove),
+            Some("me@example.com"),
+            None,
+        )
+        .unwrap();
+        assert!(recipients.to.is_empty());
     }
 
     #[test]
