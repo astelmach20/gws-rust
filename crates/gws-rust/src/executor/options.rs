@@ -104,7 +104,7 @@ pub fn parse_exec_options(m: &clap::ArgMatches) -> Result<ExecOptions, GwsError>
 
 /// Resolve credentials for `method`: a token plus a provider that can refresh
 /// it on 401. No stored credentials means an unauthenticated request.
-async fn resolve_credentials(method: &RestMethod) -> Result<Credentials, GwsError> {
+pub(super) async fn resolve_credentials(method: &RestMethod) -> Result<Credentials, GwsError> {
     let scopes = crate::auth::scopes_for_method(&method.scopes, &method.http_method)
         .map_err(crate::auth::to_gws_error)?;
     Credentials::for_scopes(&scopes).await
@@ -159,19 +159,14 @@ pub async fn run_from_matches(
             "--decode-field requires -o/--output".to_string(),
         ));
     }
-    // A dry run sends nothing, so it never needs (or touches) credentials.
-    let credentials = if options.dry_run {
-        Credentials::None
-    } else {
-        resolve_credentials(method).await?
-    };
-
     execute(Invocation {
         doc,
         method,
         params,
         body,
-        credentials,
+        // Resolved only after validation and confirmation; a dry run sends
+        // nothing, so it never needs (or touches) credentials.
+        credentials: None,
         upload,
         output,
         pagination: parse_pagination_config(m, defaults)?,
