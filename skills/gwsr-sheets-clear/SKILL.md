@@ -44,6 +44,9 @@ gwsr sheets +clear --spreadsheet-id ID --range 'Sheet1!A2:Z' --yes
 
 - Destructive: requires --yes (or a confirmation prompt on a terminal).
 
+> [!CAUTION]
+> This is a **write** command — confirm with the user before executing.
+
 ## See Also
 
 - [gwsr-shared](../gwsr-shared/SKILL.md) — Global flags and auth

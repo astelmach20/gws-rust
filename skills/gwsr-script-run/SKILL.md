@@ -50,6 +50,9 @@ gwsr script +run --script-id SCRIPT_ID --function add --args '[1, 2]' --dev-mode
 - project with your OAuth client. Prints the function's return value.
 - A script error fails the command with the script's message and stack.
 
+> [!CAUTION]
+> This is a **write** command — confirm with the user before executing.
+
 ## See Also
 
 - [gwsr-shared](../gwsr-shared/SKILL.md) — Global flags and auth

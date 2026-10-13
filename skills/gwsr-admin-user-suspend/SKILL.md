@@ -47,6 +47,9 @@ gwsr admin +user-suspend --user ann@example.com --unsuspend
 - The Directory API cannot record a suspension reason (its suspensionReason
 - field is output-only).
 
+> [!CAUTION]
+> This is a **write** command — confirm with the user before executing.
+
 ## See Also
 
 - [gwsr-shared](../gwsr-shared/SKILL.md) — Global flags and auth

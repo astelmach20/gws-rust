@@ -59,6 +59,9 @@ gwsr gmail +reply --message-id 18f1a2b3c4d --body 'Draft reply' --draft
 - --sanitize screens the subject and body, quoted original included, before sending;
 - in block mode a match or a Model Armor failure sends nothing. --dry-run does not call Model Armor.
 
+> [!CAUTION]
+> This is a **write** command — confirm with the user before executing.
+
 ## See Also
 
 - [gwsr-shared](../gwsr-shared/SKILL.md) — Global flags and auth
