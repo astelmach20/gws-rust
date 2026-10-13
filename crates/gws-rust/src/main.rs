@@ -509,7 +509,7 @@ async fn run_service(
     error::set_context(ErrorContext {
         service: Some(alias.clone()),
         required_scopes: method.scopes.clone(),
-        granted_scopes: None,
+        ..Default::default()
     });
 
     executor::options::run_from_matches(
