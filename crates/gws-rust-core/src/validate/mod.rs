@@ -122,10 +122,20 @@ pub fn encode_path_segment(s: &str) -> String {
 /// URL parsing removes such segments (`files/F1/permissions/..` becomes
 /// `files/F1/`), so the request would address a different resource than the
 /// one named, e.g. a whole calendar instead of one of its events.
+///
+/// Mirrors the WHATWG parser used by `reqwest`: ASCII tab, CR and LF are
+/// removed before parsing, and `\` separates path segments in http(s) URLs,
+/// so `a/.<TAB>./b` and `a/..\b` hide dot segments too.
 pub fn reject_dot_segments(url: &str) -> Result<(), GwsError> {
-    let after_scheme = url.split_once("://").map_or(url, |(_, rest)| rest);
+    let stripped: String = url
+        .chars()
+        .filter(|c| !matches!(c, '\t' | '\n' | '\r'))
+        .collect();
+    let after_scheme = stripped
+        .split_once("://")
+        .map_or(stripped.as_str(), |(_, rest)| rest);
     let path_and_rest = after_scheme
-        .find('/')
+        .find(['/', '\\'])
         .map_or("", |start| &after_scheme[start..]);
     let path = path_and_rest
         .split(['?', '#'])
@@ -135,7 +145,7 @@ pub fn reject_dot_segments(url: &str) -> Result<(), GwsError> {
         let decoded = segment.replace("%2E", ".").replace("%2e", ".");
         decoded == "." || decoded == ".."
     };
-    if path.split('/').any(is_dot_segment) {
+    if path.split(['/', '\\']).any(is_dot_segment) {
         return Err(GwsError::Validation(format!(
             "Refusing to send a request whose URL path has a '.' or '..' dot segment \
              (an ID or resource name of '.' or '..'), which would address a different \
@@ -365,6 +375,41 @@ mod tests {
         ] {
             assert!(reject_dot_segments(ok).is_ok(), "{ok}");
         }
+    }
+
+    /// The WHATWG parser treats `\` as a path separator in http(s) URLs and
+    /// strips ASCII tab/CR/LF, so these also hide a `..` segment that
+    /// parsing removes.
+    #[test]
+    fn reject_dot_segments_catches_backslash_and_stripped_whitespace() {
+        for (bad, parsed_path) in [
+            (
+                "https://www.googleapis.com/drive/v3/files/F1/..\\x",
+                "/drive/v3/files/x",
+            ),
+            (
+                "https://www.googleapis.com/drive/v3/files/F1\\..\\x",
+                "/drive/v3/files/x",
+            ),
+            (
+                "https://www.googleapis.com/drive/v3/files/F1/.\t./x",
+                "/drive/v3/files/x",
+            ),
+            (
+                "https://www.googleapis.com/drive/v3/files/F1/%2E\n%2E/x",
+                "/drive/v3/files/x",
+            ),
+            (
+                "https://www.googleapis.com/drive/v3/files/F1/.\r/x",
+                "/drive/v3/files/F1/x",
+            ),
+        ] {
+            // Precondition: parsing really does drop the hidden segment.
+            assert_eq!(url::Url::parse(bad).unwrap().path(), parsed_path, "{bad:?}");
+            let result = reject_dot_segments(bad);
+            assert!(result.is_err(), "{bad:?} was accepted");
+        }
+        assert!(reject_dot_segments("https://www.googleapis.com/a/b\\c").is_ok());
     }
 
     #[test]
