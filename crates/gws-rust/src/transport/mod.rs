@@ -193,7 +193,9 @@ impl Transport {
     }
 
     /// An authenticated transport for `scopes` (credentials are required).
+    /// Helpers use it; error hints name `scopes` as what to log in for.
     pub(crate) async fn for_scopes(scopes: &[&str]) -> Result<Self, GwsError> {
+        crate::error::note_helper_scopes(scopes);
         Self::from_env(&Credentials::required_for_scopes(scopes).await?)
     }
 
