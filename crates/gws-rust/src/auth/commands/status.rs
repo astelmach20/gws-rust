@@ -45,7 +45,7 @@ pub(super) async fn build_report(env: &AuthEnv, offline: bool) -> Value {
 
     // Report the client `auth login` would use (same resolution order), and
     // name a saved file that the environment variables shadow.
-    match client_config::resolve_optional() {
+    match client_config::resolve_optional_in(&env.base) {
         Ok(Some(c)) => {
             let mut client = json!({
                 "source": c.source.kind(),
@@ -53,10 +53,9 @@ pub(super) async fn build_report(env: &AuthEnv, offline: bool) -> Value {
                 "project_id": c.project_id,
             });
             if c.source == client_config::ClientSource::EnvVars {
-                match client_config::client_config_path() {
-                    Ok(p) if p.exists() => client["overrides"] = json!(p.display().to_string()),
-                    Ok(_) => {}
-                    Err(e) => out["client_error"] = json!(format!("{e:#}")),
+                let p = client_config::client_config_path_in(&env.base);
+                if p.exists() {
+                    client["overrides"] = json!(p.display().to_string());
                 }
             }
             out["client"] = client;
@@ -189,6 +188,24 @@ mod tests {
             },
             ProfilePaths::new(dir, "default"),
         )
+    }
+
+    /// The report reads the OAuth client from the config directory it is
+    /// given, never from the process-wide (real) one.
+    #[tokio::test]
+    async fn client_is_read_from_the_reports_config_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        crate::auth::client_config::save_client_config(
+            &dir.path().join("client_secret.json"),
+            "123-hermetic.apps.googleusercontent.com",
+            &secrecy::SecretString::from("cs".to_string()),
+            Some("hermetic-test-project"),
+        )
+        .unwrap();
+        let r = build_report(&env(dir.path()), true).await;
+        // No message: on failure the report would describe the real client.
+        assert!(r["client"]["project_id"] == "hermetic-test-project");
+        assert!(r["client"]["source"] == "client_secret.json");
     }
 
     #[tokio::test]
