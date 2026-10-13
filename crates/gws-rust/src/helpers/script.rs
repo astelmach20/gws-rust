@@ -374,9 +374,11 @@ fn local_path_for(name: &str, file_type: &str) -> Result<PathBuf, GwsError> {
             )));
         }
         // The name maps back to the path on +push, so it cannot be renamed
-        // on disk; refuse names Windows would treat as a device (`CON.gs`)
+        // on disk; refuse names Windows would treat as a device (`CON.gs`),
+        // as a drive-relative path or alternate data stream (`C:x`, `a:b`),
         // or silently change (a trailing dot or space on a directory).
         if crate::helpers::http::is_windows_device_name(part)
+            || part.contains(['<', '>', ':', '"', '|', '?', '*'])
             || (i != last && part.ends_with(['.', ' ']))
         {
             return Err(GwsError::Validation(format!(
@@ -675,8 +677,47 @@ mod tests {
             let err = local_path_for(name, "SERVER_JS").unwrap_err().to_string();
             assert!(err.contains("Windows"), "{name}: {err}");
         }
+        for name in [
+            "C:evil",
+            "lib/D:x",
+            "a:b",
+            "q?",
+            "a*b",
+            "x|y",
+            "<t>",
+            "say\"hi\"",
+        ] {
+            let err = local_path_for(name, "SERVER_JS").unwrap_err().to_string();
+            assert!(err.contains("Windows"), "{name}: {err}");
+        }
         assert!(local_path_for("CONTRACT", "SERVER_JS").is_ok());
         assert!(local_path_for("lib/console", "SERVER_JS").is_ok());
+    }
+
+    /// On Windows a component such as `C:evil` is a drive-relative path:
+    /// `PathBuf::push`/`join` replaces everything before it, so the pulled
+    /// file would land in drive C's current directory instead of `--dir`.
+    #[test]
+    fn local_paths_never_escape_the_directory() {
+        let dir = PathBuf::from("pulled");
+        for name in ["C:evil", "lib/D:x", "a:b", "z:"] {
+            if let Ok(relative) = local_path_for(name, "SERVER_JS") {
+                let joined = dir.join(&relative);
+                assert!(
+                    joined.starts_with(&dir),
+                    "{name} -> {} escapes {}",
+                    joined.display(),
+                    dir.display()
+                );
+                assert!(
+                    relative
+                        .components()
+                        .all(|c| matches!(c, std::path::Component::Normal(_))),
+                    "{name} -> {}",
+                    relative.display()
+                );
+            }
+        }
     }
 
     #[tokio::test]
