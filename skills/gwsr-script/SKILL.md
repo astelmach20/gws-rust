@@ -50,7 +50,7 @@ gwsr script <resource> <method> [flags]
 
 ### scripts
 
-  - `run` — 
+  - `run`
 
 ## Discovering Commands
 
