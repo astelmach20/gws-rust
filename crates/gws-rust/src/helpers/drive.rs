@@ -1144,9 +1144,10 @@ async fn sync(api: &Api, folder_id: &str, dir: &Path) -> Result<Value, GwsError>
                 ),
                 // The API refused this one file (restricted download, export
                 // size limit...): record it and mirror the rest. Anything
-                // else (auth, network, local I/O) affects every file, so it
-                // aborts the sync.
-                Err(err @ GwsError::Api { .. }) => failed.push(json!({
+                // else (auth, network, local I/O, and retryable API errors
+                // such as rate limits or 503s) affects every file, so it
+                // aborts the sync with its own exit code.
+                Err(err @ GwsError::Api { .. }) if !err.is_retryable() => failed.push(json!({
                     "id": child_id,
                     "path": path.display().to_string(),
                     "error": err.to_json()["error"],
@@ -1696,6 +1697,53 @@ mod tests {
 
         // A clean run is not a partial failure.
         assert!(sync_failure(&json!({"failed": []})).is_none());
+    }
+
+    /// A rate limit or server outage is not about one file: it would hit
+    /// every later file too, and it is retryable (exit 6). It must abort the
+    /// sync with that error, not be listed under "failed" and turned into a
+    /// non-retryable `syncPartialFailure` (exit 1).
+    #[tokio::test]
+    async fn sync_aborts_on_retryable_api_errors() {
+        let bodies = [
+            (
+                403,
+                json!({"error": {"code": 403, "message": "User rate limit exceeded.",
+                    "errors": [{"domain": "usageLimits", "reason": "userRateLimitExceeded"}]}}),
+            ),
+            (
+                503,
+                json!({"error": {"code": 503, "message": "Backend Error",
+                    "errors": [{"reason": "backendError"}]}}),
+            ),
+        ];
+        for (status, body) in bodies {
+            let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .and(path("/drive/v3/files"))
+                .and(query_param("q", "'ROOT' in parents and trashed = false"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({"files": [
+                    {"id": "A", "name": "a.txt", "mimeType": "text/plain"}
+                ]})))
+                .mount(&server)
+                .await;
+            Mock::given(method("GET"))
+                .and(path("/drive/v3/files/A"))
+                .and(query_param("alt", "media"))
+                .respond_with(ResponseTemplate::new(status).set_body_json(body))
+                .mount(&server)
+                .await;
+            let api = api(&server.uri(), "drive/v3/");
+            let dir = tempfile::tempdir().unwrap();
+            let err = sync(&api, "ROOT", dir.path())
+                .await
+                .expect_err(&format!("HTTP {status} must abort the sync"));
+            assert_eq!(
+                err.exit_code(),
+                GwsError::EXIT_CODE_API_RETRYABLE,
+                "HTTP {status}: {err:?}"
+            );
+        }
     }
 
     /// Mounts a `files.list` response for `parent` and an `alt=media`
