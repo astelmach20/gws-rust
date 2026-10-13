@@ -376,7 +376,12 @@ async fn dispatch(
             executor::batch::handle_batch_command(&batch_args, &ctx).await?;
         }
         TopCommand::Schema { path, resolve_refs } => {
-            let value = schema::handle_schema_command(&path, resolve_refs).await?;
+            let value = schema::handle_schema_command(
+                &path,
+                cli.global.api_version.as_deref(),
+                resolve_refs,
+            )
+            .await?;
             emit_value(&value, format)?;
         }
         TopCommand::Commands { services } => {
