@@ -228,15 +228,32 @@ fn subscription_from_operation(op: &Value) -> Result<String, GwsError> {
     op.get("response")
         .and_then(|r| r.get("name"))
         .and_then(Value::as_str)
-        .or_else(|| op.get("metadata").and_then(|m| m.get("subscription")).and_then(Value::as_str))
-        .or_else(|| op.get("name").and_then(Value::as_str).filter(|n| n.starts_with("subscriptions/")))
-        .map(str::to_string)
-        .ok_or_else(|| {
-            GwsError::other(format!(
-                "Workspace Events operation {} did not report a subscription name yet; check it with                  gwsr events operations get",
-                op.get("name").and_then(Value::as_str).unwrap_or("(unnamed)")
-            ))
+        .or_else(|| {
+            op.get("metadata")
+                .and_then(|m| m.get("subscription"))
+                .and_then(Value::as_str)
         })
+        .or_else(|| {
+            op.get("name")
+                .and_then(Value::as_str)
+                .filter(|n| n.starts_with("subscriptions/"))
+        })
+        .map(str::to_string)
+        .ok_or_else(|| GwsError::other(pending_subscription_message(op)))
+}
+
+/// The error for a finished operation that names no subscription, with the
+/// command that shows the operation.
+fn pending_subscription_message(op: &Value) -> String {
+    match op.get("name").and_then(Value::as_str) {
+        Some(name) => format!(
+            "Workspace Events operation {name} did not report a subscription name yet; check \
+             it with: gwsr events operations get --params '{}'",
+            json!({ "name": name })
+        ),
+        None => "Workspace Events operation (unnamed) did not report a subscription name yet"
+            .to_string(),
+    }
 }
 
 struct SubscribeStep<'a> {
@@ -669,7 +686,18 @@ mod tests {
             subscription_from_operation(&json!({"name": "subscriptions/direct"})).unwrap(),
             "subscriptions/direct"
         );
-        assert!(subscription_from_operation(&json!({"name": "operations/pending"})).is_err());
+        // A pending operation names the full command that shows it (the
+        // operation name is a required parameter of `operations get`).
+        let err = subscription_from_operation(&json!({"name": "operations/pending"}))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains(
+                r#"check it with: gwsr events operations get --params '{"name":"operations/pending"}'"#
+            ),
+            "{err}"
+        );
+        assert!(!err.contains("  "), "{err}");
         // The operation's error code is a gRPC code: 7 PERMISSION_DENIED is
         // HTTP 403, 14 UNAVAILABLE is a retryable 503.
         let err = subscription_from_operation(&json!({"error": {"code": 7, "message": "denied"}}))

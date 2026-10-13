@@ -545,7 +545,8 @@ fn resolve_quota_project(
     load_client_config: impl FnOnce() -> anyhow::Result<Option<client_config::ClientConfig>>,
     adc_path: Option<&std::path::Path>,
 ) -> Result<Option<String>, GwsError> {
-    let skip = "set GWSR_PROJECT_ID, or pass --no-quota-project to send no quota project";
+    let skip = "set GWSR_PROJECT_ID, or set GWSR_NO_QUOTA_PROJECT=1 (API methods also take \
+                --no-quota-project) to send no quota project";
     if let Some(project) = env_project {
         return Ok(Some(project));
     }
