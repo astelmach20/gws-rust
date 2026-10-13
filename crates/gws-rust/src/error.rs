@@ -185,7 +185,8 @@ pub fn hint_for(err: &GwsError, ctx: &ErrorContext) -> Option<String> {
         ),
         GwsError::Network(_) => Some(
             "No response was received. Check the network connection and proxy settings, and \
-             raise --timeout for slow links. Before re-running a create or other \
+             raise the request timeout for slow links (GWSR_TIMEOUT or `timeout_secs` in \
+             config.toml; API methods also take --timeout). Before re-running a create or other \
              non-idempotent call, check whether it was applied. Exit code 10 marks network \
              failures."
                 .to_string(),
@@ -240,8 +241,8 @@ fn api_hint(
         return Some(
             "Google refused the quota project sent as x-goog-user-project: you lack \
              serviceusage.services.use on it (common when the OAuth client belongs to a \
-             project you are not a member of). Pass --no-quota-project (or set \
-             GWSR_NO_QUOTA_PROJECT=1) to send no quota project, set GWSR_PROJECT_ID to a \
+             project you are not a member of). Set GWSR_NO_QUOTA_PROJECT=1 (API methods \
+             also take --no-quota-project) to send no quota project, set GWSR_PROJECT_ID to a \
              project you can use, or ask the project owner for \
              roles/serviceusage.serviceUsageConsumer."
                 .to_string(),
@@ -258,8 +259,9 @@ fn api_hint(
                 .to_string(),
         }),
         "rateLimitExceeded" | "userRateLimitExceeded" | "RATE_LIMIT_EXCEEDED" => Some(
-            "Rate limited by Google. Retry after an exponential backoff; for bulk work \
-             add --page-delay or lower concurrency. Exit code 6 marks retryable errors."
+            "Rate limited by Google. Retry after an exponential backoff; for bulk work, run \
+             fewer calls in parallel, or raise --page-delay (or GWSR_PAGE_DELAY_MS) when \
+             paginating. Exit code 6 marks retryable errors."
                 .to_string(),
         ),
         "quotaExceeded" | "dailyLimitExceeded" => Some(
@@ -626,6 +628,24 @@ mod tests {
         );
         assert!(hint_for(&api(404, "notFound"), &ctx).is_none());
         assert!(hint_for(&GwsError::Validation("x".into()), &ctx).is_none());
+    }
+
+    /// `--timeout`, `--no-quota-project` and `--page-delay` exist only on
+    /// generated API methods (and `--page-delay` only on paginated ones), so a
+    /// hint that names one also names a setting that works for every command
+    /// (helpers, `gwsr batch`), and never a setting gwsr does not have.
+    #[test]
+    fn hints_name_settings_that_every_command_honors() {
+        let ctx = ErrorContext::default();
+        let network = hint_for(&GwsError::Network("timed out".into()), &ctx).unwrap();
+        assert!(network.contains("GWSR_TIMEOUT"), "{network}");
+        assert!(network.contains("timeout_secs"), "{network}");
+        let quota = hint_for(&api(403, "USER_PROJECT_DENIED"), &ctx).unwrap();
+        assert!(quota.contains("Set GWSR_NO_QUOTA_PROJECT=1"), "{quota}");
+        assert!(!quota.contains("Pass --no-quota-project"), "{quota}");
+        let rate = hint_for(&api(429, "rateLimitExceeded"), &ctx).unwrap();
+        assert!(rate.contains("GWSR_PAGE_DELAY_MS"), "{rate}");
+        assert!(!rate.contains("concurrency"), "{rate}");
     }
 
     #[test]
