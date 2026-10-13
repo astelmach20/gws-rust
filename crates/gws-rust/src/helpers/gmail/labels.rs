@@ -72,16 +72,11 @@ async fn apply(
 
 /// Requests that `apply` would make, for `--dry-run`.
 fn plan(api: &GmailApi, targets: &Targets, add: &[String], remove: &[String]) -> Vec<Value> {
-    let mut requests = Vec::new();
-    if !targets.messages.is_empty() {
-        let (url, body) = api.modify_messages_request(&targets.messages, add, remove);
-        requests.push(crate::helpers::http::dry_run_request(
-            "POST",
-            &url,
-            &[],
-            Some(&body),
-        ));
-    }
+    let mut requests: Vec<Value> = api
+        .modify_messages_requests(&targets.messages, add, remove)
+        .iter()
+        .map(|(url, body)| crate::helpers::http::dry_run_request("POST", url, &[], Some(body)))
+        .collect();
     for thread in &targets.threads {
         let body = json!({ "addLabelIds": add, "removeLabelIds": remove });
         requests.push(crate::helpers::http::dry_run_request(
@@ -240,6 +235,46 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(out["addedLabelIds"][0], "L1");
+    }
+
+    /// `users.messages.batchModify` accepts at most 1000 IDs per request.
+    #[tokio::test]
+    async fn apply_splits_batch_modify_at_the_api_limit() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/gmail/v1/users/me/messages/batchModify"))
+            .respond_with(ResponseTemplate::new(204))
+            .expect(3)
+            .mount(&server)
+            .await;
+        let ids: Vec<String> = (0..2001).map(|i| format!("m{i}")).collect();
+        let targets = Targets {
+            messages: ids.clone(),
+            threads: vec![],
+        };
+        apply(&mock_api(&server), &targets, &[], &["INBOX".into()])
+            .await
+            .unwrap();
+        let sent: Vec<String> = server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .flat_map(|r| {
+                let body: Value = serde_json::from_slice(&r.body).unwrap();
+                let ids = body["ids"].as_array().unwrap().clone();
+                assert!(ids.len() <= 1000, "{} ids in one request", ids.len());
+                ids.into_iter().map(|v| v.as_str().unwrap().to_string())
+            })
+            .collect();
+        assert_eq!(sent, ids);
+
+        let reqs = plan(&offline_api().unwrap(), &targets, &[], &["INBOX".into()]);
+        let sizes: Vec<usize> = reqs
+            .iter()
+            .map(|r| r["body"]["ids"].as_array().unwrap().len())
+            .collect();
+        assert_eq!(sizes, [1000, 1000, 1]);
     }
 
     #[tokio::test]
