@@ -333,12 +333,18 @@ pub(crate) const LIST_ENVELOPE_KEYS: &[&str] = &[
     "etag",
     "nextPageToken",
     "nextSyncToken",
+    // Drive `changes.list` (last page).
+    "newStartPageToken",
     "prevPageToken",
     "previousPageToken",
     "incompleteSearch",
     "resultSizeEstimate",
     "totalSize",
     "totalItems",
+    // People `connections.list`.
+    "totalPeople",
+    // Gmail `history.list`.
+    "historyId",
     "selfLink",
     "nextLink",
     "timeZone",
@@ -1010,6 +1016,36 @@ mod tests {
         // gmail +search.
         let search = json!({"messages": [{"id": "m"}], "resultSizeEstimate": 1, "query": "q"});
         assert_eq!(fmt(&search, OutputFormat::Csv), "id\nm");
+    }
+
+    /// Workspace list responses whose envelopes carry list metadata beyond
+    /// `nextPageToken`: People `connections.list` (`totalPeople`), Gmail
+    /// `history.list` (`historyId`) and Drive `changes.list`
+    /// (`newStartPageToken`, on the last page).
+    #[test]
+    fn api_list_envelopes_with_extra_metadata_render_their_items_as_rows() {
+        let connections = json!({
+            "connections": [{"resourceName": "people/c1"}, {"resourceName": "people/c2"}],
+            "nextPageToken": "t", "totalPeople": 2, "totalItems": 2
+        });
+        assert_eq!(
+            fmt(&connections, OutputFormat::Csv),
+            "resourceName\npeople/c1\npeople/c2"
+        );
+        let history = json!({"history": [{"id": "h1"}], "historyId": "9"});
+        assert_eq!(fmt(&history, OutputFormat::Csv), "id\nh1");
+        assert_eq!(fmt(&history, OutputFormat::Table), "id\n──\nh1");
+        let changes = json!({
+            "kind": "drive#changeList", "newStartPageToken": "5", "changes": [{"fileId": "f"}]
+        });
+        assert_eq!(fmt(&changes, OutputFormat::Csv), "fileId\nf");
+        // A last page whose (empty) list field was omitted has no rows.
+        let mut pages = PageStream::list_pages();
+        let last = json!({"kind": "drive#changeList", "newStartPageToken": "5"});
+        assert_eq!(
+            render(&last, OutputFormat::Csv, &plain(), Some(&mut pages)).unwrap(),
+            ""
+        );
     }
 
     #[test]
