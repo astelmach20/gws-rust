@@ -463,7 +463,7 @@ Helper flag conventions: IDs are `--<noun>-id` (`--document-id`, `--spreadsheet-
 
 Calendar helpers interpret times without a UTC offset in `--timezone`, falling back to your Google account's time zone. It is fetched from the Calendar settings API and cached for 24 hours in the cache directory, separately for each profile, credentials file and `--impersonate` user (never for `GWSR_TOKEN`/`GWSR_TOKEN_FILE`). A date-only `--start` creates an all-day event. `calendar +insert` emails attendees by default (`--send-updates all`).
 
-`gmail +watch` and `events +subscribe` stream NDJSON on stdout. Transient failures (the retryable API errors that exit `6`, such as 429, 503 or a 403 rate limit, and network errors) back off with jitter, up to `--max-failures N` consecutive failures (default 10). Pub/Sub messages are acknowledged only after they are written.
+`gmail +watch` and `events +subscribe` stream NDJSON on stdout; `--jq` and `--format` apply to each record. Transient failures (the retryable API errors that exit `6`, such as 429, 503 or a 403 rate limit, and network errors) back off with jitter, up to `--max-failures N` consecutive failures (default 10). Pub/Sub messages are acknowledged only after they are written.
 
 ## Model Armor
 
