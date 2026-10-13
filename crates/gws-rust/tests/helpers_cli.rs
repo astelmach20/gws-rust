@@ -615,6 +615,89 @@ fn upload_rejects_paths_outside_cwd() {
 }
 
 #[test]
+fn drive_share_rejects_bad_flag_combinations_before_confirm_and_auth() {
+    // No credentials exist here, and ownership transfers always need
+    // confirmation: a flag combination the helper can never send is a
+    // validation error (exit 3), not a prompt (exit 7) or an auth error (2).
+    let dir = setup();
+    let base = ["drive", "+share", "--file-id", "F1"];
+    let cases: [(&[&str], &str); 4] = [
+        (
+            &[
+                "--domain",
+                "example.com",
+                "--role",
+                "reader",
+                "--message",
+                "hi",
+            ],
+            "--message only applies to --email grants",
+        ),
+        (
+            &["--anyone", "--role", "commenter", "--message", "hi"],
+            "--message only applies to --email grants",
+        ),
+        (
+            &["--email", "team@example.com", "--group", "--role", "owner"],
+            "--role owner can only be granted to a single user",
+        ),
+        (
+            &[
+                "--email",
+                "user@example.com",
+                "--role",
+                "owner",
+                "--no-notify",
+            ],
+            "--no-notify cannot be used with --role owner",
+        ),
+    ];
+    for (args, expected) in cases {
+        for policy in ["0", "1"] {
+            let out = gwsr(dir.path())
+                .env("GWSR_REQUIRE_CONFIRM", policy)
+                .args(base)
+                .args(args)
+                .output()
+                .unwrap();
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            assert_eq!(
+                out.status.code(),
+                Some(3),
+                "{args:?} policy {policy}: {stderr}"
+            );
+            assert!(stderr.contains(expected), "{args:?}: {stderr}");
+            assert!(!stderr.contains("confirm"), "{args:?}: {stderr}");
+        }
+    }
+}
+
+#[test]
+fn drive_download_and_export_check_output_before_auth() {
+    // `--output .` names a directory, which no download can write to. The
+    // helper must say so before loading (absent) credentials.
+    let dir = setup();
+    for args in [
+        &["drive", "+download", "--file-id", "F1", "--output", "."][..],
+        &[
+            "drive",
+            "+export",
+            "--file-id",
+            "F1",
+            "--to",
+            "pdf",
+            "--output",
+            ".",
+        ][..],
+    ] {
+        let out = gwsr(dir.path()).args(args).output().unwrap();
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(3), "{args:?}: {stderr}");
+        assert!(stderr.contains("is a directory"), "{args:?}: {stderr}");
+    }
+}
+
+#[test]
 fn gmail_helper_output_honors_sanitize_block_mode() {
     let dir = setup();
     seed(dir.path(), "gmail", "v1", "");

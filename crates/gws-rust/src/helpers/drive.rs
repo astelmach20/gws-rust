@@ -319,6 +319,7 @@ TIPS:
                     (api, v)
                 }
                 "+download" => {
+                    check_output(m)?;
                     let api = Api::new(doc, &[SCOPE_DRIVE_READONLY], dry, sanitize).await?;
                     let v = download(
                         &api,
@@ -333,6 +334,7 @@ TIPS:
                     (api, v)
                 }
                 "+export" => {
+                    check_output(m)?;
                     let api = Api::new(doc, &[SCOPE_DRIVE_READONLY], dry, sanitize).await?;
                     let v = export(
                         &api,
@@ -500,6 +502,16 @@ fn str_field<'v>(v: &'v Value, key: &str) -> Result<&'v str, GwsError> {
     v.get(key)
         .and_then(Value::as_str)
         .ok_or_else(|| http::other_err(anyhow::anyhow!("Drive response is missing '{key}'")))
+}
+
+/// Check an explicit `--output` before credentials are loaded, so a path the
+/// download could never write to is a validation error, not an auth error.
+/// Without `--output` the default file name comes from Drive at run time.
+fn check_output(m: &ArgMatches) -> Result<(), GwsError> {
+    if let Some(o) = optional(m, "output")? {
+        OutputTarget::parse(o, flag(m, "overwrite")?)?;
+    }
+    Ok(())
 }
 
 /// `--output`, or a local file named after the Drive file. `ext` (for an
@@ -857,13 +869,43 @@ impl ShareArgs {
                 "one of --email, --domain or --anyone is required".into(),
             ));
         };
-        Ok(Self {
+        let args = Self {
             file_id: required(m, "file-id")?.to_string(),
             role: required(m, "role")?.to_string(),
             grantee,
             notify: !flag(m, "no-notify")?,
             message: optional(m, "message")?.map(str::to_string),
-        })
+        };
+        args.check()?;
+        Ok(args)
+    }
+
+    /// Reject combinations Drive would refuse, before the confirmation
+    /// prompt and before credentials are loaded.
+    fn check(&self) -> Result<(), GwsError> {
+        let is_person = matches!(self.grantee, Grantee::User(_) | Grantee::Group(_));
+        if self.message.is_some() && !is_person {
+            return Err(GwsError::Validation(
+                "--message only applies to --email grants".into(),
+            ));
+        }
+        if self.role == "owner" {
+            if !matches!(self.grantee, Grantee::User(_)) {
+                return Err(GwsError::Validation(
+                    "--role owner can only be granted to a single user (--email without --group)"
+                        .into(),
+                ));
+            }
+            // permissions.create `sendNotificationEmail`: "It must not be
+            // disabled for ownership transfers."
+            if !self.notify {
+                return Err(GwsError::Validation(
+                    "--no-notify cannot be used with --role owner: Drive always notifies the new owner of an ownership transfer"
+                        .into(),
+                ));
+            }
+        }
+        Ok(())
     }
 
     fn grantee_label(&self) -> String {
@@ -905,7 +947,7 @@ impl ShareArgs {
         )
     }
 
-    fn body(&self) -> Result<Value, GwsError> {
+    fn body(&self) -> Value {
         let mut body = json!({ "role": self.role });
         match &self.grantee {
             Grantee::User(e) => {
@@ -922,34 +964,23 @@ impl ShareArgs {
             }
             Grantee::Anyone => body["type"] = json!("anyone"),
         }
-        if self.role == "owner" && !matches!(self.grantee, Grantee::User(_)) {
-            return Err(GwsError::Validation(
-                "--role owner can only be granted to a single user (--email without --group)"
-                    .into(),
-            ));
-        }
-        Ok(body)
+        body
     }
 }
 
 async fn share(api: &Api, args: &ShareArgs) -> Result<Value, GwsError> {
-    let body = args.body()?;
     let is_person = matches!(args.grantee, Grantee::User(_) | Grantee::Group(_));
     let mut req = ApiRequest::post(api.url(&format!(
         "files/{}/permissions",
         encode_path_segment(&args.file_id)
     )))
     .query("supportsAllDrives", "true")
-    .json(body);
+    .json(args.body());
     if is_person {
         req = req.query("sendNotificationEmail", args.notify.to_string());
         if let Some(msg) = &args.message {
             req = req.query("emailMessage", msg.clone());
         }
-    } else if args.message.is_some() {
-        return Err(GwsError::Validation(
-            "--message only applies to --email grants".into(),
-        ));
     }
     if args.role == "owner" {
         req = req.query("transferOwnership", "true");
