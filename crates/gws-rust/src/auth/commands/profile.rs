@@ -19,7 +19,7 @@ use std::path::Path;
 use serde_json::{Value, json};
 
 use super::print_json;
-use crate::auth::profiles::{self, ActiveProfile, ProfilePaths};
+use crate::auth::profiles::{self, ActiveProfile, ProfileDirs, ProfilePaths};
 use crate::error::GwsError;
 
 pub(super) fn handle_list() -> Result<(), GwsError> {
@@ -29,24 +29,66 @@ pub(super) fn handle_list() -> Result<(), GwsError> {
 }
 
 pub(super) fn list_report(base: &Path, active: &ActiveProfile) -> Result<Value, GwsError> {
-    let names = profiles::list_profiles(base).map_err(crate::auth::to_gws_error)?;
+    let dirs = profiles::list_profiles(base).map_err(crate::auth::to_gws_error)?;
     let mut rows = Vec::new();
-    for name in names {
-        let paths = ProfilePaths::new(base, &name);
+    for name in &dirs.valid {
+        let paths = ProfilePaths::new(base, name);
         let meta = profiles::load_metadata(&paths.metadata).map_err(crate::auth::to_gws_error)?;
         rows.push(json!({
             "name": name,
-            "active": name == active.name,
+            "active": *name == active.name,
             "logged_in": paths.credentials.exists(),
             "account": meta.as_ref().and_then(|m| m.account.clone()),
             "granted_scope_count": meta.as_ref().map(|m| m.granted_scopes.len()),
         }));
     }
-    Ok(json!({
+    let (invalid, warning) = invalid_profiles_report(&dirs);
+    let mut out = json!({
         "active_profile": active.name,
         "active_profile_source": active.source,
         "profiles": rows,
-    }))
+        "invalid_profiles": invalid,
+    });
+    if let Some(w) = warning {
+        out["warning"] = json!(w);
+    }
+    Ok(out)
+}
+
+/// Describe the profile directories whose names are not valid profile
+/// names, and a warning saying how to fix them (`None` when there are none).
+pub(super) fn invalid_profiles_report(dirs: &ProfileDirs) -> (Value, Option<String>) {
+    let mut entries = Vec::new();
+    let mut fixes = Vec::new();
+    for path in &dirs.invalid {
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| path.display().to_string());
+        // Suggest the lowercase spelling unless that profile already exists.
+        let suggestion = profiles::lowercase_suggestion(&name).filter(|s| !dirs.valid.contains(s));
+        fixes.push(match &suggestion {
+            Some(s) => format!("'{name}' (rename to '{s}')"),
+            None => format!("'{name}'"),
+        });
+        entries.push(json!({
+            "name": name,
+            "path": path.display().to_string(),
+            "logged_in": path.join("credentials.enc").exists(),
+            "suggested_name": suggestion,
+        }));
+    }
+    let warning = (!fixes.is_empty()).then(|| {
+        format!(
+            "these profile directories have names that are not valid profile names (profile \
+             names are lowercase) and cannot be selected: {}. Rename one to a valid name to use \
+             it or to log out of it with `gwsr auth logout --profile <name>`; deleting the \
+             directory instead does not revoke its access (see \
+             https://myaccount.google.com/permissions)",
+            fixes.join(", ")
+        )
+    });
+    (Value::Array(entries), warning)
 }
 
 pub(super) fn handle_use(m: &clap::ArgMatches) -> Result<(), GwsError> {
@@ -115,5 +157,42 @@ mod tests {
         assert_eq!(rows[1]["account"], "w@example.com");
         assert_eq!(rows[1]["active"], true);
         assert_eq!(rows[1]["granted_scope_count"], 2);
+    }
+
+    /// A profile directory whose name is no longer valid (an older gwsr
+    /// allowed uppercase) still holds credentials: `auth list` must show it
+    /// with its path and how to fix it, not hide it.
+    #[test]
+    fn list_reports_profile_directories_with_invalid_names() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path();
+        let legacy = base.join("profiles").join("Work");
+        std::fs::create_dir_all(&legacy).unwrap();
+        std::fs::write(legacy.join("credentials.enc"), b"GWSR").unwrap();
+        ProfilePaths::new(base, "home").ensure_dir().unwrap();
+
+        let active = profiles::active_profile(base).unwrap();
+        let r = list_report(base, &active).unwrap();
+        let rows = r["profiles"].as_array().unwrap();
+        assert_eq!(rows.len(), 1, "{r}");
+        assert_eq!(rows[0]["name"], "home");
+        let invalid = r["invalid_profiles"].as_array().expect("invalid_profiles");
+        assert_eq!(invalid.len(), 1, "{r}");
+        assert_eq!(invalid[0]["name"], "Work");
+        assert_eq!(invalid[0]["path"], legacy.display().to_string());
+        assert_eq!(invalid[0]["logged_in"], true);
+        let warning = r["warning"].as_str().expect("warning");
+        assert!(warning.contains("'work'"), "{warning}");
+    }
+
+    #[test]
+    fn list_has_no_warning_without_invalid_directories() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path();
+        ProfilePaths::new(base, "home").ensure_dir().unwrap();
+        let active = profiles::active_profile(base).unwrap();
+        let r = list_report(base, &active).unwrap();
+        assert_eq!(r["invalid_profiles"], json!([]));
+        assert!(r.get("warning").is_none(), "{r}");
     }
 }

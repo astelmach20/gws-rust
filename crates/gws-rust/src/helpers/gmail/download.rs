@@ -54,7 +54,8 @@ pub(super) fn safe_filename(raw: &str, fallback: &str) -> String {
     truncate_filename(&name)
 }
 
-/// Truncate to MAX_FILENAME_BYTES on a char boundary, preserving the extension.
+/// Truncate to MAX_FILENAME_BYTES on a char boundary, preserving the extension
+/// and never ending the stem in a dot or space.
 fn truncate_filename(name: &str) -> String {
     if name.len() <= MAX_FILENAME_BYTES {
         return name.to_string();
@@ -68,7 +69,9 @@ fn truncate_filename(name: &str) -> String {
     while !stem.is_char_boundary(end) {
         end -= 1;
     }
-    format!("{}{ext}", &stem[..end])
+    // The cut can expose a trailing dot or space, which Windows drops.
+    let stem = stem[..end].trim_end_matches(['.', ' ']);
+    format!("{stem}{ext}")
 }
 
 /// How a file system that ignores case and Unicode normalization (APFS,
@@ -128,13 +131,26 @@ fn plan_paths(
     Ok(paths)
 }
 
-/// Select which parts to download.
+/// Select which parts to download: every attachment, plus inline images
+/// (parts embedded in the HTML body by Content-ID) when `include_inline`.
+///
+/// Only images count as inline: some clients (Apple Mail) send ordinary files
+/// such as PDFs with `Content-Disposition: inline` and a Content-ID, and
+/// those are attachments the reader expects to get.
 fn select_parts(parts: &[OriginalPart], include_inline: bool) -> Vec<OriginalPart> {
     parts
         .iter()
-        .filter(|p| include_inline || !p.is_inline())
+        .filter(|p| include_inline || !is_inline_image(p))
         .cloned()
         .collect()
+}
+
+fn is_inline_image(part: &OriginalPart) -> bool {
+    part.is_inline()
+        && part
+            .content_type
+            .get(..6)
+            .is_some_and(|t| t.eq_ignore_ascii_case("image/"))
 }
 
 /// Download `parts` into `dir` and describe what was written.
@@ -265,6 +281,24 @@ mod tests {
         assert!(out.ends_with(".pdf"));
     }
 
+    /// Windows drops a trailing dot or space, so truncation must not leave
+    /// one behind (the file would get a different name than reported, or a
+    /// literal trailing dot under a `\\?\` path that Explorer cannot open).
+    #[test]
+    fn truncation_never_leaves_a_trailing_dot_or_space() {
+        let a = "a".repeat(MAX_FILENAME_BYTES - 1);
+        for raw in [
+            format!("{a} {}", "b".repeat(50)),
+            format!("{a}.{}", "b".repeat(50)),
+            format!("{}. {}", "a".repeat(MAX_FILENAME_BYTES - 2), "b".repeat(50)),
+        ] {
+            let out = safe_filename(&raw, "f");
+            assert!(out.len() <= MAX_FILENAME_BYTES, "{out}");
+            assert!(!out.ends_with(['.', ' ']), "{out:?}");
+            assert!(out.starts_with('a'), "{out:?}");
+        }
+    }
+
     #[test]
     fn dedupe_adds_suffix() {
         let mut taken = HashSet::new();
@@ -287,12 +321,61 @@ mod tests {
 
     #[test]
     fn select_parts_excludes_inline_by_default() {
-        let parts = vec![
-            part("a", PartData::Inline(String::new()), false),
-            part("img", PartData::Inline(String::new()), true),
-        ];
+        let mut img = part("img", PartData::Inline(String::new()), true);
+        img.content_type = "image/png".to_string();
+        let parts = vec![part("a", PartData::Inline(String::new()), false), img];
         assert_eq!(select_parts(&parts, false).len(), 1);
         assert_eq!(select_parts(&parts, true).len(), 2);
+    }
+
+    /// Apple Mail sends ordinary files as `Content-Disposition: inline` with a
+    /// Content-ID. Only inline *images* are skipped by default; a PDF sent
+    /// that way is still an attachment.
+    #[test]
+    fn select_parts_keeps_inline_non_images() {
+        let header = |name: &str, value: &str| json!({ "name": name, "value": value });
+        let msg = json!({
+            "id": "m1",
+            "threadId": "t1",
+            "payload": {
+                "mimeType": "multipart/mixed",
+                "headers": [
+                    header("From", "a@example.com"),
+                    header("Subject", "s"),
+                    header("Message-ID", "<m1@example.com>"),
+                ],
+                "parts": [
+                    { "mimeType": "text/plain", "body": { "data": "aGk", "size": 2 } },
+                    {
+                        "mimeType": "application/pdf",
+                        "filename": "report.pdf",
+                        "headers": [
+                            header("Content-Disposition", "inline; filename=report.pdf"),
+                            header("Content-Id", "<pdf1@example.com>"),
+                        ],
+                        "body": { "attachmentId": "A1", "size": 10 }
+                    },
+                    {
+                        "mimeType": "image/png",
+                        "filename": "logo.png",
+                        "headers": [
+                            header("Content-Disposition", "inline; filename=logo.png"),
+                            header("Content-Id", "<logo@example.com>"),
+                        ],
+                        "body": { "attachmentId": "A2", "size": 10 }
+                    }
+                ]
+            }
+        });
+        let original = parse_original_message(&msg).unwrap();
+        let names = |parts: Vec<OriginalPart>| -> Vec<String> {
+            parts.into_iter().map(|p| p.filename).collect()
+        };
+        assert_eq!(names(select_parts(&original.parts, false)), ["report.pdf"]);
+        assert_eq!(
+            names(select_parts(&original.parts, true)),
+            ["report.pdf", "logo.png"]
+        );
     }
 
     #[tokio::test]
