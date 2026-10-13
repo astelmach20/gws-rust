@@ -111,7 +111,7 @@ pub fn check_derived_path(path: &Path, policy: PathPolicy, cwd: &Path) -> Result
         return Ok(());
     }
     let shown = path.display().to_string();
-    let resolved = normalize_existing_prefix(&cwd.join(path)).map_err(|e| {
+    let resolved = normalize_existing_prefix(&absolute_cwd(cwd)?.join(path)).map_err(|e| {
         GwsError::Validation(format!("Failed to resolve output path '{shown}': {e}"))
     })?;
     enforce_policy(&resolved, &shown, "output path", policy, cwd)
@@ -124,9 +124,21 @@ fn resolve_any(path_str: &str, flag_name: &str, cwd: &Path) -> Result<PathBuf, G
         )));
     }
     reject_dangerous_chars(path_str, flag_name)?;
-    let joined = cwd.join(path_str);
+    let joined = absolute_cwd(cwd)?.join(path_str);
     normalize_existing_prefix(&joined).map_err(|e| {
         GwsError::Validation(format!("Failed to resolve {flag_name} '{path_str}': {e}"))
+    })
+}
+
+/// `cwd` made absolute against the process working directory, so a relative
+/// `cwd` such as `.` cannot let a leading `..` be dropped lexically (which
+/// would turn `../x` into `x`) and the resolved path is always absolute.
+fn absolute_cwd(cwd: &Path) -> Result<PathBuf, GwsError> {
+    std::path::absolute(cwd).map_err(|e| {
+        GwsError::Validation(format!(
+            "Failed to resolve current directory '{}': {e}",
+            cwd.display()
+        ))
     })
 }
 
@@ -403,6 +415,35 @@ mod tests {
                 assert!(resolve_output_dir(bad, policy, &cwd).is_err(), "{bad:?}");
             }
         }
+    }
+
+    /// A relative `cwd` (e.g. `"."`) must be resolved against the process
+    /// working directory, not consumed lexically: `./../x` is the parent's
+    /// `x`, never `x` in the current directory, and the result is absolute.
+    #[test]
+    fn relative_cwd_is_made_absolute() {
+        let process_cwd = std::env::current_dir().unwrap().canonicalize().unwrap();
+        let name = "gwsr-relative-cwd-test-missing.txt";
+        let got = resolve_file_path(
+            &format!("../{name}"),
+            "--output",
+            PathPolicy::Unrestricted,
+            Path::new("."),
+        )
+        .unwrap();
+        assert!(got.is_absolute(), "{}", got.display());
+        assert_eq!(got, process_cwd.parent().unwrap().join(name));
+        let err = resolve_file_path(
+            &format!("../{name}"),
+            "--output",
+            PathPolicy::Cwd,
+            Path::new("."),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("outside the current directory"), "{err}");
+        let inside = resolve_file_path(name, "--output", PathPolicy::Cwd, Path::new(".")).unwrap();
+        assert_eq!(inside, process_cwd.join(name));
     }
 
     #[test]

@@ -54,7 +54,8 @@ pub(super) fn safe_filename(raw: &str, fallback: &str) -> String {
     truncate_filename(&name)
 }
 
-/// Truncate to MAX_FILENAME_BYTES on a char boundary, preserving the extension.
+/// Truncate to MAX_FILENAME_BYTES on a char boundary, preserving the extension
+/// and never ending the stem in a dot or space.
 fn truncate_filename(name: &str) -> String {
     if name.len() <= MAX_FILENAME_BYTES {
         return name.to_string();
@@ -68,7 +69,9 @@ fn truncate_filename(name: &str) -> String {
     while !stem.is_char_boundary(end) {
         end -= 1;
     }
-    format!("{}{ext}", &stem[..end])
+    // The cut can expose a trailing dot or space, which Windows drops.
+    let stem = stem[..end].trim_end_matches(['.', ' ']);
+    format!("{stem}{ext}")
 }
 
 /// How a file system that ignores case and Unicode normalization (APFS,
@@ -276,6 +279,24 @@ mod tests {
         let out = safe_filename(&long, "f");
         assert!(out.len() <= MAX_FILENAME_BYTES);
         assert!(out.ends_with(".pdf"));
+    }
+
+    /// Windows drops a trailing dot or space, so truncation must not leave
+    /// one behind (the file would get a different name than reported, or a
+    /// literal trailing dot under a `\\?\` path that Explorer cannot open).
+    #[test]
+    fn truncation_never_leaves_a_trailing_dot_or_space() {
+        let a = "a".repeat(MAX_FILENAME_BYTES - 1);
+        for raw in [
+            format!("{a} {}", "b".repeat(50)),
+            format!("{a}.{}", "b".repeat(50)),
+            format!("{}. {}", "a".repeat(MAX_FILENAME_BYTES - 2), "b".repeat(50)),
+        ] {
+            let out = safe_filename(&raw, "f");
+            assert!(out.len() <= MAX_FILENAME_BYTES, "{out}");
+            assert!(!out.ends_with(['.', ' ']), "{out:?}");
+            assert!(out.starts_with('a'), "{out:?}");
+        }
     }
 
     #[test]
