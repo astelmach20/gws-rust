@@ -782,12 +782,15 @@ fn csv_text(s: &str) -> String {
     }
 }
 
-/// A CSV cell. Only JSON strings can carry formulas; numbers such as `-5`
-/// are written unchanged.
+/// A CSV cell. Numbers such as `-5`, booleans and null are written unchanged;
+/// anything else is text that can carry a formula, including an array whose
+/// joined elements start with one (`["=1+1"]` is the cell `=1+1`).
 fn csv_cell(value: &Value) -> String {
     match value {
-        Value::String(s) => csv_text(s),
-        other => sanitize_for_terminal(&value_to_cell(other)),
+        Value::Number(_) | Value::Bool(_) | Value::Null => {
+            sanitize_for_terminal(&value_to_cell(value))
+        }
+        Value::String(_) | Value::Array(_) | Value::Object(_) => csv_text(&value_to_cell(value)),
     }
 }
 
@@ -1479,6 +1482,19 @@ mod tests {
         assert_eq!(rows, "'=1+1");
         let header = fmt(&json!([{"\u{7}=cmd": "x"}]), OutputFormat::Csv);
         assert_eq!(header.lines().next().unwrap(), "'=cmd");
+    }
+
+    /// An array value is joined into one text cell, so a formula in its
+    /// first element must be neutralised like a string's.
+    #[test]
+    fn csv_formula_guard_applies_to_array_cells() {
+        let out = fmt(&json!([{"a": ["=1+1", "x"], "b": [-5]}]), OutputFormat::Csv);
+        assert_eq!(out.lines().nth(1).unwrap(), "\"'=1+1, x\",'-5");
+        let rows = fmt(&json!({"values": [[["=1+1"]]]}), OutputFormat::Csv);
+        assert_eq!(rows, "'=1+1");
+        // Scalars are unchanged.
+        let out = fmt(&json!([{"n": -5, "t": true}]), OutputFormat::Csv);
+        assert_eq!(out.lines().nth(1).unwrap(), "-5,true");
     }
 
     #[test]
