@@ -32,7 +32,7 @@ pub(super) fn list_report(base: &Path, active: &ActiveProfile) -> Result<Value, 
     let dirs = profiles::list_profiles(base).map_err(crate::auth::to_gws_error)?;
     let mut rows = Vec::new();
     for name in &dirs.valid {
-        let paths = ProfilePaths::new(base, &name);
+        let paths = ProfilePaths::new(base, name);
         let meta = profiles::load_metadata(&paths.metadata).map_err(crate::auth::to_gws_error)?;
         rows.push(json!({
             "name": name,
