@@ -156,8 +156,12 @@ impl Builder {
                     // Drop the paragraph's '\n' (one UTF-16 unit).
                     self.out.text.pop();
                     self.len -= 1;
+                    // A paragraph holding only the item's nesting tabs (the
+                    // item opened with a quote) has no line to break.
+                    if self.len > p.start.max(self.item_body) {
+                        self.push(LINE_BREAK);
+                    }
                     self.para_start = Some((p.start, p.kind));
-                    self.push(LINE_BREAK);
                 } else {
                     let kind = self.list_item_kind();
                     self.begin_para(kind);
@@ -729,6 +733,20 @@ mod tests {
         // A later code line still continues the item.
         let r = render("- a\n  - ```\n    x\n    y\n    ```\n").unwrap();
         assert_eq!(r.text, "a\n\tx\u{b}y\n");
+    }
+
+    #[test]
+    fn item_starting_with_block_quote_has_no_empty_first_line() {
+        // The quote closes the item's (still empty) paragraph; its text must
+        // start the item, not follow a line break.
+        let r = render("- > quoted\n- b\n").unwrap();
+        assert_eq!(r.text, "quoted\nb\n");
+        assert_eq!(r.paras.len(), 2);
+        let r = render("- a\n  - > quoted\n").unwrap();
+        assert_eq!(r.text, "a\n\tquoted\n");
+        // A quote after the item's own text still continues it on a new line.
+        let r = render("- a\n\n  > quoted\n").unwrap();
+        assert_eq!(r.text, "a\u{b}quoted\n");
     }
 
     #[test]
