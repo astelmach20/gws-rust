@@ -199,7 +199,10 @@ pub(crate) async fn wait(
     let mut interval = cfg.initial_interval;
     let auth = transport.auth_method()?;
     while !is_done(&op) {
-        if started.elapsed() + interval > cfg.timeout {
+        // Poll until the deadline itself: when the next interval would pass
+        // it, sleep only what is left and poll once more at the deadline.
+        let remaining = cfg.timeout.saturating_sub(started.elapsed());
+        if remaining.is_zero() {
             return Err(GwsError::other(anyhow::anyhow!(
                 "--wait: operation {name} did not finish within {}s; last state: {}",
                 cfg.timeout.as_secs(),
@@ -207,7 +210,7 @@ pub(crate) async fn wait(
             )));
         }
         tracing::info!("Waiting for operation {name}...");
-        tokio::time::sleep(interval).await;
+        tokio::time::sleep(interval.min(remaining)).await;
         interval = interval.mul_f64(1.5).min(cfg.max_interval);
 
         let sent = transport
