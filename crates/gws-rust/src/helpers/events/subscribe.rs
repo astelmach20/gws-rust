@@ -250,7 +250,7 @@ struct SubscribeStep<'a> {
 }
 
 impl SubscribeStep<'_> {
-    fn output(&mut self, event: &Value) -> Result<(), StepError> {
+    async fn output(&mut self, event: &Value) -> Result<(), StepError> {
         let fatal = |e: String| StepError::Fatal(GwsError::other(e));
         match &self.config.output_dir {
             Some(dir) => {
@@ -259,8 +259,11 @@ impl SubscribeStep<'_> {
                 let path = dir.join(format!("{ts}_{}.json", self.file_counter));
                 let text = serde_json::to_string_pretty(event)
                     .map_err(|e| fatal(format!("Failed to serialize event: {e}")))?;
-                std::fs::write(&path, text)
-                    .map_err(|e| fatal(format!("Failed to write {}: {e}", path.display())))?;
+                // The shared writer replaces (never follows) a symlink at
+                // the target and applies GWSR_RESTRICT_PATHS.
+                crate::output_file::write_atomic(&path, text.as_bytes(), true)
+                    .await
+                    .map_err(StepError::Fatal)?;
                 emit_diagnostic(
                     "info",
                     "wrote",
@@ -299,7 +302,7 @@ impl StreamStep for SubscribeStep<'_> {
                     status: None,
                     message: e.to_string(),
                 })? {
-                Sanitized::Pass(v) => self.output(&v)?,
+                Sanitized::Pass(v) => self.output(&v).await?,
                 Sanitized::Blocked(r) => emit_diagnostic(
                     "warning",
                     "blocked",

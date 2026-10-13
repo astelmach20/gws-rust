@@ -29,6 +29,7 @@ pub(crate) mod http;
 pub mod keep;
 pub mod meet;
 pub mod modelarmor;
+pub(crate) mod pagination;
 pub mod people;
 #[cfg(test)]
 mod registry_tests;

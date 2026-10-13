@@ -48,6 +48,8 @@ pub(super) fn upload_base() -> Result<String, GwsError> {
 /// `mediaUpload.maxSize` of `users.messages.send` and `users.drafts.create`
 /// in the Gmail Discovery document (35 MiB), for the whole raw message.
 pub(super) const MAX_UPLOAD_BYTES: u64 = 36_700_160;
+/// `users.messages.batchModify` accepts at most this many IDs per request.
+const BATCH_MODIFY_MAX_IDS: usize = 1000;
 
 /// Gmail API client bound to the authenticated user (`users/me`).
 #[derive(Clone)]
@@ -192,43 +194,50 @@ impl GmailApi {
             .await
     }
 
-    /// Add/remove labels on messages. Uses `batchModify` for more than one ID.
+    /// Add/remove labels on messages. Uses `batchModify` for more than one ID,
+    /// in requests of at most [`BATCH_MODIFY_MAX_IDS`].
     pub(super) async fn modify_messages(
         &self,
         ids: &[String],
         add: &[String],
         remove: &[String],
-    ) -> Result<Value, GwsError> {
-        let (url, body) = self.modify_messages_request(ids, add, remove);
-        self.rest
-            .json(
-                Method::POST,
-                &url,
-                &[],
-                Some(&body),
-                Idempotency::Idempotent,
-                "Failed to modify message labels",
-            )
-            .await
+    ) -> Result<(), GwsError> {
+        for (url, body) in self.modify_messages_requests(ids, add, remove) {
+            self.rest
+                .json(
+                    Method::POST,
+                    &url,
+                    &[],
+                    Some(&body),
+                    Idempotency::Idempotent,
+                    "Failed to modify message labels",
+                )
+                .await?;
+        }
+        Ok(())
     }
 
-    pub(super) fn modify_messages_request(
+    /// The requests [`Self::modify_messages`] sends, in order.
+    pub(super) fn modify_messages_requests(
         &self,
         ids: &[String],
         add: &[String],
         remove: &[String],
-    ) -> (String, Value) {
+    ) -> Vec<(String, Value)> {
         if let [single] = ids {
-            (
+            return vec![(
                 format!("{}/modify", self.message_url(single)),
                 json!({ "addLabelIds": add, "removeLabelIds": remove }),
-            )
-        } else {
-            (
-                self.url("messages/batchModify"),
-                json!({ "ids": ids, "addLabelIds": add, "removeLabelIds": remove }),
-            )
+            )];
         }
+        ids.chunks(BATCH_MODIFY_MAX_IDS)
+            .map(|chunk| {
+                (
+                    self.url("messages/batchModify"),
+                    json!({ "ids": chunk, "addLabelIds": add, "removeLabelIds": remove }),
+                )
+            })
+            .collect()
     }
 
     pub(super) fn modify_thread_url(&self, id: &str) -> String {
@@ -581,11 +590,16 @@ mod tests {
     fn modify_request_uses_batch_for_many() {
         let h = "http://127.0.0.1:9";
         let api = GmailApi::with_bases(Transport::for_test(h), h, "http://127.0.0.1:9/u");
-        let (url, body) = api.modify_messages_request(&["a".into()], &["L".into()], &[]);
+        let reqs = api.modify_messages_requests(&["a".into()], &["L".into()], &[]);
+        let [(url, body)] = reqs.as_slice() else {
+            panic!("{reqs:?}")
+        };
         assert_eq!(url, "http://127.0.0.1:9/users/me/messages/a/modify");
         assert_eq!(body["addLabelIds"][0], "L");
-        let (url, body) =
-            api.modify_messages_request(&["a".into(), "b".into()], &[], &["INBOX".into()]);
+        let reqs = api.modify_messages_requests(&["a".into(), "b".into()], &[], &["INBOX".into()]);
+        let [(url, body)] = reqs.as_slice() else {
+            panic!("{reqs:?}")
+        };
         assert_eq!(url, "http://127.0.0.1:9/users/me/messages/batchModify");
         assert_eq!(body["ids"][1], "b");
     }

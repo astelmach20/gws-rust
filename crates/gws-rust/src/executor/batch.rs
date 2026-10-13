@@ -137,15 +137,10 @@ pub async fn handle_batch_command(args: &BatchArgs, ctx: &BatchContext) -> Resul
     options.allow_unknown_fields = args.allow_unknown_fields;
 
     let calls = parse_calls(&doc, &text, &options)?;
-    let credentials = if options.dry_run {
-        Credentials::None
-    } else {
-        batch_credentials(&calls).await?
-    };
     run_batch(
         &doc,
         &calls,
-        credentials,
+        None,
         &options,
         &ctx.sanitize,
         &Emitter::stdout(),
@@ -475,10 +470,12 @@ fn in_call_order(
         .collect()
 }
 
+/// Run parsed `calls`. With `credentials` `None`, the calls' scopes are
+/// resolved only after the confirmation gate (and never for a dry run).
 pub(crate) async fn run_batch(
     doc: &RestDescription,
     calls: &[BatchCall<'_>],
-    credentials: Credentials,
+    credentials: Option<Credentials>,
     options: &ExecOptions,
     sanitize: &SanitizeConfig,
     emitter: &Emitter,
@@ -545,6 +542,10 @@ pub(crate) async fn run_batch(
         )?;
     }
 
+    let credentials = match credentials {
+        Some(c) => c,
+        None => batch_credentials(calls).await?,
+    };
     let transport = Transport::new(
         &credentials,
         options.retry.clone(),
