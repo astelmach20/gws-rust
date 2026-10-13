@@ -88,6 +88,8 @@ struct Builder {
     in_code_block: bool,
     /// The open code block belongs to a list item and continues its paragraph.
     code_in_item: bool,
+    /// Where the current list item's content starts, after its nesting tabs.
+    item_body: u64,
 }
 
 impl Builder {
@@ -136,7 +138,8 @@ impl Builder {
     fn continue_item(&mut self) {
         match &self.para_start {
             Some((start, _)) => {
-                if self.len > *start {
+                // The current item's nesting tabs are not content.
+                if self.len > (*start).max(self.item_body) {
                     self.push(LINE_BREAK);
                 }
             }
@@ -207,6 +210,7 @@ pub(super) fn render(md: &str) -> Result<Rendered, GwsError> {
         in_quote: 0,
         in_code_block: false,
         code_in_item: false,
+        item_body: 0,
     };
     for event in Parser::new_ext(md, options) {
         match event {
@@ -260,6 +264,7 @@ pub(super) fn render(md: &str) -> Result<Rendered, GwsError> {
                     for _ in 0..depth {
                         b.push("\t");
                     }
+                    b.item_body = b.len;
                 }
                 Tag::Emphasis => b.open_span(SpanStyle::Italic),
                 Tag::Strong => b.open_span(SpanStyle::Bold),
@@ -690,6 +695,24 @@ mod tests {
         let r = render("- a\n  - b\n\n    cont\n- c\n").unwrap();
         assert_eq!(r.paras.len(), 3);
         assert_eq!(r.text, "a\n\tb\u{b}cont\nc\n");
+    }
+
+    #[test]
+    fn nested_item_starting_with_code_block_has_no_empty_first_line() {
+        // The nesting tabs are not content: the code must start the item
+        // instead of following a line break after them.
+        let r = render("- a\n  - ```\n    x\n    ```\n").unwrap();
+        assert_eq!(r.text, "a\n\tx\n");
+        let code: Vec<_> = r
+            .spans
+            .iter()
+            .filter(|s| s.style == SpanStyle::Code)
+            .map(|s| (s.start, s.end))
+            .collect();
+        assert_eq!(code, vec![(3, 4)]);
+        // A later code line still continues the item.
+        let r = render("- a\n  - ```\n    x\n    y\n    ```\n").unwrap();
+        assert_eq!(r.text, "a\n\tx\u{b}y\n");
     }
 
     #[test]
