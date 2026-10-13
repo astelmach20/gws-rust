@@ -660,6 +660,107 @@ fn invalid_jq_fails_before_doing_anything() {
         .stderr(predicate::str::contains("invalid --jq expression"));
 }
 
+/// A generated method checks its input, and asks for confirmation, before it
+/// loads credentials: broken credentials (here a `GWSR_CREDENTIALS_FILE` that
+/// does not exist) must not turn a bad call into a credential error (exit 8, or 2), and
+/// a refused destructive call must not fetch a token first.
+#[test]
+fn generated_methods_validate_and_confirm_before_loading_credentials() {
+    let env = Env::new();
+    env.seed_doc(&json!({
+        "name": "drive",
+        "version": "v3",
+        "rootUrl": "https://www.googleapis.com/",
+        "servicePath": "drive/v3/",
+        "resources": {"files": {"methods": {
+            "list": {
+                "id": "drive.files.list",
+                "httpMethod": "GET",
+                "path": "files",
+                "parameters": {"pageSize": {"type": "integer", "location": "query"}},
+                "scopes": ["https://www.googleapis.com/auth/drive.readonly"]
+            },
+            "delete": {
+                "id": "drive.files.delete",
+                "httpMethod": "DELETE",
+                "path": "files/{fileId}",
+                "parameters": {"fileId": {"type": "string", "location": "path", "required": true}},
+                "parameterOrder": ["fileId"],
+                "scopes": ["https://www.googleapis.com/auth/drive"]
+            }
+        }}}
+    }));
+    let missing = env.root.path().join("missing-credentials.json");
+    let cases: [(&[&str], i32, &str); 4] = [
+        (
+            &["drive", "files", "list", "--params", r#"{"bogus": 1}"#],
+            3,
+            "bogus",
+        ),
+        (
+            &[
+                "drive",
+                "files",
+                "list",
+                "--params",
+                r#"{"pageSize": "many"}"#,
+            ],
+            3,
+            "pageSize",
+        ),
+        (&["drive", "files", "delete", "--params", "{}"], 3, "fileId"),
+        (
+            &[
+                "drive",
+                "files",
+                "delete",
+                "--params",
+                r#"{"fileId": "F1"}"#,
+            ],
+            7,
+            "--yes",
+        ),
+    ];
+    for (args, code, expected) in cases {
+        let out = env
+            .cmd()
+            .env("GWSR_CREDENTIALS_FILE", &missing)
+            .args(args)
+            .output()
+            .unwrap();
+        let stderr = stderr_of(&out);
+        assert_eq!(out.status.code(), Some(code), "{args:?}: {stderr}");
+        assert!(stderr.contains(expected), "{args:?}: {stderr}");
+        assert!(out.stdout.is_empty(), "{args:?}: {out:?}");
+    }
+    // `gwsr batch` asks for confirmation of a destructive call first, too.
+    let calls = env.work_dir().join("calls.ndjson");
+    std::fs::write(
+        &calls,
+        r#"{"method": "files.delete", "params": {"fileId": "F1"}}"#,
+    )
+    .unwrap();
+    let out = env
+        .cmd()
+        .env("GWSR_CREDENTIALS_FILE", &missing)
+        .args(["batch", "drive", "--input"])
+        .arg(&calls)
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(7), "{}", stderr_of(&out));
+    assert!(stderr_of(&out).contains("--yes"), "{}", stderr_of(&out));
+
+    // A valid call still reaches the credentials and reports them.
+    let out = env
+        .cmd()
+        .env("GWSR_CREDENTIALS_FILE", &missing)
+        .args(["drive", "files", "list"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(8), "{}", stderr_of(&out));
+    assert!(stderr_of(&out).contains("GWSR_CREDENTIALS_FILE"));
+}
+
 // ── Output formats ──────────────────────────────────────────────────────
 
 #[test]

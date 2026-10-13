@@ -339,7 +339,7 @@ impl<'a> Call<'a> {
                 method: rest_method(self.doc, self.method),
                 params: params(self.params),
                 body: self.body,
-                credentials: self.credentials,
+                credentials: Some(self.credentials),
                 upload: self.upload,
                 output: self.output,
                 pagination: self.pagination,
@@ -2039,7 +2039,7 @@ async fn batch_round_trip_reports_partial_failure() {
     let err = batch::run_batch(
         &d,
         &calls,
-        Credentials::Static("tok".into()),
+        Some(Credentials::Static("tok".into())),
         &opts,
         &SanitizeConfig::default(),
         &em,
@@ -2139,7 +2139,7 @@ async fn batch_results_follow_input_order_when_parts_are_reordered() {
     batch::run_batch(
         &d,
         &calls,
-        Credentials::Static("tok".into()),
+        Some(Credentials::Static("tok".into())),
         &opts,
         &SanitizeConfig::default(),
         &em,

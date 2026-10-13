@@ -155,6 +155,78 @@ fn docs_markdown_write_dry_run_builds_native_requests() {
 }
 
 #[test]
+fn docs_helpers_validate_input_before_auth() {
+    // No credentials exist here. Input the helper can reject on its own is a
+    // validation error (exit 3), not an authentication error (exit 2); for
+    // `+create --markdown` the real run would otherwise create an empty
+    // document before failing on the Markdown.
+    let dir = setup();
+    let table = "| a | b |\n|---|---|\n| 1 | 2 |";
+    let cases: [(&[&str], &str); 5] = [
+        (
+            &[
+                "docs",
+                "+create",
+                "--title",
+                "T",
+                "--markdown",
+                "--text",
+                table,
+            ],
+            "Markdown tables are not supported",
+        ),
+        (
+            &[
+                "docs",
+                "+write",
+                "--document-id",
+                "D",
+                "--markdown",
+                "--text",
+                table,
+            ],
+            "Markdown tables are not supported",
+        ),
+        (
+            &[
+                "docs",
+                "+read",
+                "--document-id",
+                "D",
+                "--body-format",
+                "raw",
+                "--output",
+                "doc.json",
+            ],
+            "--output needs --body-format markdown or text",
+        ),
+        (
+            &["docs", "+read", "--document-id", "D", "--output", "."],
+            "is a directory",
+        ),
+        (
+            &[
+                "docs",
+                "+replace",
+                "--document-id",
+                "D",
+                "--find",
+                "",
+                "--replace-with",
+                "x",
+            ],
+            "--find must not be empty",
+        ),
+    ];
+    for (args, expected) in cases {
+        let out = gwsr(dir.path()).args(args).output().unwrap();
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(3), "{args:?}: {stderr}");
+        assert!(stderr.contains(expected), "{args:?}: {stderr}");
+    }
+}
+
+#[test]
 fn sheets_append_dry_run_is_json() {
     let dir = setup();
     let out = gwsr(dir.path())
@@ -276,6 +348,110 @@ fn agenda_dry_run_shows_calendar_list_page_size() {
     );
     // The real request asks for 250 calendars per page; the plan must too.
     assert_eq!(list["query_params"]["maxResults"], "250", "{v}");
+}
+
+#[test]
+fn calendar_helpers_validate_times_before_confirm_and_auth() {
+    // No credentials exist here. Times, zones and "nothing to change" are
+    // known from the command line alone, so each is a validation error
+    // (exit 3), never a confirmation (7) or authentication (2) error.
+    let dir = setup();
+    let insert = [
+        "calendar",
+        "+insert",
+        "--summary",
+        "S",
+        "--attendee",
+        "guest@example.com",
+    ];
+    let cases: [(&[&str], &[&str], &str); 11] = [
+        (
+            &insert,
+            &["--start", "tomorrow", "--duration", "1h"],
+            "--start 'tomorrow' is not a date",
+        ),
+        (
+            &insert,
+            &["--start", "2026-01-01T10:00", "--end", "2026-01-01T09:00"],
+            "--end must be after --start",
+        ),
+        (
+            &insert,
+            &["--start", "2026-01-01T10:00:00Z"],
+            "Timed events need --end or --duration",
+        ),
+        (
+            &insert,
+            &["--start", "2026-01-01", "--duration", "1h"],
+            "--duration cannot be used with an all-day --start",
+        ),
+        (
+            &insert,
+            &[
+                "--start",
+                "2026-01-01T10:00",
+                "--duration",
+                "1h",
+                "--timezone",
+                "Mars/Base",
+            ],
+            "Invalid timezone 'Mars/Base'",
+        ),
+        (
+            &["calendar", "+agenda"],
+            &["--timezone", "Mars/Base"],
+            "Invalid timezone 'Mars/Base'",
+        ),
+        (
+            &["calendar", "+freebusy", "--start", "2026-01-01T10:00:00Z"],
+            &[
+                "--duration",
+                "8h",
+                "--slot",
+                "30m",
+                "--working-hours",
+                "9-5",
+            ],
+            "Invalid --working-hours '9-5'",
+        ),
+        (
+            &["calendar", "+freebusy", "--start", "2026-01-01T10:00:00Z"],
+            &["--duration", "8h", "--slot", "5x"],
+            "Invalid duration '5x'",
+        ),
+        (
+            &["calendar", "+update", "--event-id", "E1"],
+            &[],
+            "Nothing to update",
+        ),
+        (
+            &["calendar", "+update", "--event-id", "E1"],
+            &["--start", "2026-01-01T10:00:00Z", "--end", "soon"],
+            "--end 'soon' is not a date",
+        ),
+        (
+            &["calendar", "+update", "--event-id", "E1"],
+            &["--summary", "S", "--timezone", "Mars/Base"],
+            "Invalid timezone 'Mars/Base'",
+        ),
+    ];
+    for (base, args, expected) in cases {
+        for policy in ["0", "1"] {
+            let out = gwsr(dir.path())
+                .env("GWSR_REQUIRE_CONFIRM", policy)
+                .args(base)
+                .args(args)
+                .output()
+                .unwrap();
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            assert_eq!(
+                out.status.code(),
+                Some(3),
+                "{base:?} {args:?} policy {policy}: {stderr}"
+            );
+            assert!(stderr.contains(expected), "{base:?} {args:?}: {stderr}");
+        }
+    }
 }
 
 #[test]
@@ -1190,6 +1366,23 @@ fn dry_run_plan_keeps_repeated_query_keys() {
         ]),
         "{v}"
     );
+}
+
+#[test]
+fn people_find_rejects_bad_input_before_auth() {
+    // No credentials exist here: a bad --limit or --query must be a
+    // validation error (exit 3), not an authentication failure (exit 2).
+    let dir = setup();
+    seed(dir.path(), "people", "v1", "");
+    let cases: [&[&str]; 2] = [
+        &["people", "+find", "--query", "ann", "--limit", "31"],
+        &["people", "+find", "--query", " "],
+    ];
+    for args in cases {
+        let out = gwsr(dir.path()).args(args).output().unwrap();
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(3), "{args:?}: {stderr}");
+    }
 }
 
 #[test]

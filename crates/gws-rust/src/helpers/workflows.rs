@@ -281,7 +281,7 @@ async fn get_all_items(
 ) -> Result<Vec<Value>, GwsError> {
     let mut items = Vec::new();
     let mut page_token: Option<String> = None;
-    let mut seen = std::collections::HashSet::new();
+    let mut tokens = super::pagination::PageTokens::new();
     loop {
         let mut q = query.to_vec();
         if let Some(t) = &page_token {
@@ -294,19 +294,8 @@ async fn get_all_items(
                 .ok_or_else(|| GwsError::other(format!("{context}: 'items' is not an array")))?;
             items.extend(arr.iter().cloned());
         }
-        // An empty token means no further page; a token already followed
-        // would request the same pages forever.
-        match page
-            .get("nextPageToken")
-            .and_then(Value::as_str)
-            .filter(|t| !t.is_empty())
-        {
-            Some(t) if !seen.insert(t.to_string()) => {
-                return Err(GwsError::other(format!(
-                    "{context}: the API returned the nextPageToken '{t}' twice; aborting pagination"
-                )));
-            }
-            Some(t) => page_token = Some(t.to_string()),
+        match tokens.next(&page, context)? {
+            Some(t) => page_token = Some(t),
             None => return Ok(items),
         }
     }
@@ -543,6 +532,7 @@ async fn meeting_prep(
 ) -> Result<Value, GwsError> {
     let url = calendar_events_url(bases, calendar_id);
     let mut page_token: Option<String> = None;
+    let mut tokens = super::pagination::PageTokens::new();
     let event = loop {
         let mut query = next_meeting_query(&now.to_rfc3339());
         if let Some(t) = &page_token {
@@ -567,13 +557,8 @@ async fn meeting_prep(
         if let Some(event) = found {
             break event;
         }
-        match page.get("nextPageToken").and_then(Value::as_str) {
-            Some(t) if page_token.as_deref() != Some(t) => page_token = Some(t.to_string()),
-            Some(t) => {
-                return Err(GwsError::other(format!(
-                    "Calendar returned the same nextPageToken '{t}' twice"
-                )));
-            }
+        match tokens.next(&page, "Failed to fetch calendar events")? {
+            Some(t) => page_token = Some(t),
             None => {
                 return Ok(json!({ "event": null, "message": "No upcoming meetings found." }));
             }
@@ -1239,6 +1224,60 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(out["summary"], "Standup", "{out}");
+    }
+
+    /// `+meeting-prep` treats an empty nextPageToken as the last page, and a
+    /// token it already followed (even not back to back) as an error rather
+    /// than paging forever.
+    #[tokio::test]
+    async fn meeting_prep_stops_on_empty_or_cycling_page_token() {
+        let limit = std::time::Duration::from_secs(10);
+        let now = chrono::DateTime::parse_from_rfc3339("2026-03-10T10:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+
+        let empty = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(json!({"items": [], "nextPageToken": ""})),
+            )
+            .mount(&empty)
+            .await;
+        let out = tokio::time::timeout(
+            limit,
+            meeting_prep(&rest(&empty), &bases(&empty), "primary", now),
+        )
+        .await
+        .expect("an empty nextPageToken must end pagination")
+        .unwrap();
+        assert!(out["event"].is_null(), "{out}");
+
+        let cycle = MockServer::start().await;
+        for (token, next) in [("A", "B"), ("B", "A")] {
+            Mock::given(method("GET"))
+                .and(query_param("pageToken", token))
+                .respond_with(
+                    ResponseTemplate::new(200)
+                        .set_body_json(json!({"items": [], "nextPageToken": next})),
+                )
+                .mount(&cycle)
+                .await;
+        }
+        Mock::given(method("GET"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({"items": [], "nextPageToken": "A"})),
+            )
+            .mount(&cycle)
+            .await;
+        let err = tokio::time::timeout(
+            limit,
+            meeting_prep(&rest(&cycle), &bases(&cycle), "primary", now),
+        )
+        .await
+        .expect("a page-token cycle must end pagination")
+        .unwrap_err();
+        assert!(err.to_string().contains("twice"), "{err}");
     }
 
     #[tokio::test]
