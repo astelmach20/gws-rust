@@ -2475,6 +2475,50 @@ mod tests {
         assert_eq!(std::fs::read(&doc).unwrap(), b"DOCX");
     }
 
+    /// Long names that collide get an ID prefix; shortening the prefixed name
+    /// must keep the extension (here of a download and of an export).
+    #[tokio::test]
+    async fn sync_keeps_extensions_of_long_colliding_names() {
+        let long = "r".repeat(200);
+        let server = MockServer::start().await;
+        mount_listing(
+            &server,
+            "ROOT",
+            json!([
+                {"id": "P1", "name": format!("{long}.pdf"), "mimeType": "application/pdf"},
+                {"id": "P2", "name": format!("{long}.pdf"), "mimeType": "application/pdf"}
+            ]),
+        )
+        .await;
+        let api = api(&server.uri(), "drive/v3/");
+        let dir = tempfile::tempdir().unwrap();
+        let v = sync(&api, "ROOT", dir.path()).await.unwrap();
+        let names: Vec<String> = v["downloaded"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|d| {
+                let p = PathBuf::from(d["path"].as_str().unwrap());
+                p.file_name().unwrap().to_str().unwrap().to_string()
+            })
+            .collect();
+        assert_eq!(names.len(), 2, "{v}");
+        for (name, id) in names.iter().zip(["P1", "P2"]) {
+            assert!(name.starts_with(&format!("{id}-r")), "{name}");
+            assert!(name.ends_with("r.pdf"), "{name}");
+            assert!(name.len() <= 255, "{name}");
+        }
+    }
+
+    #[test]
+    fn download_default_name_keeps_the_extension_of_a_long_name() {
+        let name = format!("{}.pdf", "d".repeat(250));
+        let target = resolve_target(None, &name, None, false).unwrap();
+        let local = target.describe();
+        let local = Path::new(local.as_str().unwrap()).file_name().unwrap();
+        assert_eq!(local.to_str().unwrap(), format!("{}.pdf", "d".repeat(196)));
+    }
+
     /// Drive names are case-sensitive but the default macOS and Windows
     /// file systems are not: `Report.txt` and `report.txt` must not share a
     /// local path, or the second one is silently reported "unchanged" (or
