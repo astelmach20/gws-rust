@@ -270,7 +270,7 @@ fn styled(text: &str, marks: &Marks) -> String {
     let lead = &text[..text.len() - text.trim_start().len()];
     let trail = &text[text.trim_end().len()..];
     let mut core = if marks.mono {
-        format!("`{trimmed}`")
+        code_span(trimmed)
     } else {
         escape_markdown(trimmed)
     };
@@ -287,6 +287,25 @@ fn styled(text: &str, marks: &Marks) -> String {
         core = format!("[{core}]({url})");
     }
     format!("{lead}{core}{trail}")
+}
+
+/// A CommonMark code span for `code`: the fence is one backtick longer than
+/// the longest backtick run inside, and a space pads content that starts or
+/// ends with a backtick (one space is stripped from each side when parsed).
+fn code_span(code: &str) -> String {
+    let mut longest = 0;
+    let mut run = 0;
+    for c in code.chars() {
+        run = if c == '`' { run + 1 } else { 0 };
+        longest = longest.max(run);
+    }
+    let fence = "`".repeat(longest + 1);
+    let pad = if code.starts_with('`') || code.ends_with('`') {
+        " "
+    } else {
+        ""
+    };
+    format!("{fence}{pad}{code}{pad}{fence}")
 }
 
 fn cell_text(cell: &Value, document: &Value, markdown: bool) -> String {
@@ -540,6 +559,30 @@ mod tests {
         ]}}]}});
         assert_eq!(render(&styled_doc, true), "**a\\_b** `x*y`\n\n");
         assert_eq!(render(&document, false), format!("{}\n", lines.join("\n")));
+    }
+
+    /// Monospace text containing backticks must stay one code span with the
+    /// same content; a single-backtick fence would end the span early.
+    #[test]
+    fn monospace_text_with_backticks_stays_one_code_span() {
+        let mono = json!({"weightedFontFamily": {"fontFamily": "Courier New"}});
+        for code in ["a`b", "`tick`", "x``y`", "``"] {
+            let document = json!({"body": {"content": [{"paragraph": {"elements": [
+                {"textRun": {"content": "see ", "textStyle": {}}},
+                {"textRun": {"content": code, "textStyle": mono}},
+                {"textRun": {"content": " end\n"}}
+            ]}}]}});
+            let md = render(&document, true);
+            let spans: Vec<String> = pulldown_cmark::Parser::new(&md)
+                .filter_map(|e| match e {
+                    pulldown_cmark::Event::Code(c) => Some(c.to_string()),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(spans, [code], "from:\n{md}");
+            let (_, text) = parse_back(&md);
+            assert_eq!(text, "see  end\n", "from:\n{md}");
+        }
     }
 
     #[test]
