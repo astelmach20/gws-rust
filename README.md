@@ -136,7 +136,7 @@ gwsr <service> +<helper> [flags]
 
 **Any other Discovery API** works as `<api>:<version>`, for example `gwsr youtube:v3 videos list` or `gwsr admin:directory_v1 users list`. `--api-version V` (or `--api-version=V`) overrides the version of a registered service. A mistyped service name gets a "did you mean" suggestion.
 
-Discovery documents are cached for 24 hours under `<platform cache dir>/gwsr/discovery` (`~/Library/Caches/gwsr` on macOS, `~/.cache/gwsr` on Linux; override with `GWSR_CACHE_DIR`). Fetches retry on 5xx. If a fetch fails, an expired cached copy is used with a warning on stderr. A document is checked (name, version, trusted endpoints) before it is written to the cache. Cache files are `0600` in a `0700` directory, and a corrupt or tampered entry is discarded and fetched again.
+Discovery documents are cached for 24 hours under `<platform cache dir>/gwsr/discovery` (`~/Library/Caches/gwsr` on macOS, `~/.cache/gwsr` on Linux; override with `GWSR_CACHE_DIR`). Fetches retry on 408, 429, 500, 502, 503 and 504 and on connection errors. If a fetch fails, an expired cached copy is used with a warning on stderr. A document is checked (name, version, trusted endpoints) before it is written to the cache. Cache files are `0600` in a `0700` directory, and a corrupt or tampered entry is discarded and fetched again.
 
 ## Authentication
 
@@ -269,7 +269,7 @@ gwsr auth export --unmasked --output ci-credentials.json
 
 `gwsr` is machine-readable by default, whether or not stdout is a terminal.
 
-- **stdout carries only results.** JSON by default: pretty on a terminal, compact when piped. Paginated output and streams (`--page-all`, `--page-items`, `gmail +watch`, `events +subscribe`, `gwsr batch`) are NDJSON, one object per line. Empty and `204` responses print `{"status":"success","httpStatus":204}`; with `--page-all`/`--page-items`, an empty later page just ends the stream (with a warning on stderr). Text bodies are wrapped in a JSON object.
+- **stdout carries only results.** JSON by default: pretty on a terminal, compact when piped. Paginated output and streams (`--page-all`, `--page-items`, `gmail +watch`, `events +subscribe`, `gwsr batch`) are NDJSON, one object per line. Empty and `204` responses print `{"status":"success","httpStatus":<status>}`, for example `{"status":"success","httpStatus":204}`; with `--page-all`/`--page-items`, an empty later page just ends the stream (with a warning on stderr). Text bodies are wrapped in a JSON object.
 - **stderr carries everything else:** logs, warnings, progress and prompts.
 - **Human formats are opt-in:** `--format table|yaml|csv` (or `GWSR_FORMAT`, or `format` in `config.toml`).
 - The only non-JSON stdout is `--help`, `gwsr completions`, `--version`, and raw payloads you ask for explicitly (`-o -`, or `--output -` on helpers).
@@ -302,7 +302,7 @@ The fields are `code`, `message`, `reason` and `retryable`, plus `hint` when the
 | `0` | Success |
 | `1` | API error: Google rejected the request (permanent; don't retry unchanged) |
 | `2` | Auth error: credentials missing, expired or invalid |
-| `3` | Validation error: bad arguments, flags, config or input |
+| `3` | Validation error: bad arguments, flags or input |
 | `4` | Discovery error: could not fetch or parse the API schema |
 | `5` | Internal error: I/O, serialization, or other unexpected failure |
 | `6` | Retryable API error: 408, 429, 500, 502, 503, 504, or 403 `rateLimitExceeded`/`userRateLimitExceeded` (the statuses `gwsr` itself retries); retry with backoff. Other 5xx statuses, such as 501, are permanent and exit `1`. The same rule applies to Google's OAuth token endpoint (`tokenEndpointUnavailable` / `tokenEndpointError`) |
@@ -331,7 +331,7 @@ echo '{"title":"Groceries"}' | gwsr tasks tasklists insert --json -   # - reads 
 
 - `--params` and `--json` are checked against Discovery before anything is sent: parameter names, types, enums, repeated values, required path parameters, and body fields. Unknown names are rejected with a "did you mean" suggestion, and with a hint when a name belongs in `--json`. `--allow-unknown-params` and `--allow-unknown-fields` send them anyway (for example, for Developer Preview fields).
 - `--fields MASK` requests a partial response, for example `--fields 'files(id,name)'`. When paginating, `nextPageToken` is added automatically.
-- `--dry-run` validates the request and prints it as JSON (`method`, `url`, `query_params`, `body`, `page_all`, `upload`) without loading credentials or sending anything.
+- `--dry-run` validates the request and prints it as JSON (`dry_run`, `method`, `url`, `query_params`, `body`, `page_all`, `upload`) without loading credentials or sending anything.
 - `supportsAllDrives=true` is sent by default on every method that has it, so Shared Drives just work.
 - Path segments are percent-encoded. RFC 3986 unreserved characters (`- . _ ~`) and `@` are kept as-is.
 
@@ -459,7 +459,7 @@ gwsr tasks +add --title 'File taxes' --due 2026-04-15
 gwsr events +subscribe --target //chat.googleapis.com/spaces/SPACE_ID --event-types google.workspace.chat.message.v1.created --project my-project
 ```
 
-Helper flag conventions: IDs are `--<noun>-id` (`--document-id`, `--spreadsheet-id`, `--calendar-id`, `--message-id`, `--space-id`, `--script-id`). People and groups are `--email`, `--user`, `--group`, `--member`. Local output is `--output PATH` (`-` for stdout) and never overwrites an existing file without `--overwrite`. Result counts use `--limit N`.
+Helper flag conventions: IDs are `--<noun>-id` (`--document-id`, `--spreadsheet-id`, `--calendar-id`, `--message-id`, `--space-id`, `--script-id`). People and groups are `--email`, `--user`, `--group`, `--member`. Local output is `--output PATH` (`-` for stdout) and never overwrites an existing file without `--overwrite`. Result counts use `--limit N`, except `gmail +search` and `gmail +triage`, which take `--max N`.
 
 Calendar helpers interpret times without a UTC offset in `--timezone`, falling back to your Google account's time zone. It is fetched from the Calendar settings API and cached for 24 hours in the cache directory, separately for each profile, credentials file and `--impersonate` user (never for `GWSR_TOKEN`/`GWSR_TOKEN_FILE`). A date-only `--start` creates an all-day event. `calendar +insert` emails attendees by default (`--send-updates all`).
 

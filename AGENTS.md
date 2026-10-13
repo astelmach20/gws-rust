@@ -58,7 +58,7 @@ just                 # list recipes
 - **Toolchain:** Rust 1.98.1 is pinned in `rust-toolchain.toml`. The MSRV is 1.89 (CI checks it), the edition is 2024, and both crates forbid `unsafe` code.
 - **Git hooks (lefthook, opt-in via `pnpm run hooks`):** pre-commit runs fmt, clippy, shellcheck and actionlint on staged files. Pre-push runs the tests, `cargo deny` and the JS tests. The install script refuses to run in a linked worktree, because all worktrees share one `.git/hooks`.
 - **Snapshots:** CLI help and output snapshots live in `crates/gws-rust/tests/snapshots`. Review them with `cargo insta review`, or update them with `INSTA_UPDATE=always cargo test`.
-- **Skills:** after changing help text, helper flags, `registry/*.toml` or the generator, run `just skills` and commit the result, including new and deleted directories. CI fails when `skills/` or `docs/skills.md` drift, and warns about skill directories without the generator marker. Every generated `SKILL.md` carries `<!-- gwsr generated skill: do not edit by hand -->` after its front matter. A full (unfiltered) run deletes marked directories it no longer produces (`pruned` in its summary); unmarked directories are never touched and are listed as `unmanaged`; delete those by hand if they are stale. `--dry-run` reports what would be written and pruned without touching disk.
+- **Skills:** after changing help text, helper flags, `crates/gws-rust/registry/*.toml` or the generator, run `just skills` and commit the result, including new and deleted directories. CI fails when `skills/` or `docs/skills.md` drift, and warns about skill directories without the generator marker. Every generated `SKILL.md` carries `<!-- gwsr generated skill: do not edit by hand -->` after its front matter. A full (unfiltered) run deletes marked directories it no longer produces (`pruned` in its summary); unmarked directories are never touched and are listed as `unmanaged`; delete those by hand if they are stale. `--dry-run` reports what would be written and pruned without touching disk.
 
 ### Changesets
 
@@ -118,7 +118,7 @@ The repository is a Cargo workspace with two crates, plus the npm launcher in `n
 | `formatter.rs`, `output.rs`, `jq.rs` | Output formats, terminal sanitization, `emit()`, `--jq` via jaq |
 | `schema.rs`, `inventory.rs` | `gwsr schema`, `gwsr commands` |
 | `completions.rs` | Dynamic shell completions and `dev man` |
-| `generate_skills.rs` | `gwsr dev generate-skills` (reads `registry/personas.toml`, `registry/recipes.toml`) |
+| `generate_skills.rs` | `gwsr dev generate-skills` (reads `crates/gws-rust/registry/personas.toml`, `recipes.toml`) |
 | `logging.rs`, `hardening.rs`, `fs_util.rs`, `timezone.rs`, `text.rs` | Logging, process hardening, secret-file I/O, account time zone, text utilities |
 | `helpers/` | `+verb` helpers per service. `http.rs` has `Api`, the helper REST client (dry-run planning, pagination, sanitization) and `OutputTarget`. Gmail is in `helpers/gmail/`, Workspace Events in `helpers/events/` |
 
