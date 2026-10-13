@@ -222,6 +222,7 @@ impl GmailWatchStep<'_> {
         let mut ids = Vec::new();
         let mut seen = HashSet::new();
         let mut page_token: Option<String> = None;
+        let mut tokens = crate::helpers::pagination::PageTokens::new();
         loop {
             let page = api
                 .history(self.last_history_id, page_token.as_deref())
@@ -238,8 +239,11 @@ impl GmailWatchStep<'_> {
                 &self.config.label_ids,
                 &mut seen,
             ));
-            match page.get("nextPageToken").and_then(Value::as_str) {
-                Some(t) => page_token = Some(t.to_string()),
+            match tokens
+                .next(&page, "Failed to list Gmail history")
+                .map_err(StepError::Fatal)?
+            {
+                Some(t) => page_token = Some(t),
                 None => break,
             }
         }
@@ -759,6 +763,39 @@ mod tests {
             .mount(&server)
             .await;
         run_once(&server, &SanitizeConfig::default()).await.unwrap();
+    }
+
+    /// History paging treats an empty nextPageToken as the last page and a
+    /// repeated one as a fatal error, never paging forever.
+    #[tokio::test]
+    async fn watch_history_stops_on_repeated_or_empty_page_token() {
+        let limit = Duration::from_secs(10);
+        for (token, ok) in [("same", false), ("", true)] {
+            let server = MockServer::start().await;
+            mount_pull(&server).await;
+            Mock::given(method("GET"))
+                .and(path("/gmail/v1/users/me/history"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                    "historyId": "2",
+                    "nextPageToken": token
+                })))
+                .mount(&server)
+                .await;
+            Mock::given(method("POST"))
+                .and(path("/v1/projects/test/subscriptions/demo:acknowledge"))
+                .respond_with(ResponseTemplate::new(200))
+                .mount(&server)
+                .await;
+            let res = tokio::time::timeout(limit, run_once(&server, &SanitizeConfig::default()))
+                .await
+                .unwrap_or_else(|_| panic!("nextPageToken {token:?} must end pagination"));
+            if ok {
+                res.unwrap();
+            } else {
+                let err = res.unwrap_err();
+                assert!(err.to_string().contains("twice"), "{err}");
+            }
+        }
     }
 
     /// `--label-ids` must filter what is emitted, not only which changes

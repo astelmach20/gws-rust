@@ -197,6 +197,7 @@ impl EventsApi {
     async fn list_all(&self, filter: &str) -> Result<Vec<Value>, GwsError> {
         let mut out = Vec::new();
         let mut token: Option<String> = None;
+        let mut tokens = crate::helpers::pagination::PageTokens::new();
         loop {
             let mut query = vec![("filter", filter.to_string())];
             if let Some(t) = &token {
@@ -216,8 +217,8 @@ impl EventsApi {
                 })?;
                 out.extend(subs.iter().cloned());
             }
-            match page.get("nextPageToken").and_then(Value::as_str) {
-                Some(t) => token = Some(t.to_string()),
+            match tokens.next(&page, "Failed to list subscriptions")? {
+                Some(t) => token = Some(t),
                 None => return Ok(out),
             }
         }
@@ -425,6 +426,33 @@ mod tests {
         };
         let out = run(&api(&server), &config, 0).await.unwrap();
         assert_eq!(out["renewed"][0]["name"], "subscriptions/S1");
+    }
+
+    /// Listing subscriptions treats an empty nextPageToken as the last page
+    /// and a repeated one as an error, never paging forever.
+    #[tokio::test]
+    async fn list_all_stops_on_repeated_or_empty_page_token() {
+        let limit = std::time::Duration::from_secs(10);
+        for (token, ok) in [("same", false), ("", true)] {
+            let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .and(path("/v1/subscriptions"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                    "subscriptions": [{"name": "subscriptions/a"}],
+                    "nextPageToken": token
+                })))
+                .mount(&server)
+                .await;
+            let res = tokio::time::timeout(limit, api(&server).list_all("f"))
+                .await
+                .unwrap_or_else(|_| panic!("nextPageToken {token:?} must end pagination"));
+            if ok {
+                assert_eq!(res.unwrap().len(), 1);
+            } else {
+                let err = res.unwrap_err();
+                assert!(err.to_string().contains("twice"), "{err}");
+            }
+        }
     }
 
     #[tokio::test]
