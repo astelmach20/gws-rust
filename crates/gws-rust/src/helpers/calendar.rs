@@ -892,6 +892,9 @@ async fn freebusy(api: &Api, m: &ArgMatches, tz: &TzInfo) -> Result<Value, GwsEr
         .ok_or_else(|| http::other_err(anyhow::anyhow!("freeBusy response has no 'calendars'")))?;
     let mut all_busy = Vec::new();
     let mut failures = Vec::new();
+    // Google's own per-calendar failures, as opposed to a calendar the
+    // caller can't see: retry later rather than fix the input.
+    let mut transient = false;
     for (id, info) in cals {
         if let Some(errors) = info.get("errors").and_then(Value::as_array)
             && !errors.is_empty()
@@ -900,6 +903,9 @@ async fn freebusy(api: &Api, m: &ArgMatches, tz: &TzInfo) -> Result<Value, GwsEr
                 .iter()
                 .filter_map(|e| e.get("reason").and_then(Value::as_str))
                 .collect();
+            transient |= reasons
+                .iter()
+                .any(|r| matches!(*r, "backendError" | "internalError"));
             failures.push(format!("{id} ({})", reasons.join(", ")));
             continue;
         }
@@ -920,6 +926,17 @@ async fn freebusy(api: &Api, m: &ArgMatches, tz: &TzInfo) -> Result<Value, GwsEr
             };
             all_busy.push((parse("start")?, parse("end")?));
         }
+    }
+    if transient {
+        return Err(GwsError::Api {
+            code: 503,
+            message: format!(
+                "Free/busy temporarily unavailable for: {}; retry later",
+                failures.join("; ")
+            ),
+            reason: "backendError".to_string(),
+            enable_url: None,
+        });
     }
     if !failures.is_empty() {
         return Err(GwsError::Validation(format!(
@@ -1629,6 +1646,52 @@ mod tests {
         .await
         .unwrap_err();
         assert!(err.to_string().contains("c@x"));
+    }
+
+    /// A per-calendar `backendError`/`internalError` is a transient Google
+    /// failure: it exits 6 (retry later), not 3 (bad input). Bad calendars
+    /// stay a validation error.
+    #[tokio::test]
+    async fn freebusy_transient_calendar_errors_are_retryable() {
+        for (reason, exit) in [
+            ("backendError", GwsError::EXIT_CODE_API_RETRYABLE),
+            ("internalError", GwsError::EXIT_CODE_API_RETRYABLE),
+            ("notFound", GwsError::EXIT_CODE_VALIDATION),
+        ] {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/freeBusy"))
+                .respond_with(
+                    ResponseTemplate::new(200).set_body_json(json!({"calendars": {
+                        "primary": {"busy": []},
+                        "c@x": {"errors": [{"domain": "global", "reason": reason}]}
+                    }})),
+                )
+                .mount(&server)
+                .await;
+            let api = api(&server.uri(), "");
+            let m = parse(&[
+                "gwsr",
+                "+freebusy",
+                "--start",
+                "2026-01-05T09:00:00Z",
+                "--end",
+                "2026-01-05T17:00:00Z",
+                "--calendar-id",
+                "primary",
+                "--calendar-id",
+                "c@x",
+            ]);
+            let err = freebusy(
+                &api,
+                m.subcommand_matches("+freebusy").unwrap(),
+                &tz("UTC", false),
+            )
+            .await
+            .unwrap_err();
+            assert!(err.to_string().contains("c@x"), "{reason}: {err}");
+            assert_eq!(err.exit_code(), exit, "{reason}: {err}");
+        }
     }
 
     #[tokio::test]
