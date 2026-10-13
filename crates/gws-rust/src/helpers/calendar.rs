@@ -1695,6 +1695,51 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn freebusy_all_day_range_starts_after_a_skipped_midnight() {
+        // America/Santiago springs forward at midnight on 2026-09-06, so that
+        // day starts at 01:00 -03:00. An all-day range over it must query from
+        // there, not fail because 00:00 does not exist.
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/freeBusy"))
+            .and(body_partial_json(json!({
+                "timeMin": "2026-09-06T04:00:00+00:00",
+                "timeMax": "2026-09-07T03:00:00+00:00",
+            })))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(json!({"calendars": {
+                    "primary": {"busy": []}
+                }})),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        let api = api(&server.uri(), "");
+        let m = parse(&[
+            "gwsr",
+            "+freebusy",
+            "--start",
+            "2026-09-06",
+            "--end",
+            "2026-09-07",
+        ]);
+        let v = freebusy(
+            &api,
+            m.subcommand_matches("+freebusy").unwrap(),
+            &tz("America/Santiago", true),
+        )
+        .await
+        .unwrap();
+        assert_eq!(v["timeMin"], "2026-09-06T01:00:00-03:00");
+        assert_eq!(v["timeMax"], "2026-09-07T00:00:00-03:00");
+        // An all-day event on that day still sorts before its timed events.
+        let santiago: Tz = "America/Santiago".parse().unwrap();
+        let all_day = json!({"start": "2026-09-06"});
+        let timed = json!({"start": "2026-09-06T09:00:00-03:00"});
+        assert!(start_key(&all_day, santiago) < start_key(&timed, santiago));
+    }
+
+    #[tokio::test]
     async fn update_merges_attendees_and_keeps_length() {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
