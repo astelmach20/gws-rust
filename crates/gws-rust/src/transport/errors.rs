@@ -143,13 +143,18 @@ fn api_error(status: reqwest::StatusCode, error_body: &str, retry_note: Option<&
             .unwrap_or_else(|| format!("HTTP {status} with no error message"));
         // Reason can appear in "errors[0].reason", in a `google.rpc.ErrorInfo`
         // entry of "details" (the current error model, whose "status" is only
-        // the coarse canonical code), or at the top-level "reason" field.
-        let reason = err_obj
-            .get("errors")
-            .and_then(Value::as_array)
-            .and_then(|arr| arr.first())
-            .and_then(|e| e.get("reason"))
-            .and_then(Value::as_str)
+        // the coarse canonical code), or at the top-level "reason" field. A
+        // rate-limit reason anywhere wins: the client retried the request
+        // because of it, so the error must be retryable too (exit code 6).
+        let reason = gws_rust_core::error::rate_limit_reason(err_obj)
+            .or_else(|| {
+                err_obj
+                    .get("errors")
+                    .and_then(Value::as_array)
+                    .and_then(|arr| arr.first())
+                    .and_then(|e| e.get("reason"))
+                    .and_then(Value::as_str)
+            })
             .or_else(|| {
                 err_obj
                     .get("details")
@@ -406,6 +411,49 @@ mod tests {
         );
         assert!(err.is_retryable(), "{err:?}");
         assert_eq!(err.exit_code(), GwsError::EXIT_CODE_API_RETRYABLE);
+    }
+
+    /// The transport retries a 403 that names a rate-limit reason anywhere in
+    /// the body, not only first; the exit code must agree once retries run
+    /// out, and the reported reason is the rate limit.
+    #[test]
+    fn rate_limit_reason_after_another_reason_is_retryable() {
+        let bodies = [
+            json!({"error": {"code": 403, "message": "m", "errors": [
+                {"domain": "global", "reason": "forbidden"},
+                {"domain": "usageLimits", "reason": "userRateLimitExceeded"}]}}),
+            json!({"error": {"code": 403, "message": "m",
+                "errors": [{"domain": "global", "reason": "forbidden"}],
+                "details": [{"@type": "type.googleapis.com/google.rpc.ErrorInfo",
+                             "reason": "RATE_LIMIT_EXCEEDED"}]}}),
+            json!({"error": {"code": 403, "message": "m", "details": [
+                {"@type": "type.googleapis.com/google.rpc.ErrorInfo", "reason": "ACCESS_DENIED"},
+                {"@type": "type.googleapis.com/google.rpc.ErrorInfo", "reason": "RATE_LIMIT_EXCEEDED"}]}}),
+        ];
+        for body in bodies {
+            let body = body.to_string();
+            assert!(
+                gws_rust_core::client::is_rate_limit_body(body.as_bytes()),
+                "{body}"
+            );
+            let err = error_from_response(
+                reqwest::StatusCode::FORBIDDEN,
+                &body,
+                &AuthMethod::OAuth,
+                None,
+            );
+            assert_eq!(
+                err.exit_code(),
+                GwsError::EXIT_CODE_API_RETRYABLE,
+                "{body} -> {err:?}"
+            );
+            let reason = err.to_json()["error"]["reason"].clone();
+            assert!(
+                ["userRateLimitExceeded", "RATE_LIMIT_EXCEEDED"]
+                    .contains(&reason.as_str().unwrap()),
+                "{reason}"
+            );
+        }
     }
 
     #[test]

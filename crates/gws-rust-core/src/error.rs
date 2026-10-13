@@ -277,6 +277,25 @@ impl From<anyhow::Error> for GwsError {
     }
 }
 
+/// The first rate-limit reason (`rateLimitExceeded`, `userRateLimitExceeded`,
+/// `RATE_LIMIT_EXCEEDED`) named anywhere in a Google error object (the `error`
+/// field of an error body): in any `errors[].reason`, any `details[].reason`
+/// or the top-level `reason`.
+///
+/// The HTTP client retries a 403 for which this is `Some`, and the error
+/// built from the final response reports this reason, so its exit code (6)
+/// agrees with the retry.
+pub fn rate_limit_reason(error: &serde_json::Value) -> Option<&str> {
+    error["errors"]
+        .as_array()
+        .into_iter()
+        .chain(error["details"].as_array())
+        .flatten()
+        .filter_map(|e| e["reason"].as_str())
+        .chain(error["reason"].as_str())
+        .find(|r| RATE_LIMIT_REASONS.contains(r))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
