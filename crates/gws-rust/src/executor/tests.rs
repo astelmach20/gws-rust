@@ -751,6 +751,46 @@ async fn fields_flag_keeps_next_page_token() {
     call.run(&Emitter::capturing()).await.unwrap();
 }
 
+/// A `nextPageToken` nested inside a sub-selection (`files(id,nextPageToken)`)
+/// does not select the top-level token, so `--page-all` still adds it.
+#[tokio::test]
+async fn nested_next_page_token_in_fields_still_adds_top_level_token() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/drive/v3/files"))
+        .and(query_param(
+            "fields",
+            "nextPageToken,files(id,nextPageToken)",
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"files": []})))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let d = doc(&server.uri());
+    let mut call = Call::new(&d, "list", &server);
+    call.options.fields = Some("files(id,nextPageToken)".into());
+    call.pagination.page_all = true;
+    call.run(&Emitter::capturing()).await.unwrap();
+}
+
+#[test]
+fn selects_top_level_ignores_nested_names() {
+    for mask in [
+        "nextPageToken",
+        "files(id),nextPageToken",
+        " nextPageToken ,a",
+    ] {
+        assert!(super::selects_top_level(mask, "nextPageToken"), "{mask}");
+    }
+    for mask in [
+        "files(id,nextPageToken)",
+        "files/nextPageToken",
+        "nextPageTokens",
+    ] {
+        assert!(!super::selects_top_level(mask, "nextPageToken"), "{mask}");
+    }
+}
+
 #[tokio::test]
 async fn empty_fields_mask_is_rejected_before_sending() {
     let server = MockServer::start().await;
