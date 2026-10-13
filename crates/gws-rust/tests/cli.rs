@@ -806,6 +806,71 @@ fn generated_methods_validate_and_confirm_before_loading_credentials() {
     assert!(stderr_of(&out).contains("GWSR_CREDENTIALS_FILE"));
 }
 
+/// JSON input read from a file or stdin may start with a UTF-8 byte order
+/// mark (Windows editors, Windows PowerShell `Set-Content -Encoding UTF8`):
+/// `--params`/`--json` `@file` and `-`, and `gwsr batch` input, accept it.
+#[test]
+fn json_input_with_utf8_bom_is_accepted() {
+    let env = Env::new();
+    env.seed_doc(&json!({
+        "name": "drive",
+        "version": "v3",
+        "rootUrl": "https://www.googleapis.com/",
+        "servicePath": "drive/v3/",
+        "batchPath": "batch/drive/v3",
+        "resources": {
+            "files": {
+                "methods": {
+                    "list": {
+                        "id": "drive.files.list",
+                        "httpMethod": "GET",
+                        "path": "files",
+                        "parameters": {
+                            "pageSize": {"type": "integer", "location": "query"}
+                        }
+                    }
+                }
+            }
+        }
+    }));
+    let params = env.work_dir().join("params.json");
+    std::fs::write(&params, "\u{feff}{\"pageSize\": 5}\r\n").unwrap();
+
+    let from_file = env
+        .cmd()
+        .args(["drive", "files", "list", "--dry-run", "--params"])
+        .arg(format!("@{}", params.display()))
+        .output()
+        .unwrap();
+    let from_stdin = env
+        .cmd()
+        .args(["drive", "files", "list", "--dry-run", "--params", "-"])
+        .write_stdin("\u{feff}{\"pageSize\": 5}")
+        .output()
+        .unwrap();
+    for out in [from_file, from_stdin] {
+        assert!(out.status.success(), "{}", stderr_of(&out));
+        let v: Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert_eq!(v["query_params"], json!([["pageSize", "5"]]));
+    }
+
+    let calls = env.work_dir().join("calls.ndjson");
+    std::fs::write(
+        &calls,
+        "\u{feff}{\"method\": \"files.list\", \"params\": {\"pageSize\": 5}}\r\n",
+    )
+    .unwrap();
+    let out = env
+        .cmd()
+        .args(["batch", "drive", "--dry-run", "--input"])
+        .arg(&calls)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    let v: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["dry_run"], true);
+}
+
 // ── Output formats ──────────────────────────────────────────────────────
 
 #[test]
