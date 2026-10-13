@@ -165,20 +165,24 @@ fn escape_markdown(text: &str) -> String {
     out
 }
 
-/// Escape block markers that only mean something at the start of a line:
-/// `-`/`+` bullets, `=` setext underlines and `1.`/`1)` ordered items.
+/// Drop leading indentation and escape block markers that only mean
+/// something at the start of a line: `-`/`+` bullets, `=` setext underlines
+/// and `1.`/`1)` ordered items.
+///
+/// Markdown has no indented paragraphs: a line starting with a tab or four
+/// spaces is an indented code block, which would show the escaped text
+/// verbatim in monospace, so the indentation is removed.
 fn escape_line_starts(text: &str) -> String {
     text.split('\n')
         .map(|l| {
-            let body = l.trim_start_matches(' ');
-            let indent = &l[..l.len() - body.len()];
+            let body = l.trim_start_matches([' ', '\t']);
             let digits = body.len() - body.trim_start_matches(|c: char| c.is_ascii_digit()).len();
             if body.starts_with(['-', '+', '=']) {
-                format!("{indent}\\{body}")
+                format!("\\{body}")
             } else if digits > 0 && body[digits..].starts_with(['.', ')']) {
-                format!("{indent}{}\\{}", &body[..digits], &body[digits..])
+                format!("{}\\{}", &body[..digits], &body[digits..])
             } else {
-                l.to_string()
+                body.to_string()
             }
         })
         .collect::<Vec<_>>()
@@ -448,6 +452,26 @@ mod tests {
         ]}}]}});
         assert_eq!(render(&styled_doc, true), "**a\\_b** `x*y`\n\n");
         assert_eq!(render(&document, false), format!("{}\n", lines.join("\n")));
+    }
+
+    #[test]
+    fn indented_paragraphs_do_not_become_code_blocks() {
+        let para = |t: &str| json!({"paragraph": {"elements": [{"textRun": {"content": t}}]}});
+        let document = json!({"body": {"content": [
+            para("\tTabbed snake_case\n"),
+            para("    Four spaces\n"),
+            para("Line one\u{000b}    indented line two\n"),
+        ]}});
+        let md = render(&document, true);
+        let (tags, text) = parse_back(&md);
+        assert!(
+            tags.iter().all(|t| t == "Paragraph"),
+            "indented text parsed as {tags:?} from:\n{md:?}"
+        );
+        assert_eq!(
+            text, "Tabbed snake_case\nFour spaces\nLine one\nindented line two\n",
+            "from:\n{md:?}"
+        );
     }
 
     #[test]
