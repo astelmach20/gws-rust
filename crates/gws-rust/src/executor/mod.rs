@@ -266,7 +266,7 @@ fn apply_param_defaults(
     if paginating
         && let Some(Value::String(mask)) = params.get_mut("fields")
         && !mask.is_empty()
-        && !mask.contains("nextPageToken")
+        && !selects_top_level(mask, "nextPageToken")
     {
         *mask = format!("nextPageToken,{mask}");
     }
@@ -277,6 +277,28 @@ fn apply_param_defaults(
         params.insert("supportsAllDrives".to_string(), Value::Bool(true));
     }
     Ok(())
+}
+
+/// Whether a partial-response `mask` selects `field` at the top level. A name
+/// inside a sub-selection (`files(id,nextPageToken)`) or a path
+/// (`files/nextPageToken`) selects a nested field, not this one.
+fn selects_top_level(mask: &str, field: &str) -> bool {
+    let mut depth = 0usize;
+    let mut start = 0;
+    for (i, c) in mask.char_indices() {
+        match c {
+            '(' => depth += 1,
+            ')' => depth = depth.saturating_sub(1),
+            ',' if depth == 0 => {
+                if mask[start..i].trim() == field {
+                    return true;
+                }
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    mask[start..].trim() == field
 }
 
 /// POST/PATCH are retried only when they carry a `requestId` that the API
