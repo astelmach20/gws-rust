@@ -1031,6 +1031,32 @@ fn explicit_profile_is_never_silently_replaced_by_gwsr_token() {
     );
 }
 
+/// The hint's `gwsr auth login` command must sign in to the profile the
+/// failed command used. Plain `gwsr auth login --scopes ...` would sign in to
+/// the config/default profile instead, leaving `--profile work` broken and
+/// replacing another profile's login.
+#[test]
+fn auth_error_hint_names_the_profile_chosen_by_flag() {
+    let env = Env::new();
+    env.seed_drive("Lists files.");
+    let out = env
+        .cmd()
+        .args(["--profile", "work", "drive", "files", "list"])
+        .assert()
+        .code(2)
+        .stdout("")
+        .get_output()
+        .clone();
+    let err = stderr_error(&out);
+    let message = err["error"]["message"].as_str().unwrap();
+    assert!(message.contains("gwsr auth login --profile work"), "{err}");
+    let hint = err["error"]["hint"].as_str().unwrap();
+    assert!(
+        hint.contains("`gwsr auth login --profile work --scopes drive.readonly`"),
+        "{err}"
+    );
+}
+
 #[test]
 fn cache_clear_dry_run_reports_and_keeps_the_cache() {
     let env = Env::new();

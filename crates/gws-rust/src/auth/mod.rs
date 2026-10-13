@@ -83,11 +83,13 @@ pub enum AuthError {
          with `{}`; for a service account, ask a Workspace admin to authorize them for \
          domain-wide delegation",
         requested.join(", "),
-        scopes::login_command_hint(requested)
+        scopes::login_command_hint(login_command, requested)
     )]
     InvalidScope {
         requested: Vec<String>,
         description: String,
+        /// The `gwsr auth login` command for the profile in use.
+        login_command: String,
     },
     /// The token endpoint returned an error.
     #[error("token request failed: {0}")]
@@ -273,11 +275,31 @@ async fn token_for(scopes: &[&str], freshness: Freshness) -> anyhow::Result<Stri
 
 /// The `gwsr auth login` command that re-authenticates the active profile.
 pub(crate) fn login_command(env: &AuthEnv) -> String {
-    if env.profile_is_explicit() || env.profile.name != profiles::DEFAULT_PROFILE {
-        format!("gwsr auth login --profile {}", env.profile.name)
+    login_command_for(&env.profile)
+}
+
+/// The `gwsr auth login` command that signs in to `profile`: it names the
+/// profile unless it is the implicit default, so following it never signs in
+/// to a different profile than the one the failed command used.
+pub(crate) fn login_command_for(profile: &profiles::ActiveProfile) -> String {
+    if profile.source != profiles::ProfileSource::Default
+        || profile.name != profiles::DEFAULT_PROFILE
+    {
+        format!("gwsr auth login --profile {}", profile.name)
     } else {
         "gwsr auth login".to_string()
     }
+}
+
+/// [`login_command_for`] the active profile of this process (`--profile`,
+/// `GWSR_PROFILE`, `config.toml`, default). Reads no credentials.
+///
+/// # Errors
+///
+/// Config-dir or profile resolution failures.
+pub(crate) fn active_login_command() -> anyhow::Result<String> {
+    let base = profiles::try_config_dir()?;
+    Ok(login_command_for(&profiles::active_profile(&base)?))
 }
 
 /// [`get_token`] with an explicit environment (testable, no globals) and
@@ -448,7 +470,8 @@ pub fn scopes_for_method(
     method_scopes: &[String],
     http_method: &str,
 ) -> anyhow::Result<Vec<String>> {
-    let granted = granted_scopes()?;
+    let env = AuthEnv::from_process()?;
+    let granted = granted_scopes_for(&env)?;
     let choice = scopes::select_for_method(method_scopes, http_method, granted.as_deref());
     if let scopes::ScopeChoice::NotGranted {
         required_any_of, ..
@@ -458,7 +481,7 @@ pub fn scopes_for_method(
             "this method needs one of [{}], but the active profile was granted none of \
              them. Add one with `{}`",
             required_any_of.join(", "),
-            scopes::login_command_hint(&required_any_of[..1])
+            scopes::login_command_hint(&login_command(&env), &required_any_of[..1])
         );
     }
     Ok(choice.scopes().into_iter().map(str::to_string).collect())
@@ -715,6 +738,7 @@ mod tests {
                 AuthError::InvalidScope {
                     requested: vec!["https://www.googleapis.com/auth/drive".into()],
                     description: "nope".into(),
+                    login_command: "gwsr auth login".into(),
                 },
                 2,
                 "authError",
