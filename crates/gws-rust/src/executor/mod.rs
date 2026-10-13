@@ -175,7 +175,10 @@ pub struct Invocation<'a> {
     pub method: &'a RestMethod,
     pub params: Map<String, Value>,
     pub body: Option<Value>,
-    pub credentials: Credentials,
+    /// `None`: the method's own scopes, resolved only once the call has been
+    /// validated and confirmed, so bad input or a refused confirmation never
+    /// loads credentials or refreshes a token (and a dry run never does).
+    pub credentials: Option<Credentials>,
     pub upload: Option<UploadSource<'a>>,
     /// `-o/--output`: where to put the response payload.
     pub output: Option<OutputTarget>,
@@ -467,6 +470,10 @@ pub(crate) async fn execute_to(
         None => {}
     }
 
+    let credentials = match credentials {
+        Some(c) => c,
+        None => options::resolve_credentials(method).await?,
+    };
     let quota_project = if options.quota_project {
         crate::auth::get_quota_project()?
     } else {
