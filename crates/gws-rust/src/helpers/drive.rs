@@ -486,14 +486,22 @@ fn str_field<'v>(v: &'v Value, key: &str) -> Result<&'v str, GwsError> {
         .ok_or_else(|| http::other_err(anyhow::anyhow!("Drive response is missing '{key}'")))
 }
 
+/// `--output`, or a local file named after the Drive file. `ext` (for an
+/// export) is appended after the name is made safe, so shortening a long
+/// name never cuts the extension off.
 fn resolve_target(
     output: Option<&str>,
     default_name: &str,
+    ext: Option<&str>,
     overwrite: bool,
 ) -> Result<OutputTarget, GwsError> {
-    match output {
-        Some(o) => OutputTarget::parse(o, overwrite),
-        None => OutputTarget::parse(&safe_filename(default_name, "download"), overwrite),
+    if let Some(o) = output {
+        return OutputTarget::parse(o, overwrite);
+    }
+    let safe = safe_filename(default_name, "download");
+    match ext {
+        Some(ext) => OutputTarget::parse(&with_extension(&safe, ext), overwrite),
+        None => OutputTarget::parse(&safe, overwrite),
     }
 }
 
@@ -517,7 +525,7 @@ async fn download(
     let (name, target) = if api.is_dry_run() {
         (
             "<file name>".to_string(),
-            resolve_target(output, "download", overwrite)?,
+            resolve_target(output, "download", None, overwrite)?,
         )
     } else {
         let meta = get_metadata(api, file_id).await?;
@@ -526,7 +534,7 @@ async fn download(
             return Err(native_download_error(&meta, file_id, mime)?);
         }
         let name = str_field(&meta, "name")?.to_string();
-        let target = resolve_target(output, &name, overwrite)?;
+        let target = resolve_target(output, &name, None, overwrite)?;
         (name, target)
     };
     let bytes = api
@@ -749,7 +757,7 @@ async fn export(
         check_export(format, str_field(&meta, "mimeType")?)?;
         str_field(&meta, "name")?.to_string()
     };
-    let target = resolve_target(output, &with_extension(&name, format.ext), overwrite)?;
+    let target = resolve_target(output, &name, Some(format.ext), overwrite)?;
     let bytes = api
         .download(
             ApiRequest::get(api.url(&format!("files/{}/export", encode_path_segment(file_id))))
@@ -1364,6 +1372,23 @@ mod tests {
         assert!(check_export(md, "application/pdf").is_err());
         assert_eq!(with_extension("Report", "pdf"), "Report.pdf");
         assert_eq!(with_extension("Report.PDF", "pdf"), "Report.PDF");
+    }
+
+    #[test]
+    fn export_default_name_keeps_the_extension_for_long_titles() {
+        // Shortening a long Drive title must not cut off the export format's
+        // extension (`report.pdf` saved as `report` with no extension).
+        let long = "Quarterly report ".repeat(20);
+        let target = resolve_target(None, &long, Some("pdf"), false).unwrap();
+        let OutputTarget::File { path, .. } = target else {
+            panic!("expected a file target");
+        };
+        let name = path.file_name().unwrap().to_str().unwrap();
+        assert!(name.ends_with(".pdf"), "{name}");
+        assert!(
+            name.len() <= http::SAFE_FILENAME_MAX_BYTES + ".pdf".len(),
+            "{name}"
+        );
     }
 
     #[tokio::test]
