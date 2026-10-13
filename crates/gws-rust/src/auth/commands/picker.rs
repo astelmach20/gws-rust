@@ -247,7 +247,9 @@ pub(super) fn selected_from_items(
     scopes::dedup_hierarchical(&chosen)
 }
 
-/// For services with no preset scope, add their scopes from Discovery.
+/// For services with no preset scope, add their scopes from Discovery; then
+/// add the fixed scopes of `events` / `workflow` (see
+/// [`scopes::append_fixed_service_scopes`]).
 ///
 /// # Errors
 ///
@@ -279,12 +281,13 @@ where
     F: Fn(String) -> Fut,
     Fut: std::future::Future<Output = anyhow::Result<Vec<String>>>,
 {
+    // Services with a fixed scope list are never looked up. Their scopes are
+    // appended last, so they cannot make another requested service (`chat`
+    // next to `events`) look covered and skip its own Discovery scopes.
     let mut missing: Vec<String> = scopes::find_unmatched_services(result, services)
         .into_iter()
+        .filter(|svc| !scopes::has_fixed_scopes(svc))
         .collect();
-    if missing.is_empty() {
-        return Ok(());
-    }
     missing.sort();
     let lookups = missing.into_iter().map(|svc| {
         let found = lookup(svc.clone());
@@ -308,6 +311,7 @@ where
         }
     }
     if failures.is_empty() {
+        scopes::append_fixed_service_scopes(result, services, readonly_only);
         Ok(())
     } else {
         Err(GwsError::Validation(format!(
@@ -429,6 +433,33 @@ mod tests {
         let entries = static_entries();
         assert!(picker_entries(&entries, Some(&set(&["chat"]))).is_none());
         assert!(picker_entries(&entries, Some(&set(&["gmail", "chat"]))).is_none());
+    }
+
+    #[tokio::test]
+    async fn fixed_scope_services_do_not_cover_other_services() {
+        // `events` lists Chat read scopes; they must not stop `chat` from
+        // getting its own Discovery scopes, and `events` itself is never
+        // looked up.
+        let lookup = |svc: String| async move {
+            match svc.as_str() {
+                "chat" => Ok(vec![format!("{}chat.spaces.create", scopes::SCOPE_PREFIX)]),
+                other => Err(anyhow::anyhow!("unexpected lookup of {other}")),
+            }
+        };
+        let mut result = Vec::new();
+        augment_with(&mut result, &set(&["chat", "events"]), false, lookup)
+            .await
+            .unwrap();
+        let shorts: Vec<&str> = result.iter().map(|s| scopes::short_name(s)).collect();
+        assert_eq!(shorts.first(), Some(&"chat.spaces.create"), "{shorts:?}");
+        assert!(shorts.contains(&"chat.messages.readonly"), "{shorts:?}");
+        assert!(shorts.contains(&"pubsub"), "{shorts:?}");
+    }
+
+    #[test]
+    fn picker_is_skipped_for_events() {
+        // The basic list has drive.readonly but no Chat or Meet scopes.
+        assert!(picker_entries(&static_entries(), Some(&set(&["events"]))).is_none());
     }
 
     #[tokio::test]

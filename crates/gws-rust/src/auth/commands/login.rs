@@ -477,6 +477,95 @@ mod tests {
         assert!(s.iter().any(|x| x == scopes::PLATFORM_SCOPE));
     }
 
+    fn set(v: &[&str]) -> HashSet<String> {
+        v.iter().map(|x| (*x).to_string()).collect()
+    }
+
+    fn short(v: &[String]) -> Vec<&str> {
+        v.iter().map(|s| scopes::short_name(s)).collect()
+    }
+
+    #[tokio::test]
+    async fn events_service_requests_the_event_scopes() {
+        // `-s events` used to be "covered" by the drive.readonly preset row
+        // and request nothing else.
+        let s = resolve_scopes(ScopeMode::Default, None, Some(&set(&["events"])), false)
+            .await
+            .unwrap();
+        assert_eq!(
+            short(&s),
+            [
+                "drive.readonly",
+                "chat.messages.readonly",
+                "chat.messages.reactions.readonly",
+                "chat.memberships.readonly",
+                "chat.spaces.readonly",
+                "meetings.space.readonly",
+            ]
+        );
+        // `--write` adds Pub/Sub (`events +subscribe` creates topics) and does
+        // not widen Drive to the read-write preset scope.
+        let s = resolve_scopes(ScopeMode::Write, None, Some(&set(&["events"])), false)
+            .await
+            .unwrap();
+        assert_eq!(
+            short(&s),
+            [
+                "chat.messages.readonly",
+                "chat.messages.reactions.readonly",
+                "chat.memberships.readonly",
+                "chat.spaces.readonly",
+                "meetings.space.readonly",
+                "drive.readonly",
+                "pubsub",
+            ]
+        );
+        // Combined with a preset service, both contribute and nothing repeats.
+        let s = resolve_scopes(
+            ScopeMode::Default,
+            None,
+            Some(&set(&["drive", "events", "gmail"])),
+            false,
+        )
+        .await
+        .unwrap();
+        let mut sorted = short(&s);
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(sorted.len(), s.len(), "duplicate scopes: {s:?}");
+        for want in ["drive.readonly", "gmail.readonly", "chat.spaces.readonly"] {
+            assert!(s.contains(&scopes::normalize_scope(want)), "{want}: {s:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn workflow_service_requests_the_helper_scopes() {
+        // `workflow` has no Discovery document; its scopes are the helpers'.
+        for name in ["workflow", "wf"] {
+            let s = resolve_scopes(ScopeMode::Default, None, Some(&set(&[name])), false)
+                .await
+                .unwrap();
+            let mut got = short(&s);
+            got.sort_unstable();
+            assert_eq!(
+                got,
+                [
+                    "calendar.readonly",
+                    "drive.readonly",
+                    "gmail.readonly",
+                    "tasks.readonly",
+                ],
+                "{name}"
+            );
+        }
+        let s = resolve_scopes(ScopeMode::Write, None, Some(&set(&["workflow"])), false)
+            .await
+            .unwrap();
+        for want in ["tasks", "chat.messages.create", "gmail.readonly"] {
+            assert!(s.contains(&scopes::normalize_scope(want)), "{want}: {s:?}");
+        }
+    }
+
     #[test]
     fn unknown_service_names_are_rejected() {
         let err = parse_args(&matches(&["-s", "gmail,contacts.other.readonly"]))

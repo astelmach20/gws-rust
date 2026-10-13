@@ -313,6 +313,32 @@ mod tests {
     }
 
     #[test]
+    fn login_services_events_covers_helper_scopes() {
+        // `gwsr auth login -s events` must grant every scope these helpers use.
+        let events: std::collections::HashSet<String> =
+            std::iter::once("events".to_string()).collect();
+        let types: Vec<String> = [
+            "google.workspace.chat.message.v1.created",
+            "google.workspace.chat.reaction.v1.created",
+            "google.workspace.chat.membership.v1.created",
+            "google.workspace.chat.space.v1.updated",
+            "google.workspace.meet.conference.v2.started",
+            "google.workspace.drive.file.v1.updated",
+        ]
+        .iter()
+        .map(|s| (*s).to_string())
+        .collect();
+        let mut used = scopes_for_event_types(&types).unwrap();
+        used.push(PUBSUB_SCOPE);
+        for scope in used {
+            assert!(
+                crate::auth::scopes::scope_matches_service(scope, &events),
+                "{scope}"
+            );
+        }
+    }
+
+    #[test]
     fn test_help_does_not_duplicate_defaults() {
         let cmd = EventsHelper.inject_commands(
             Command::new("t"),

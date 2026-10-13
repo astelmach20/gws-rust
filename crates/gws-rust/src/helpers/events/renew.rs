@@ -294,6 +294,16 @@ mod tests {
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     #[test]
+    fn login_services_events_covers_all_event_scopes() {
+        let events = std::iter::once("events".to_string()).collect();
+        let mut granted: Vec<String> = Vec::new();
+        crate::auth::scopes::append_fixed_service_scopes(&mut granted, &events, true);
+        for scope in ALL_EVENT_SCOPES {
+            assert!(granted.iter().any(|g| g == scope), "{scope}");
+        }
+    }
+
+    #[test]
     fn test_parse_duration() {
         assert_eq!(parse_duration("1h").unwrap(), 3600);
         assert_eq!(parse_duration("30m").unwrap(), 1800);
