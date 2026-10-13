@@ -2441,6 +2441,60 @@ async fn truncation_marker_is_not_passed_through_jq() {
     }
 }
 
+/// `--sanitize` in warn mode screens each `--page-all` page; `--page-items`
+/// must carry that page's `_sanitization` annotation onto every item it
+/// prints instead of dropping it with the page envelope.
+#[tokio::test(flavor = "multi_thread")]
+async fn page_items_keep_the_sanitization_annotation() {
+    use wiremock::matchers::any;
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    Mock::given(any())
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({"files": [{"id": "a"}, {"id": "b"}]})),
+        )
+        .mount(&server)
+        .await;
+    let env = Env::new();
+    std::fs::create_dir_all(env.cache_dir().join("discovery")).unwrap();
+    env.seed_doc(&json!({
+        "name": "drive",
+        "version": "v3",
+        "title": "Google Drive API",
+        "rootUrl": "https://www.googleapis.com/",
+        "servicePath": "drive/v3/",
+        "resources": {"files": {"methods": {"list": {
+            "id": "drive.files.list",
+            "httpMethod": "GET",
+            "path": "files",
+            "parameters": {"pageToken": {"type": "string", "location": "query"}},
+            "scopes": ["https://www.googleapis.com/auth/drive.readonly"]
+        }}}}
+    }));
+    // Model Armor is unreachable (https goes to a closed port), so warn mode
+    // annotates every screened page with `_sanitization.error`.
+    let out = blocking_sanitize_cmd(&env, &server.uri())
+        .env("GWSR_SANITIZE_MODE", "warn")
+        .args(["drive", "files", "list", "--page-items"])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    let stdout = stdout_of(&out);
+    let items: Vec<Value> = stdout
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap_or_else(|e| panic!("{e}: {stdout}")))
+        .collect();
+    assert_eq!(items.len(), 2, "{stdout}");
+    for (item, id) in items.iter().zip(["a", "b"]) {
+        assert_eq!(item["id"], id, "{stdout}");
+        assert!(
+            item["_sanitization"]["error"].is_string(),
+            "item lost the page's _sanitization annotation: {stdout}"
+        );
+    }
+}
+
 /// `GWSR_RESTRICT_PATHS=cwd` confines every file flag, including the ones of
 /// `dev man` and `auth export`, which used to write anywhere.
 #[test]

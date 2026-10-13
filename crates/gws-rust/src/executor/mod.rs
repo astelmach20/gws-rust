@@ -761,10 +761,19 @@ pub(crate) async fn execute_to(
                     item_field = Some(pagination::item_field(doc, method, &value, requested)?);
                 }
                 let field = item_field.as_deref().unwrap_or_default();
+                // `--sanitize` screened the whole page; in warn mode its
+                // `_sanitization` annotation must reach every item printed
+                // from that page instead of being dropped with the envelope.
+                let annotation = value
+                    .as_object_mut()
+                    .and_then(|page| page.remove("_sanitization"));
                 match value.get_mut(field).map(Value::take) {
                     Some(Value::Array(items)) => {
                         for item in items {
-                            out.stream(item)?;
+                            out.stream(match &annotation {
+                                Some(a) => crate::helpers::modelarmor::annotate(item, a.clone()),
+                                None => item,
+                            })?;
                         }
                     }
                     Some(Value::Null) | None => {}
