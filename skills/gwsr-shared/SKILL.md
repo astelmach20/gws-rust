@@ -61,7 +61,7 @@ stderr holds one JSON object: `{"error":{"code","message","reason","retryable","
 (human-readable text with a non-JSON `--format`).
 
 Exit codes: `0` success, `1` API error (permanent), `2` auth, `3` validation,
-`4` discovery, `5` internal, `6` API error that is safe to retry (429 / 5xx / rate limit),
+`4` discovery, `5` internal, `6` API error that is safe to retry (408 / 429 / 500 / 502 / 503 / 504 / rate limit),
 `7` confirmation required (nothing was sent; re-run with `--yes` once the user agrees),
 `8` configuration (`configError`), `9` credential store (`credentialStoreError`: keyring or
 stored credentials), `10` network (`networkError`: no response; a non-idempotent call may

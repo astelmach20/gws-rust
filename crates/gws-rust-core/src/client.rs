@@ -342,30 +342,21 @@ enum Verdict {
     },
 }
 
-// Google signals per-user and per-project rate limits with HTTP 403 and one
-// of these reasons in `error.errors[].reason` (or `error.details[].reason`).
-use crate::error::RATE_LIMIT_REASONS;
+// Google signals per-user and per-project rate limits with HTTP 403 and a
+// rate-limit reason in `error.errors[].reason` (or `error.details[].reason`).
 
 /// Returns true when a Google error body names a retryable rate-limit reason.
 pub fn is_rate_limit_body(body: &[u8]) -> bool {
     let Ok(json) = serde_json::from_slice::<serde_json::Value>(body) else {
         return false;
     };
-    let err = &json["error"];
-    let reasons = err["errors"]
-        .as_array()
-        .into_iter()
-        .chain(err["details"].as_array())
-        .flatten()
-        .filter_map(|e| e["reason"].as_str());
-    reasons
-        .chain(err["reason"].as_str())
-        .any(|r| RATE_LIMIT_REASONS.contains(&r))
+    crate::error::rate_limit_reason(&json["error"]).is_some()
 }
 
-/// HTTP statuses retried for idempotent requests.
+/// HTTP statuses retried for idempotent requests (the same set that exits
+/// with code 6; see [`crate::error::is_retryable_status_code`]).
 pub fn is_retryable_status(status: StatusCode) -> bool {
-    matches!(status.as_u16(), 408 | 429 | 500 | 502 | 503 | 504)
+    crate::error::is_retryable_status_code(status.as_u16())
 }
 
 /// Parse a `Retry-After` header: delta-seconds or an HTTP-date. An invalid

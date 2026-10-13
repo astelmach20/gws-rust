@@ -24,6 +24,17 @@ pub(crate) const RATE_LIMIT_REASONS: &[&str] = &[
     "RATE_LIMIT_EXCEEDED",
 ];
 
+/// HTTP statuses after which the same request may succeed later: 408, 429,
+/// 500, 502, 503 and 504.
+///
+/// This is the single source of truth for both the HTTP client's retry policy
+/// ([`crate::client::is_retryable_status`]) and exit code 6
+/// ([`GwsError::is_retryable`]). Other 5xx statuses (501 Not Implemented, 505
+/// HTTP Version Not Supported, ...) are permanent and are not retried.
+pub fn is_retryable_status_code(code: u16) -> bool {
+    matches!(code, 408 | 429 | 500 | 502 | 503 | 504)
+}
+
 /// Boxed error type carried by [`GwsError::Other`].
 pub type BoxError = Box<dyn std::error::Error + Send + Sync + 'static>;
 
@@ -121,8 +132,8 @@ impl GwsError {
     pub const EXIT_CODE_DISCOVERY: i32 = 4;
     /// Exit code for [`GwsError::Other`] variants.
     pub const EXIT_CODE_OTHER: i32 = 5;
-    /// Exit code for retryable [`GwsError::Api`] errors (HTTP 429, 5xx, or
-    /// 403 rate-limit reasons). See [`GwsError::is_retryable`].
+    /// Exit code for retryable [`GwsError::Api`] errors (HTTP 408, 429, 500,
+    /// 502, 503, 504, or a rate-limit reason). See [`GwsError::is_retryable`].
     pub const EXIT_CODE_API_RETRYABLE: i32 = 6;
     /// Exit code for [`GwsError::ConfirmationRequired`].
     pub const EXIT_CODE_CONFIRMATION_REQUIRED: i32 = 7;
@@ -142,12 +153,14 @@ impl GwsError {
 
     /// Whether retrying the same request later may succeed.
     ///
-    /// True for API errors with HTTP 429, any 5xx, or a rate-limit reason
-    /// (`rateLimitExceeded`, `userRateLimitExceeded`, `RATE_LIMIT_EXCEEDED`).
+    /// True for API errors with a status the HTTP client retries
+    /// ([`is_retryable_status_code`]: 408, 429, 500, 502, 503, 504) or a
+    /// rate-limit reason (`rateLimitExceeded`, `userRateLimitExceeded`,
+    /// `RATE_LIMIT_EXCEEDED`).
     pub fn is_retryable(&self) -> bool {
         match self {
             GwsError::Api { code, reason, .. } => {
-                *code == 429 || *code >= 500 || RATE_LIMIT_REASONS.contains(&reason.as_str())
+                is_retryable_status_code(*code) || RATE_LIMIT_REASONS.contains(&reason.as_str())
             }
             _ => false,
         }
@@ -262,6 +275,25 @@ impl From<anyhow::Error> for GwsError {
         // `{:#}` renders the full anyhow context chain in one line.
         GwsError::Other(format!("{err:#}").into())
     }
+}
+
+/// The first rate-limit reason (`rateLimitExceeded`, `userRateLimitExceeded`,
+/// `RATE_LIMIT_EXCEEDED`) named anywhere in a Google error object (the `error`
+/// field of an error body): in any `errors[].reason`, any `details[].reason`
+/// or the top-level `reason`.
+///
+/// The HTTP client retries a 403 for which this is `Some`, and the error
+/// built from the final response reports this reason, so its exit code (6)
+/// agrees with the retry.
+pub fn rate_limit_reason(error: &serde_json::Value) -> Option<&str> {
+    error["errors"]
+        .as_array()
+        .into_iter()
+        .chain(error["details"].as_array())
+        .flatten()
+        .filter_map(|e| e["reason"].as_str())
+        .chain(error["reason"].as_str())
+        .find(|r| RATE_LIMIT_REASONS.contains(r))
 }
 
 #[cfg(test)]
@@ -491,6 +523,30 @@ mod tests {
             assert_eq!(err.exit_code(), GwsError::EXIT_CODE_API);
         }
         assert!(!GwsError::Validation("x".into()).is_retryable());
+    }
+
+    /// Exit code 6 promises "the same request may succeed later", so it must
+    /// cover exactly the statuses the HTTP client itself retries: a 408 is
+    /// retried (exit 6), a 501 Not Implemented or 505 is permanent (exit 1).
+    #[test]
+    fn retryable_exit_code_matches_the_client_retry_policy() {
+        for code in 100..600u16 {
+            let status = reqwest::StatusCode::from_u16(code).unwrap();
+            let err = api(code, "someReason");
+            assert_eq!(
+                err.is_retryable(),
+                crate::client::is_retryable_status(status),
+                "HTTP {code}: exit classification and retry policy disagree"
+            );
+        }
+        assert_eq!(
+            api(408, "requestTimeout").exit_code(),
+            GwsError::EXIT_CODE_API_RETRYABLE
+        );
+        assert_eq!(
+            api(501, "notImplemented").exit_code(),
+            GwsError::EXIT_CODE_API
+        );
     }
 
     #[derive(Debug, thiserror::Error)]

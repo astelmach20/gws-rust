@@ -267,7 +267,7 @@ gwsr auth export --unmasked --output ci-credentials.json
 
 `gwsr` is machine-readable by default, whether or not stdout is a terminal.
 
-- **stdout carries only results.** JSON by default: pretty on a terminal, compact when piped. Paginated output and streams (`--page-all`, `--page-items`, `gmail +watch`, `events +subscribe`, `gwsr batch`) are NDJSON, one object per line. Empty and `204` responses print `{"status":"success","httpStatus":204}`. Text bodies are wrapped in a JSON object.
+- **stdout carries only results.** JSON by default: pretty on a terminal, compact when piped. Paginated output and streams (`--page-all`, `--page-items`, `gmail +watch`, `events +subscribe`, `gwsr batch`) are NDJSON, one object per line. Empty and `204` responses print `{"status":"success","httpStatus":204}`; with `--page-all`/`--page-items`, an empty later page just ends the stream (with a warning on stderr). Text bodies are wrapped in a JSON object.
 - **stderr carries everything else:** logs, warnings, progress and prompts.
 - **Human formats are opt-in:** `--format table|yaml|csv` (or `GWSR_FORMAT`, or `format` in `config.toml`).
 - The only non-JSON stdout is `--help`, `gwsr completions`, `--version`, and raw payloads you ask for explicitly (`-o -`, or `--output -` on helpers).
@@ -303,7 +303,7 @@ The fields are `code`, `message`, `reason` and `retryable`, plus `hint` when the
 | `3` | Validation error: bad arguments, flags, config or input |
 | `4` | Discovery error: could not fetch or parse the API schema |
 | `5` | Internal error: I/O, serialization, or other unexpected failure |
-| `6` | Retryable API error: 429, 5xx, or 403 `rateLimitExceeded`/`userRateLimitExceeded`; retry with backoff |
+| `6` | Retryable API error: 408, 429, 500, 502, 503, 504, or 403 `rateLimitExceeded`/`userRateLimitExceeded` (the statuses `gwsr` itself retries); retry with backoff. Other 5xx statuses, such as 501, are permanent and exit `1` |
 | `7` | Confirmation required: a gated action ran without `--yes` and without a terminal, or the prompt was declined. Nothing was sent |
 | `8` | Configuration error (`configError`): an invalid environment variable, `config.toml`, profile name or OAuth client file |
 | `9` | Credential store error (`credentialStoreError`): the OS keyring, key file or stored credentials can't be read, written or decrypted |
