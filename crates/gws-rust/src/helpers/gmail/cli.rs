@@ -772,8 +772,12 @@ fn watch_cmd() -> Command {
         .arg(
             Arg::new("subscription")
                 .long("subscription")
-                .help("Existing Pub/Sub subscription name (skip setup)")
-                .value_name("NAME"),
+                .help(
+                    "Existing Pub/Sub subscription name (skip setup; conflicts with the setup \
+                     flags --project, --topic, --label-ids and --cleanup)",
+                )
+                .value_name("NAME")
+                .conflicts_with_all(["project", "topic", "label-ids", "cleanup"]),
         )
         .arg(
             Arg::new("topic")

@@ -115,8 +115,12 @@ fn subscribe_cmd() -> Command {
         .arg(
             Arg::new("subscription")
                 .long("subscription")
-                .help("Existing Pub/Sub subscription name (skip setup)")
-                .value_name("NAME"),
+                .help(
+                    "Existing Pub/Sub subscription name (skip setup; conflicts with the setup \
+                     flags --target, --event-types, --project and --cleanup)",
+                )
+                .value_name("NAME")
+                .conflicts_with_all(["target", "event-types", "project", "cleanup"]),
         )
         .arg(
             Arg::new("max-messages")
@@ -171,7 +175,7 @@ fn subscribe_cmd() -> Command {
 EXAMPLES:
   gwsr events +subscribe --target '//chat.googleapis.com/spaces/SPACE' --event-types 'google.workspace.chat.message.v1.created' --project my-project
   gwsr events +subscribe --subscription projects/p/subscriptions/my-sub --once
-  gwsr events +subscribe --subscription projects/p/subscriptions/my-sub --cleanup --output-dir ./events
+  gwsr events +subscribe --target '//chat.googleapis.com/spaces/SPACE' --event-types 'google.workspace.chat.message.v1.created' --project my-project --cleanup --output-dir ./events
 
 TIPS:
   stdout carries one JSON event per line. Transient errors are retried with
