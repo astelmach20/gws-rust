@@ -68,19 +68,22 @@ pub(super) async fn handle_read(
         let text = serde_json::to_string_pretty(&checked)
             .map_err(|e| GwsError::other(format!("Failed to serialize message: {e}")))?;
         writeln!(stdout, "{text}")
-            .map_err(|e| GwsError::other(format!("Failed to write output: {e}")))?;
+            .and_then(|()| stdout.flush())
+            .map_err(crate::output::stdout_error)?;
         return Ok(());
     }
-    render(&original, opts, &mut stdout)
+    render(&original, opts, &mut stdout)?;
+    stdout.flush().map_err(crate::output::stdout_error)
 }
 
-/// Render a message as text or JSON to `out`.
+/// Render a message as text or JSON to `out` (stdout outside tests: a
+/// write error is a stdout error, so a closed pipe ends quietly).
 fn render(
     original: &OriginalMessage,
     opts: ReadOptions,
     out: &mut impl Write,
 ) -> Result<(), GwsError> {
-    let io_err = |e: io::Error| GwsError::other(format!("Failed to write output: {e}"));
+    let io_err = crate::output::stdout_error;
 
     if opts.json {
         let text = serde_json::to_string_pretty(original)

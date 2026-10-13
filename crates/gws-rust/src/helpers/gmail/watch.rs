@@ -213,7 +213,7 @@ impl GmailWatchStep<'_> {
                 let mut out = std::io::stdout().lock();
                 writeln!(out, "{line}")
                     .and_then(|()| out.flush())
-                    .map_err(|e| fatal(format!("Failed to write to stdout: {e}")))?;
+                    .map_err(|e| StepError::Fatal(crate::output::stdout_error(e)))?;
             }
         }
         Ok(())
