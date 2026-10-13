@@ -74,8 +74,9 @@ fn read_profile_plaintext(env: &AuthEnv) -> Result<Zeroizing<String>, GwsError> 
     let path = &env.paths.credentials;
     if !path.exists() {
         return Err(GwsError::Auth(format!(
-            "profile '{}' has no stored credentials to export (run `gwsr auth login`)",
-            env.profile.name
+            "profile '{}' has no stored credentials to export (run `{}`)",
+            env.profile.name,
+            crate::auth::login_command(env)
         )));
     }
     let data = std::fs::read(path)

@@ -313,6 +313,9 @@ TIPS:
                         flag(m, "overwrite")?,
                     )
                     .await?;
+                    if streamed_to_stdout(&api, m)? {
+                        return Ok(true);
+                    }
                     (api, v)
                 }
                 "+export" => {
@@ -326,6 +329,9 @@ TIPS:
                         flag(m, "overwrite")?,
                     )
                     .await?;
+                    if streamed_to_stdout(&api, m)? {
+                        return Ok(true);
+                    }
                     (api, v)
                 }
                 "+move" => {
@@ -492,15 +498,30 @@ fn check_output(m: &ArgMatches) -> Result<(), GwsError> {
     Ok(())
 }
 
+/// `--output`, or a local file named after the Drive file. `ext` (for an
+/// export) is appended after the name is made safe, so shortening a long
+/// name never cuts the extension off.
 fn resolve_target(
     output: Option<&str>,
     default_name: &str,
+    ext: Option<&str>,
     overwrite: bool,
 ) -> Result<OutputTarget, GwsError> {
-    match output {
-        Some(o) => OutputTarget::parse(o, overwrite),
-        None => OutputTarget::parse(&safe_filename(default_name, "download"), overwrite),
+    if let Some(o) = output {
+        return OutputTarget::parse(o, overwrite);
     }
+    let safe = safe_filename(default_name, "download");
+    match ext {
+        Some(ext) => OutputTarget::parse(&with_extension(&safe, ext), overwrite),
+        None => OutputTarget::parse(&safe, overwrite),
+    }
+}
+
+/// Whether `--output -` sent the payload to stdout, which must then carry
+/// nothing else: no JSON summary after the raw bytes. A dry run still
+/// prints its plan.
+fn streamed_to_stdout(api: &Api, m: &ArgMatches) -> Result<bool, GwsError> {
+    Ok(!api.is_dry_run() && optional(m, "output")? == Some("-"))
 }
 
 fn download_result(file_id: &str, target: &OutputTarget, bytes: Option<u64>) -> Value {
@@ -516,7 +537,7 @@ async fn download(
     let (name, target) = if api.is_dry_run() {
         (
             "<file name>".to_string(),
-            resolve_target(output, "download", overwrite)?,
+            resolve_target(output, "download", None, overwrite)?,
         )
     } else {
         let meta = get_metadata(api, file_id).await?;
@@ -525,7 +546,7 @@ async fn download(
             return Err(native_download_error(&meta, file_id, mime)?);
         }
         let name = str_field(&meta, "name")?.to_string();
-        let target = resolve_target(output, &name, overwrite)?;
+        let target = resolve_target(output, &name, None, overwrite)?;
         (name, target)
     };
     let bytes = api
@@ -748,7 +769,7 @@ async fn export(
         check_export(format, str_field(&meta, "mimeType")?)?;
         str_field(&meta, "name")?.to_string()
     };
-    let target = resolve_target(output, &with_extension(&name, format.ext), overwrite)?;
+    let target = resolve_target(output, &name, Some(format.ext), overwrite)?;
     let bytes = api
         .download(
             ApiRequest::get(api.url(&format!("files/{}/export", encode_path_segment(file_id))))
@@ -1175,9 +1196,10 @@ async fn sync(api: &Api, folder_id: &str, dir: &Path) -> Result<Value, GwsError>
                 ),
                 // The API refused this one file (restricted download, export
                 // size limit...): record it and mirror the rest. Anything
-                // else (auth, network, local I/O) affects every file, so it
-                // aborts the sync.
-                Err(err @ GwsError::Api { .. }) => failed.push(json!({
+                // else (auth, network, local I/O, and retryable API errors
+                // such as rate limits or 503s) affects every file, so it
+                // aborts the sync with its own exit code.
+                Err(err @ GwsError::Api { .. }) if !err.is_retryable() => failed.push(json!({
                     "id": child_id,
                     "path": path.display().to_string(),
                     "error": err.to_json()["error"],
@@ -1382,6 +1404,23 @@ mod tests {
         assert!(check_export(md, "application/pdf").is_err());
         assert_eq!(with_extension("Report", "pdf"), "Report.pdf");
         assert_eq!(with_extension("Report.PDF", "pdf"), "Report.PDF");
+    }
+
+    #[test]
+    fn export_default_name_keeps_the_extension_for_long_titles() {
+        // Shortening a long Drive title must not cut off the export format's
+        // extension (`report.pdf` saved as `report` with no extension).
+        let long = "Quarterly report ".repeat(20);
+        let target = resolve_target(None, &long, Some("pdf"), false).unwrap();
+        let OutputTarget::File { path, .. } = target else {
+            panic!("expected a file target");
+        };
+        let name = path.file_name().unwrap().to_str().unwrap();
+        assert!(name.ends_with(".pdf"), "{name}");
+        assert!(
+            name.len() <= http::SAFE_FILENAME_MAX_BYTES + ".pdf".len(),
+            "{name}"
+        );
     }
 
     #[tokio::test]
@@ -1727,6 +1766,53 @@ mod tests {
 
         // A clean run is not a partial failure.
         assert!(sync_failure(&json!({"failed": []})).is_none());
+    }
+
+    /// A rate limit or server outage is not about one file: it would hit
+    /// every later file too, and it is retryable (exit 6). It must abort the
+    /// sync with that error, not be listed under "failed" and turned into a
+    /// non-retryable `syncPartialFailure` (exit 1).
+    #[tokio::test]
+    async fn sync_aborts_on_retryable_api_errors() {
+        let bodies = [
+            (
+                403,
+                json!({"error": {"code": 403, "message": "User rate limit exceeded.",
+                    "errors": [{"domain": "usageLimits", "reason": "userRateLimitExceeded"}]}}),
+            ),
+            (
+                503,
+                json!({"error": {"code": 503, "message": "Backend Error",
+                    "errors": [{"reason": "backendError"}]}}),
+            ),
+        ];
+        for (status, body) in bodies {
+            let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .and(path("/drive/v3/files"))
+                .and(query_param("q", "'ROOT' in parents and trashed = false"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({"files": [
+                    {"id": "A", "name": "a.txt", "mimeType": "text/plain"}
+                ]})))
+                .mount(&server)
+                .await;
+            Mock::given(method("GET"))
+                .and(path("/drive/v3/files/A"))
+                .and(query_param("alt", "media"))
+                .respond_with(ResponseTemplate::new(status).set_body_json(body))
+                .mount(&server)
+                .await;
+            let api = api(&server.uri(), "drive/v3/");
+            let dir = tempfile::tempdir().unwrap();
+            let err = sync(&api, "ROOT", dir.path())
+                .await
+                .expect_err(&format!("HTTP {status} must abort the sync"));
+            assert_eq!(
+                err.exit_code(),
+                GwsError::EXIT_CODE_API_RETRYABLE,
+                "HTTP {status}: {err:?}"
+            );
+        }
     }
 
     /// Mounts a `files.list` response for `parent` and an `alt=media`

@@ -169,7 +169,7 @@ TIPS:
 
 /// Convert `--due` into the RFC 3339 midnight-UTC form the API expects.
 fn parse_due(s: &str) -> Result<String, GwsError> {
-    use chrono::{NaiveDate, NaiveDateTime, Timelike};
+    use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
     // Each accepted form is tried in turn; input matching none is reported.
     let date = if let Ok(d) = NaiveDate::parse_from_str(s, "%Y-%m-%d") {
         d
@@ -177,12 +177,13 @@ fn parse_due(s: &str) -> Result<String, GwsError> {
         let (date, has_time) = if let Ok(t) = chrono::DateTime::parse_from_rfc3339(s) {
             (
                 t.date_naive(),
-                t.time().num_seconds_from_midnight() != 0 || t.offset().local_minus_utc() != 0,
+                // Compare the full time, so sub-second parts count too.
+                t.time() != NaiveTime::MIN || t.offset().local_minus_utc() != 0,
             )
         } else if let Ok(t) = NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M")
             .or_else(|_| NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S"))
         {
-            (t.date(), t.time().num_seconds_from_midnight() != 0)
+            (t.date(), t.time() != NaiveTime::MIN)
         } else {
             return Err(GwsError::Validation(format!(
                 "--due '{s}' is not a date; use YYYY-MM-DD"
@@ -263,6 +264,18 @@ mod tests {
         assert!(parse_due("2026-04-15T00:00:00-07:00").is_err());
         assert!(parse_due("2026-04-15T09:30").is_err());
         assert!(parse_due("next friday").is_err());
+    }
+
+    #[test]
+    fn due_rejects_fractional_seconds_past_midnight() {
+        // A sub-second time of day is still a time the API would drop.
+        let err = parse_due("2026-04-15T00:00:00.5Z").unwrap_err().to_string();
+        assert!(err.contains("only stores the due date"), "{err}");
+        assert!(parse_due("2026-04-15T00:00:00.000001Z").is_err());
+        assert_eq!(
+            parse_due("2026-04-15T00:00:00.000Z").unwrap(),
+            "2026-04-15T00:00:00.000Z"
+        );
     }
 
     #[tokio::test]

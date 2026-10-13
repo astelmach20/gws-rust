@@ -177,6 +177,28 @@ pub enum Resolved {
 
 /// Snapshot of everything that influences credential resolution. Built from
 /// the process environment in production and by hand in tests.
+/// Application Default Credentials locations from the process:
+/// `GOOGLE_APPLICATION_CREDENTIALS` and gcloud's well-known file.
+#[cfg(not(test))]
+fn process_adc_paths() -> (Option<PathBuf>, Option<PathBuf>) {
+    let from_env = std::env::var_os("GOOGLE_APPLICATION_CREDENTIALS")
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from);
+    // gcloud always uses ~/.config/gcloud, even on macOS and Windows.
+    let well_known = dirs::home_dir().map(|h| {
+        h.join(".config")
+            .join("gcloud")
+            .join("application_default_credentials.json")
+    });
+    (from_env, well_known)
+}
+
+/// Unit tests never read the developer's gcloud credentials.
+#[cfg(test)]
+fn process_adc_paths() -> (Option<PathBuf>, Option<PathBuf>) {
+    (None, None)
+}
+
 #[derive(Clone)]
 pub struct AuthEnv {
     pub base: PathBuf,
@@ -223,15 +245,7 @@ impl AuthEnv {
         env.token_file = vars.token_file.clone();
         env.credentials_file = vars.credentials_file.clone();
         env.keyring_backend = vars.keyring_backend.unwrap_or_default();
-        env.adc_env = std::env::var_os("GOOGLE_APPLICATION_CREDENTIALS")
-            .filter(|v| !v.is_empty())
-            .map(PathBuf::from);
-        // gcloud always uses ~/.config/gcloud, even on macOS and Windows.
-        env.adc_well_known = dirs::home_dir().map(|h| {
-            h.join(".config")
-                .join("gcloud")
-                .join("application_default_credentials.json")
-        });
+        (env.adc_env, env.adc_well_known) = process_adc_paths();
         env.impersonate = super::profiles::impersonation_subject()?;
         Ok(env)
     }

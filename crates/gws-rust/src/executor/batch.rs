@@ -260,8 +260,13 @@ pub(crate) fn parse_calls<'a>(
             None | Some(Value::Null) => (calls.len() + 1).to_string(),
             Some(_) => return Err(at("\"id\" must be a string or number".to_string())),
         };
-        if id.contains(['\r', '\n', '<', '>']) {
-            return Err(at("\"id\" must not contain CR, LF, '<' or '>'".to_string()));
+        // The id goes into a MIME Content-ID header and the confirmation
+        // prompt: no control characters (CR/LF included), invisible or bidi
+        // characters, or the header's own '<' / '>' delimiters.
+        gws_rust_core::validate::reject_dangerous_chars(&id, "\"id\"")
+            .map_err(|e| at(e.to_string()))?;
+        if id.contains(['<', '>']) {
+            return Err(at("\"id\" must not contain '<' or '>'".to_string()));
         }
         // Results are matched to calls by id; a repeated one (explicit, or a
         // generated line number that equals an explicit id) is ambiguous.
@@ -488,11 +493,20 @@ pub(crate) async fn run_batch(
         .filter(|c| c.impact == Some(crate::confirm::Impact::Outbound))
         .map(|c| c.id.as_str())
         .collect();
+    // The Discovery document names the batch endpoint (`batch/drive/v3` on
+    // www.googleapis.com, plain `batch` on the newer per-API hosts); an API
+    // without a `batchPath` does not accept batch requests. The path was
+    // checked to be relative when the document was loaded.
+    let batch_path = doc.batch_path.as_deref().ok_or_else(|| {
+        GwsError::Validation(format!(
+            "the {} {} API does not support batch requests (its Discovery document has no batchPath)",
+            doc.name, doc.version
+        ))
+    })?;
     let batch_url = format!(
-        "{}batch/{}/{}",
+        "{}{}",
         doc.api_root(options.endpoints.override_base())?,
-        doc.name,
-        doc.version
+        batch_path.trim_start_matches('/')
     );
 
     // Every line honours --format, --jq and --columns like a paginated
@@ -771,6 +785,31 @@ mod tests {
             }
         }
         assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+    }
+
+    /// An id goes into a MIME `Content-ID` header and the terminal
+    /// confirmation prompt: control and invisible characters are refused.
+    #[test]
+    #[serial_test::serial]
+    fn rejects_ids_with_control_characters() {
+        let doc = drive_doc("https://www.googleapis.com/");
+        let mut accepted = Vec::new();
+        for id in [
+            "a\u{1b}[2J",
+            "a\u{0}",
+            "a\tb",
+            "a\u{7f}",
+            "a\u{202e}b",
+            "a\u{200b}",
+        ] {
+            let line = json!({"id": id, "method": "files.get", "params": {"fileId": "1"}});
+            if parse_calls(&doc, &line.to_string(), &opts()).is_ok() {
+                accepted.push(id.escape_debug().to_string());
+            }
+        }
+        assert!(accepted.is_empty(), "accepted ids: {accepted:?}");
+        let ok = json!({"id": "row-1_a.b", "method": "files.get", "params": {"fileId": "1"}});
+        assert!(parse_calls(&doc, &ok.to_string(), &opts()).is_ok());
     }
 
     #[test]
