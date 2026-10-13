@@ -175,7 +175,10 @@ pub struct Invocation<'a> {
     pub method: &'a RestMethod,
     pub params: Map<String, Value>,
     pub body: Option<Value>,
-    pub credentials: Credentials,
+    /// `None`: the method's own scopes, resolved only once the call has been
+    /// validated and confirmed, so bad input or a refused confirmation never
+    /// loads credentials or refreshes a token (and a dry run never does).
+    pub credentials: Option<Credentials>,
     pub upload: Option<UploadSource<'a>>,
     /// `-o/--output`: where to put the response payload.
     pub output: Option<OutputTarget>,
@@ -266,7 +269,7 @@ fn apply_param_defaults(
     if paginating
         && let Some(Value::String(mask)) = params.get_mut("fields")
         && !mask.is_empty()
-        && !mask.contains("nextPageToken")
+        && !selects_top_level(mask, "nextPageToken")
     {
         *mask = format!("nextPageToken,{mask}");
     }
@@ -277,6 +280,28 @@ fn apply_param_defaults(
         params.insert("supportsAllDrives".to_string(), Value::Bool(true));
     }
     Ok(())
+}
+
+/// Whether a partial-response `mask` selects `field` at the top level. A name
+/// inside a sub-selection (`files(id,nextPageToken)`) or a path
+/// (`files/nextPageToken`) selects a nested field, not this one.
+fn selects_top_level(mask: &str, field: &str) -> bool {
+    let mut depth = 0usize;
+    let mut start = 0;
+    for (i, c) in mask.char_indices() {
+        match c {
+            '(' => depth += 1,
+            ')' => depth = depth.saturating_sub(1),
+            ',' if depth == 0 => {
+                if mask[start..i].trim() == field {
+                    return true;
+                }
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    mask[start..].trim() == field
 }
 
 /// POST/PATCH are retried only when they carry a `requestId` that the API
@@ -467,6 +492,10 @@ pub(crate) async fn execute_to(
         None => {}
     }
 
+    let credentials = match credentials {
+        Some(c) => c,
+        None => options::resolve_credentials(method).await?,
+    };
     let quota_project = if options.quota_project {
         crate::auth::get_quota_project()?
     } else {
@@ -633,8 +662,12 @@ pub(crate) async fn execute_to(
         };
         pages += 1;
 
-        // Long-running operations.
-        let auto_wait = output.is_some() && operation::is_operation(&value);
+        // Long-running operations. `-o` waits on its own only for a method
+        // declared to return one: other resources can look like an operation
+        // (a People ContactGroup has a string `name` and a `metadata` object).
+        let auto_wait = output.is_some()
+            && crate::commands::returns_operation(method)
+            && operation::is_operation(&value);
         if operation::is_operation(&value) && (options.wait.is_some() || auto_wait) {
             let cfg = options.wait.clone().unwrap_or_default();
             let done = operation::wait(&transport, doc, value, &cfg).await?;

@@ -137,15 +137,10 @@ pub async fn handle_batch_command(args: &BatchArgs, ctx: &BatchContext) -> Resul
     options.allow_unknown_fields = args.allow_unknown_fields;
 
     let calls = parse_calls(&doc, &text, &options)?;
-    let credentials = if options.dry_run {
-        Credentials::None
-    } else {
-        batch_credentials(&calls).await?
-    };
     run_batch(
         &doc,
         &calls,
-        credentials,
+        None,
         &options,
         &ctx.sanitize,
         &Emitter::stdout(),
@@ -260,8 +255,13 @@ pub(crate) fn parse_calls<'a>(
             None | Some(Value::Null) => (calls.len() + 1).to_string(),
             Some(_) => return Err(at("\"id\" must be a string or number".to_string())),
         };
-        if id.contains(['\r', '\n', '<', '>']) {
-            return Err(at("\"id\" must not contain CR, LF, '<' or '>'".to_string()));
+        // The id goes into a MIME Content-ID header and the confirmation
+        // prompt: no control characters (CR/LF included), invisible or bidi
+        // characters, or the header's own '<' / '>' delimiters.
+        gws_rust_core::validate::reject_dangerous_chars(&id, "\"id\"")
+            .map_err(|e| at(e.to_string()))?;
+        if id.contains(['<', '>']) {
+            return Err(at("\"id\" must not contain '<' or '>'".to_string()));
         }
         // Results are matched to calls by id; a repeated one (explicit, or a
         // generated line number that equals an explicit id) is ambiguous.
@@ -470,10 +470,12 @@ fn in_call_order(
         .collect()
 }
 
+/// Run parsed `calls`. With `credentials` `None`, the calls' scopes are
+/// resolved only after the confirmation gate (and never for a dry run).
 pub(crate) async fn run_batch(
     doc: &RestDescription,
     calls: &[BatchCall<'_>],
-    credentials: Credentials,
+    credentials: Option<Credentials>,
     options: &ExecOptions,
     sanitize: &SanitizeConfig,
     emitter: &Emitter,
@@ -540,6 +542,10 @@ pub(crate) async fn run_batch(
         )?;
     }
 
+    let credentials = match credentials {
+        Some(c) => c,
+        None => batch_credentials(calls).await?,
+    };
     let transport = Transport::new(
         &credentials,
         options.retry.clone(),
@@ -780,6 +786,31 @@ mod tests {
             }
         }
         assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+    }
+
+    /// An id goes into a MIME `Content-ID` header and the terminal
+    /// confirmation prompt: control and invisible characters are refused.
+    #[test]
+    #[serial_test::serial]
+    fn rejects_ids_with_control_characters() {
+        let doc = drive_doc("https://www.googleapis.com/");
+        let mut accepted = Vec::new();
+        for id in [
+            "a\u{1b}[2J",
+            "a\u{0}",
+            "a\tb",
+            "a\u{7f}",
+            "a\u{202e}b",
+            "a\u{200b}",
+        ] {
+            let line = json!({"id": id, "method": "files.get", "params": {"fileId": "1"}});
+            if parse_calls(&doc, &line.to_string(), &opts()).is_ok() {
+                accepted.push(id.escape_debug().to_string());
+            }
+        }
+        assert!(accepted.is_empty(), "accepted ids: {accepted:?}");
+        let ok = json!({"id": "row-1_a.b", "method": "files.get", "params": {"fileId": "1"}});
+        assert!(parse_calls(&doc, &ok.to_string(), &opts()).is_ok());
     }
 
     #[test]

@@ -339,7 +339,7 @@ impl<'a> Call<'a> {
                 method: rest_method(self.doc, self.method),
                 params: params(self.params),
                 body: self.body,
-                credentials: self.credentials,
+                credentials: Some(self.credentials),
                 upload: self.upload,
                 output: self.output,
                 pagination: self.pagination,
@@ -749,6 +749,46 @@ async fn fields_flag_keeps_next_page_token() {
     call.options.fields = Some("files(id)".into());
     call.pagination.page_all = true;
     call.run(&Emitter::capturing()).await.unwrap();
+}
+
+/// A `nextPageToken` nested inside a sub-selection (`files(id,nextPageToken)`)
+/// does not select the top-level token, so `--page-all` still adds it.
+#[tokio::test]
+async fn nested_next_page_token_in_fields_still_adds_top_level_token() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/drive/v3/files"))
+        .and(query_param(
+            "fields",
+            "nextPageToken,files(id,nextPageToken)",
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"files": []})))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let d = doc(&server.uri());
+    let mut call = Call::new(&d, "list", &server);
+    call.options.fields = Some("files(id,nextPageToken)".into());
+    call.pagination.page_all = true;
+    call.run(&Emitter::capturing()).await.unwrap();
+}
+
+#[test]
+fn selects_top_level_ignores_nested_names() {
+    for mask in [
+        "nextPageToken",
+        "files(id),nextPageToken",
+        " nextPageToken ,a",
+    ] {
+        assert!(super::selects_top_level(mask, "nextPageToken"), "{mask}");
+    }
+    for mask in [
+        "files(id,nextPageToken)",
+        "files/nextPageToken",
+        "nextPageTokens",
+    ] {
+        assert!(!super::selects_top_level(mask, "nextPageToken"), "{mask}");
+    }
 }
 
 #[tokio::test]
@@ -1913,6 +1953,36 @@ async fn download_operation_is_waited_on_and_followed() {
 }
 
 #[tokio::test]
+async fn output_follows_an_operation_without_wait_flag() {
+    // `-o` alone still resolves an operation-returning method's result.
+    let server = MockServer::start().await;
+    let download_uri = format!("{}/download/f1", server.uri());
+    Mock::given(method("POST"))
+        .and(path("/drive/v3/files/f1/download"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "name": "op1", "done": true,
+            "response": {"downloadUri": download_uri}
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/download/f1"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(b"exported".to_vec(), "text/plain"))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("f1.txt");
+    let d = doc(&server.uri());
+    let mut call = Call::new(&d, "download", &server);
+    call.params = json!({"fileId": "f1"});
+    call.output = Some(OutputTarget::File(out.clone()));
+    call.run(&Emitter::capturing()).await.unwrap();
+    assert_eq!(std::fs::read(&out).unwrap(), b"exported");
+}
+
+#[tokio::test]
 async fn failed_operation_is_an_error() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
@@ -1969,7 +2039,7 @@ async fn batch_round_trip_reports_partial_failure() {
     let err = batch::run_batch(
         &d,
         &calls,
-        Credentials::Static("tok".into()),
+        Some(Credentials::Static("tok".into())),
         &opts,
         &SanitizeConfig::default(),
         &em,
@@ -2013,7 +2083,7 @@ async fn batch_posts_to_the_discovery_batch_path() {
     batch::run_batch(
         &d,
         &calls,
-        Credentials::Static("tok".into()),
+        Some(Credentials::Static("tok".into())),
         &opts,
         &SanitizeConfig::default(),
         &em,
@@ -2027,7 +2097,7 @@ async fn batch_posts_to_the_discovery_batch_path() {
     let err = batch::run_batch(
         &d,
         &calls,
-        Credentials::Static("tok".into()),
+        Some(Credentials::Static("tok".into())),
         &opts,
         &SanitizeConfig::default(),
         &Emitter::capturing(),
@@ -2069,7 +2139,7 @@ async fn batch_results_follow_input_order_when_parts_are_reordered() {
     batch::run_batch(
         &d,
         &calls,
-        Credentials::Static("tok".into()),
+        Some(Credentials::Static("tok".into())),
         &opts,
         &SanitizeConfig::default(),
         &em,

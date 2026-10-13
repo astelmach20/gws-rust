@@ -486,6 +486,60 @@ fn top_level_discovery_methods_are_commands() {
         .stdout(predicate::str::contains("Tokeninfo"));
 }
 
+/// API versions may contain dots (`<api>:v3.4`): `gwsr schema` must keep
+/// them in the service spec instead of splitting the version apart, so the
+/// path printed in method help is one that runs.
+#[test]
+fn schema_paths_accept_dotted_api_versions() {
+    let env = Env::new();
+    env.seed_doc(&json!({
+        "name": "dfareporting",
+        "version": "v3.4",
+        "rootUrl": "https://dfareporting.googleapis.com/",
+        "servicePath": "dfareporting/v3.4/",
+        "resources": {
+            "ads": {
+                "methods": {
+                    "list": {
+                        "id": "dfareporting.ads.list",
+                        "httpMethod": "GET",
+                        "path": "ads",
+                        "description": "Lists ads.",
+                        "parameters": {
+                            "maxResults": {"type": "integer", "location": "query"}
+                        },
+                        "response": {"$ref": "Ad"}
+                    }
+                }
+            }
+        },
+        "schemas": {
+            "Ad": {"id": "Ad", "type": "object", "properties": {"name": {"type": "string"}}}
+        }
+    }));
+
+    env.cmd()
+        .args(["dfareporting:v3.4", "ads", "list", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Full request/response schema: gwsr schema dfareporting:v3.4.ads.list",
+        ));
+
+    env.cmd()
+        .args(["schema", "dfareporting:v3.4.ads.list"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"httpMethod\":\"GET\""))
+        .stdout(predicate::str::contains("\"schemaRef\":\"Ad\""));
+
+    env.cmd()
+        .args(["schema", "dfareporting:v3.4.Ad"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"name\""));
+}
+
 // ── Errors ──────────────────────────────────────────────────────────────
 
 /// Parse stderr as exactly one JSON error object.
@@ -604,6 +658,107 @@ fn invalid_jq_fails_before_doing_anything() {
         .assert()
         .code(3)
         .stderr(predicate::str::contains("invalid --jq expression"));
+}
+
+/// A generated method checks its input, and asks for confirmation, before it
+/// loads credentials: broken credentials (here a `GWSR_CREDENTIALS_FILE` that
+/// does not exist) must not turn a bad call into a credential error (exit 8, or 2), and
+/// a refused destructive call must not fetch a token first.
+#[test]
+fn generated_methods_validate_and_confirm_before_loading_credentials() {
+    let env = Env::new();
+    env.seed_doc(&json!({
+        "name": "drive",
+        "version": "v3",
+        "rootUrl": "https://www.googleapis.com/",
+        "servicePath": "drive/v3/",
+        "resources": {"files": {"methods": {
+            "list": {
+                "id": "drive.files.list",
+                "httpMethod": "GET",
+                "path": "files",
+                "parameters": {"pageSize": {"type": "integer", "location": "query"}},
+                "scopes": ["https://www.googleapis.com/auth/drive.readonly"]
+            },
+            "delete": {
+                "id": "drive.files.delete",
+                "httpMethod": "DELETE",
+                "path": "files/{fileId}",
+                "parameters": {"fileId": {"type": "string", "location": "path", "required": true}},
+                "parameterOrder": ["fileId"],
+                "scopes": ["https://www.googleapis.com/auth/drive"]
+            }
+        }}}
+    }));
+    let missing = env.root.path().join("missing-credentials.json");
+    let cases: [(&[&str], i32, &str); 4] = [
+        (
+            &["drive", "files", "list", "--params", r#"{"bogus": 1}"#],
+            3,
+            "bogus",
+        ),
+        (
+            &[
+                "drive",
+                "files",
+                "list",
+                "--params",
+                r#"{"pageSize": "many"}"#,
+            ],
+            3,
+            "pageSize",
+        ),
+        (&["drive", "files", "delete", "--params", "{}"], 3, "fileId"),
+        (
+            &[
+                "drive",
+                "files",
+                "delete",
+                "--params",
+                r#"{"fileId": "F1"}"#,
+            ],
+            7,
+            "--yes",
+        ),
+    ];
+    for (args, code, expected) in cases {
+        let out = env
+            .cmd()
+            .env("GWSR_CREDENTIALS_FILE", &missing)
+            .args(args)
+            .output()
+            .unwrap();
+        let stderr = stderr_of(&out);
+        assert_eq!(out.status.code(), Some(code), "{args:?}: {stderr}");
+        assert!(stderr.contains(expected), "{args:?}: {stderr}");
+        assert!(out.stdout.is_empty(), "{args:?}: {out:?}");
+    }
+    // `gwsr batch` asks for confirmation of a destructive call first, too.
+    let calls = env.work_dir().join("calls.ndjson");
+    std::fs::write(
+        &calls,
+        r#"{"method": "files.delete", "params": {"fileId": "F1"}}"#,
+    )
+    .unwrap();
+    let out = env
+        .cmd()
+        .env("GWSR_CREDENTIALS_FILE", &missing)
+        .args(["batch", "drive", "--input"])
+        .arg(&calls)
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(7), "{}", stderr_of(&out));
+    assert!(stderr_of(&out).contains("--yes"), "{}", stderr_of(&out));
+
+    // A valid call still reaches the credentials and reports them.
+    let out = env
+        .cmd()
+        .env("GWSR_CREDENTIALS_FILE", &missing)
+        .args(["drive", "files", "list"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(8), "{}", stderr_of(&out));
+    assert!(stderr_of(&out).contains("GWSR_CREDENTIALS_FILE"));
 }
 
 // ── Output formats ──────────────────────────────────────────────────────
@@ -732,6 +887,49 @@ fn auth_configuration_errors_exit_with_the_config_code() {
         .stdout("")
         .stderr(predicate::str::contains("\"configError\""))
         .stderr(predicate::str::contains("GWSR_PROFILE"));
+}
+
+/// `--impersonate` takes the same values as `GWSR_IMPERSONATE`: a user email
+/// address. Anything else is rejected before it reaches a JWT `sub` claim, a
+/// cache key or the status report, wherever the flag is given.
+#[test]
+fn impersonate_flag_rejects_values_that_are_not_email_addresses() {
+    let env = Env::new();
+    // No Discovery download: the sandboxed test run has no network.
+    env.seed_drive("Lists files.");
+    for bad in [
+        "",
+        "not-an-email",
+        "alice@example.com\nbob@example.com",
+        "a b@example.com",
+    ] {
+        for args in [
+            vec!["--impersonate", bad, "auth", "status", "--offline"],
+            vec!["auth", "status", "--offline", "--impersonate", bad],
+            vec!["--impersonate", bad, "drive", "files", "list", "--dry-run"],
+        ] {
+            env.cmd()
+                .args(&args)
+                .assert()
+                .code(3)
+                .stdout("")
+                .stderr(predicate::str::contains("--impersonate"))
+                .stderr(predicate::str::contains("email address"));
+        }
+    }
+    env.cmd()
+        .args([
+            "--impersonate",
+            "alice@example.com",
+            "auth",
+            "status",
+            "--offline",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "\"impersonate\":\"alice@example.com\"",
+        ));
 }
 
 /// `auth status` must report the OAuth client `auth login` would use: the
@@ -2146,4 +2344,65 @@ fn restrict_paths_confines_dev_man_and_auth_export() {
         .unwrap();
     assert!(out.status.success(), "{out:?}");
     assert!(env.work_dir().join("man").join("gwsr.1").exists());
+}
+
+// ── -o/--output and long-running operations ─────────────────────────────
+
+/// `-o` waits for a long-running operation automatically, but only for a
+/// method that returns one. A People `ContactGroup` has a string `name` and a
+/// `metadata` object, like an Operation; saving it must not try to poll an
+/// `operations.get` the API does not have.
+#[tokio::test(flavor = "multi_thread")]
+async fn output_saves_a_resource_that_only_looks_like_an_operation() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let group = json!({
+        "resourceName": "contactGroups/g1",
+        "name": "Friends",
+        "metadata": {"updateTime": "2026-01-01T00:00:00Z"},
+        "groupType": "USER_CONTACT_GROUP"
+    });
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/contactGroups/g1"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(group.clone()))
+        .mount(&server)
+        .await;
+    let env = Env::new();
+    env.seed_doc(&json!({
+        "name": "people", "version": "v1",
+        "rootUrl": "https://people.googleapis.com/", "servicePath": "",
+        "schemas": {"ContactGroup": {"id": "ContactGroup", "type": "object"}},
+        "resources": {"contactGroups": {"methods": {"get": {
+            "id": "people.contactGroups.get", "httpMethod": "GET",
+            "path": "v1/{+resourceName}",
+            "parameters": {"resourceName": {
+                "type": "string", "location": "path", "required": true,
+                "pattern": "^contactGroups/[^/]+$"
+            }},
+            "parameterOrder": ["resourceName"],
+            "response": {"$ref": "ContactGroup"},
+            "scopes": ["https://www.googleapis.com/auth/contacts.readonly"]
+        }}}}
+    }));
+    let out = env
+        .cmd()
+        .env("GWSR_TOKEN", "test-token")
+        .env("GWSR_API_BASE_URL", server.uri())
+        .args([
+            "people",
+            "contactGroups",
+            "get",
+            "--params",
+            r#"{"resourceName": "contactGroups/g1"}"#,
+            "-o",
+            "group.json",
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    let saved: Value =
+        serde_json::from_slice(&std::fs::read(env.work_dir().join("group.json")).unwrap()).unwrap();
+    assert_eq!(saved, group);
 }

@@ -155,6 +155,78 @@ fn docs_markdown_write_dry_run_builds_native_requests() {
 }
 
 #[test]
+fn docs_helpers_validate_input_before_auth() {
+    // No credentials exist here. Input the helper can reject on its own is a
+    // validation error (exit 3), not an authentication error (exit 2); for
+    // `+create --markdown` the real run would otherwise create an empty
+    // document before failing on the Markdown.
+    let dir = setup();
+    let table = "| a | b |\n|---|---|\n| 1 | 2 |";
+    let cases: [(&[&str], &str); 5] = [
+        (
+            &[
+                "docs",
+                "+create",
+                "--title",
+                "T",
+                "--markdown",
+                "--text",
+                table,
+            ],
+            "Markdown tables are not supported",
+        ),
+        (
+            &[
+                "docs",
+                "+write",
+                "--document-id",
+                "D",
+                "--markdown",
+                "--text",
+                table,
+            ],
+            "Markdown tables are not supported",
+        ),
+        (
+            &[
+                "docs",
+                "+read",
+                "--document-id",
+                "D",
+                "--body-format",
+                "raw",
+                "--output",
+                "doc.json",
+            ],
+            "--output needs --body-format markdown or text",
+        ),
+        (
+            &["docs", "+read", "--document-id", "D", "--output", "."],
+            "is a directory",
+        ),
+        (
+            &[
+                "docs",
+                "+replace",
+                "--document-id",
+                "D",
+                "--find",
+                "",
+                "--replace-with",
+                "x",
+            ],
+            "--find must not be empty",
+        ),
+    ];
+    for (args, expected) in cases {
+        let out = gwsr(dir.path()).args(args).output().unwrap();
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(3), "{args:?}: {stderr}");
+        assert!(stderr.contains(expected), "{args:?}: {stderr}");
+    }
+}
+
+#[test]
 fn sheets_append_dry_run_is_json() {
     let dir = setup();
     let out = gwsr(dir.path())
@@ -276,6 +348,110 @@ fn agenda_dry_run_shows_calendar_list_page_size() {
     );
     // The real request asks for 250 calendars per page; the plan must too.
     assert_eq!(list["query_params"]["maxResults"], "250", "{v}");
+}
+
+#[test]
+fn calendar_helpers_validate_times_before_confirm_and_auth() {
+    // No credentials exist here. Times, zones and "nothing to change" are
+    // known from the command line alone, so each is a validation error
+    // (exit 3), never a confirmation (7) or authentication (2) error.
+    let dir = setup();
+    let insert = [
+        "calendar",
+        "+insert",
+        "--summary",
+        "S",
+        "--attendee",
+        "guest@example.com",
+    ];
+    let cases: [(&[&str], &[&str], &str); 11] = [
+        (
+            &insert,
+            &["--start", "tomorrow", "--duration", "1h"],
+            "--start 'tomorrow' is not a date",
+        ),
+        (
+            &insert,
+            &["--start", "2026-01-01T10:00", "--end", "2026-01-01T09:00"],
+            "--end must be after --start",
+        ),
+        (
+            &insert,
+            &["--start", "2026-01-01T10:00:00Z"],
+            "Timed events need --end or --duration",
+        ),
+        (
+            &insert,
+            &["--start", "2026-01-01", "--duration", "1h"],
+            "--duration cannot be used with an all-day --start",
+        ),
+        (
+            &insert,
+            &[
+                "--start",
+                "2026-01-01T10:00",
+                "--duration",
+                "1h",
+                "--timezone",
+                "Mars/Base",
+            ],
+            "Invalid timezone 'Mars/Base'",
+        ),
+        (
+            &["calendar", "+agenda"],
+            &["--timezone", "Mars/Base"],
+            "Invalid timezone 'Mars/Base'",
+        ),
+        (
+            &["calendar", "+freebusy", "--start", "2026-01-01T10:00:00Z"],
+            &[
+                "--duration",
+                "8h",
+                "--slot",
+                "30m",
+                "--working-hours",
+                "9-5",
+            ],
+            "Invalid --working-hours '9-5'",
+        ),
+        (
+            &["calendar", "+freebusy", "--start", "2026-01-01T10:00:00Z"],
+            &["--duration", "8h", "--slot", "5x"],
+            "Invalid duration '5x'",
+        ),
+        (
+            &["calendar", "+update", "--event-id", "E1"],
+            &[],
+            "Nothing to update",
+        ),
+        (
+            &["calendar", "+update", "--event-id", "E1"],
+            &["--start", "2026-01-01T10:00:00Z", "--end", "soon"],
+            "--end 'soon' is not a date",
+        ),
+        (
+            &["calendar", "+update", "--event-id", "E1"],
+            &["--summary", "S", "--timezone", "Mars/Base"],
+            "Invalid timezone 'Mars/Base'",
+        ),
+    ];
+    for (base, args, expected) in cases {
+        for policy in ["0", "1"] {
+            let out = gwsr(dir.path())
+                .env("GWSR_REQUIRE_CONFIRM", policy)
+                .args(base)
+                .args(args)
+                .output()
+                .unwrap();
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            assert_eq!(
+                out.status.code(),
+                Some(3),
+                "{base:?} {args:?} policy {policy}: {stderr}"
+            );
+            assert!(stderr.contains(expected), "{base:?} {args:?}: {stderr}");
+        }
+    }
 }
 
 #[test]
@@ -1110,6 +1286,23 @@ fn dry_run_plan_keeps_repeated_query_keys() {
 }
 
 #[test]
+fn people_find_rejects_bad_input_before_auth() {
+    // No credentials exist here: a bad --limit or --query must be a
+    // validation error (exit 3), not an authentication failure (exit 2).
+    let dir = setup();
+    seed(dir.path(), "people", "v1", "");
+    let cases: [&[&str]; 2] = [
+        &["people", "+find", "--query", "ann", "--limit", "31"],
+        &["people", "+find", "--query", " "],
+    ];
+    for args in cases {
+        let out = gwsr(dir.path()).args(args).output().unwrap();
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(3), "{args:?}: {stderr}");
+    }
+}
+
+#[test]
 fn chat_send_rejects_empty_text_before_confirm_and_auth() {
     // No credentials exist here: an empty message is a validation error
     // (exit 3), not a confirmation (exit 7) or authentication (exit 2) one.
@@ -1253,6 +1446,81 @@ fn gmail_filter_forward_is_gated_under_policy() {
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );
+}
+
+/// `drive +download --output -` and `drive +export --output -` stream the raw
+/// payload to stdout; nothing else may follow it there (a JSON summary after
+/// the bytes would corrupt `| sha256sum` or a redirected file).
+#[tokio::test(flavor = "multi_thread")]
+async fn drive_download_and_export_to_stdout_print_only_the_payload() {
+    use wiremock::matchers::{method, path, query_param};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/drive/v3/files/F1"))
+        .and(query_param("alt", "media"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_raw(b"raw-bytes".to_vec(), "application/pdf"),
+        )
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/drive/v3/files/F1"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "F1", "name": "f.pdf", "mimeType": "application/pdf"
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/drive/v3/files/D1"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "D1", "name": "Doc", "mimeType": "application/vnd.google-apps.document"
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/drive/v3/files/D1/export"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_raw(b"# exported".to_vec(), "text/markdown"),
+        )
+        .mount(&server)
+        .await;
+
+    let dir = setup();
+    for (args, expected) in [
+        (
+            vec!["drive", "+download", "--file-id", "F1", "--output", "-"],
+            "raw-bytes",
+        ),
+        (
+            vec![
+                "drive",
+                "+export",
+                "--file-id",
+                "D1",
+                "--to",
+                "md",
+                "--output",
+                "-",
+            ],
+            "# exported",
+        ),
+    ] {
+        let out = gwsr(dir.path())
+            .env("GWSR_TOKEN", "test-token")
+            .env("GWSR_API_BASE_URL", server.uri())
+            .args(&args)
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(out.status.success(), "{args:?}: {stderr}");
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout),
+            expected,
+            "{args:?}: stdout must hold only the payload"
+        );
+    }
 }
 
 /// `drive +sync` keeps a local file it did not write and exits 1 with

@@ -189,15 +189,18 @@ impl GmailWatchStep<'_> {
         }
     }
 
-    fn output(&self, id: &str, msg: &Value) -> Result<(), StepError> {
+    async fn output(&self, id: &str, msg: &Value) -> Result<(), StepError> {
         let fatal = |e: String| StepError::Fatal(GwsError::other(e));
         match &self.config.output_dir {
             Some(dir) => {
                 let path = dir.join(format!("{}.json", crate::validate::encode_path_segment(id)));
                 let text = serde_json::to_string_pretty(msg)
                     .map_err(|e| fatal(format!("Failed to serialize message {id}: {e}")))?;
-                std::fs::write(&path, text)
-                    .map_err(|e| fatal(format!("Failed to write {}: {e}", path.display())))?;
+                // The shared writer replaces (never follows) a symlink at
+                // the target and applies GWSR_RESTRICT_PATHS.
+                crate::output_file::write_atomic(&path, text.as_bytes(), true)
+                    .await
+                    .map_err(StepError::Fatal)?;
                 emit_diagnostic(
                     "info",
                     "wrote",
@@ -222,6 +225,7 @@ impl GmailWatchStep<'_> {
         let mut ids = Vec::new();
         let mut seen = HashSet::new();
         let mut page_token: Option<String> = None;
+        let mut tokens = crate::helpers::pagination::PageTokens::new();
         loop {
             let page = api
                 .history(self.last_history_id, page_token.as_deref())
@@ -238,8 +242,11 @@ impl GmailWatchStep<'_> {
                 &self.config.label_ids,
                 &mut seen,
             ));
-            match page.get("nextPageToken").and_then(Value::as_str) {
-                Some(t) => page_token = Some(t.to_string()),
+            match tokens
+                .next(&page, "Failed to list Gmail history")
+                .map_err(StepError::Fatal)?
+            {
+                Some(t) => page_token = Some(t),
                 None => break,
             }
         }
@@ -264,7 +271,7 @@ impl GmailWatchStep<'_> {
                     status: None,
                     message: e.to_string(),
                 })? {
-                Sanitized::Pass(v) => self.output(&id, &v)?,
+                Sanitized::Pass(v) => self.output(&id, &v).await?,
                 Sanitized::Blocked(result) => emit_diagnostic(
                     "warning",
                     "blocked",
@@ -588,6 +595,15 @@ mod tests {
         sanitize: &SanitizeConfig,
         label_ids: &[&str],
     ) -> Result<u64, GwsError> {
+        run_once_with(server, sanitize, label_ids, None).await
+    }
+
+    async fn run_once_with(
+        server: &MockServer,
+        sanitize: &SanitizeConfig,
+        label_ids: &[&str],
+        output_dir: Option<PathBuf>,
+    ) -> Result<u64, GwsError> {
         let config = WatchConfig {
             project: None,
             subscription: Some("projects/test/subscriptions/demo".into()),
@@ -599,7 +615,7 @@ mod tests {
             format: "full".into(),
             once: true,
             cleanup: false,
-            output_dir: None,
+            output_dir,
         };
         let mut step = GmailWatchStep {
             gmail: crate::helpers::gmail::test_support::mock_api(server),
@@ -663,6 +679,49 @@ mod tests {
             .await;
         let last = run_once(&server, &SanitizeConfig::default()).await.unwrap();
         assert_eq!(last, 2);
+    }
+
+    /// `--output-dir` files are written through the shared output writer: a
+    /// symlink planted at a message's file name is replaced, never followed
+    /// to clobber the file it points at.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn output_dir_does_not_follow_a_planted_symlink() {
+        let server = MockServer::start().await;
+        mount_pull(&server).await;
+        Mock::given(method("GET"))
+            .and(path("/gmail/v1/users/me/history"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "history": [{ "messagesAdded": [{ "message": { "id": "msg-1" } }] }]
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/gmail/v1/users/me/messages/msg-1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "id": "msg-1" })))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/v1/projects/test/subscriptions/demo:acknowledge"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+            .mount(&server)
+            .await;
+        let root = tempfile::tempdir().unwrap();
+        let out = root.path().join("out");
+        std::fs::create_dir(&out).unwrap();
+        let victim = root.path().join("victim.txt");
+        std::fs::write(&victim, "keep me").unwrap();
+        std::os::unix::fs::symlink(&victim, out.join("msg-1.json")).unwrap();
+
+        run_once_with(&server, &SanitizeConfig::default(), &[], Some(out.clone()))
+            .await
+            .unwrap();
+
+        assert_eq!(std::fs::read_to_string(&victim).unwrap(), "keep me");
+        let written = out.join("msg-1.json");
+        assert!(!written.symlink_metadata().unwrap().file_type().is_symlink());
+        let v: Value = serde_json::from_str(&std::fs::read_to_string(&written).unwrap()).unwrap();
+        assert_eq!(v["id"], "msg-1");
     }
 
     #[tokio::test]
@@ -759,6 +818,39 @@ mod tests {
             .mount(&server)
             .await;
         run_once(&server, &SanitizeConfig::default()).await.unwrap();
+    }
+
+    /// History paging treats an empty nextPageToken as the last page and a
+    /// repeated one as a fatal error, never paging forever.
+    #[tokio::test]
+    async fn watch_history_stops_on_repeated_or_empty_page_token() {
+        let limit = Duration::from_secs(10);
+        for (token, ok) in [("same", false), ("", true)] {
+            let server = MockServer::start().await;
+            mount_pull(&server).await;
+            Mock::given(method("GET"))
+                .and(path("/gmail/v1/users/me/history"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                    "historyId": "2",
+                    "nextPageToken": token
+                })))
+                .mount(&server)
+                .await;
+            Mock::given(method("POST"))
+                .and(path("/v1/projects/test/subscriptions/demo:acknowledge"))
+                .respond_with(ResponseTemplate::new(200))
+                .mount(&server)
+                .await;
+            let res = tokio::time::timeout(limit, run_once(&server, &SanitizeConfig::default()))
+                .await
+                .unwrap_or_else(|_| panic!("nextPageToken {token:?} must end pagination"));
+            if ok {
+                res.unwrap();
+            } else {
+                let err = res.unwrap_err();
+                assert!(err.to_string().contains("twice"), "{err}");
+            }
+        }
     }
 
     /// `--label-ids` must filter what is emitted, not only which changes

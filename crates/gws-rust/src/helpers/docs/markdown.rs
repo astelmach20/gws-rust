@@ -30,6 +30,11 @@ use serde_json::{Value, json};
 const MONOSPACE: &str = "Courier New";
 /// A line break inside a paragraph (Shift+Enter in the Docs editor).
 const LINE_BREAK: &str = "\u{000b}";
+/// Paragraph style fields cleared on inserted content, so it does not keep
+/// the layout of the paragraph it was inserted into.
+const PARAGRAPH_RESET_FIELDS: &str = "alignment,lineSpacing,spaceAbove,spaceBelow,\
+indentFirstLine,indentStart,indentEnd,borderTop,borderBottom,borderLeft,borderRight,\
+borderBetween,shading";
 
 #[derive(Debug, Clone, PartialEq)]
 enum ParaKind {
@@ -413,7 +418,9 @@ impl Rendered {
         let mut requests = vec![json!({
             "insertText": { "location": { "index": index }, "text": text }
         })];
-        // Reset inherited styling over the whole inserted range.
+        // Reset styling inherited from the paragraph the content lands in
+        // (its text style, and paragraph styles such as a quote's indent or a
+        // rule's border) over the whole inserted range.
         requests.push(json!({
             "deleteParagraphBullets": { "range": range(base, total_end) }
         }));
@@ -421,7 +428,14 @@ impl Rendered {
             "updateTextStyle": {
                 "range": range(base, total_end),
                 "textStyle": {},
-                "fields": "bold,italic,strikethrough,underline,link,weightedFontFamily"
+                "fields": "*"
+            }
+        }));
+        requests.push(json!({
+            "updateParagraphStyle": {
+                "range": range(base, total_end),
+                "paragraphStyle": {},
+                "fields": PARAGRAPH_RESET_FIELDS
             }
         }));
 
@@ -576,8 +590,10 @@ mod tests {
         assert_eq!(reqs[0]["insertText"]["text"], "\nT");
         assert_eq!(reqs[0]["insertText"]["location"]["index"], 10);
         let para = find(&reqs, "updateParagraphStyle");
+        // [0] resets inherited paragraph styling, [1] is the heading.
         assert_eq!(para[0]["range"], json!({"startIndex": 11, "endIndex": 13}));
-        assert_eq!(para[0]["paragraphStyle"]["namedStyleType"], "HEADING_1");
+        assert_eq!(para[1]["range"], json!({"startIndex": 11, "endIndex": 13}));
+        assert_eq!(para[1]["paragraphStyle"]["namedStyleType"], "HEADING_1");
     }
 
     #[test]
@@ -697,6 +713,143 @@ mod tests {
         let r = render("one  \ntwo").unwrap();
         assert_eq!(r.text, "one\ntwo\n");
         assert_eq!(r.paras.len(), 2);
+    }
+
+    /// A minimal Docs body: UTF-16 units starting at index 1, each with a
+    /// text style, and a paragraph style per paragraph-ending newline.
+    struct SimDoc {
+        units: Vec<u16>,
+        text_style: Vec<serde_json::Map<String, Value>>,
+        para_style: Vec<serde_json::Map<String, Value>>,
+    }
+
+    impl SimDoc {
+        /// One paragraph `text` (ending in '\n') with the given styles.
+        fn new(text: &str, text_style: Value, para_style: Value) -> Self {
+            let units: Vec<u16> = text.encode_utf16().collect();
+            let n = units.len();
+            Self {
+                units,
+                text_style: vec![text_style.as_object().unwrap().clone(); n],
+                para_style: vec![para_style.as_object().unwrap().clone(); n],
+            }
+        }
+
+        /// The paragraph-ending newline at or after position `i`.
+        fn para_end(&self, i: usize) -> usize {
+            (i..self.units.len())
+                .find(|&j| self.units[j] == u16::from(b'\n'))
+                .unwrap()
+        }
+
+        fn update(target: &mut serde_json::Map<String, Value>, style: &Value, fields: &str) {
+            if fields == "*" {
+                target.clear();
+            }
+            for f in fields.split(',').filter(|f| *f != "*") {
+                match style.get(f) {
+                    Some(v) => target.insert(f.to_string(), v.clone()),
+                    None => target.remove(f),
+                };
+            }
+            if fields == "*" {
+                for (k, v) in style.as_object().unwrap() {
+                    target.insert(k.clone(), v.clone());
+                }
+            }
+        }
+
+        /// Apply the requests this test cares about (text and styles).
+        fn apply(&mut self, reqs: &[Value]) {
+            for r in reqs {
+                if let Some(ins) = r.get("insertText") {
+                    let at = ins["location"]["index"].as_u64().unwrap() as usize - 1;
+                    let new: Vec<u16> = ins["text"].as_str().unwrap().encode_utf16().collect();
+                    // Inserted text takes the style of the text before it, and
+                    // new paragraphs split off the paragraph they land in.
+                    let ts = self.text_style[at.saturating_sub(1)].clone();
+                    let ps = self.para_style[self.para_end(at)].clone();
+                    for (k, u) in new.into_iter().enumerate() {
+                        self.units.insert(at + k, u);
+                        self.text_style.insert(at + k, ts.clone());
+                        self.para_style.insert(at + k, ps.clone());
+                    }
+                } else if let Some(u) = r.get("updateTextStyle") {
+                    let s = u["range"]["startIndex"].as_u64().unwrap() as usize - 1;
+                    let e = u["range"]["endIndex"].as_u64().unwrap() as usize - 1;
+                    for t in &mut self.text_style[s..e] {
+                        Self::update(t, &u["textStyle"], u["fields"].as_str().unwrap());
+                    }
+                } else if let Some(u) = r.get("updateParagraphStyle") {
+                    let s = u["range"]["startIndex"].as_u64().unwrap() as usize - 1;
+                    let e = u["range"]["endIndex"].as_u64().unwrap() as usize - 1;
+                    let mut i = s;
+                    while i < e {
+                        let end = self.para_end(i);
+                        Self::update(
+                            &mut self.para_style[end],
+                            &u["paragraphStyle"],
+                            u["fields"].as_str().unwrap(),
+                        );
+                        i = end + 1;
+                    }
+                }
+            }
+        }
+
+        /// Text, paragraph style and first unit's text style of each paragraph.
+        fn paragraphs(&self) -> Vec<(String, Value, Value)> {
+            let mut out = Vec::new();
+            let mut start = 0;
+            while start < self.units.len() {
+                let end = self.para_end(start);
+                out.push((
+                    String::from_utf16(&self.units[start..=end]).unwrap(),
+                    Value::Object(self.para_style[end].clone()),
+                    Value::Object(self.text_style[start].clone()),
+                ));
+                start = end + 1;
+            }
+            out
+        }
+    }
+
+    #[test]
+    fn appended_markdown_does_not_inherit_quote_indent_or_text_style() {
+        // The document ends with a quote written by an earlier +write
+        // --markdown, in large red text.
+        let mut doc = SimDoc::new(
+            "Quoted\n",
+            json!({"fontSize": {"magnitude": 24, "unit": "PT"},
+                   "foregroundColor": {"color": {"rgbColor": {"red": 1}}}}),
+            json!({"namedStyleType": "NORMAL_TEXT",
+                   "indentStart": {"magnitude": 36, "unit": "PT"},
+                   "indentFirstLine": {"magnitude": 36, "unit": "PT"}}),
+        );
+        // append_point: endIndex 8, last paragraph has text.
+        doc.apply(&render("plain").unwrap().to_requests(7, true));
+        let paras = doc.paragraphs();
+        assert_eq!(paras.len(), 2);
+        assert_eq!(paras[1].0, "plain\n");
+        assert_eq!(paras[1].1, json!({"namedStyleType": "NORMAL_TEXT"}));
+        assert_eq!(paras[1].2, json!({}));
+        // The existing paragraph keeps its own styling.
+        assert!(paras[0].1.get("indentStart").is_some());
+    }
+
+    #[test]
+    fn markdown_after_a_rule_does_not_inherit_its_border() {
+        // An earlier +write --markdown ending in `---` leaves an empty last
+        // paragraph with a bottom border; the next write lands in it.
+        let mut doc = SimDoc::new(
+            "\n",
+            json!({}),
+            json!({"namedStyleType": "NORMAL_TEXT", "borderBottom": {"width": {"magnitude": 1, "unit": "PT"}}}),
+        );
+        doc.apply(&render("text").unwrap().to_requests(1, false));
+        let paras = doc.paragraphs();
+        assert_eq!(paras[0].0, "text\n");
+        assert_eq!(paras[0].1, json!({"namedStyleType": "NORMAL_TEXT"}));
     }
 
     #[test]
