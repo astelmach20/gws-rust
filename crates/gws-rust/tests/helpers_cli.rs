@@ -917,6 +917,112 @@ async fn events_helpers_honour_api_base_override() {
     assert!(out.status.success(), "events +renew: {out:?}");
 }
 
+/// The NDJSON streams of `events +subscribe` and `gmail +watch` go through
+/// the shared formatter: `--jq` and `--format` apply to every record, as they
+/// do to a generated method's `--page-all` stream.
+#[tokio::test(flavor = "multi_thread")]
+async fn stream_helpers_honor_jq_and_format() {
+    use base64::Engine as _;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let b64 = |s: &str| base64::engine::general_purpose::STANDARD.encode(s);
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/projects/p/subscriptions/ev:pull"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "receivedMessages": [{ "ackId": "a1", "message": {
+                "attributes": { "ce-type": "t" },
+                "data": b64(r#"{"id":"evt-1"}"#)
+            }}]
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/projects/p/subscriptions/gm:pull"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "receivedMessages": [{ "ackId": "a2", "message": {
+                "data": b64(r#"{"emailAddress":"me@example.com","historyId":"5"}"#)
+            }}]
+        })))
+        .mount(&server)
+        .await;
+    for sub in ["ev", "gm"] {
+        Mock::given(method("POST"))
+            .and(path(format!(
+                "/v1/projects/p/subscriptions/{sub}:acknowledge"
+            )))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+            .mount(&server)
+            .await;
+    }
+    Mock::given(method("GET"))
+        .and(path("/gmail/v1/users/me/profile"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"historyId": "1"})))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/gmail/v1/users/me/history"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "history": [{ "messagesAdded": [{ "message": { "id": "M1" } }] }]
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/gmail/v1/users/me/messages/M1"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({"id": "M1", "snippet": "hi"})),
+        )
+        .mount(&server)
+        .await;
+
+    let dir = tempfile::tempdir().unwrap();
+    seed(dir.path(), "workspaceevents", "v1", "");
+    seed(dir.path(), "gmail", "v1", "");
+    let run = |args: &[&str]| {
+        gwsr(dir.path())
+            .env("GWSR_TOKEN", "test-token")
+            .env("GWSR_API_BASE_URL", format!("{}/", server.uri()))
+            .env("HTTPS_PROXY", "http://127.0.0.1:9")
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    let events = [
+        "events",
+        "+subscribe",
+        "--subscription",
+        "projects/p/subscriptions/ev",
+        "--once",
+    ];
+    let gmail = [
+        "gmail",
+        "+watch",
+        "--subscription",
+        "projects/p/subscriptions/gm",
+        "--once",
+    ];
+
+    for (base, field, want) in [
+        (&events[..], ".data.id", "evt-1"),
+        (&gmail[..], ".snippet", "hi"),
+    ] {
+        let out = run(&[base, &["--jq", field]].concat());
+        assert!(out.status.success(), "{base:?}: {out:?}");
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout).trim(),
+            want,
+            "{base:?}"
+        );
+
+        let out = run(&[base, &["--format", "csv"]].concat());
+        assert!(out.status.success(), "{base:?}: {out:?}");
+        let text = String::from_utf8_lossy(&out.stdout);
+        assert!(!text.trim_start().starts_with('{'), "{base:?}: {text}");
+        assert!(text.contains(want), "{base:?}: {text}");
+    }
+}
+
 // ── Dot-segment path parameters ─────────────────────────────────────────
 
 /// A path parameter of `.` or `..` must never reach the server: URL parsing

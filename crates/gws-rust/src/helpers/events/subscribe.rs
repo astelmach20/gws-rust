@@ -16,8 +16,8 @@
 //! subscription and stream CloudEvents as NDJSON.
 
 use super::stream::{
-    PubSubClient, StepError, StreamOptions, StreamStep, cleanup_resources, emit_diagnostic,
-    run_stream,
+    PubSubClient, StepError, StreamOptions, StreamPrinter, StreamStep, cleanup_resources,
+    emit_diagnostic, run_stream,
 };
 use super::{PUBSUB_SCOPE, parse_event_types, scopes_for_event_types, workspace_events_api_base};
 
@@ -28,7 +28,6 @@ use base64::Engine as _;
 use clap::ArgMatches;
 use gws_rust_core::client::Idempotency;
 use serde_json::{Value, json};
-use std::io::Write;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -247,6 +246,7 @@ struct SubscribeStep<'a> {
     sanitize: &'a SanitizeConfig,
     pull_timeout: Duration,
     file_counter: u64,
+    printer: StreamPrinter,
 }
 
 impl SubscribeStep<'_> {
@@ -270,14 +270,7 @@ impl SubscribeStep<'_> {
                     json!({ "path": path.display().to_string() }),
                 );
             }
-            None => {
-                let line = serde_json::to_string(event)
-                    .map_err(|e| fatal(format!("Failed to serialize event: {e}")))?;
-                let mut out = std::io::stdout().lock();
-                writeln!(out, "{line}")
-                    .and_then(|()| out.flush())
-                    .map_err(|e| fatal(format!("Failed to write to stdout: {e}")))?;
-            }
+            None => self.printer.print(event)?,
         }
         Ok(())
     }
@@ -464,6 +457,7 @@ pub(super) async fn handle_subscribe(
         config: config.clone(),
         sanitize: sanitize_config,
         file_counter: 0,
+        printer: StreamPrinter::new(crate::helpers::http::output_format(matches)?),
     };
     let result = run_stream(&opts, &mut step).await;
 
@@ -715,6 +709,7 @@ mod tests {
             config: cfg,
             sanitize: &sanitize,
             file_counter: 0,
+            printer: StreamPrinter::new(crate::formatter::OutputFormat::Json),
         };
         let mut opts = StreamOptions::new(true, 1, 2);
         opts.backoff_base = Duration::from_millis(1);

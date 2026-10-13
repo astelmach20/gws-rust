@@ -22,13 +22,12 @@
 use super::cli::{required_str, value_or_default};
 use super::prelude::*;
 use crate::helpers::events::stream::{
-    PubSubClient, StepError, StreamOptions, StreamStep, cleanup_resources, emit_diagnostic,
-    run_stream,
+    PubSubClient, StepError, StreamOptions, StreamPrinter, StreamStep, cleanup_resources,
+    emit_diagnostic, run_stream,
 };
 use crate::helpers::modelarmor::{SanitizeConfig, Sanitized, sanitize_value};
 use crate::transport::Transport;
 use std::collections::{HashSet, VecDeque};
-use std::io::Write;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -175,6 +174,7 @@ struct GmailWatchStep<'a> {
     emitted: HashSet<String>,
     emitted_order: VecDeque<String>,
     pull_timeout: Duration,
+    printer: StreamPrinter,
 }
 
 impl GmailWatchStep<'_> {
@@ -189,7 +189,7 @@ impl GmailWatchStep<'_> {
         }
     }
 
-    async fn output(&self, id: &str, msg: &Value) -> Result<(), StepError> {
+    async fn output(&mut self, id: &str, msg: &Value) -> Result<(), StepError> {
         let fatal = |e: String| StepError::Fatal(GwsError::other(e));
         match &self.config.output_dir {
             Some(dir) => {
@@ -207,14 +207,7 @@ impl GmailWatchStep<'_> {
                     json!({ "path": path.display().to_string() }),
                 );
             }
-            None => {
-                let line = serde_json::to_string(msg)
-                    .map_err(|e| fatal(format!("Failed to serialize message {id}: {e}")))?;
-                let mut out = std::io::stdout().lock();
-                writeln!(out, "{line}")
-                    .and_then(|()| out.flush())
-                    .map_err(|e| fatal(format!("Failed to write to stdout: {e}")))?;
-            }
+            None => self.printer.print(msg)?,
         }
         Ok(())
     }
@@ -431,6 +424,7 @@ pub(super) async fn handle_watch(
         last_history_id: history_id,
         emitted: HashSet::new(),
         emitted_order: VecDeque::new(),
+        printer: StreamPrinter::new(crate::helpers::http::output_format(matches)?),
     };
     let result = run_stream(&opts, &mut step).await;
 
@@ -630,6 +624,7 @@ mod tests {
             last_history_id: 1,
             emitted: HashSet::new(),
             emitted_order: VecDeque::new(),
+            printer: StreamPrinter::new(crate::formatter::OutputFormat::Json),
         };
         let mut opts = StreamOptions::new(true, 1, 3);
         opts.backoff_base = Duration::from_millis(1);
