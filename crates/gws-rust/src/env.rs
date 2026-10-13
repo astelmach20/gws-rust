@@ -286,7 +286,7 @@ impl Env {
                 if name.as_encoded_bytes().starts_with(PREFIX.as_bytes()) {
                     problems.push(format!(
                         "environment variable name {} is not valid UTF-8 and is not one gwsr \
-                         reads; run `gwsr --help` for the supported variables",
+                         reads; unset it, then `gwsr --help` lists the supported variables",
                         name.to_string_lossy()
                     ));
                 }
@@ -469,8 +469,9 @@ fn unknown_message(name: &str) -> String {
         None => String::new(),
     };
     format!(
-        "unknown environment variable {name}: gwsr does not read it; {hint}Unset it, or run \
-         `gwsr --help` for the supported variables"
+        "unknown environment variable {name}: gwsr does not read it; {hint}Unset it (every \
+         command, `gwsr --help` included, fails while it is set); with it unset, `gwsr --help` \
+         lists the supported variables"
     )
 }
 

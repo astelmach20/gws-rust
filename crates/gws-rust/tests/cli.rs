@@ -1265,6 +1265,21 @@ fn unknown_gwsr_variable_fails_with_a_suggestion() {
         "{message}"
     );
     assert!(message.contains("did you mean GWSR_TIMEOUT?"), "{message}");
+
+    // The variable is checked before argument parsing, so `gwsr --help` fails
+    // the same way while it is set: the message must not offer it as an
+    // alternative to unsetting the variable.
+    env.cmd()
+        .arg("--help")
+        .env("GWSR_TIMEOUT_SECS", "30")
+        .assert()
+        .code(8)
+        .stdout("");
+    assert!(!message.contains("or run `gwsr --help`"), "{message}");
+    assert!(
+        message.contains("with it unset, `gwsr --help` lists the supported variables"),
+        "{message}"
+    );
 }
 
 #[test]
