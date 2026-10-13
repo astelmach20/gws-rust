@@ -2083,7 +2083,7 @@ async fn batch_posts_to_the_discovery_batch_path() {
     batch::run_batch(
         &d,
         &calls,
-        Credentials::Static("tok".into()),
+        Some(Credentials::Static("tok".into())),
         &opts,
         &SanitizeConfig::default(),
         &em,
@@ -2097,7 +2097,7 @@ async fn batch_posts_to_the_discovery_batch_path() {
     let err = batch::run_batch(
         &d,
         &calls,
-        Credentials::Static("tok".into()),
+        Some(Credentials::Static("tok".into())),
         &opts,
         &SanitizeConfig::default(),
         &Emitter::capturing(),

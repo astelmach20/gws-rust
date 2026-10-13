@@ -672,6 +672,7 @@ fn generated_methods_validate_and_confirm_before_loading_credentials() {
         "version": "v3",
         "rootUrl": "https://www.googleapis.com/",
         "servicePath": "drive/v3/",
+        "batchPath": "batch/drive/v3",
         "resources": {"files": {"methods": {
             "list": {
                 "id": "drive.files.list",
