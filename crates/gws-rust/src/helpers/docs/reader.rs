@@ -125,11 +125,12 @@ fn render_paragraph(p: &Value, document: &Value, markdown: bool, out: &mut Strin
     flush(&mut line, &mut pending);
     // A vertical tab is a line break inside the paragraph (Shift+Enter).
     // Markdown needs a hard break (`\` before the newline) to keep it; a
-    // trailing one has nothing to break and would leave a literal `\`.
+    // trailing one has nothing to break and would leave a literal `\`, also
+    // when only white space follows it (Markdown drops that anyway).
     let line = if markdown {
         escape_line_starts(
             &line
-                .trim_end_matches('\u{000b}')
+                .trim_end_matches(|c: char| c == '\u{000b}' || c.is_whitespace())
                 .replace('\u{000b}', "\\\n"),
         )
     } else {
@@ -670,6 +671,17 @@ mod tests {
             render(&document, false),
             "one\ntwo\ntrailing\n\n- item\n- more\n"
         );
+    }
+
+    /// A trailing line break followed only by white space must not leave a
+    /// literal `\` at the end of the paragraph.
+    #[test]
+    fn trailing_line_break_before_white_space_is_dropped() {
+        let para = |t: &str| json!({"paragraph": {"elements": [{"textRun": {"content": t}}]}});
+        let document = json!({"body": {"content": [para("a\u{b} \n"), para("b\u{b}\t\u{b} \n")]}});
+        let md = render(&document, true);
+        let (_, text) = parse_back(&md);
+        assert_eq!(text, "a\nb\n", "from:\n{md:?}");
     }
 
     /// A line break (Shift+Enter) inside monospace text, such as a code
