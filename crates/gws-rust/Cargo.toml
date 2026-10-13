@@ -44,7 +44,7 @@ crossterm = "0.29.0"
 dirs = "7"
 futures-util = "0.3"
 iana-time-zone = "0.1"
-mail-builder = "1.0"
+mail-builder = { version = "1.0", default-features = false }
 mime_guess2 = "2.3.1"
 percent-encoding.workspace = true
 rand = "0.10"
