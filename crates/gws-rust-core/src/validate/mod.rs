@@ -169,6 +169,33 @@ fn is_resource_name_char(c: char) -> bool {
 /// control characters and non-ASCII are rejected. Segments must be non-empty
 /// and must not be `.` or `..`. Returns the validated name.
 pub fn validate_resource_name(s: &str) -> Result<&str, GwsError> {
+    check_resource_name(s, is_resource_name_char, "only A-Z a-z 0-9 . _ ~ / - are")
+}
+
+/// Whether `c` is an RFC 3986 `pchar` other than `%`: unreserved, the
+/// sub-delims `!$&'()*+,;=`, `:` and `@` (plus `/` between segments).
+fn is_path_char(c: char) -> bool {
+    is_resource_name_char(c) || "!$&'()*+,;=:@".contains(c)
+}
+
+/// Validate the value of a `{+name}` (RFC 6570 reserved expansion) path
+/// parameter of a Discovery method.
+///
+/// Like [`validate_resource_name`], but every RFC 3986 path character is
+/// allowed, because documented resource names use them: Chat accepts
+/// `users/user@example.com/...` and `customEmojis/:example-emoji:`. `%`,
+/// `?`, `#`, whitespace, control and non-ASCII characters, empty segments
+/// and `.`/`..` segments are still rejected. Encode the result with
+/// [`encode_path_preserving_slashes`].
+pub fn validate_reserved_path_value(s: &str) -> Result<&str, GwsError> {
+    check_resource_name(s, is_path_char, "only RFC 3986 path characters are")
+}
+
+fn check_resource_name<'a>(
+    s: &'a str,
+    allowed: fn(char) -> bool,
+    allowed_text: &str,
+) -> Result<&'a str, GwsError> {
     if s.is_empty() {
         return Err(GwsError::Validation(
             "Resource name must not be empty".to_string(),
@@ -193,10 +220,9 @@ pub fn validate_resource_name(s: &str) -> Result<&str, GwsError> {
             "Resource name must not contain '?' or '#': {shown}"
         )));
     }
-    if let Some(c) = s.chars().find(|c| !is_resource_name_char(*c)) {
+    if let Some(c) = s.chars().find(|c| !allowed(*c)) {
         return Err(GwsError::Validation(format!(
-            "Resource name contains invalid characters ({:?} is not allowed; only A-Z a-z 0-9 . _ ~ / - are): {shown}",
-            c
+            "Resource name contains invalid characters ({c:?} is not allowed; {allowed_text}): {shown}"
         )));
     }
     if s.split('/').any(str::is_empty) {
@@ -436,6 +462,39 @@ mod tests {
         assert!(validate_resource_name("%2e%2e").is_err());
         assert!(validate_resource_name("spaces/%2e%2e/etc").is_err());
         assert!(validate_resource_name("spaces/100%").is_err());
+    }
+
+    #[test]
+    fn test_validate_reserved_path_value() {
+        for ok in [
+            "users/user@example.com/spaces/A",
+            "customEmojis/:emoji:",
+            "users/a+b@example.com",
+            "@default",
+            "projects/p1/topics/t1",
+        ] {
+            assert_eq!(validate_reserved_path_value(ok).unwrap(), ok);
+        }
+        for bad in [
+            "",
+            "users/a b",
+            "users/a%40b",
+            "users/a?x",
+            "users/a#x",
+            "users/../x",
+            "users/./x",
+            "users//x",
+            "/users/x",
+            "users/x/",
+            "users/é",
+            "users/a\\b",
+            "users/a\u{200B}b",
+            "users/a\nb",
+        ] {
+            assert!(validate_reserved_path_value(bad).is_err(), "{bad:?}");
+        }
+        // The resource-name validator used by helpers stays strict.
+        assert!(validate_resource_name("users/user@example.com").is_err());
     }
 
     // --- reject_dangerous_chars Unicode ---

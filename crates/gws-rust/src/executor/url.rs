@@ -189,7 +189,7 @@ pub(crate) fn render_path_template(
                     )));
                 }
                 let encoded = if is_plus {
-                    let validated = crate::validate::validate_resource_name(&val_str)?;
+                    let validated = crate::validate::validate_reserved_path_value(&val_str)?;
                     crate::validate::encode_path_preserving_slashes(validated)
                 } else {
                     crate::validate::encode_path_segment(&val_str)
@@ -317,6 +317,51 @@ mod tests {
         params.insert("name".into(), json!("projects/../../etc/passwd"));
         let err = build_url(&doc, &m, &params, UrlTarget::Method, &google()).unwrap_err();
         assert!(err.to_string().contains("path traversal"));
+    }
+
+    /// `{+name}` values may contain any RFC 3986 path character. Chat
+    /// documents `users/user@example.com/...` (email alias for a user) and
+    /// `customEmojis/:example-emoji:` (emoji-name alias).
+    #[test]
+    fn plus_expansion_accepts_documented_aliases() {
+        let doc = doc_with_base("https://chat.googleapis.com/");
+        let m = method("v1/{+name}", path_params(&["name"]));
+        let cases = [
+            (
+                "users/user@example.com/spaces/AAAA/spaceNotificationSetting",
+                "v1/users/user@example.com/spaces/AAAA/spaceNotificationSetting",
+            ),
+            (
+                "customEmojis/:example-emoji:",
+                "v1/customEmojis/%3Aexample-emoji%3A",
+            ),
+            (
+                "spaces/AAAA/members/first+tag@example.com",
+                "v1/spaces/AAAA/members/first%2Btag@example.com",
+            ),
+        ];
+        for (name, path) in cases {
+            let mut params = Map::new();
+            params.insert("name".into(), json!(name));
+            let u = build_url(&doc, &m, &params, UrlTarget::Method, &google())
+                .unwrap_or_else(|e| panic!("{name}: {e}"));
+            assert_eq!(u.url, format!("https://chat.googleapis.com/{path}"));
+        }
+        // Still refused: query/fragment, percent, whitespace, traversal.
+        for name in [
+            "users/a b",
+            "users/a%40b",
+            "users/a?x",
+            "users/../x",
+            "users//x",
+        ] {
+            let mut params = Map::new();
+            params.insert("name".into(), json!(name));
+            assert!(
+                build_url(&doc, &m, &params, UrlTarget::Method, &google()).is_err(),
+                "{name} was accepted"
+            );
+        }
     }
 
     #[test]
