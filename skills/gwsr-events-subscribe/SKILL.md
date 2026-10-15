@@ -33,7 +33,7 @@ gwsr events +subscribe
 | `--target` | — | — | Workspace resource URI (e.g., //chat.googleapis.com/spaces/SPACE_ID) |
 | `--event-types` | — | — | Comma-separated CloudEvents types to subscribe to |
 | `--project` | — | — | GCP project ID for Pub/Sub resources (or set GWSR_PROJECT_ID) |
-| `--subscription` | — | — | Existing Pub/Sub subscription name (skip setup) |
+| `--subscription` | — | — | Existing Pub/Sub subscription name (skip setup; conflicts with the setup flags --target, --event-types, --project and --cleanup) |
 | `--max-messages` | — | 10 | Maximum Pub/Sub messages per pull |
 | `--poll-interval` | — | 5 | Seconds between pulls |
 | `--max-failures` | — | 10 | Consecutive transient failures (429/5xx/network) tolerated before exiting |
@@ -47,7 +47,7 @@ gwsr events +subscribe
 ```bash
 gwsr events +subscribe --target '//chat.googleapis.com/spaces/SPACE' --event-types 'google.workspace.chat.message.v1.created' --project my-project
 gwsr events +subscribe --subscription projects/p/subscriptions/my-sub --once
-gwsr events +subscribe --subscription projects/p/subscriptions/my-sub --cleanup --output-dir ./events
+gwsr events +subscribe --target '//chat.googleapis.com/spaces/SPACE' --event-types 'google.workspace.chat.message.v1.created' --project my-project --cleanup --output-dir ./events
 ```
 
 ## Tips

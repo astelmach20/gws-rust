@@ -1918,3 +1918,82 @@ async fn helpers_writing_raw_stdout_exit_cleanly_on_a_closed_pipe() {
         assert!(stderr.is_empty(), "{args:?}: {stderr}");
     }
 }
+
+// ── Streaming helpers with an existing subscription ─────────────────────
+
+/// With `--subscription`, `gmail +watch` and `events +subscribe` create
+/// nothing, so the setup flags (`--cleanup` and what the created resources
+/// would use) would be ignored. They are rejected instead of being dropped.
+#[test]
+fn existing_subscription_rejects_setup_flags() {
+    let dir = tempfile::tempdir().unwrap();
+    seed(dir.path(), "gmail", "v1", "");
+    seed(dir.path(), "workspaceevents", "v1", "");
+    let sub = "projects/p/subscriptions/s";
+    let rejected: [&[&str]; 8] = [
+        &["gmail", "+watch", "--subscription", sub, "--cleanup"],
+        &["gmail", "+watch", "--subscription", sub, "--project", "p"],
+        &[
+            "gmail",
+            "+watch",
+            "--subscription",
+            sub,
+            "--topic",
+            "projects/p/topics/t",
+        ],
+        &[
+            "gmail",
+            "+watch",
+            "--subscription",
+            sub,
+            "--label-ids",
+            "INBOX",
+        ],
+        &["events", "+subscribe", "--subscription", sub, "--cleanup"],
+        &[
+            "events",
+            "+subscribe",
+            "--subscription",
+            sub,
+            "--project",
+            "p",
+        ],
+        &[
+            "events",
+            "+subscribe",
+            "--subscription",
+            sub,
+            "--target",
+            "//chat.googleapis.com/spaces/A",
+        ],
+        &[
+            "events",
+            "+subscribe",
+            "--subscription",
+            sub,
+            "--event-types",
+            "google.workspace.chat.message.v1.created",
+        ],
+    ];
+    for args in rejected {
+        let out = gwsr(dir.path())
+            .args(args)
+            .arg("--dry-run")
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(3), "{args:?}: {out:?}");
+        assert!(out.stdout.is_empty(), "{args:?}: {out:?}");
+    }
+    for args in [
+        ["gmail", "+watch", "--subscription", sub],
+        ["events", "+subscribe", "--subscription", sub],
+    ] {
+        let out = gwsr(dir.path())
+            .args(args)
+            .arg("--dry-run")
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{args:?}: {out:?}");
+        assert_eq!(stdout_json(&out)["subscription"], sub);
+    }
+}
