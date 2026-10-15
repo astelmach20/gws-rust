@@ -209,6 +209,9 @@ pub(crate) struct Api {
     root: String,
     planned: Mutex<Vec<Value>>,
     sanitize: crate::helpers::modelarmor::SanitizeConfig,
+    /// Whether a request that changes something (not GET/HEAD/OPTIONS)
+    /// succeeded, so withheld output must not hide that it happened.
+    wrote: std::sync::atomic::AtomicBool,
 }
 
 fn with_slash(s: &str) -> String {
@@ -263,6 +266,7 @@ impl Api {
             root: with_slash(&root),
             planned: Mutex::new(Vec::new()),
             sanitize: crate::helpers::modelarmor::SanitizeConfig::default(),
+            wrote: std::sync::atomic::AtomicBool::new(false),
         })
     }
 
@@ -312,7 +316,7 @@ impl Api {
             GwsError::other("internal error: a dry-run request reached the transport")
         })?;
         let context = format!("{} {}", req.method, redact_url(&req.url));
-        transport
+        let resp = transport
             .send_ok(
                 req.method.clone(),
                 &req.url,
@@ -322,7 +326,17 @@ impl Api {
                 Some(reqwest::StatusCode::PERMANENT_REDIRECT),
                 |rb| req.apply(rb),
             )
-            .await
+            .await?;
+        self.note_write(&req.method);
+        Ok(resp)
+    }
+
+    /// Remember that a request with `method` succeeded, if it changes state.
+    fn note_write(&self, method: &reqwest::Method) {
+        use reqwest::Method as M;
+        if !matches!(*method, M::GET | M::HEAD | M::OPTIONS) {
+            self.wrote.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
     }
 
     fn idle_timeout(&self) -> Option<std::time::Duration> {
@@ -455,9 +469,19 @@ impl Api {
                 .clone();
             return print_value(matches, &json!({ "dry_run": true, "requests": planned }));
         }
-        use crate::helpers::modelarmor::{require_pass, sanitize_value};
-        let value = require_pass(sanitize_value(&self.sanitize, value.clone()).await?)?;
-        print_value(matches, &value)
+        use crate::helpers::modelarmor::{note_applied_write, require_pass, sanitize_value};
+        let screened = match sanitize_value(&self.sanitize, value.clone()).await {
+            Ok(outcome) => require_pass(outcome),
+            Err(e) => Err(e),
+        };
+        match screened {
+            Ok(v) => print_value(matches, &v),
+            // The write already happened: say so, and name what it made.
+            Err(e) if self.wrote.load(std::sync::atomic::Ordering::Relaxed) => {
+                Err(note_applied_write(e, value))
+            }
+            Err(e) => Err(e),
+        }
     }
 
     /// Screen text through Model Armor (when configured) before it is written
@@ -551,6 +575,7 @@ impl Api {
         if !sent.response.status().is_success() {
             return Err(transport.error_for(sent, &context).await);
         }
+        self.note_write(&init.method);
         crate::transport::json_body(sent.response, self.idle_timeout(), &context).await
     }
 }

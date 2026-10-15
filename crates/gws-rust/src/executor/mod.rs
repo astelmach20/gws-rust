@@ -732,9 +732,19 @@ pub(crate) async fn execute_to(
         // Screen what is printed or saved: with --wait that is the finished
         // operation's result, not the pending operation first returned.
         if sanitize.template.is_some() {
-            value = crate::helpers::modelarmor::require_pass(
-                crate::helpers::modelarmor::sanitize_value(&sanitize, value).await?,
-            )?;
+            let screened =
+                match crate::helpers::modelarmor::sanitize_value(&sanitize, value.clone()).await {
+                    Ok(outcome) => crate::helpers::modelarmor::require_pass(outcome),
+                    Err(e) => Err(e),
+                };
+            value = match screened {
+                Ok(v) => v,
+                // The method already changed something: say so, and name it.
+                Err(e) if !matches!(http, Method::GET | Method::HEAD | Method::OPTIONS) => {
+                    return Err(crate::helpers::modelarmor::note_applied_write(e, &value));
+                }
+                Err(e) => return Err(e),
+            };
         }
 
         match &output {
