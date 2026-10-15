@@ -517,31 +517,44 @@ pub(crate) async fn resumable_upload(
                     // Nothing of the chunk was persisted: resend it, but as a
                     // failure, so a session that never advances ends.
                     offset = next;
-                    format!("HTTP 308 with no progress at byte {offset}")
+                    ChunkFailure::Stalled(format!("HTTP 308 with no progress at byte {offset}"))
                 }
                 StatusCode::NOT_FOUND | StatusCode::GONE => {
                     progress.finish();
-                    return Err(GwsError::other(anyhow::anyhow!(
+                    // Google refused the session URL: an API error (exit 1;
+                    // retrying the same session cannot succeed), with the
+                    // server's message and the way out.
+                    let context = format!(
                         "resumable upload session expired (HTTP {}); rerun the command to start a new upload",
                         sent.response.status()
-                    )));
+                    );
+                    return Err(transport.error_for(sent, &context).await);
                 }
-                s if gws_rust_core::client::is_retryable_status(s) => format!("HTTP {s}"),
+                s if gws_rust_core::client::is_retryable_status(s) => ChunkFailure::Status(sent),
                 _ => {
                     progress.finish();
                     return Ok(sent);
                 }
             },
-            Err(e) => e.to_string(),
+            Err(e) => ChunkFailure::Error(e),
         };
 
         failures += 1;
         if failures > MAX_CHUNK_FAILURES {
             progress.finish();
-            return Err(GwsError::other(anyhow::anyhow!(
-                "resumable upload failed after {MAX_CHUNK_FAILURES} consecutive retries at byte {offset} of {total}: {failed_reason}"
-            )));
+            let context = format!(
+                "resumable upload failed after {MAX_CHUNK_FAILURES} consecutive retries at byte {offset} of {total}"
+            );
+            // Keep the class of the last failure: a retryable status stays
+            // a retryable API error (exit 6), a lost connection a network
+            // error (exit 10).
+            return Err(match failed_reason {
+                ChunkFailure::Status(sent) => transport.error_for(sent, &context).await,
+                ChunkFailure::Error(e) => crate::transport::errors::with_context(e, &context),
+                ChunkFailure::Stalled(why) => GwsError::other(anyhow::anyhow!("{context}: {why}")),
+            });
         }
+        let failed_reason = failed_reason.describe();
         tracing::debug!(offset, failures, reason = %failed_reason, "upload chunk failed; querying session status");
         tokio::time::sleep(transport.retry.backoff(failures - 1)).await;
 
@@ -572,6 +585,27 @@ pub(crate) async fn resumable_upload(
                 tracing::debug!(status = %sent.response.status(), "upload status query failed; retrying chunk");
             }
             Err(e) => tracing::debug!(error = %e, "upload status query failed; retrying chunk"),
+        }
+    }
+}
+
+/// Why a chunk did not advance the upload.
+enum ChunkFailure {
+    /// A retryable status; the response is kept to report it if retries
+    /// run out.
+    Status(Sent),
+    /// No response (connection error, timeout).
+    Error(GwsError),
+    /// The server answered but persisted nothing new.
+    Stalled(String),
+}
+
+impl ChunkFailure {
+    fn describe(&self) -> String {
+        match self {
+            Self::Status(sent) => format!("HTTP {}", sent.response.status()),
+            Self::Error(e) => e.to_string(),
+            Self::Stalled(why) => why.clone(),
         }
     }
 }

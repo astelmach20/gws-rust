@@ -167,7 +167,7 @@ Signs in with the OAuth authorization-code flow: PKCE (S256), a random `state` t
 
 | Flag | Effect |
 |---|---|
-| `-s, --services drive,gmail` | Limit the request to these services (other services' scopes come from their Discovery documents). An unknown service name is an error, and `cloud-platform` is never included (it belongs to no single service); pass it with `--scopes` if you need it |
+| `-s, --services drive,gmail` | Limit the request to these services (other services' scopes come from their Discovery documents; `events` and `workflow` get the scopes their helpers use: Chat, Meet and Drive read scopes for `events`, plus Pub/Sub with `--write`). An unknown service name is an error, and `cloud-platform` is never included (it belongs to no single service); pass it with `--scopes` if you need it |
 | `--write` | Read-write scopes for the core services |
 | `--full` | Read-write core scopes plus `gmail.settings.basic`, Pub/Sub and `cloud-platform` |
 | `--scopes a,b` | Exact scopes; short names such as `gmail.modify` expand to `https://www.googleapis.com/auth/gmail.modify` |
@@ -269,7 +269,7 @@ gwsr auth export --unmasked --output ci-credentials.json
 
 `gwsr` is machine-readable by default, whether or not stdout is a terminal.
 
-- **stdout carries only results.** JSON by default: pretty on a terminal, compact when piped. Paginated output and streams (`--page-all`, `--page-items`, `gmail +watch`, `events +subscribe`, `gwsr batch`) are NDJSON, one object per line. Empty and `204` responses print `{"status":"success","httpStatus":<status>}`, for example `{"status":"success","httpStatus":204}`; with `--page-all`/`--page-items`, an empty later page just ends the stream (with a warning on stderr). Text bodies are wrapped in a JSON object.
+- **stdout carries only results.** JSON by default: pretty on a terminal, compact when piped. Paginated output and streams (`--page-all`, `--page-items`, `gmail +watch`, `events +subscribe`, `gwsr batch`) are NDJSON, one object per line. Empty and `204` responses print `{"status":"success","httpStatus":<status>}`, for example `{"status":"success","httpStatus":204}`; with `--page-all`/`--page-items`, an empty later page just ends the stream (with a warning on stderr), while a later page that is not JSON (an HTML proxy page, say) fails the run (exit `5`) and names the `pageToken` to resume from. Text bodies are wrapped in a JSON object.
 - **stderr carries everything else:** logs, warnings, progress and prompts.
 - **Human formats are opt-in:** `--format table|yaml|csv` (or `GWSR_FORMAT`, or `format` in `config.toml`).
 - The only non-JSON stdout is `--help`, `gwsr completions`, `--version`, and raw payloads you ask for explicitly (`-o -`, or `--output -` on helpers).

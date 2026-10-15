@@ -450,6 +450,12 @@ pub(crate) async fn execute_to(
     };
     let request_url = build_url(doc, method, &params, target, &options.endpoints)?;
     let http = http_method(method)?;
+    // Refuse --wait on an API that cannot be polled before anything is sent:
+    // finding out after the operation started would leave it running behind
+    // an error.
+    if options.wait.is_some() && operation::find_operations_get(doc).is_none() {
+        return Err(operation::no_operations_get(doc));
+    }
 
     if options.dry_run {
         // Show the query exactly as send_upload will send it.
@@ -613,6 +619,15 @@ pub(crate) async fn execute_to(
         let is_json =
             content_type.contains("application/json") || content_type.contains("text/json");
         if !is_json && !content_type.is_empty() {
+            if pages > 0 {
+                return Err(non_json_page(
+                    method_id,
+                    pages,
+                    &content_type,
+                    &query,
+                    &body,
+                ));
+            }
             if let Some(summary) = download::deliver_non_json(
                 sent.response,
                 &content_type,
@@ -639,6 +654,9 @@ pub(crate) async fn execute_to(
                     "{method_id} returned invalid JSON ({e}); first bytes: {}",
                     String::from_utf8_lossy(&raw[..raw.len().min(200)])
                 )));
+            }
+            Err(_) if pages > 0 => {
+                return Err(non_json_page(method_id, pages, "(none)", &query, &body));
             }
             Err(_) => {
                 // No content type and not JSON: save/stream it when asked,
@@ -825,6 +843,35 @@ pub(crate) async fn execute_to(
     }
 
     Ok(out.finish())
+}
+
+/// A later page of a `--page-all` run that is not JSON (an HTML proxy or
+/// captive-portal page served with 200, say) is not a list page. Ending the
+/// stream there would report a truncated listing as complete, so it is an
+/// error that names the page token to resume from.
+fn non_json_page(
+    method_id: &str,
+    pages_done: u32,
+    content_type: &str,
+    query: &[(String, String)],
+    body: &Option<Value>,
+) -> GwsError {
+    let token = query
+        .iter()
+        .find(|(k, _)| k == "pageToken")
+        .map(|(_, v)| v.as_str())
+        .or_else(|| {
+            body.as_ref()
+                .and_then(|b| b.get("pageToken"))
+                .and_then(Value::as_str)
+        })
+        .unwrap_or("(unknown)");
+    GwsError::other(anyhow::anyhow!(
+        "{method_id} returned a response that is not JSON (content type {content_type}) for page {} \
+         of --page-all; the {pages_done} page(s) already printed are incomplete. Resume with \
+         pageToken {token}",
+        pages_done + 1
+    ))
 }
 
 /// Report an empty success response (204, or no body). The first response

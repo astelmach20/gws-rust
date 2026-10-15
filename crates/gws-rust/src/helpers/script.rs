@@ -459,7 +459,28 @@ async fn pull(api: &Api, script_id: &str, dir: &Path, overwrite: bool) -> Result
     for f in files {
         let name = f.get("name").and_then(Value::as_str).unwrap_or("");
         let file_type = f.get("type").and_then(Value::as_str).unwrap_or("");
-        let source = f.get("source").and_then(Value::as_str).unwrap_or("");
+        // Proto3 JSON omits empty strings, so a missing `source` is an empty
+        // file. Any other non-string value is a response we don't
+        // understand: writing it as empty would let the next +push (which
+        // replaces the whole project) wipe the file.
+        let source = match f.get("source") {
+            None => "",
+            Some(Value::String(s)) => s.as_str(),
+            Some(other) => {
+                return Err(GwsError::Validation(format!(
+                    "Apps Script file '{name}' has a non-string source ({}); refusing to pull \
+                     (nothing was written)",
+                    match other {
+                        Value::Null => "null",
+                        Value::Bool(_) => "boolean",
+                        Value::Number(_) => "number",
+                        Value::Array(_) => "array",
+                        Value::Object(_) => "object",
+                        Value::String(_) => "string",
+                    }
+                )));
+            }
+        };
         let relative = local_path_for(name, file_type)?;
         claim_case_insensitively(&mut claimed, &relative)?;
         let path = dir.join(relative);
@@ -916,6 +937,58 @@ mod tests {
             .collect();
         names.sort();
         assert_eq!(names, ["appsscript", "config.dev", "config.prod"]);
+    }
+
+    /// A `source` that is present but not a string is a response we do not
+    /// understand. Writing it as an empty file would let the next `+push`
+    /// (which replaces the whole project) wipe that file, so refuse before
+    /// writing anything and name the file.
+    #[tokio::test]
+    async fn pull_refuses_non_string_source() {
+        for bad in [json!(null), json!(42), json!({"text": "x"}), json!(["x"])] {
+            let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .and(path("/v1/projects/S_1/content"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({"files": [
+                    {"name": "appsscript", "type": "JSON", "source": "{}"},
+                    {"name": "Code", "type": "SERVER_JS", "source": bad}
+                ]})))
+                .mount(&server)
+                .await;
+            let api = api(&server.uri(), "");
+            let dir = tempdir().unwrap();
+            let err = pull(&api, "S_1", dir.path(), true).await.unwrap_err();
+            assert!(matches!(err, GwsError::Validation(_)), "{bad}: {err:?}");
+            assert!(err.to_string().contains("'Code'"), "{err}");
+            assert_eq!(
+                fs::read_dir(dir.path()).unwrap().count(),
+                0,
+                "nothing written for {bad}"
+            );
+        }
+    }
+
+    /// Proto3 JSON omits empty strings, so an empty project file arrives
+    /// without `source`. It is pulled as an empty file and pushes back as
+    /// the same empty file.
+    #[tokio::test]
+    async fn pull_writes_omitted_source_as_empty_file() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/projects/S_1/content"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"files": [
+                {"name": "appsscript", "type": "JSON", "source": "{}"},
+                {"name": "Empty", "type": "SERVER_JS"}
+            ]})))
+            .mount(&server)
+            .await;
+        let api = api(&server.uri(), "");
+        let dir = tempdir().unwrap();
+        pull(&api, "S_1", dir.path(), true).await.unwrap();
+        assert_eq!(fs::read_to_string(dir.path().join("Empty.gs")).unwrap(), "");
+        let pushed = collect_files(dir.path()).unwrap();
+        let empty = pushed.iter().find(|f| f["name"] == "Empty").unwrap();
+        assert_eq!(empty["source"], "");
     }
 
     #[tokio::test]
