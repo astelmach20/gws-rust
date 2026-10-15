@@ -340,13 +340,15 @@ impl Api {
             return Ok(Value::Null);
         }
         let resp = self.execute(&req).await?;
+        // Keep the error class: a dropped connection or an idle timeout while
+        // reading the body is a network error (exit 10), not an internal one.
         let raw = crate::transport::read_body(resp, self.idle_timeout())
             .await
             .map_err(|e| {
-                other_err(anyhow::anyhow!(
-                    "Failed to read response from {}: {e}",
-                    redact_url(&req.url)
-                ))
+                crate::transport::errors::with_context(
+                    e,
+                    &format!("Failed to read response from {}", redact_url(&req.url)),
+                )
             })?;
         if raw.iter().all(u8::is_ascii_whitespace) {
             return Ok(Value::Null);
@@ -901,6 +903,34 @@ mod tests {
         let api = api(&server.uri(), "");
         let v = api.send(ApiRequest::delete(api.url("x"))).await.unwrap();
         assert!(v.is_null());
+    }
+
+    /// A connection that drops mid-body (fewer bytes than `Content-Length`)
+    /// is a network failure (exit 10), as it is for generated methods, not
+    /// an internal error (exit 5).
+    #[tokio::test]
+    async fn send_truncated_body_is_a_network_error() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 4096];
+            let n = sock.read(&mut buf).await.unwrap();
+            assert!(n > 0);
+            sock.write_all(
+                b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n\
+                  content-length: 100\r\n\r\n{\"ok\":",
+            )
+            .await
+            .unwrap();
+            sock.shutdown().await.unwrap();
+        });
+        let api = api(&format!("http://{addr}"), "");
+        let err = api.send(ApiRequest::get(api.url("x"))).await.unwrap_err();
+        assert!(matches!(err, GwsError::Network(_)), "{err:?}");
+        assert_eq!(err.exit_code(), 10, "{err}");
+        assert!(err.to_string().contains("/x"), "{err}");
     }
 
     #[tokio::test]
