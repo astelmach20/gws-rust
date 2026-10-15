@@ -56,6 +56,8 @@ pub(super) async fn search(
     let mut page_token = params.page_token.clone();
     let mut result_size_estimate = None;
     let mut next_page_token = None;
+    // An empty token ends the listing; a repeated one would list forever.
+    let mut tokens = crate::helpers::pagination::PageTokens::new();
 
     loop {
         // Saturating: more than u32::MAX collected IDs means none remain.
@@ -87,11 +89,7 @@ pub(super) async fn search(
                 ids.push(id.to_string());
             }
         }
-        let token = page
-            .get("nextPageToken")
-            .and_then(Value::as_str)
-            .map(str::to_string);
-        match token {
+        match tokens.next(&page, "gmail messages.list")? {
             // Saturating, as above.
             Some(t) if u32::try_from(ids.len()).unwrap_or(u32::MAX) >= params.max => {
                 next_page_token = Some(t);
@@ -318,6 +316,72 @@ mod tests {
         assert_eq!(results.next_page_token.as_deref(), Some("more"));
         let out = search_output(&params, &results);
         assert_eq!(out["nextPageToken"], "more");
+    }
+
+    /// An empty `nextPageToken` is the last page: following it would list
+    /// the first page again and return its messages twice.
+    #[tokio::test]
+    async fn search_stops_on_an_empty_page_token() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/gmail/v1/users/me/messages"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "messages": [{"id": "m1"}],
+                "nextPageToken": ""
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        mount_messages(&server).await;
+        let params = SearchParams {
+            query: None,
+            max: 5,
+            page_token: None,
+            include_spam_trash: false,
+        };
+        let results = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            search(&mock_api(&server), &params),
+        )
+        .await
+        .expect("an empty nextPageToken must end the search")
+        .unwrap();
+        let ids: Vec<_> = results
+            .messages
+            .iter()
+            .map(|m| m["id"].as_str().unwrap())
+            .collect();
+        assert_eq!(ids, vec!["m1"]);
+        assert!(results.next_page_token.is_none());
+    }
+
+    /// A token the API hands back again (here on pages with no messages,
+    /// so `--max` is never reached) is an error, not an endless loop.
+    #[tokio::test]
+    async fn search_fails_on_a_repeated_page_token() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/gmail/v1/users/me/messages"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "resultSizeEstimate": 0,
+                "nextPageToken": "same"
+            })))
+            .mount(&server)
+            .await;
+        let params = SearchParams {
+            query: None,
+            max: 5,
+            page_token: None,
+            include_spam_trash: false,
+        };
+        let err = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            search(&mock_api(&server), &params),
+        )
+        .await
+        .expect("a repeated nextPageToken must end the search")
+        .unwrap_err();
+        assert!(err.to_string().contains("'same' twice"), "{err}");
     }
 
     #[tokio::test]
