@@ -1427,6 +1427,23 @@ async fn resumable_upload_without_progress_gives_up() {
     assert!(puts <= 20, "{puts} PUTs");
 }
 
+/// A session whose chunks keep failing with a retryable status gives up
+/// with that status (exit 6, retryable), not an internal error (exit 5).
+#[tokio::test]
+async fn resumable_upload_exhausted_on_503_is_retryable_not_internal() {
+    let (result, _) = resumable_against(
+        1000,
+        ResponseTemplate::new(503).set_body_json(json!({
+            "error": {"code": 503, "message": "backend unavailable", "status": "UNAVAILABLE"}
+        })),
+    )
+    .await;
+    let err = result.expect("must finish").unwrap_err();
+    assert!(matches!(err, GwsError::Api { code: 503, .. }), "{err:?}");
+    assert_eq!(err.exit_code(), 6, "{err}");
+    assert!(err.to_string().contains("backend unavailable"), "{err}");
+}
+
 #[tokio::test]
 async fn resumable_range_beyond_the_file_is_an_error_not_a_panic() {
     let (result, _) = resumable_against(
