@@ -177,14 +177,26 @@ impl When {
     }
 }
 
+/// The (exclusive) end date of a one-day all-day event on `d`.
+pub(super) fn next_day(d: NaiveDate) -> Result<NaiveDate, GwsError> {
+    d.succ_opt().ok_or_else(|| {
+        GwsError::Validation(format!(
+            "All-day --start {d} is the latest representable date: it has no next day to end on"
+        ))
+    })
+}
+
 /// Validate a start/end pair: same kind (all-day vs timed) and end after start.
 pub(super) fn check_range(start: &When, end: &When, tz: Tz) -> Result<(), GwsError> {
     match (start, end) {
         (When::Date(s), When::Date(e)) => {
             if e <= s {
+                // The last representable date has no next day to name.
+                let next = s
+                    .succ_opt()
+                    .map_or_else(|| "the next day".to_string(), |n| n.to_string());
                 return Err(GwsError::Validation(format!(
-                    "All-day --end {e} must be after --start {s} (the end date is exclusive: a one-day event on {s} ends on {})",
-                    *s + Duration::days(1)
+                    "All-day --end {e} must be after --start {s} (the end date is exclusive: a one-day event on {s} ends on {next})"
                 )));
             }
         }
