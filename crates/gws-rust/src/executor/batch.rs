@@ -472,6 +472,85 @@ fn in_call_order(
         .collect()
 }
 
+/// Send one group of calls as a batch request and return its parts in
+/// call order.
+async fn send_group(
+    transport: &Transport,
+    batch_url: &str,
+    chunk: &[BatchCall<'_>],
+    options: &ExecOptions,
+    auth: &crate::transport::AuthMethod,
+) -> Result<Vec<PartResponse>, GwsError> {
+    let boundary = format!("gwsr_batch_{:016x}", rand::random::<u64>());
+    let (content_type, body) = build_batch_body(chunk, &boundary)?;
+    let all_idempotent = chunk
+        .iter()
+        .all(|c| matches!(c.http, Method::GET | Method::PUT | Method::DELETE));
+    let idem = if all_idempotent {
+        Idempotency::Idempotent
+    } else {
+        Idempotency::NonIdempotent
+    };
+    let sent = transport
+        .send(Method::POST, batch_url, idem, |rb| {
+            rb.header(reqwest::header::CONTENT_TYPE, content_type.as_str())
+                .body(body.clone())
+        })
+        .await?;
+    let status = sent.response.status();
+    let note = sent.retry_note();
+    let resp_type = sent
+        .response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        // A missing or non-ASCII Content-Type is "unknown"; the multipart
+        // parser below then reports the body as malformed.
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+    let raw = read_body(sent.response, options.retry.response_timeout).await?;
+    let text = String::from_utf8_lossy(&raw);
+    if !status.is_success() {
+        return Err(error_from_response(status, &text, auth, note.as_deref()));
+    }
+    let parts = parse_batch_response(&resp_type, &text)?;
+    if parts.len() != chunk.len() {
+        return Err(GwsError::other(anyhow::anyhow!(
+            "batch response has {} parts for {} calls",
+            parts.len(),
+            chunk.len()
+        )));
+    }
+    in_call_order(chunk, parts)
+}
+
+/// The error for a batch that stopped early: `err`, prefixed with the ids
+/// of the calls that got no result (and `why`) and of those never sent, so
+/// the caller knows what happened to every call. Results already printed
+/// stay on stdout.
+fn batch_stopped(
+    err: GwsError,
+    no_result: &[&str],
+    why: &str,
+    not_sent: &[BatchCall<'_>],
+) -> GwsError {
+    let mut what = Vec::new();
+    if !no_result.is_empty() {
+        what.push(format!(
+            "no result for call(s) {} ({why})",
+            no_result.join(", ")
+        ));
+    }
+    if !not_sent.is_empty() {
+        let ids: Vec<&str> = not_sent.iter().map(|c| c.id.as_str()).collect();
+        what.push(format!("call(s) {} not sent", ids.join(", ")));
+    }
+    if what.is_empty() {
+        return err;
+    }
+    crate::helpers::modelarmor::prefix_message(err, &format!("Batch stopped; {}", what.join("; ")))
+}
+
 /// Run parsed `calls`. With `credentials` `None`, the calls' scopes are
 /// resolved only after the confirmation gate (and never for a dry run).
 pub(crate) async fn run_batch(
@@ -560,59 +639,56 @@ pub(crate) async fn run_batch(
     )?;
     let auth = credentials.auth_method();
     let mut failures = 0usize;
-    for chunk in calls.chunks(MAX_BATCH) {
-        let boundary = format!("gwsr_batch_{:016x}", rand::random::<u64>());
-        let (content_type, body) = build_batch_body(chunk, &boundary)?;
-        let all_idempotent = chunk
-            .iter()
-            .all(|c| matches!(c.http, Method::GET | Method::PUT | Method::DELETE));
-        let idem = if all_idempotent {
-            Idempotency::Idempotent
-        } else {
-            Idempotency::NonIdempotent
+    for (group, chunk) in calls.chunks(MAX_BATCH).enumerate() {
+        let not_sent = &calls[(group * MAX_BATCH + chunk.len()).min(calls.len())..];
+        let parts = match send_group(&transport, &batch_url, chunk, options, &auth).await {
+            Ok(parts) => parts,
+            Err(e) => {
+                let ids: Vec<&str> = chunk.iter().map(|c| c.id.as_str()).collect();
+                return Err(batch_stopped(
+                    e,
+                    &ids,
+                    "their batch request failed, so they may or may not have been applied",
+                    not_sent,
+                ));
+            }
         };
-        let sent = transport
-            .send(Method::POST, &batch_url, idem, |rb| {
-                rb.header(reqwest::header::CONTENT_TYPE, content_type.as_str())
-                    .body(body.clone())
-            })
-            .await?;
-        let status = sent.response.status();
-        let note = sent.retry_note();
-        let resp_type = sent
-            .response
-            .headers()
-            .get(reqwest::header::CONTENT_TYPE)
-            // A missing or non-ASCII Content-Type is "unknown"; the multipart
-            // parser below then reports the body as malformed.
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("")
-            .to_string();
-        let raw = read_body(sent.response, options.retry.response_timeout).await?;
-        let text = String::from_utf8_lossy(&raw);
-        if !status.is_success() {
-            return Err(error_from_response(status, &text, &auth, note.as_deref()));
-        }
-        let parts = parse_batch_response(&resp_type, &text)?;
-        if parts.len() != chunk.len() {
-            return Err(GwsError::other(anyhow::anyhow!(
-                "batch response has {} parts for {} calls",
-                parts.len(),
-                chunk.len()
-            )));
-        }
-        for (call, part) in chunk.iter().zip(in_call_order(chunk, parts)?) {
+        // Calls whose result Model Armor withheld: sent and answered.
+        let mut withheld: Vec<&str> = Vec::new();
+        let mut first_error: Option<GwsError> = None;
+        for (index, (call, part)) in chunk.iter().zip(parts).enumerate() {
             if !(200..300).contains(&part.status) {
                 failures += 1;
             }
-            let body = crate::helpers::modelarmor::require_pass(
-                crate::helpers::modelarmor::sanitize_value(sanitize, part.body).await?,
-            )?;
+            let body = match crate::helpers::modelarmor::sanitize_value(sanitize, part.body).await {
+                Ok(crate::helpers::modelarmor::Sanitized::Pass(body)) => body,
+                Ok(crate::helpers::modelarmor::Sanitized::Blocked(result)) => {
+                    withheld.push(&call.id);
+                    first_error
+                        .get_or_insert_with(|| crate::helpers::modelarmor::blocked_error(&result));
+                    continue;
+                }
+                Err(e) => {
+                    // Screening itself failed (block mode fails closed): the
+                    // rest of this group cannot be screened either.
+                    withheld.extend(chunk[index..].iter().map(|c| c.id.as_str()));
+                    first_error.get_or_insert(e);
+                    break;
+                }
+            };
             emitter.page(
                 &json!({"id": call.id, "status": part.status, "body": body}),
                 &format,
                 &mut pages,
             )?;
+        }
+        if let Some(err) = first_error {
+            return Err(batch_stopped(
+                err,
+                &withheld,
+                "sent and answered, but the result was withheld",
+                not_sent,
+            ));
         }
     }
     if failures > 0 {
