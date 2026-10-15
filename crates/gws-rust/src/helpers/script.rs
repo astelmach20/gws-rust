@@ -492,9 +492,23 @@ async fn pull(api: &Api, script_id: &str, dir: &Path, overwrite: bool) -> Result
         }
         planned.push((path, source));
     }
-    let mut written = Vec::new();
+    let total = planned.len();
+    let mut written: Vec<String> = Vec::new();
     for (path, source) in planned {
-        crate::output_file::write_atomic(&path, source.as_bytes(), overwrite).await?;
+        if let Err(e) = crate::output_file::write_atomic(&path, source.as_bytes(), overwrite).await
+        {
+            // The files before this one are already on disk: say which.
+            let note = if written.is_empty() {
+                format!("Wrote 0 of {total} files")
+            } else {
+                format!(
+                    "Wrote {} of {total} files before failing ({})",
+                    written.len(),
+                    written.join(", ")
+                )
+            };
+            return Err(crate::helpers::modelarmor::prefix_message(e, &note));
+        }
         written.push(path.display().to_string());
     }
     Ok(json!({ "scriptId": script_id, "files": written }))
@@ -873,6 +887,34 @@ mod tests {
         );
         assert!(pull(&api, "S_1", dir.path(), false).await.is_err());
         pull(&api, "S_1", dir.path(), true).await.unwrap();
+    }
+
+    /// A write that fails part-way leaves the files before it on disk; the
+    /// error must list them so the caller knows the directory changed.
+    #[tokio::test]
+    async fn pull_failure_part_way_lists_the_files_already_written() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/projects/S_1/content"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"files": [
+                {"name": "appsscript", "type": "JSON", "source": "{}"},
+                {"name": "lib/Code", "type": "SERVER_JS", "source": "function a(){}"}
+            ]})))
+            .mount(&server)
+            .await;
+        let api = api(&server.uri(), "");
+        let dir = tempdir().unwrap();
+        // A regular file where the `lib` directory must go: the second
+        // write fails after the first succeeded.
+        fs::write(dir.path().join("lib"), "not a directory").unwrap();
+        let err = pull(&api, "S_1", dir.path(), false).await.unwrap_err();
+        assert!(dir.path().join("appsscript.json").exists());
+        let msg = err.to_string();
+        assert!(
+            msg.contains(&dir.path().join("appsscript.json").display().to_string()),
+            "the error does not list the file already written: {msg}"
+        );
+        assert!(msg.contains("1 of 2"), "{msg}");
     }
 
     /// `Code` and `code` (or `lib/a` and `Lib/b`) are distinct in the
