@@ -425,21 +425,24 @@ fn escape_key_segment(key: &str) -> Cow<'_, str> {
 
 /// Recursively flatten a JSON object into `(dot.notation.key, value)` pairs.
 /// Dots and backslashes inside a key are escaped (see [`escape_key_segment`]),
-/// so every flattened name maps to exactly one value.
+/// so every flattened name maps to exactly one value. `prefix` is `None` at
+/// the top level: an empty key is still a path segment (`{"": {"a": 1}}` is
+/// `.a`, not `a`).
 fn flatten_object<'a>(
     obj: &'a Map<String, Value>,
-    prefix: &str,
+    prefix: Option<&str>,
     out: &mut Vec<(String, &'a Value)>,
 ) {
     for (key, val) in obj {
         let segment = escape_key_segment(key);
-        let full_key = if prefix.is_empty() {
-            segment.into_owned()
-        } else {
-            format!("{prefix}.{segment}")
+        let full_key = match prefix {
+            None => segment.into_owned(),
+            Some(prefix) => format!("{prefix}.{segment}"),
         };
         match val {
-            Value::Object(nested) if !nested.is_empty() => flatten_object(nested, &full_key, out),
+            Value::Object(nested) if !nested.is_empty() => {
+                flatten_object(nested, Some(&full_key), out);
+            }
             _ => out.push((full_key, val)),
         }
     }
@@ -447,7 +450,7 @@ fn flatten_object<'a>(
 
 fn flatten(obj: &Map<String, Value>) -> Vec<(String, &Value)> {
     let mut out = Vec::new();
-    flatten_object(obj, "", &mut out);
+    flatten_object(obj, None, &mut out);
     out
 }
 
@@ -1154,6 +1157,14 @@ mod tests {
         assert!(out.contains("literal"), "{out}");
         assert!(out.contains("nested"), "{out}");
         assert_eq!(out, "a.b,a\\.b\nnested,literal");
+    }
+
+    #[test]
+    fn csv_empty_key_does_not_collide_with_its_child() {
+        // `{"": {"a": 1}}` used to flatten to `a`, colliding with `"a": 2`,
+        // and one of the two values was silently dropped.
+        let out = fmt(&json!([{"": {"a": 1}, "a": 2}]), OutputFormat::Csv);
+        assert_eq!(out, ".a,a\n1,2");
     }
 
     #[test]
