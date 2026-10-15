@@ -615,7 +615,7 @@ pub(crate) fn safe_filename(raw: &str, fallback: &str) -> String {
             }
         })
         .collect();
-    let cleaned = avoid_windows_device_name(trim_name(cleaned.trim_start_matches('.')));
+    let cleaned = avoid_windows_device_name(trim_name(&cleaned));
     let truncated = truncate_keeping_extension(&cleaned);
     if truncated.is_empty() {
         fallback.to_string()
@@ -656,10 +656,12 @@ fn truncate_keeping_extension(name: &str) -> String {
     format!("{stem_cut}{ext}")
 }
 
-/// Trim surrounding whitespace, and the trailing dots and spaces Windows
-/// silently drops (so `a.` would collide with `a`, and `CON.` is `CON`).
+/// Trim dots and whitespace from both ends: a leading dot makes a hidden
+/// file (or `.`/`..`), and Windows silently drops trailing dots and spaces
+/// (so `a.` would collide with `a`, and `CON.` is `CON`). Both are trimmed
+/// in one pass, so `" .bashrc"` or `"a. \u{a0}"` cannot leave a dot exposed.
 fn trim_name(name: &str) -> &str {
-    name.trim().trim_end_matches(['.', ' ']).trim()
+    name.trim_matches(|c: char| c == '.' || c.is_whitespace())
 }
 
 /// Whether `component` names a Windows device (`CON`, `PRN`, `AUX`, `NUL`,
@@ -1162,6 +1164,17 @@ mod tests {
         assert_eq!(safe_filename(".bashrc", "x"), "bashrc");
         assert_eq!(safe_filename("a\nb:c", "x"), "a_b_c");
         assert_eq!(safe_filename("Report Q1.pdf", "x"), "Report Q1.pdf");
+    }
+
+    /// Dots and whitespace interleaved at either end must not leave a hidden
+    /// name (`.bashrc`) or a trailing dot that Windows drops.
+    #[test]
+    fn safe_filename_trims_interleaved_dots_and_whitespace() {
+        assert_eq!(safe_filename(" .bashrc", "x"), "bashrc");
+        assert_eq!(safe_filename("\u{a0}.x", "x"), "x");
+        assert_eq!(safe_filename(". .bashrc", "x"), "bashrc");
+        assert_eq!(safe_filename("report.\u{a0}.", "x"), "report");
+        assert_eq!(safe_filename(" .CON", "x"), "_CON");
     }
 
     #[test]
