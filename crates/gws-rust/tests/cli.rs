@@ -2495,6 +2495,60 @@ async fn page_items_keep_the_sanitization_annotation() {
     }
 }
 
+// ── --columns in item streams ───────────────────────────────────────
+
+/// APIs omit unset fields: with `--page-items`, a `--columns` field missing
+/// from the first item (a Google Doc has no `size`) is an empty cell, not an
+/// error that prints nothing. A column no item has still fails, after the
+/// rows.
+#[tokio::test(flavor = "multi_thread")]
+async fn page_items_columns_missing_from_the_first_item_are_empty_cells() {
+    use wiremock::matchers::any;
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    Mock::given(any())
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({"files": [{"name": "doc"}, {"name": "f", "size": "3"}]})),
+        )
+        .mount(&server)
+        .await;
+    let env = Env::new();
+    std::fs::create_dir_all(env.cache_dir().join("discovery")).unwrap();
+    env.seed_doc(&json!({
+        "name": "drive",
+        "version": "v3",
+        "title": "Google Drive API",
+        "rootUrl": "https://www.googleapis.com/",
+        "servicePath": "drive/v3/",
+        "resources": {"files": {"methods": {"list": {
+            "id": "drive.files.list",
+            "httpMethod": "GET",
+            "path": "files",
+            "parameters": {"pageToken": {"type": "string", "location": "query"}},
+            "scopes": ["https://www.googleapis.com/auth/drive.readonly"]
+        }}}}
+    }));
+    let run = |columns: &str| {
+        env.cmd()
+            .env("GWSR_TOKEN", "test-token")
+            .env("GWSR_API_BASE_URL", server.uri())
+            .args(["drive", "files", "list", "--page-items", "--format", "csv"])
+            .args(["--columns", columns])
+            .output()
+            .unwrap()
+    };
+    let out = run("name,size");
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert_eq!(stdout_of(&out), "name,size\ndoc,\nf,3\n");
+
+    let out = run("name,nope");
+    assert_eq!(out.status.code(), Some(3), "{}", stderr_of(&out));
+    assert_eq!(stdout_of(&out), "name,nope\ndoc,\nf,\n");
+    assert!(stderr_of(&out).contains("nope"), "{}", stderr_of(&out));
+}
+
 /// `GWSR_RESTRICT_PATHS=cwd` confines every file flag, including the ones of
 /// `dev man` and `auth export`, which used to write anywhere.
 #[test]
