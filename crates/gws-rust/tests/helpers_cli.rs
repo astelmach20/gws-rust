@@ -1264,6 +1264,85 @@ async fn dot_segment_path_parameters_are_rejected_before_sending() {
     assert!(sent.is_empty(), "requests reached the server: {sent:?}");
 }
 
+// ── Account time zone lookups ───────────────────────────────────────────
+
+/// `+insert`/`+update` read the account time zone only for a time without an
+/// offset. Times with offsets, dates and field-only updates never request it,
+/// so a failing lookup (here a missing-scope 403) cannot affect them.
+#[tokio::test(flavor = "multi_thread")]
+async fn calendar_writes_without_local_times_skip_the_account_time_zone() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/calendar/v3/users/me/settings/timezone"))
+        .respond_with(ResponseTemplate::new(403).set_body_json(json!({"error": {
+            "code": 403,
+            "message": "Request had insufficient authentication scopes.",
+            "errors": [{"reason": "insufficientPermissions"}],
+        }})))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/calendar/v3/calendars/primary/events"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id": "E1"})))
+        .mount(&server)
+        .await;
+    Mock::given(method("PATCH"))
+        .and(path("/calendar/v3/calendars/primary/events/E1"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id": "E1"})))
+        .mount(&server)
+        .await;
+
+    let dir = setup();
+    let cases: [&[&str]; 4] = [
+        &[
+            "+insert",
+            "--summary",
+            "S",
+            "--start",
+            "2026-06-17T09:00:00Z",
+            "--end",
+            "2026-06-17T10:00:00Z",
+        ],
+        &[
+            "+insert",
+            "--summary",
+            "S",
+            "--start",
+            "2026-06-17T09:00:00-07:00",
+            "--duration",
+            "30m",
+        ],
+        &["+insert", "--summary", "S", "--start", "2026-06-17"],
+        &["+update", "--event-id", "E1", "--summary", "New", "--yes"],
+    ];
+    for args in cases {
+        let out = gwsr(dir.path())
+            .env("GWSR_TOKEN", "test-token")
+            .env("GWSR_API_BASE_URL", server.uri())
+            .arg("calendar")
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{args:?}: {out:?}");
+        assert_eq!(stdout_json(&out)["id"], "E1", "{args:?}");
+    }
+    let lookups: Vec<String> = server
+        .received_requests()
+        .await
+        .unwrap()
+        .iter()
+        .filter(|r| r.url.path().ends_with("/settings/timezone"))
+        .map(|r| r.url.to_string())
+        .collect();
+    assert!(
+        lookups.is_empty(),
+        "the account time zone was fetched though no time needed it: {lookups:?}"
+    );
+}
+
 // ── GWSR_API_BASE_URL in Gmail helpers ──────────────────────────────────
 
 /// Gmail helpers must route to the GWSR_API_BASE_URL override like generated
