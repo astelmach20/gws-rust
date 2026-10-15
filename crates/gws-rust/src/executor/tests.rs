@@ -1393,6 +1393,33 @@ async fn resumable_upload_exhausted_on_503_is_retryable_not_internal() {
     assert!(err.to_string().contains("backend unavailable"), "{err}");
 }
 
+/// An expired upload session (404 or 410 on a chunk) is Google refusing
+/// the session URL, not an internal failure: it exits as an API error
+/// (1, not retryable unchanged) and tells the user to rerun the command.
+#[tokio::test]
+async fn resumable_upload_session_expired_is_an_api_error_not_internal() {
+    for status in [404u16, 410] {
+        let (result, puts) = resumable_against(
+            1000,
+            ResponseTemplate::new(status).set_body_json(json!({
+                "error": {"code": status, "message": "upload session not found", "status": "NOT_FOUND"}
+            })),
+        )
+        .await;
+        let err = result.expect("must finish").unwrap_err();
+        assert!(
+            matches!(err, GwsError::Api { code, .. } if code == status),
+            "{status}: {err:?}"
+        );
+        assert_eq!(err.exit_code(), 1, "{status}: {err}");
+        assert!(!err.is_retryable(), "{status}: {err}");
+        let msg = err.to_string();
+        assert!(msg.contains("rerun the command"), "{msg}");
+        assert!(msg.contains("upload session not found"), "{msg}");
+        assert_eq!(puts, 1, "{status}: an expired session is not retried");
+    }
+}
+
 #[tokio::test]
 async fn resumable_range_beyond_the_file_is_an_error_not_a_panic() {
     let (result, _) = resumable_against(

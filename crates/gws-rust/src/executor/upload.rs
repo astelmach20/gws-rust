@@ -521,10 +521,14 @@ pub(crate) async fn resumable_upload(
                 }
                 StatusCode::NOT_FOUND | StatusCode::GONE => {
                     progress.finish();
-                    return Err(GwsError::other(anyhow::anyhow!(
+                    // Google refused the session URL: an API error (exit 1;
+                    // retrying the same session cannot succeed), with the
+                    // server's message and the way out.
+                    let context = format!(
                         "resumable upload session expired (HTTP {}); rerun the command to start a new upload",
                         sent.response.status()
-                    )));
+                    );
+                    return Err(transport.error_for(sent, &context).await);
                 }
                 s if gws_rust_core::client::is_retryable_status(s) => ChunkFailure::Status(sent),
                 _ => {
