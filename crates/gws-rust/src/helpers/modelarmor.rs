@@ -455,7 +455,7 @@ fn outgoing_screening_failed(
 }
 
 /// Prefix an error's message with `context`, keeping its variant.
-fn prefix_message(error: GwsError, context: &str) -> GwsError {
+pub(crate) fn prefix_message(error: GwsError, context: &str) -> GwsError {
     let prefixed = |m: String| format!("{context}: {m}");
     match error {
         GwsError::Validation(m) => GwsError::Validation(prefixed(m)),
