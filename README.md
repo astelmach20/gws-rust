@@ -199,7 +199,7 @@ Each profile has its own credentials, token cache and granted scopes under `prof
 ```bash
 gwsr auth login --profile work --write
 gwsr auth use work          # make it the default
-gwsr auth list              # {"active_profile":"work","active_profile_source":"config",...,"profiles":[...]}
+gwsr auth list              # {"active_profile":"work","active_profile_source":"config_file",...,"profiles":[...]}
 gwsr --profile personal gmail +triage
 ```
 
