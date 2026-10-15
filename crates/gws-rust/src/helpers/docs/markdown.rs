@@ -152,7 +152,9 @@ impl Builder {
                 let reopen = self.out.paras.last().is_some_and(|p| {
                     p.end == self.len && matches!(p.kind, ParaKind::Bullet { .. })
                 });
-                if let (true, Some(p)) = (reopen, self.out.paras.pop()) {
+                // Pop only when reopening: any other last paragraph (a
+                // heading inside the item) must be kept.
+                if reopen && let Some(p) = self.out.paras.pop() {
                     // Drop the paragraph's '\n' (one UTF-16 unit).
                     self.out.text.pop();
                     self.len -= 1;
@@ -747,6 +749,24 @@ mod tests {
         // A quote after the item's own text still continues it on a new line.
         let r = render("- a\n\n  > quoted\n").unwrap();
         assert_eq!(r.text, "a\u{b}quoted\n");
+    }
+
+    #[test]
+    fn heading_inside_a_list_item_keeps_its_paragraph() {
+        // The paragraph after the heading used to drop the heading's
+        // paragraph, leaving its text unstyled and outside every paragraph.
+        let r = render("- # h\n\n  more").unwrap();
+        assert_eq!(r.text, "\nh\nmore\n");
+        let heading = Para {
+            start: 1,
+            end: 3,
+            kind: ParaKind::Heading(1),
+        };
+        assert!(r.paras.contains(&heading), "{:?}", r.paras);
+        let ends: Vec<u64> = r.paras.iter().map(|p| p.end).collect();
+        let starts: Vec<u64> = r.paras.iter().map(|p| p.start).collect();
+        assert_eq!(starts, [0, 1, 3], "paragraphs must cover the text");
+        assert_eq!(ends, [1, 3, 8]);
     }
 
     #[test]
