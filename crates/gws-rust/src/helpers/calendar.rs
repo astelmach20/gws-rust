@@ -2010,6 +2010,36 @@ mod tests {
         assert_eq!(plan[0]["query_params"]["sendUpdates"], "none");
     }
 
+    /// A DELETE is retried after a 5xx, but the server may have deleted the
+    /// event before failing. A 410/404 on the retry must not read as "the
+    /// event never existed": the error says the earlier attempt may have
+    /// deleted it.
+    #[tokio::test]
+    async fn delete_retry_not_found_says_an_earlier_attempt_may_have_deleted_it() {
+        let server = MockServer::start().await;
+        Mock::given(method("DELETE"))
+            .and(path("/calendars/primary/events/E1"))
+            .respond_with(ResponseTemplate::new(503))
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("DELETE"))
+            .and(path("/calendars/primary/events/E1"))
+            .respond_with(ResponseTemplate::new(410).set_body_json(
+                json!({"error": {"code": 410, "message": "Resource has been deleted"}}),
+            ))
+            .mount(&server)
+            .await;
+        let api = api(&server.uri(), "");
+        let err = delete(&api, "primary", "E1", "none").await.unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("an earlier attempt may already have deleted it"),
+            "{msg}"
+        );
+        assert_eq!(server.received_requests().await.unwrap().len(), 2);
+    }
+
     #[test]
     fn agenda_window_flags_are_exclusive() {
         let cmd = CalendarHelper.inject_commands(
