@@ -40,10 +40,11 @@ pub(super) fn safe_filename(raw: &str, fallback: &str) -> String {
             c => c,
         })
         .collect();
-    let cleaned = cleaned.trim().trim_start_matches('.');
-    // Windows drops trailing dots and spaces, and opens a device for names
-    // such as `CON.pdf`; see `http::is_windows_device_name`.
-    let cleaned = cleaned.trim_end_matches(['.', ' ']).trim();
+    // A leading dot makes a hidden file; Windows drops trailing dots and
+    // spaces, and opens a device for names such as `CON.pdf` (see
+    // `http::is_windows_device_name`). Dots and whitespace are trimmed in
+    // one pass, so `". .bashrc"` cannot leave `.bashrc` behind.
+    let cleaned = cleaned.trim_matches(|c: char| c == '.' || c.is_whitespace());
     let name = if cleaned.is_empty() {
         fallback.to_string()
     } else if crate::helpers::http::is_windows_device_name(cleaned) {
@@ -261,6 +262,16 @@ mod tests {
         assert_eq!(safe_filename("..", "fallback.bin"), "fallback.bin");
         assert_eq!(safe_filename(".bashrc", "f"), "bashrc");
         assert_eq!(safe_filename("   ", "f.bin"), "f.bin");
+    }
+
+    /// Dots and whitespace interleaved at either end must not leave a hidden
+    /// name (`.bashrc`) or a trailing dot that Windows drops.
+    #[test]
+    fn safe_filename_trims_interleaved_dots_and_whitespace() {
+        assert_eq!(safe_filename(". .bashrc", "f"), "bashrc");
+        assert_eq!(safe_filename("dir/.\u{a0}..profile", "f"), "profile");
+        assert_eq!(safe_filename("report.\u{a0}.", "f"), "report");
+        assert_eq!(safe_filename(". .CON", "f"), "_CON");
     }
 
     #[test]

@@ -260,9 +260,82 @@ pub fn service_scope_prefixes(service: &str) -> Vec<&str> {
         "reseller" => vec!["apps.order"],
         "vault" => vec!["ediscovery"],
         "cloudidentity" => vec!["cloud-identity"],
-        "events" => vec!["chat", "meetings", "drive"],
         "script" => vec!["script"],
         s => vec![s],
+    }
+}
+
+/// Read scopes `events +subscribe` / `events +renew` request for each event
+/// service (Chat, Meet, Drive).
+const EVENTS_READ_SCOPES: &[&str] = &[
+    "https://www.googleapis.com/auth/chat.messages.readonly",
+    "https://www.googleapis.com/auth/chat.messages.reactions.readonly",
+    "https://www.googleapis.com/auth/chat.memberships.readonly",
+    "https://www.googleapis.com/auth/chat.spaces.readonly",
+    "https://www.googleapis.com/auth/meetings.space.readonly",
+    "https://www.googleapis.com/auth/drive.readonly",
+];
+
+/// `events +subscribe` creates Pub/Sub topics and subscriptions.
+const EVENTS_WRITE_SCOPES: &[&str] = &["https://www.googleapis.com/auth/pubsub"];
+
+/// Read scopes the `workflow` helpers request.
+const WORKFLOW_READ_SCOPES: &[&str] = &[
+    "https://www.googleapis.com/auth/calendar.readonly",
+    "https://www.googleapis.com/auth/tasks.readonly",
+    "https://www.googleapis.com/auth/gmail.readonly",
+    "https://www.googleapis.com/auth/drive.readonly",
+];
+
+/// Write scopes the `workflow` helpers request (`+email-to-task`,
+/// `+file-announce`).
+const WORKFLOW_WRITE_SCOPES: &[&str] = &[
+    "https://www.googleapis.com/auth/tasks",
+    "https://www.googleapis.com/auth/chat.messages.create",
+];
+
+/// The fixed `(read, write)` scope lists of a service whose `--services`
+/// scopes cannot be derived from scope-name prefixes.
+///
+/// `events` subscribes to other services' events, so a prefix mapping would
+/// let an unrelated preset row (`drive.readonly`) "cover" it; `workflow` has
+/// no Discovery document. Their scopes are the ones their helpers request.
+fn fixed_service_scopes(
+    service: &str,
+) -> Option<(&'static [&'static str], &'static [&'static str])> {
+    match service {
+        "events" => Some((EVENTS_READ_SCOPES, EVENTS_WRITE_SCOPES)),
+        "workflow" | "wf" => Some((WORKFLOW_READ_SCOPES, WORKFLOW_WRITE_SCOPES)),
+        _ => None,
+    }
+}
+
+/// Whether `service` has a fixed scope list (see [`append_fixed_service_scopes`]);
+/// such services are never looked up in Discovery.
+pub fn has_fixed_scopes(service: &str) -> bool {
+    fixed_service_scopes(service).is_some()
+}
+
+/// Append the fixed scopes of every service in `services` that has them
+/// (read scopes, plus write scopes unless `readonly_only`), skipping scopes
+/// already in `result`.
+pub fn append_fixed_service_scopes(
+    result: &mut Vec<String>,
+    services: &HashSet<String>,
+    readonly_only: bool,
+) {
+    let mut names: Vec<&String> = services.iter().collect();
+    names.sort();
+    for name in names {
+        let Some((read, write)) = fixed_service_scopes(name) else {
+            continue;
+        };
+        let write: &[&str] = if readonly_only { &[] } else { write };
+        for scope in read.iter().chain(write) {
+            if !result.iter().any(|s| s == scope) {
+                result.push((*scope).to_string());
+            }
+        }
     }
 }
 
@@ -302,6 +375,9 @@ pub fn scope_matches_service(scope_url: &str, services: &HashSet<String>) -> boo
     }
     let short = short_name(scope_url);
     services.iter().any(|svc| {
+        if let Some((read, write)) = fixed_service_scopes(svc) {
+            return read.iter().chain(write).any(|s| *s == scope_url);
+        }
         service_scope_prefixes(svc)
             .iter()
             .any(|p| short == *p || short.starts_with(&format!("{p}.")))
@@ -323,11 +399,15 @@ pub fn filter_scopes_by_services(
 }
 
 /// Services in `services` with no matching scope in `scopes`
-/// (`cloud-platform` counts for none of them).
+/// (`cloud-platform` counts for none of them). A service with a fixed scope
+/// list is matched only when all its read scopes are present.
 pub fn find_unmatched_services(scopes: &[String], services: &HashSet<String>) -> HashSet<String> {
     services
         .iter()
         .filter(|svc| {
+            if let Some((read, _)) = fixed_service_scopes(svc) {
+                return !read.iter().all(|r| scopes.iter().any(|s| s == r));
+            }
             let one: HashSet<String> = std::iter::once((*svc).clone()).collect();
             !scopes.iter().any(|s| scope_matches_service(s, &one))
         })
@@ -609,6 +689,20 @@ mod tests {
         let set: HashSet<String> = ["drive", "meet"].iter().map(|x| x.to_string()).collect();
         let missing = find_unmatched_services(&s(&[&a("drive"), PLATFORM_SCOPE]), &set);
         assert_eq!(missing, ["meet".to_string()].into_iter().collect());
+
+        // A Drive preset row does not cover `events`; only its own scopes do.
+        let set: HashSet<String> = ["events".to_string()].into_iter().collect();
+        assert!(!scope_matches_service(&a("drive"), &set));
+        assert!(scope_matches_service(&a("drive.readonly"), &set));
+        assert!(scope_matches_service(&a("pubsub"), &set));
+        assert_eq!(
+            find_unmatched_services(&s(&[&a("drive.readonly"), &a("drive")]), &set),
+            set
+        );
+        let mut all = Vec::new();
+        append_fixed_service_scopes(&mut all, &set, true);
+        assert!(find_unmatched_services(&all, &set).is_empty());
+        assert!(!all.contains(&a("pubsub")), "read-only login: {all:?}");
     }
 
     #[test]
