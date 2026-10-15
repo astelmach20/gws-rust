@@ -216,10 +216,16 @@ impl DiscoveryLoader {
                     err @ (DiscoveryError::InvalidDocument { .. }
                     | DiscoveryError::InsecurePermissions { .. }),
                 ) => {
-                    cache.remove(service, version)?;
+                    // The entry is ignored either way. A failed delete is
+                    // reported like a failed cache write, not fatal: the
+                    // fetch below does not need the entry gone.
+                    let outcome = match cache.remove(service, version) {
+                        Ok(()) => "deleted".to_string(),
+                        Err(e) => format!("could not delete it: {e}"),
+                    };
                     notices.push(DiscoveryNotice::DiscardedCacheEntry {
                         path: cache.entry_path(service, version).display().to_string(),
-                        reason: format!("{err} (deleted; refetching)"),
+                        reason: format!("{err} ({outcome}; refetching)"),
                     });
                 }
                 Err(other) => return Err(other),

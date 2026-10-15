@@ -173,6 +173,32 @@ async fn corrupt_cache_is_deleted_and_refetched() {
     assert!(cache.load("drive", "v3", None).unwrap().is_some());
 }
 
+/// An invalid entry that cannot be deleted (here a directory where the file
+/// should be) is still ignored and the document fetched again, as for an
+/// entry that could not be written: the failed delete is reported, not fatal.
+#[tokio::test]
+async fn undeletable_invalid_cache_entry_is_reported_and_refetched() {
+    let server = MockServer::start().await;
+    mount(&server, PRIMARY, 200, DRIVE, 1).await;
+    let tmp = tempfile::tempdir().unwrap();
+    let cache = DiscoveryCache::new(tmp.path());
+    std::fs::create_dir_all(cache.entry_path("drive", "v3")).unwrap();
+
+    let got = loader(&server, Some(tmp.path()))
+        .load("drive", "v3")
+        .await
+        .unwrap();
+    assert_eq!(got.origin, DocumentOrigin::Network);
+    assert_eq!(got.doc.name, "drive");
+    match got.notices.as_slice() {
+        [
+            DiscoveryNotice::DiscardedCacheEntry { reason, .. },
+            DiscoveryNotice::CacheWriteFailed { .. },
+        ] => assert!(reason.contains("could not delete"), "{reason}"),
+        other => panic!("unexpected notices {other:?}"),
+    }
+}
+
 #[tokio::test]
 async fn tampered_cache_with_foreign_root_url_is_refetched() {
     let server = MockServer::start().await;
