@@ -914,7 +914,8 @@ mod tests {
         tokio::spawn(async move {
             let (mut sock, _) = listener.accept().await.unwrap();
             let mut buf = [0u8; 4096];
-            sock.read(&mut buf).await.unwrap();
+            let n = sock.read(&mut buf).await.unwrap();
+            assert!(n > 0);
             sock.write_all(
                 b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n\
                   content-length: 100\r\n\r\n{\"ok\":",
