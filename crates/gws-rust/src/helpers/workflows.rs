@@ -919,6 +919,24 @@ mod tests {
     use wiremock::matchers::{body_json, method, path, query_param};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
+    #[test]
+    fn login_services_workflow_covers_helper_scopes() {
+        // `gwsr auth login --write -s workflow` must grant every scope used here.
+        let workflow = std::iter::once("workflow".to_string()).collect();
+        let mut granted: Vec<String> = Vec::new();
+        crate::auth::scopes::append_fixed_service_scopes(&mut granted, &workflow, false);
+        for scope in [
+            CALENDAR_READONLY,
+            TASKS_READONLY,
+            TASKS,
+            GMAIL_READONLY,
+            DRIVE_READONLY,
+            CHAT_MESSAGES_CREATE,
+        ] {
+            assert!(granted.iter().any(|g| g == scope), "{scope}");
+        }
+    }
+
     fn bases(server: &MockServer) -> Bases {
         let u = server.uri();
         Bases {
