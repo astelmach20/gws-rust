@@ -450,6 +450,12 @@ pub(crate) async fn execute_to(
     };
     let request_url = build_url(doc, method, &params, target, &options.endpoints)?;
     let http = http_method(method)?;
+    // Refuse --wait on an API that cannot be polled before anything is sent:
+    // finding out after the operation started would leave it running behind
+    // an error.
+    if options.wait.is_some() && operation::find_operations_get(doc).is_none() {
+        return Err(operation::no_operations_get(doc));
+    }
 
     if options.dry_run {
         // Show the query exactly as send_upload will send it.

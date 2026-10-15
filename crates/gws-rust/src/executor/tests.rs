@@ -2113,6 +2113,64 @@ async fn wait_polls_at_the_deadline_when_the_interval_would_pass_it() {
     assert_eq!(lines(&em)[0], json!({"ok": true}));
 }
 
+#[tokio::test]
+async fn wait_poll_failure_names_the_started_operation() {
+    // The POST was accepted and started op4; when polling fails the error
+    // must say so, or a rerun starts the operation a second time.
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/drive/v3/files/f1/download"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({"name": "op4", "done": false})),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/drive/v3/operations/op4"))
+        .respond_with(ResponseTemplate::new(503).set_body_json(json!({
+            "error": {"code": 503, "message": "backend unavailable"}
+        })))
+        .mount(&server)
+        .await;
+    let d = doc(&server.uri());
+    let mut call = Call::new(&d, "download", &server);
+    call.params = json!({"fileId": "f1"});
+    call.options.wait = Some(WaitConfig {
+        timeout: Duration::from_secs(5),
+        initial_interval: Duration::from_millis(1),
+        max_interval: Duration::from_millis(5),
+    });
+    let err = call.run(&Emitter::capturing()).await.unwrap_err();
+    let text = err.to_string();
+    assert!(text.contains("op4"), "{text}");
+    assert!(text.contains("backend unavailable"), "{text}");
+    // Still the API's (retryable) error class.
+    assert!(matches!(err, GwsError::Api { code: 503, .. }), "{err:?}");
+}
+
+#[tokio::test]
+async fn wait_without_operations_get_is_refused_before_sending() {
+    // --wait on an API that cannot be polled must fail before the request
+    // is sent, not after the operation has already been started.
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({"name": "op5", "done": false})),
+        )
+        .expect(0)
+        .mount(&server)
+        .await;
+    let mut d = doc(&server.uri());
+    d.resources.remove("operations");
+    let mut call = Call::new(&d, "download", &server);
+    call.params = json!({"fileId": "f1"});
+    call.options.wait = Some(WaitConfig::default());
+    let err = call.run(&Emitter::capturing()).await.unwrap_err();
+    assert!(matches!(err, GwsError::Validation(_)), "{err:?}");
+    assert!(err.to_string().contains("operations.get"), "{err}");
+}
+
 // ── Batch ───────────────────────────────────────────────────────────────
 
 #[tokio::test]

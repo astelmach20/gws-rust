@@ -157,27 +157,63 @@ fn grpc_to_http(code: u64) -> Option<(u16, &'static str)> {
     })
 }
 
+/// The error for `--wait` on an API without `operations.get`.
+pub(crate) fn no_operations_get(doc: &RestDescription) -> GwsError {
+    GwsError::Validation(format!(
+        "--wait: the {} API has no operations.get method to poll",
+        doc.name
+    ))
+}
+
 /// Poll `op` until done or the timeout elapses; returns the final operation.
+///
+/// The request that returned `op` was already accepted, so every failure
+/// from here on names the operation: the caller can check on it instead of
+/// rerunning the request and starting it a second time.
 pub(crate) async fn wait(
     transport: &Transport,
     doc: &RestDescription,
-    mut op: Value,
+    op: Value,
     cfg: &WaitConfig,
 ) -> Result<Value, GwsError> {
     if is_done(&op) {
         return Ok(op);
     }
-    let get = find_operations_get(doc).ok_or_else(|| {
-        GwsError::Validation(format!(
-            "--wait: the {} API has no operations.get method to poll",
-            doc.name
-        ))
-    })?;
     let name = op
         .get("name")
         .and_then(Value::as_str)
         .ok_or_else(|| GwsError::other(anyhow::anyhow!("operation has no name to poll")))?
         .to_string();
+    poll(transport, doc, op, &name, cfg)
+        .await
+        .map_err(|e| polling_failed(e, &name))
+}
+
+/// Prefix `err` with the operation that was started. The error keeps its
+/// class, and so its exit code.
+fn polling_failed(err: GwsError, name: &str) -> GwsError {
+    let context = format!(
+        "--wait: the request was accepted and started operation {name}, but waiting for it failed \
+         (do not rerun the request; check the operation with the API's operations.get)"
+    );
+    match err {
+        GwsError::Validation(m) => GwsError::Validation(format!("{context}: {m}")),
+        GwsError::Auth(m) => GwsError::Auth(format!("{context}: {m}")),
+        GwsError::Config(m) => GwsError::Config(format!("{context}: {m}")),
+        GwsError::CredentialStore(m) => GwsError::CredentialStore(format!("{context}: {m}")),
+        other => crate::transport::errors::with_context(other, &context),
+    }
+}
+
+async fn poll(
+    transport: &Transport,
+    doc: &RestDescription,
+    mut op: Value,
+    name: &str,
+    cfg: &WaitConfig,
+) -> Result<Value, GwsError> {
+    let get = find_operations_get(doc).ok_or_else(|| no_operations_get(doc))?;
+    let name = name.to_string();
     let param = get
         .parameter_order
         .first()
@@ -204,7 +240,7 @@ pub(crate) async fn wait(
         let remaining = cfg.timeout.saturating_sub(started.elapsed());
         if remaining.is_zero() {
             return Err(GwsError::other(anyhow::anyhow!(
-                "--wait: operation {name} did not finish within {}s; last state: {}",
+                "the operation did not finish within {}s; last state: {}",
                 cfg.timeout.as_secs(),
                 op.get("metadata").cloned().unwrap_or(json!(null))
             )));
