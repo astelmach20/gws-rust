@@ -115,8 +115,12 @@ fn subscribe_cmd() -> Command {
         .arg(
             Arg::new("subscription")
                 .long("subscription")
-                .help("Existing Pub/Sub subscription name (skip setup)")
-                .value_name("NAME"),
+                .help(
+                    "Existing Pub/Sub subscription name (skip setup; conflicts with the setup \
+                     flags --target, --event-types, --project and --cleanup)",
+                )
+                .value_name("NAME")
+                .conflicts_with_all(["target", "event-types", "project", "cleanup"]),
         )
         .arg(
             Arg::new("max-messages")
@@ -171,7 +175,7 @@ fn subscribe_cmd() -> Command {
 EXAMPLES:
   gwsr events +subscribe --target '//chat.googleapis.com/spaces/SPACE' --event-types 'google.workspace.chat.message.v1.created' --project my-project
   gwsr events +subscribe --subscription projects/p/subscriptions/my-sub --once
-  gwsr events +subscribe --subscription projects/p/subscriptions/my-sub --cleanup --output-dir ./events
+  gwsr events +subscribe --target '//chat.googleapis.com/spaces/SPACE' --event-types 'google.workspace.chat.message.v1.created' --project my-project --cleanup --output-dir ./events
 
 TIPS:
   stdout carries one JSON event per line. Transient errors are retried with
@@ -310,6 +314,32 @@ mod tests {
         assert!(scopes_for_event_types(&[]).is_err());
         assert!(scopes_for_event_types(&["custom.event".into()]).is_err());
         assert!(scopes_for_event_types(&["google.workspace.keep.note.v1.created".into()]).is_err());
+    }
+
+    #[test]
+    fn login_services_events_covers_helper_scopes() {
+        // `gwsr auth login -s events` must grant every scope these helpers use.
+        let events: std::collections::HashSet<String> =
+            std::iter::once("events".to_string()).collect();
+        let types: Vec<String> = [
+            "google.workspace.chat.message.v1.created",
+            "google.workspace.chat.reaction.v1.created",
+            "google.workspace.chat.membership.v1.created",
+            "google.workspace.chat.space.v1.updated",
+            "google.workspace.meet.conference.v2.started",
+            "google.workspace.drive.file.v1.updated",
+        ]
+        .iter()
+        .map(|s| (*s).to_string())
+        .collect();
+        let mut used = scopes_for_event_types(&types).unwrap();
+        used.push(PUBSUB_SCOPE);
+        for scope in used {
+            assert!(
+                crate::auth::scopes::scope_matches_service(scope, &events),
+                "{scope}"
+            );
+        }
     }
 
     #[test]

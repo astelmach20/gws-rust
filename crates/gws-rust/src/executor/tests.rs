@@ -590,6 +590,57 @@ async fn page_all_empty_later_page_ends_the_stream_without_a_success_object() {
     }
 }
 
+/// A later page that is not JSON (an HTML proxy or captive-portal page served
+/// with 200, or an unlabelled non-JSON body) is not a list page: it must fail
+/// the run instead of being wrapped as `{"status":"success",...}`, mixed into
+/// the stream and reported as a complete listing with exit 0.
+#[tokio::test]
+async fn page_all_non_json_later_page_is_an_error() {
+    for bad in [
+        ResponseTemplate::new(200)
+            .insert_header("content-type", "text/html; charset=utf-8")
+            .set_body_string("<html><body>Service temporarily unavailable</body></html>"),
+        ResponseTemplate::new(200).set_body_bytes(b"<html>proxy error</html>".to_vec()),
+    ] {
+        for page_items in [false, true] {
+            let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .and(path("/drive/v3/files"))
+                .and(query_param_is_missing("pageToken"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(
+                    json!({"files": [{"id": "1"}, {"id": "2"}], "nextPageToken": "p2"}),
+                ))
+                .mount(&server)
+                .await;
+            Mock::given(method("GET"))
+                .and(path("/drive/v3/files"))
+                .and(query_param("pageToken", "p2"))
+                .respond_with(bad.clone())
+                .mount(&server)
+                .await;
+            let d = doc(&server.uri());
+            let mut call = Call::new(&d, "list", &server);
+            call.pagination.page_all = true;
+            call.pagination.page_delay_ms = 0;
+            if page_items {
+                call.options.page_items = Some(ItemsMode::Auto);
+            }
+            let em = Emitter::capturing();
+            let err = call.run(&em).await.unwrap_err();
+            let msg = err.to_string();
+            assert!(msg.contains("not JSON"), "{msg}");
+            assert!(msg.contains("page 2"), "{msg}");
+            assert!(msg.contains("p2"), "the resume token is named: {msg}");
+            assert!(!matches!(err, GwsError::Validation(_)), "{err:?}");
+            let text = em.captured_text();
+            assert!(
+                !text.contains("\"status\""),
+                "page_items={page_items}: {text}"
+            );
+        }
+    }
+}
+
 #[tokio::test]
 async fn page_limit_truncation_is_marked() {
     let server = MockServer::start().await;
@@ -1376,6 +1427,50 @@ async fn resumable_upload_without_progress_gives_up() {
     assert!(puts <= 20, "{puts} PUTs");
 }
 
+/// A session whose chunks keep failing with a retryable status gives up
+/// with that status (exit 6, retryable), not an internal error (exit 5).
+#[tokio::test]
+async fn resumable_upload_exhausted_on_503_is_retryable_not_internal() {
+    let (result, _) = resumable_against(
+        1000,
+        ResponseTemplate::new(503).set_body_json(json!({
+            "error": {"code": 503, "message": "backend unavailable", "status": "UNAVAILABLE"}
+        })),
+    )
+    .await;
+    let err = result.expect("must finish").unwrap_err();
+    assert!(matches!(err, GwsError::Api { code: 503, .. }), "{err:?}");
+    assert_eq!(err.exit_code(), 6, "{err}");
+    assert!(err.to_string().contains("backend unavailable"), "{err}");
+}
+
+/// An expired upload session (404 or 410 on a chunk) is Google refusing
+/// the session URL, not an internal failure: it exits as an API error
+/// (1, not retryable unchanged) and tells the user to rerun the command.
+#[tokio::test]
+async fn resumable_upload_session_expired_is_an_api_error_not_internal() {
+    for status in [404u16, 410] {
+        let (result, puts) = resumable_against(
+            1000,
+            ResponseTemplate::new(status).set_body_json(json!({
+                "error": {"code": status, "message": "upload session not found", "status": "NOT_FOUND"}
+            })),
+        )
+        .await;
+        let err = result.expect("must finish").unwrap_err();
+        assert!(
+            matches!(err, GwsError::Api { code, .. } if code == status),
+            "{status}: {err:?}"
+        );
+        assert_eq!(err.exit_code(), 1, "{status}: {err}");
+        assert!(!err.is_retryable(), "{status}: {err}");
+        let msg = err.to_string();
+        assert!(msg.contains("rerun the command"), "{msg}");
+        assert!(msg.contains("upload session not found"), "{msg}");
+        assert_eq!(puts, 1, "{status}: an expired session is not retried");
+    }
+}
+
 #[tokio::test]
 async fn resumable_range_beyond_the_file_is_an_error_not_a_panic() {
     let (result, _) = resumable_against(
@@ -2043,6 +2138,64 @@ async fn wait_polls_at_the_deadline_when_the_interval_would_pass_it() {
     let em = Emitter::capturing();
     call.run(&em).await.unwrap();
     assert_eq!(lines(&em)[0], json!({"ok": true}));
+}
+
+#[tokio::test]
+async fn wait_poll_failure_names_the_started_operation() {
+    // The POST was accepted and started op4; when polling fails the error
+    // must say so, or a rerun starts the operation a second time.
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/drive/v3/files/f1/download"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({"name": "op4", "done": false})),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/drive/v3/operations/op4"))
+        .respond_with(ResponseTemplate::new(503).set_body_json(json!({
+            "error": {"code": 503, "message": "backend unavailable"}
+        })))
+        .mount(&server)
+        .await;
+    let d = doc(&server.uri());
+    let mut call = Call::new(&d, "download", &server);
+    call.params = json!({"fileId": "f1"});
+    call.options.wait = Some(WaitConfig {
+        timeout: Duration::from_secs(5),
+        initial_interval: Duration::from_millis(1),
+        max_interval: Duration::from_millis(5),
+    });
+    let err = call.run(&Emitter::capturing()).await.unwrap_err();
+    let text = err.to_string();
+    assert!(text.contains("op4"), "{text}");
+    assert!(text.contains("backend unavailable"), "{text}");
+    // Still the API's (retryable) error class.
+    assert!(matches!(err, GwsError::Api { code: 503, .. }), "{err:?}");
+}
+
+#[tokio::test]
+async fn wait_without_operations_get_is_refused_before_sending() {
+    // --wait on an API that cannot be polled must fail before the request
+    // is sent, not after the operation has already been started.
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({"name": "op5", "done": false})),
+        )
+        .expect(0)
+        .mount(&server)
+        .await;
+    let mut d = doc(&server.uri());
+    d.resources.remove("operations");
+    let mut call = Call::new(&d, "download", &server);
+    call.params = json!({"fileId": "f1"});
+    call.options.wait = Some(WaitConfig::default());
+    let err = call.run(&Emitter::capturing()).await.unwrap_err();
+    assert!(matches!(err, GwsError::Validation(_)), "{err:?}");
+    assert!(err.to_string().contains("operations.get"), "{err}");
 }
 
 // ── Batch ───────────────────────────────────────────────────────────────

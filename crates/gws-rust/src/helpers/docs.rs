@@ -408,24 +408,57 @@ async fn create(api: &Api, title: &str, content: Option<&Content>) -> Result<Val
             })?
             .to_string()
     };
+    let url = format!("https://docs.google.com/document/d/{id}/edit");
     if let Some(content) = content {
-        if content.markdown {
-            let rendered = markdown::render(&content.text)?;
-            api.send(batch_update_request(
-                api,
-                &id,
-                rendered.to_requests(1, false),
-            ))
-            .await?;
+        let written = if content.markdown {
+            match markdown::render(&content.text) {
+                Ok(rendered) => api
+                    .send(batch_update_request(
+                        api,
+                        &id,
+                        rendered.to_requests(1, false),
+                    ))
+                    .await
+                    .map(drop),
+                Err(e) => Err(e),
+            }
         } else {
-            write(api, &id, content).await?;
-        }
+            write(api, &id, content).await.map(drop)
+        };
+        // The document already exists: name it, so the content can be added
+        // with +write instead of a rerun that creates a second document.
+        written.map_err(|e| content_write_failed(e, &id, &url))?;
     }
     Ok(json!({
         "documentId": id,
         "title": title,
-        "url": format!("https://docs.google.com/document/d/{id}/edit"),
+        "url": url,
     }))
+}
+
+/// Prefix an error from writing a new document's content with the document
+/// that `documents.create` already made. The error keeps its class (and so
+/// its exit code).
+fn content_write_failed(err: GwsError, id: &str, url: &str) -> GwsError {
+    let context = format!(
+        "document {id} was created ({url}) but writing its content failed; \
+         add the content with `gwsr docs +write --document-id {id}` rather than \
+         rerunning +create"
+    );
+    match err {
+        GwsError::Validation(m) => GwsError::Validation(format!("{context}: {m}")),
+        GwsError::Auth(m) => GwsError::Auth(format!("{context}: {m}")),
+        GwsError::Config(m) => GwsError::Config(format!("{context}: {m}")),
+        GwsError::CredentialStore(m) => GwsError::CredentialStore(format!("{context}: {m}")),
+        GwsError::Discovery(m) => GwsError::Discovery(format!("{context}: {m}")),
+        GwsError::ConfirmationRequired(m) => {
+            GwsError::ConfirmationRequired(format!("{context}: {m}"))
+        }
+        GwsError::SanitizationBlocked(m) => {
+            GwsError::SanitizationBlocked(format!("{context}: {m}"))
+        }
+        other => crate::transport::errors::with_context(other, &context),
+    }
 }
 
 fn check_find(find: &str) -> Result<(), GwsError> {
@@ -625,6 +658,46 @@ mod tests {
         let plan = api.planned();
         assert_eq!(plan.len(), 2);
         assert_eq!(plan[0]["body"]["title"], "T");
+    }
+
+    #[tokio::test]
+    async fn create_names_the_new_document_when_writing_content_fails() {
+        // documents.create succeeded, so the document exists: the error must
+        // say which one, or a rerun of +create makes a second document.
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/documents"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"documentId": "NEWDOC"})))
+            .expect(2)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/v1/documents/NEWDOC:batchUpdate"))
+            .respond_with(ResponseTemplate::new(400).set_body_json(json!({
+                "error": {"code": 400, "message": "Invalid requests[0]", "status": "INVALID_ARGUMENT"}
+            })))
+            .expect(2)
+            .mount(&server)
+            .await;
+        let api = api(&server.uri(), "");
+        for markdown in [true, false] {
+            let err = create(
+                &api,
+                "T",
+                Some(&Content {
+                    text: "hello".into(),
+                    markdown,
+                }),
+            )
+            .await
+            .unwrap_err();
+            let text = err.to_string();
+            assert!(text.contains("NEWDOC"), "{text}");
+            assert!(text.contains("+write --document-id NEWDOC"), "{text}");
+            assert!(text.contains("Invalid requests[0]"), "{text}");
+            // Still the API's error class and exit code.
+            assert!(matches!(err, GwsError::Api { code: 400, .. }), "{err:?}");
+        }
     }
 
     #[tokio::test]

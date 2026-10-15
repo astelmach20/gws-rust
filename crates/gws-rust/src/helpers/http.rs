@@ -340,13 +340,15 @@ impl Api {
             return Ok(Value::Null);
         }
         let resp = self.execute(&req).await?;
+        // Keep the error class: a dropped connection or an idle timeout while
+        // reading the body is a network error (exit 10), not an internal one.
         let raw = crate::transport::read_body(resp, self.idle_timeout())
             .await
             .map_err(|e| {
-                other_err(anyhow::anyhow!(
-                    "Failed to read response from {}: {e}",
-                    redact_url(&req.url)
-                ))
+                crate::transport::errors::with_context(
+                    e,
+                    &format!("Failed to read response from {}", redact_url(&req.url)),
+                )
             })?;
         if raw.iter().all(u8::is_ascii_whitespace) {
             return Ok(Value::Null);
@@ -615,7 +617,7 @@ pub(crate) fn safe_filename(raw: &str, fallback: &str) -> String {
             }
         })
         .collect();
-    let cleaned = avoid_windows_device_name(trim_name(cleaned.trim_start_matches('.')));
+    let cleaned = avoid_windows_device_name(trim_name(&cleaned));
     let truncated = truncate_keeping_extension(&cleaned);
     if truncated.is_empty() {
         fallback.to_string()
@@ -656,10 +658,12 @@ fn truncate_keeping_extension(name: &str) -> String {
     format!("{stem_cut}{ext}")
 }
 
-/// Trim surrounding whitespace, and the trailing dots and spaces Windows
-/// silently drops (so `a.` would collide with `a`, and `CON.` is `CON`).
+/// Trim dots and whitespace from both ends: a leading dot makes a hidden
+/// file (or `.`/`..`), and Windows silently drops trailing dots and spaces
+/// (so `a.` would collide with `a`, and `CON.` is `CON`). Both are trimmed
+/// in one pass, so `" .bashrc"` or `"a. \u{a0}"` cannot leave a dot exposed.
 fn trim_name(name: &str) -> &str {
-    name.trim().trim_end_matches(['.', ' ']).trim()
+    name.trim_matches(|c: char| c == '.' || c.is_whitespace())
 }
 
 /// Whether `component` names a Windows device (`CON`, `PRN`, `AUX`, `NUL`,
@@ -899,6 +903,34 @@ mod tests {
         let api = api(&server.uri(), "");
         let v = api.send(ApiRequest::delete(api.url("x"))).await.unwrap();
         assert!(v.is_null());
+    }
+
+    /// A connection that drops mid-body (fewer bytes than `Content-Length`)
+    /// is a network failure (exit 10), as it is for generated methods, not
+    /// an internal error (exit 5).
+    #[tokio::test]
+    async fn send_truncated_body_is_a_network_error() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 4096];
+            let n = sock.read(&mut buf).await.unwrap();
+            assert!(n > 0);
+            sock.write_all(
+                b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n\
+                  content-length: 100\r\n\r\n{\"ok\":",
+            )
+            .await
+            .unwrap();
+            sock.shutdown().await.unwrap();
+        });
+        let api = api(&format!("http://{addr}"), "");
+        let err = api.send(ApiRequest::get(api.url("x"))).await.unwrap_err();
+        assert!(matches!(err, GwsError::Network(_)), "{err:?}");
+        assert_eq!(err.exit_code(), 10, "{err}");
+        assert!(err.to_string().contains("/x"), "{err}");
     }
 
     #[tokio::test]
@@ -1162,6 +1194,17 @@ mod tests {
         assert_eq!(safe_filename(".bashrc", "x"), "bashrc");
         assert_eq!(safe_filename("a\nb:c", "x"), "a_b_c");
         assert_eq!(safe_filename("Report Q1.pdf", "x"), "Report Q1.pdf");
+    }
+
+    /// Dots and whitespace interleaved at either end must not leave a hidden
+    /// name (`.bashrc`) or a trailing dot that Windows drops.
+    #[test]
+    fn safe_filename_trims_interleaved_dots_and_whitespace() {
+        assert_eq!(safe_filename(" .bashrc", "x"), "bashrc");
+        assert_eq!(safe_filename("\u{a0}.x", "x"), "x");
+        assert_eq!(safe_filename(". .bashrc", "x"), "bashrc");
+        assert_eq!(safe_filename("report.\u{a0}.", "x"), "report");
+        assert_eq!(safe_filename(" .CON", "x"), "_CON");
     }
 
     #[test]

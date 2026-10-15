@@ -425,21 +425,24 @@ fn escape_key_segment(key: &str) -> Cow<'_, str> {
 
 /// Recursively flatten a JSON object into `(dot.notation.key, value)` pairs.
 /// Dots and backslashes inside a key are escaped (see [`escape_key_segment`]),
-/// so every flattened name maps to exactly one value.
+/// so every flattened name maps to exactly one value. `prefix` is `None` at
+/// the top level: an empty key is still a path segment (`{"": {"a": 1}}` is
+/// `.a`, not `a`).
 fn flatten_object<'a>(
     obj: &'a Map<String, Value>,
-    prefix: &str,
+    prefix: Option<&str>,
     out: &mut Vec<(String, &'a Value)>,
 ) {
     for (key, val) in obj {
         let segment = escape_key_segment(key);
-        let full_key = if prefix.is_empty() {
-            segment.into_owned()
-        } else {
-            format!("{prefix}.{segment}")
+        let full_key = match prefix {
+            None => segment.into_owned(),
+            Some(prefix) => format!("{prefix}.{segment}"),
         };
         match val {
-            Value::Object(nested) if !nested.is_empty() => flatten_object(nested, &full_key, out),
+            Value::Object(nested) if !nested.is_empty() => {
+                flatten_object(nested, Some(&full_key), out);
+            }
             _ => out.push((full_key, val)),
         }
     }
@@ -447,7 +450,7 @@ fn flatten_object<'a>(
 
 fn flatten(obj: &Map<String, Value>) -> Vec<(String, &Value)> {
     let mut out = Vec::new();
-    flatten_object(obj, "", &mut out);
+    flatten_object(obj, None, &mut out);
     out
 }
 
@@ -782,12 +785,15 @@ fn csv_text(s: &str) -> String {
     }
 }
 
-/// A CSV cell. Only JSON strings can carry formulas; numbers such as `-5`
-/// are written unchanged.
+/// A CSV cell. Numbers such as `-5`, booleans and null are written unchanged;
+/// anything else is text that can carry a formula, including an array whose
+/// joined elements start with one (`["=1+1"]` is the cell `=1+1`).
 fn csv_cell(value: &Value) -> String {
     match value {
-        Value::String(s) => csv_text(s),
-        other => sanitize_for_terminal(&value_to_cell(other)),
+        Value::Number(_) | Value::Bool(_) | Value::Null => {
+            sanitize_for_terminal(&value_to_cell(value))
+        }
+        Value::String(_) | Value::Array(_) | Value::Object(_) => csv_text(&value_to_cell(value)),
     }
 }
 
@@ -1154,6 +1160,14 @@ mod tests {
     }
 
     #[test]
+    fn csv_empty_key_does_not_collide_with_its_child() {
+        // `{"": {"a": 1}}` used to flatten to `a`, colliding with `"a": 2`,
+        // and one of the two values was silently dropped.
+        let out = fmt(&json!([{"": {"a": 1}, "a": 2}]), OutputFormat::Csv);
+        assert_eq!(out, ".a,a\n1,2");
+    }
+
+    #[test]
     fn table_literal_dotted_key_does_not_collide_with_nested_path() {
         let val = json!([{"a.b": "literal", "a": {"b": "nested"}}]);
         let out = fmt(&val, OutputFormat::Table);
@@ -1479,6 +1493,19 @@ mod tests {
         assert_eq!(rows, "'=1+1");
         let header = fmt(&json!([{"\u{7}=cmd": "x"}]), OutputFormat::Csv);
         assert_eq!(header.lines().next().unwrap(), "'=cmd");
+    }
+
+    /// An array value is joined into one text cell, so a formula in its
+    /// first element must be neutralised like a string's.
+    #[test]
+    fn csv_formula_guard_applies_to_array_cells() {
+        let out = fmt(&json!([{"a": ["=1+1", "x"], "b": [-5]}]), OutputFormat::Csv);
+        assert_eq!(out.lines().nth(1).unwrap(), "\"'=1+1, x\",'-5");
+        let rows = fmt(&json!({"values": [[["=1+1"]]]}), OutputFormat::Csv);
+        assert_eq!(rows, "'=1+1");
+        // Scalars are unchanged.
+        let out = fmt(&json!([{"n": -5, "t": true}]), OutputFormat::Csv);
+        assert_eq!(out.lines().nth(1).unwrap(), "-5,true");
     }
 
     #[test]
