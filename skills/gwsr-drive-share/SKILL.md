@@ -56,6 +56,9 @@ gwsr drive +share --file-id FILE_ID --email bob@example.com --role owner --yes
 - anyone with the link, always requires confirmation (--yes, or a prompt on
 - a terminal). Other grants require it when GWSR_REQUIRE_CONFIRM=1.
 
+> [!CAUTION]
+> This is a **write** command — confirm with the user before executing.
+
 ## See Also
 
 - [gwsr-shared](../gwsr-shared/SKILL.md) — Global flags and auth

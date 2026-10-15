@@ -2010,6 +2010,41 @@ async fn failed_operation_is_an_error() {
     assert!(err.to_string().contains("export failed"));
 }
 
+#[tokio::test]
+async fn wait_polls_at_the_deadline_when_the_interval_would_pass_it() {
+    // `--wait-timeout 1` with the default 1s first interval used to give up
+    // before polling even once: the next interval would have ended past the
+    // deadline. It must poll at the deadline instead.
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/drive/v3/files/f1/download"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({"name": "op3", "done": false})),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/drive/v3/operations/op3"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "name": "op3", "done": true, "response": {"ok": true}
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let d = doc(&server.uri());
+    let mut call = Call::new(&d, "download", &server);
+    call.params = json!({"fileId": "f1"});
+    call.options.wait = Some(WaitConfig {
+        timeout: Duration::from_millis(200),
+        initial_interval: Duration::from_secs(5),
+        max_interval: Duration::from_secs(10),
+    });
+    let em = Emitter::capturing();
+    call.run(&em).await.unwrap();
+    assert_eq!(lines(&em)[0], json!({"ok": true}));
+}
+
 // ── Batch ───────────────────────────────────────────────────────────────
 
 #[tokio::test]

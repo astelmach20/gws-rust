@@ -48,6 +48,9 @@ gwsr calendar +rsvp --event-id EVENT_ID --response declined --comment 'Out that 
 
 - Fails if you are not on the event's guest list.
 
+> [!CAUTION]
+> This is a **write** command — confirm with the user before executing.
+
 ## See Also
 
 - [gwsr-shared](../gwsr-shared/SKILL.md) — Global flags and auth

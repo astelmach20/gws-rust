@@ -52,18 +52,21 @@ pub enum HttpError {
     Request(#[from] reqwest::Error),
     #[error("invalid HTTP response: {0}")]
     Response(#[from] oauth2::http::Error),
-    /// The endpoint answered 429 or 5xx: a transient server-side failure,
-    /// never a verdict on the credential.
+    /// The endpoint answered with a server-side failure ([`is_server_failure`]),
+    /// never a verdict on the credential. Whether it is worth retrying is
+    /// decided by [`gws_rust_core::error::is_retryable_status_code`].
     #[error("HTTP {status}: {detail}")]
-    Unavailable { status: u16, detail: String },
+    ServerFailure { status: u16, detail: String },
 }
 
-/// Longest excerpt of an unavailable endpoint's body kept in the error.
+/// Longest excerpt of a failed endpoint's body kept in the error.
 const DETAIL_MAX_CHARS: usize = 200;
 
-/// Whether `status` is a transient server-side failure (429 or 5xx).
-pub fn is_unavailable(status: reqwest::StatusCode) -> bool {
-    status == reqwest::StatusCode::TOO_MANY_REQUESTS || status.is_server_error()
+/// Whether `status` is a server-side failure rather than an OAuth verdict on
+/// the credential: a retryable status (408, 429, 500, 502, 503, 504, the same
+/// set as the API path) or any other 5xx.
+pub fn is_server_failure(status: reqwest::StatusCode) -> bool {
+    gws_rust_core::error::is_retryable_status_code(status.as_u16()) || status.is_server_error()
 }
 
 /// A short, terminal-safe excerpt of an error body (an HTML error page can be
@@ -112,7 +115,7 @@ pub fn client() -> anyhow::Result<reqwest::Client> {
 /// # Errors
 ///
 /// Network, timeout or response-conversion errors, and
-/// [`HttpError::Unavailable`] for a 429 or 5xx response.
+/// [`HttpError::ServerFailure`] for a response [`is_server_failure`] matches.
 pub async fn execute(
     client: reqwest::Client,
     request: oauth2::HttpRequest,
@@ -120,9 +123,9 @@ pub async fn execute(
     let request = reqwest::Request::try_from(request)?;
     let response = client.execute(request).await?;
     let status = response.status();
-    if is_unavailable(status) {
+    if is_server_failure(status) {
         let body = response.bytes().await?;
-        return Err(HttpError::Unavailable {
+        return Err(HttpError::ServerFailure {
             status: status.as_u16(),
             detail: body_excerpt(&body),
         });

@@ -645,7 +645,11 @@ metadata:
                         lookup_method_description(doc, res_name, &mname).unwrap_or_else(|| {
                             m.get_about().map(|s| s.to_string()).unwrap_or_default()
                         });
-                    format!("  - `{mname}` — {mabout}")
+                    if mabout.is_empty() {
+                        format!("  - `{mname}`")
+                    } else {
+                        format!("  - `{mname}` — {mabout}")
+                    }
                 })
                 .collect();
 
@@ -700,7 +704,8 @@ fn render_helper_skill(
     let capitalized_about = capitalize_first(about);
     let trigger_desc = truncate_desc(&format!("{}: {}", product_name, capitalized_about));
 
-    // Determine if write command
+    // A write command: a known writing verb, or any command the CLI itself
+    // gates behind a confirmation (`-y/--yes`: destructive or outbound).
     let is_write = matches!(
         short,
         "send"
@@ -711,7 +716,7 @@ fn render_helper_skill(
             | "append"
             | "create-template"
             | "subscribe"
-    );
+    ) || is_confirmation_gated(cmd);
     let category = if alias == "modelarmor" {
         "security"
     } else {
@@ -823,6 +828,13 @@ metadata:
     ));
 
     out
+}
+
+/// Whether `cmd`, or any subcommand of a helper group, asks for confirmation
+/// (`confirm::with_yes` registers the `yes` argument on every gated command).
+fn is_confirmation_gated(cmd: &Command) -> bool {
+    cmd.get_arguments().any(|a| a.get_id() == "yes")
+        || cmd.get_subcommands().any(is_confirmation_gated)
 }
 
 /// The usage line (`invocation` plus its required arguments) and the flags
@@ -1164,6 +1176,11 @@ fn truncate_desc(desc: &str) -> String {
 
 /// Looks up a method's full description from the Discovery Document and
 /// truncates it at the skill-body limit (longer than CLI help).
+///
+/// The description becomes one Markdown list item, so its line breaks
+/// (Discovery descriptions often contain paragraphs and bullet lists) are
+/// collapsed to single spaces: a raw newline would end the item, and a line
+/// starting with `- ` would become a list item of its own.
 fn lookup_method_description(
     doc: &crate::discovery::RestDescription,
     resource_name: &str,
@@ -1174,8 +1191,9 @@ fn lookup_method_description(
     if let Some(method) = resource.methods.get(method_name)
         && let Some(desc) = &method.description
     {
+        let one_line = desc.split_whitespace().collect::<Vec<_>>().join(" ");
         return Some(crate::text::truncate_description(
-            desc,
+            &one_line,
             crate::text::SKILL_BODY_DESCRIPTION_LIMIT,
             false,
         ));
@@ -1508,6 +1526,64 @@ mod tests {
         assert!(result.unwrap().contains("Lists all the files"));
     }
 
+    /// Each method is one Markdown list item in the service skill, even when
+    /// its Discovery description has paragraphs and a bullet list (calendar
+    /// `calendars.transferOwnership`) or is empty (script `scripts.run`), and
+    /// no line ends in whitespace.
+    #[test]
+    fn service_skill_lists_each_method_on_one_line() {
+        let entry = services::SERVICES
+            .iter()
+            .find(|s| s.aliases[0] == "calendar")
+            .unwrap();
+        let doc: crate::discovery::RestDescription = serde_json::from_value(serde_json::json!({
+            "name": "calendar",
+            "version": "v3",
+            "rootUrl": "https://www.googleapis.com/",
+            "servicePath": "calendar/v3/",
+            "resources": {"calendars": {"methods": {
+                "transferOwnership": {
+                    "httpMethod": "POST",
+                    "path": "calendars/{calendarId}/transferOwnership",
+                    "description": "Transfers a calendar. Requires one of these scopes: \n- https://www.googleapis.com/auth/calendar \n- https://www.googleapis.com/auth/calendar.calendars\n\nNote: the calendar must be active."
+                },
+                "run": {"httpMethod": "POST", "path": "run", "description": ""}
+            }}}
+        }))
+        .unwrap();
+        let cli = crate::commands::build_cli(&doc);
+        let (helpers, resources): (Vec<&Command>, Vec<&Command>) = cli
+            .get_subcommands()
+            .partition(|sub| sub.get_name().starts_with('+'));
+        let md = render_service_skill(
+            entry.aliases[0],
+            entry,
+            &helpers,
+            &resources,
+            "Google Calendar",
+            &doc,
+        );
+        let section = md
+            .split("## API Resources\n")
+            .nth(1)
+            .and_then(|s| s.split("\n## ").next())
+            .expect("API Resources section");
+        for line in section.lines().filter(|l| !l.is_empty()) {
+            assert!(
+                line.starts_with("  - `") || line.starts_with("### "),
+                "line outside a list item: {line:?}\n{md}"
+            );
+        }
+        assert!(section.contains(
+            "  - `transferOwnership` — Transfers a calendar. Requires one of these scopes: - https://www.googleapis.com/auth/calendar - https://www.googleapis.com/auth/calendar.calendars Note: the calendar must be active.\n"
+        ), "{md}");
+        assert!(section.contains("  - `run`\n"), "{md}");
+        assert!(
+            md.lines().all(|l| l == l.trim_end()),
+            "trailing whitespace:\n{md}"
+        );
+    }
+
     #[test]
     fn test_lookup_method_description_missing_resource() {
         let doc = crate::discovery::RestDescription {
@@ -1826,6 +1902,22 @@ mod tests {
         }
         for flag in ["`--from`", "`--forward`", "`--filter-id`", "`--yes`"] {
             assert!(md.contains(flag), "missing flag {flag}:\n{md}");
+        }
+    }
+
+    /// Every helper the CLI gates behind a confirmation (`--yes`) is a write
+    /// command, and its skill tells the agent to confirm with the user first,
+    /// whatever the helper is called. Read-only helpers carry no such warning.
+    #[test]
+    fn confirmation_gated_helper_skills_carry_the_write_caution() {
+        const CAUTION: &str = "This is a **write** command";
+        for gated in ["+reply", "+forward", "+unsubscribe", "+filter", "+send"] {
+            let md = render_gmail_helper(gated);
+            assert!(md.contains(CAUTION), "{gated} lacks the caution:\n{md}");
+        }
+        for read_only in ["+read", "+search", "+triage"] {
+            let md = render_gmail_helper(read_only);
+            assert!(!md.contains(CAUTION), "{read_only} has a caution:\n{md}");
         }
     }
 

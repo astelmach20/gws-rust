@@ -58,6 +58,9 @@ gwsr gmail +forward --message-id 18f1a2b3c4d --to dave@example.com --no-original
 - --sanitize screens the subject, note and forwarded message before sending;
 - in block mode a match or a Model Armor failure sends nothing. --dry-run does not call Model Armor.
 
+> [!CAUTION]
+> This is a **write** command — confirm with the user before executing.
+
 ## See Also
 
 - [gwsr-shared](../gwsr-shared/SKILL.md) — Global flags and auth

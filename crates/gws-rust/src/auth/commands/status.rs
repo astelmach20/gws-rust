@@ -152,12 +152,13 @@ pub(super) async fn build_report(env: &AuthEnv, offline: bool) -> Value {
                         out["token_scopes"] = json!(scopes);
                     }
                 }
-                // No response from Google, or a 429/5xx outage: nothing was
-                // verified, so report it like `--offline` instead of as a
-                // rejected credential.
+                // No response from Google, or a server-side failure (408,
+                // 429, 5xx): nothing was verified, so report it like
+                // `--offline` instead of as a rejected credential.
                 Err(
                     e @ (crate::auth::AuthError::Network(_)
-                    | crate::auth::AuthError::TokenEndpointUnavailable { .. }),
+                    | crate::auth::AuthError::TokenEndpointUnavailable { .. }
+                    | crate::auth::AuthError::TokenEndpointFailed { .. }),
                 ) => {
                     out["authenticated"] = json!(true);
                     out["verified"] = json!(false);
@@ -370,12 +371,12 @@ mod tests {
         assert!(err.contains("Run `gwsr auth login --profile work`"), "{r}");
     }
 
-    /// A 429/5xx from the token endpoint is Google being unavailable, not a
+    /// A 408, 429 or 5xx from the token endpoint is a failure on Google's side, not a
     /// rejected credential (the error itself says "The credentials were not
     /// rejected"). It must not be reported as a verified "not authenticated".
     #[tokio::test]
     async fn token_endpoint_outage_is_not_a_verified_failure() {
-        for status in [429, 500, 503] {
+        for status in [408, 429, 500, 501, 503] {
             let dir = tempfile::tempdir().unwrap();
             let server = MockServer::start().await;
             Mock::given(method("POST"))
@@ -401,7 +402,7 @@ mod tests {
             assert_ne!(r["authenticated"], false, "HTTP {status}: {r}");
             assert!(r.get("token_error").is_none(), "HTTP {status}: {r}");
             let detail = r["verification_error"].as_str().unwrap_or_default();
-            assert!(detail.contains("temporarily unavailable"), "{r}");
+            assert!(detail.contains("credentials were not rejected"), "{r}");
         }
     }
 }

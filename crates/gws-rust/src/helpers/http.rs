@@ -574,12 +574,10 @@ async fn write_stream(
             while let Some(chunk) = crate::transport::next_chunk(&mut stream, idle).await? {
                 out.write_all(&chunk)
                     .await
-                    .map_err(|e| other_err(anyhow::anyhow!("Failed writing to stdout: {e}")))?;
+                    .map_err(crate::output::stdout_error)?;
                 written += chunk.len() as u64;
             }
-            out.flush()
-                .await
-                .map_err(|e| other_err(anyhow::anyhow!("Failed flushing stdout: {e}")))?;
+            out.flush().await.map_err(crate::output::stdout_error)?;
             crate::executor::download::check_length(expected, written)?;
             Ok(written)
         }

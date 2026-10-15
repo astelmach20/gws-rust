@@ -1265,6 +1265,21 @@ fn unknown_gwsr_variable_fails_with_a_suggestion() {
         "{message}"
     );
     assert!(message.contains("did you mean GWSR_TIMEOUT?"), "{message}");
+
+    // The variable is checked before argument parsing, so `gwsr --help` fails
+    // the same way while it is set: the message must not offer it as an
+    // alternative to unsetting the variable.
+    env.cmd()
+        .arg("--help")
+        .env("GWSR_TIMEOUT_SECS", "30")
+        .assert()
+        .code(8)
+        .stdout("");
+    assert!(!message.contains("or run `gwsr --help`"), "{message}");
+    assert!(
+        message.contains("with it unset, `gwsr --help` lists the supported variables"),
+        "{message}"
+    );
 }
 
 #[test]
@@ -2422,6 +2437,60 @@ async fn truncation_marker_is_not_passed_through_jq() {
             serde_json::from_str::<Value>(marker).unwrap_or_else(|e| panic!("{e}: {stdout}")),
             json!({"_truncated": {"pagesFetched": 1, "nextPageToken": "p2"}}),
             "{mode}"
+        );
+    }
+}
+
+/// `--sanitize` in warn mode screens each `--page-all` page; `--page-items`
+/// must carry that page's `_sanitization` annotation onto every item it
+/// prints instead of dropping it with the page envelope.
+#[tokio::test(flavor = "multi_thread")]
+async fn page_items_keep_the_sanitization_annotation() {
+    use wiremock::matchers::any;
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    Mock::given(any())
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({"files": [{"id": "a"}, {"id": "b"}]})),
+        )
+        .mount(&server)
+        .await;
+    let env = Env::new();
+    std::fs::create_dir_all(env.cache_dir().join("discovery")).unwrap();
+    env.seed_doc(&json!({
+        "name": "drive",
+        "version": "v3",
+        "title": "Google Drive API",
+        "rootUrl": "https://www.googleapis.com/",
+        "servicePath": "drive/v3/",
+        "resources": {"files": {"methods": {"list": {
+            "id": "drive.files.list",
+            "httpMethod": "GET",
+            "path": "files",
+            "parameters": {"pageToken": {"type": "string", "location": "query"}},
+            "scopes": ["https://www.googleapis.com/auth/drive.readonly"]
+        }}}}
+    }));
+    // Model Armor is unreachable (https goes to a closed port), so warn mode
+    // annotates every screened page with `_sanitization.error`.
+    let out = blocking_sanitize_cmd(&env, &server.uri())
+        .env("GWSR_SANITIZE_MODE", "warn")
+        .args(["drive", "files", "list", "--page-items"])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    let stdout = stdout_of(&out);
+    let items: Vec<Value> = stdout
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap_or_else(|e| panic!("{e}: {stdout}")))
+        .collect();
+    assert_eq!(items.len(), 2, "{stdout}");
+    for (item, id) in items.iter().zip(["a", "b"]) {
+        assert_eq!(item["id"], id, "{stdout}");
+        assert!(
+            item["_sanitization"]["error"].is_string(),
+            "item lost the page's _sanitization annotation: {stdout}"
         );
     }
 }
