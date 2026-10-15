@@ -1919,6 +1919,90 @@ async fn helpers_writing_raw_stdout_exit_cleanly_on_a_closed_pipe() {
     }
 }
 
+/// A helper that Google refuses for a missing scope must name a login that
+/// grants the scopes the helper requested. `-s
+/// <service>` is no fix: without a terminal it grants read-only scopes (so
+/// write helpers keep failing), and `workflow` has no scopes of its own.
+#[tokio::test(flavor = "multi_thread")]
+async fn helper_scope_error_hint_names_the_scopes_the_helper_needs() {
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    Mock::given(wiremock::matchers::any())
+        .respond_with(ResponseTemplate::new(403).set_body_json(json!({"error": {
+            "code": 403,
+            "message": "Request had insufficient authentication scopes.",
+            "status": "PERMISSION_DENIED",
+            "errors": [{"reason": "insufficientPermissions",
+                        "message": "Insufficient Permission"}],
+            "details": [{"@type": "type.googleapis.com/google.rpc.ErrorInfo",
+                         "reason": "ACCESS_TOKEN_SCOPE_INSUFFICIENT"}]
+        }})))
+        .mount(&server)
+        .await;
+    let dir = setup();
+    seed(dir.path(), "gmail", "v1", "");
+    let cases: [(&[&str], &str); 3] = [
+        (
+            &[
+                "calendar",
+                "+insert",
+                "--summary",
+                "S",
+                "--start",
+                "2026-06-17T09:00:00Z",
+                "--end",
+                "2026-06-17T10:00:00Z",
+                "--timezone",
+                "UTC",
+            ],
+            "`gwsr auth login --scopes calendar`",
+        ),
+        (
+            &[
+                "gmail",
+                "+send",
+                "--to",
+                "a@example.com",
+                "--subject",
+                "S",
+                "--body",
+                "B",
+                "--yes",
+            ],
+            "`gwsr auth login --scopes gmail.modify`",
+        ),
+        (
+            &[
+                "workflow",
+                "+file-announce",
+                "--file-id",
+                "F",
+                "--space-id",
+                "S",
+                "--yes",
+            ],
+            "`gwsr auth login --scopes drive.readonly,chat.messages.create`",
+        ),
+    ];
+    for (args, fix) in cases {
+        let out = gwsr(dir.path())
+            .env("GWSR_TOKEN", "test-token")
+            .env("GWSR_API_BASE_URL", server.uri())
+            .env("HTTPS_PROXY", "http://127.0.0.1:9")
+            .args(args)
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(1), "{args:?}: {out:?}");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        let last = stderr.trim_end().lines().last().unwrap_or_default();
+        let err: Value = serde_json::from_str(last).unwrap_or_else(|e| panic!("{e}: {stderr}"));
+        let hint = err["error"]["hint"].as_str().unwrap();
+        assert!(hint.contains(fix), "{args:?}: {hint}");
+        assert!(!hint.contains(" -s "), "{args:?}: {hint}");
+    }
+}
+
 // ── Streaming helpers with an existing subscription ─────────────────────
 
 /// With `--subscription`, `gmail +watch` and `events +subscribe` create
