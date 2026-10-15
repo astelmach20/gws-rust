@@ -345,7 +345,7 @@ TIPS:
                         )?;
                     }
                     let api = Api::new(doc, &[SCOPE_CALENDAR], dry, sanitize).await?;
-                    let tz = TzInfo::resolve(&api, optional(m, "timezone")?).await?;
+                    let tz = TzInfo::resolve_for_times(&api, m).await?;
                     let v = insert(&api, &InsertArgs::parse(m, &tz)?).await?;
                     (api, v)
                 }
@@ -376,7 +376,7 @@ TIPS:
                         &format!("update event {}", required(m, "event-id")?),
                     )?;
                     let api = Api::new(doc, &[SCOPE_CALENDAR], dry, sanitize).await?;
-                    let tz = TzInfo::resolve(&api, optional(m, "timezone")?).await?;
+                    let tz = TzInfo::resolve_for_times(&api, m).await?;
                     let v = update(&api, m, &tz).await?;
                     (api, v)
                 }
@@ -459,6 +459,31 @@ impl TzInfo {
                 })
             }
         }
+    }
+
+    /// The zone for `+insert`/`+update`, which only need one to read a
+    /// `--start`/`--end` without an offset. When neither is such a local time
+    /// and no --timezone was given, the account time zone is not fetched: the
+    /// event's times are sent as given, so a failing lookup (a missing scope,
+    /// say) cannot fail a command that would not use its answer.
+    async fn resolve_for_times(api: &Api, m: &ArgMatches) -> Result<Self, GwsError> {
+        let flag_value = optional(m, "timezone")?;
+        let mut local = false;
+        for (name, label) in [("start", "--start"), ("end", "--end")] {
+            if let Some(s) = optional(m, name)? {
+                local |= time::parse_when(s, label)?.is_local();
+            }
+        }
+        if flag_value.is_none() && !local {
+            // Never attached to the event (see `for_event`), and never used to
+            // read a time: each one has its own offset or is a date.
+            return Ok(Self {
+                tz: chrono_tz::UTC,
+                name: "UTC".into(),
+                explicit: false,
+            });
+        }
+        Self::resolve(api, flag_value).await
     }
 
     /// The zone to attach to both ends of an event: whenever either end is a
@@ -2008,6 +2033,36 @@ mod tests {
         let plan = api.planned();
         assert_eq!(plan[0]["method"], "DELETE");
         assert_eq!(plan[0]["query_params"]["sendUpdates"], "none");
+    }
+
+    /// A DELETE is retried after a 5xx, but the server may have deleted the
+    /// event before failing. A 410/404 on the retry must not read as "the
+    /// event never existed": the error says the earlier attempt may have
+    /// deleted it.
+    #[tokio::test]
+    async fn delete_retry_not_found_says_an_earlier_attempt_may_have_deleted_it() {
+        let server = MockServer::start().await;
+        Mock::given(method("DELETE"))
+            .and(path("/calendars/primary/events/E1"))
+            .respond_with(ResponseTemplate::new(503))
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("DELETE"))
+            .and(path("/calendars/primary/events/E1"))
+            .respond_with(ResponseTemplate::new(410).set_body_json(
+                json!({"error": {"code": 410, "message": "Resource has been deleted"}}),
+            ))
+            .mount(&server)
+            .await;
+        let api = api(&server.uri(), "");
+        let err = delete(&api, "primary", "E1", "none").await.unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("an earlier attempt may already have deleted it"),
+            "{msg}"
+        );
+        assert_eq!(server.received_requests().await.unwrap().len(), 2);
     }
 
     #[test]

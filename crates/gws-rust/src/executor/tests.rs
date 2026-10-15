@@ -2246,6 +2246,73 @@ async fn batch_round_trip_reports_partial_failure() {
     assert!(body.contains("GET /drive/v3/files/1 HTTP/1.1"));
 }
 
+/// A multipart batch response of 200 OK parts for calls `first..first+n` (ids are
+/// the generated line positions).
+fn batch_parts(first: usize, n: usize) -> String {
+    let mut body = String::new();
+    for id in first..first + n {
+        body.push_str(&format!(
+            "--b\r\nContent-Type: application/http\r\nContent-ID: <response-item-{id}>\r\n\r\n\
+             HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{{\"id\":\"{id}\"}}\r\n"
+        ));
+    }
+    body.push_str("--b--\r\n");
+    body
+}
+
+/// More than 100 calls go out in several batch requests. When a later one
+/// fails, the results already printed stay printed and the error names the
+/// calls that got no result, so the caller knows exactly what to re-run.
+#[tokio::test]
+async fn batch_group_failure_names_the_calls_without_a_result() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/batch/drive/v3"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_raw(batch_parts(1, 100), "multipart/mixed; boundary=b"),
+        )
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/batch/drive/v3"))
+        .respond_with(
+            ResponseTemplate::new(400)
+                .set_body_json(json!({"error": {"code": 400, "message": "bad batch"}})),
+        )
+        .mount(&server)
+        .await;
+    let d = doc(&server.uri());
+    let opts = options(&server);
+    let input: String = (1..=102)
+        .map(|i| format!("{{\"method\":\"files.get\",\"params\":{{\"fileId\":\"{i}\"}}}}\n"))
+        .collect();
+    let calls = batch::parse_calls(&d, &input, &opts).unwrap();
+    let em = Emitter::capturing();
+    let err = batch::run_batch(
+        &d,
+        &calls,
+        Some(Credentials::Static("tok".into())),
+        &opts,
+        &SanitizeConfig::default(),
+        &em,
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(
+        lines(&em).len(),
+        100,
+        "the first group's results are printed"
+    );
+    let msg = err.to_string();
+    assert!(msg.contains("bad batch"), "{msg}");
+    assert!(
+        msg.contains("no result for call(s) 101, 102"),
+        "the error does not name the calls without a result: {msg}"
+    );
+}
+
 /// The batch endpoint is the Discovery document's `batchPath` (Google's
 /// newer APIs use plain `batch` on their own host), not a guessed
 /// `batch/<name>/<version>`; an API without one does not support batching.

@@ -2208,6 +2208,59 @@ async fn batch_results_are_screened_by_model_armor() {
     assert!(!out.status.success());
 }
 
+/// When `--sanitize` withholds a result part-way through a batch of more
+/// than 100 calls, the calls of that group were already applied and the
+/// later groups are not sent. The error must say which calls are which.
+#[tokio::test(flavor = "multi_thread")]
+async fn batch_stopped_by_model_armor_names_withheld_and_unsent_calls() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    let mut parts = String::new();
+    for id in 1..=100 {
+        parts.push_str(&format!(
+            "--b\r\nContent-Type: application/http\r\nContent-ID: <response-item-{id}>\r\n\r\n\
+             HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{{\"id\":\"m{id}\"}}\r\n"
+        ));
+    }
+    parts.push_str("--b--\r\n");
+    Mock::given(method("POST"))
+        .and(path("/batch/gmail/v1"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_raw(parts.into_bytes(), "multipart/mixed; boundary=b"),
+        )
+        .mount(&server)
+        .await;
+    let env = Env::new();
+    seed_gmail_get(&env);
+    let input: String = (1..=101)
+        .map(|i| {
+            format!(
+                "{{\"method\":\"users.messages.get\",\"params\":{{\"userId\":\"me\",\"id\":\"m{i}\"}}}}\n"
+            )
+        })
+        .collect();
+    // Model Armor is unreachable in block mode: screening fails closed.
+    let out = blocking_sanitize_cmd(&env, &server.uri())
+        .args(["batch", "gmail"])
+        .write_stdin(input)
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    let stderr = stderr_of(&out);
+    assert!(
+        stderr.contains("no result for call(s) 1, 2, 3"),
+        "the error does not name the calls whose results were withheld: {stderr}"
+    );
+    assert!(
+        stderr.contains("call(s) 101 not sent"),
+        "the error does not name the calls never sent: {stderr}"
+    );
+    assert_eq!(server.received_requests().await.unwrap().len(), 1);
+}
+
 /// `--dry-run` before `auth` must not be silently dropped: `gwsr --dry-run
 /// auth logout` used to delete the profile's credentials (and revoke the
 /// refresh token) for real.

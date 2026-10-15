@@ -226,6 +226,15 @@ pub(crate) async fn resolve_account_timezone(
 /// Steps 2-4 of [`resolve_account_timezone`], with the identity's cache file
 /// (`None`: do not cache) passed in.
 async fn resolve_with(transport: &Transport, cache: Option<&Path>) -> Result<Tz, GwsError> {
+    resolve_with_local(transport, cache, local_timezone).await
+}
+
+/// [`resolve_with`], with the machine-local zone lookup passed in.
+async fn resolve_with_local(
+    transport: &Transport,
+    cache: Option<&Path>,
+    local_timezone: fn() -> Result<Tz, String>,
+) -> Result<Tz, GwsError> {
     // 2. Check this identity's cache
     if let Some(tz) = cache.and_then(read_cache) {
         tracing::debug!(timezone = %tz, source = "cache", "using cached timezone");
@@ -240,12 +249,22 @@ async fn resolve_with(transport: &Transport, cache: Option<&Path>) -> Result<Tz,
 
     // 4. Fall back to the machine-local timezone, announced on stderr so the
     //    user knows "today" is computed in a possibly different zone.
-    let tz = local_timezone().map_err(|local_err| {
-        GwsError::Validation(format!(
-            "could not determine the account timezone ({api_error}) or the local timezone \
-             ({local_err}); pass --timezone <IANA name>"
-        ))
-    })?;
+    //    When that fails too, the account lookup's own error is returned with
+    //    context: it keeps its class, so an API or auth failure (a missing
+    //    scope, say) keeps its exit code and remedy instead of becoming a
+    //    validation error.
+    let tz = match local_timezone() {
+        Ok(tz) => tz,
+        Err(local_err) => {
+            return Err(crate::transport::errors::with_context(
+                api_error,
+                &format!(
+                    "could not determine the account timezone, and the local timezone is \
+                     unavailable ({local_err}); pass --timezone <IANA name>"
+                ),
+            ));
+        }
+    };
     tracing::warn!(
         error = %api_error,
         timezone = %tz,
@@ -407,6 +426,46 @@ mod tests {
         let server = settings_server("Asia/Tokyo").await;
         assert_eq!(resolve_from(&server, None).await, chrono_tz::Asia::Tokyo);
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+    }
+
+    /// When neither the account nor the local zone can be read, the account
+    /// lookup's error is returned with its class intact: a missing-scope 403
+    /// stays an API error (exit 1, with the scope remedy), not a validation
+    /// error (exit 3).
+    #[tokio::test]
+    async fn failed_lookup_without_local_zone_keeps_the_api_error() {
+        use wiremock::matchers::{method, path};
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(method("GET"))
+            .and(path("/calendar/v3/users/me/settings/timezone"))
+            .respond_with(wiremock::ResponseTemplate::new(403).set_body_json(
+                serde_json::json!({"error": {
+                    "code": 403,
+                    "message": "Request had insufficient authentication scopes.",
+                    "errors": [{"reason": "insufficientPermissions"}],
+                }}),
+            ))
+            .mount(&server)
+            .await;
+        let err = resolve_with_local(&Transport::for_test(&server.uri()), None, || {
+            Err("no local zone".into())
+        })
+        .await
+        .unwrap_err();
+        assert_eq!(err.exit_code(), GwsError::EXIT_CODE_API, "{err:?}");
+        let GwsError::Api {
+            code,
+            reason,
+            message,
+            ..
+        } = &err
+        else {
+            panic!("expected an API error, got {err:?}");
+        };
+        assert_eq!((*code, reason.as_str()), (403, "insufficientPermissions"));
+        for part in ["account timezone", "no local zone", "--timezone"] {
+            assert!(message.contains(part), "{part}: {message}");
+        }
     }
 
     #[test]

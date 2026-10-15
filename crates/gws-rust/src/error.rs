@@ -127,6 +127,10 @@ pub struct ErrorContext {
     pub service: Option<String>,
     /// OAuth scopes the called method accepts (any one suffices).
     pub required_scopes: Vec<String>,
+    /// OAuth scopes a helper requested credentials for (all are needed),
+    /// recorded by [`note_helper_scopes`]. Takes precedence over
+    /// `required_scopes` and `service` in hints.
+    pub helper_scopes: Vec<String>,
     /// Scopes the active credentials were granted, when known.
     pub granted_scopes: Option<Vec<String>>,
     /// The `gwsr auth login` command for the active profile (names it with
@@ -144,6 +148,24 @@ pub fn set_context(ctx: ErrorContext) {
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     *guard = Some(ctx);
+}
+
+/// Record that a helper is acquiring credentials for `scopes`, so a scope or
+/// auth failure names a login that grants them. `-s <service>` would not:
+/// without a terminal it grants read-only scopes, which cannot fix a write
+/// helper, and `workflow` has no scopes of its own. Scopes from several
+/// acquisitions (e.g. Pub/Sub plus Gmail) accumulate: the failing call needs
+/// one of the sets, and a login granting all of them fixes it.
+pub fn note_helper_scopes(scopes: &[&str]) {
+    let mut guard = CONTEXT
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let ctx = guard.get_or_insert_with(ErrorContext::default);
+    for scope in scopes {
+        if !ctx.helper_scopes.iter().any(|s| s == scope) {
+            ctx.helper_scopes.push((*scope).to_string());
+        }
+    }
 }
 
 fn current_context() -> ErrorContext {
@@ -300,7 +322,11 @@ fn api_hint(
 
 fn scope_hint(ctx: &ErrorContext) -> String {
     let mut hint = String::from("Your credentials lack an OAuth scope this method needs.");
-    if ctx.required_scopes.is_empty() {
+    if !ctx.helper_scopes.is_empty() {
+        hint.push_str(" Required (all of): ");
+        hint.push_str(&ctx.helper_scopes.join(", "));
+        hint.push('.');
+    } else if ctx.required_scopes.is_empty() {
         hint.push_str(" Required scopes: see `gwsr schema <service>.<resource>.<method>`.");
     } else {
         hint.push_str(" Required (any one of): ");
@@ -330,12 +356,36 @@ fn login_base(ctx: &ErrorContext) -> &str {
 /// for the profile the failed command used.
 fn login_fix(ctx: &ErrorContext) -> String {
     let login = login_base(ctx);
+    if !ctx.helper_scopes.is_empty() {
+        return crate::auth::scopes::login_command_hint(login, &missing_helper_scopes(ctx));
+    }
     match (ctx.required_scopes.first(), ctx.service.as_deref()) {
         (Some(scope), _) => {
             crate::auth::scopes::login_command_hint(login, std::slice::from_ref(scope))
         }
         (None, Some(service)) => format!("{login} -s {service}"),
         (None, None) => format!("{login} -s <service>"),
+    }
+}
+
+/// The helper scopes the recorded grant lacks; all of them when the grant is
+/// unknown or (stale) claims to cover every one.
+fn missing_helper_scopes(ctx: &ErrorContext) -> Vec<String> {
+    use crate::auth::scopes::normalize_scope;
+    let Some(granted) = &ctx.granted_scopes else {
+        return ctx.helper_scopes.clone();
+    };
+    let granted: Vec<String> = granted.iter().map(|s| normalize_scope(s)).collect();
+    let missing: Vec<String> = ctx
+        .helper_scopes
+        .iter()
+        .filter(|s| !granted.contains(&normalize_scope(s)))
+        .cloned()
+        .collect();
+    if missing.is_empty() {
+        ctx.helper_scopes.clone()
+    } else {
+        missing
     }
 }
 
@@ -595,6 +645,7 @@ mod tests {
                 "https://www.googleapis.com/auth/gmail.readonly".into(),
             ]),
             login_command: None,
+            helper_scopes: Vec::new(),
         };
         let hint = hint_for(&api(403, "insufficientPermissions"), &ctx).unwrap();
         assert!(
@@ -653,6 +704,47 @@ mod tests {
             rejected.contains("`gwsr auth login --profile work`"),
             "{rejected}"
         );
+    }
+
+    /// A helper's scope or auth failure names a login for the scopes the
+    /// helper requested (all of them, minus any already granted), for the
+    /// active profile; never `-s <service>`, which grants read-only scopes
+    /// without a terminal.
+    #[test]
+    fn helper_hints_name_the_requested_scopes() {
+        let ctx = ErrorContext {
+            service: Some("workflow".into()),
+            helper_scopes: vec![
+                "https://www.googleapis.com/auth/drive.readonly".into(),
+                "https://www.googleapis.com/auth/chat.messages.create".into(),
+            ],
+            login_command: Some("gwsr auth login --profile work".into()),
+            ..Default::default()
+        };
+        let fix = "`gwsr auth login --profile work --scopes drive.readonly,chat.messages.create`";
+        let scope = hint_for(&api(403, "insufficientPermissions"), &ctx).unwrap();
+        assert!(scope.contains("Required (all of): "), "{scope}");
+        assert!(scope.contains(fix), "{scope}");
+        let auth = hint_for(&GwsError::Auth("x".into()), &ctx).unwrap();
+        assert!(auth.contains(fix), "{auth}");
+        assert!(!auth.contains(" -s "), "{auth}");
+
+        let granted = ErrorContext {
+            granted_scopes: Some(vec!["drive.readonly".into(), "openid".into()]),
+            ..ctx.clone()
+        };
+        let scope = hint_for(&api(403, "insufficientPermissions"), &granted).unwrap();
+        assert!(
+            scope.contains("`gwsr auth login --profile work --scopes chat.messages.create`"),
+            "{scope}"
+        );
+        // A grant that (stale) claims every scope still names them all.
+        let stale = ErrorContext {
+            granted_scopes: Some(ctx.helper_scopes.clone()),
+            ..ctx.clone()
+        };
+        let scope = hint_for(&api(403, "insufficientPermissions"), &stale).unwrap();
+        assert!(scope.contains(fix), "{scope}");
     }
 
     #[test]

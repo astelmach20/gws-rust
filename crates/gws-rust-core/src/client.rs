@@ -248,15 +248,35 @@ pub struct Sent {
     /// (attempts exhausted, a non-idempotent request, or a `Retry-After`
     /// longer than the policy allows). False for a definitive answer.
     pub gave_up: bool,
+    /// Whether an earlier attempt may have reached the server and been
+    /// applied without its answer arriving (a timeout or a retryable error
+    /// status). A connection that could not be made does not count.
+    pub earlier_attempt_unknown: bool,
+    /// The request method.
+    pub method: Method,
 }
 
 impl Sent {
     /// Human-readable note describing retries, for appending to error messages.
     /// `None` when the response is a definitive answer, even after earlier
     /// retried attempts.
+    ///
+    /// A DELETE that finds nothing (404/410) on a retry is noted too: an
+    /// earlier attempt whose answer was lost may already have deleted it.
     pub fn retry_note(&self) -> Option<String> {
         if !self.gave_up {
-            return None;
+            let not_found = matches!(
+                self.response.status(),
+                StatusCode::NOT_FOUND | StatusCode::GONE
+            );
+            return (self.method == Method::DELETE && not_found && self.earlier_attempt_unknown)
+                .then(|| {
+                    format!(
+                        "an earlier attempt may already have deleted it: the request was retried \
+                         after an attempt whose outcome is unknown, and attempt {} found nothing",
+                        self.attempts
+                    )
+                });
         }
         retry_note(self.attempts, self.retry_after)
     }
@@ -456,6 +476,8 @@ pub async fn send(
 ) -> Result<Sent, SendError> {
     let max_attempts = policy.max_attempts.max(1);
     let mut attempt: u32 = 0;
+    // Set once an attempt may have been applied without its answer arriving.
+    let mut earlier_attempt_unknown = false;
     loop {
         attempt += 1;
         let (client, request) = build().build_split();
@@ -479,6 +501,7 @@ pub async fn send(
                 // Connect errors mean nothing was sent; any method may retry.
                 let retryable = err.is_connect() || (idempotent && err.is_timeout());
                 if retryable && can_retry {
+                    earlier_attempt_unknown |= !err.is_connect();
                     tracing::debug!(%method, %url, attempt, error = %err, "retrying after transport error");
                     tokio::time::sleep(policy.backoff(attempt - 1)).await;
                     continue;
@@ -494,6 +517,7 @@ pub async fn send(
             Err(None) => {
                 let timeout = policy.response_timeout.unwrap_or_default();
                 if idempotent && can_retry {
+                    earlier_attempt_unknown = true;
                     tracing::debug!(%method, %url, attempt, "retrying after timeout");
                     tokio::time::sleep(policy.backoff(attempt - 1)).await;
                     continue;
@@ -515,6 +539,8 @@ pub async fn send(
                     attempts: attempt,
                     retry_after: None,
                     gave_up: false,
+                    earlier_attempt_unknown,
+                    method,
                 });
             }
             Verdict::Retry {
@@ -528,6 +554,8 @@ pub async fn send(
                         attempts: attempt,
                         retry_after,
                         gave_up: true,
+                        earlier_attempt_unknown,
+                        method,
                     });
                 }
                 let delay = retry_after.unwrap_or_else(|| policy.backoff(attempt - 1));
@@ -537,6 +565,9 @@ pub async fn send(
                     delay_ms = u64::try_from(delay.as_millis()).unwrap_or(u64::MAX),
                     "retrying after retryable status"
                 );
+                // A 5xx may come after the server applied the request; a 429,
+                // 408 or rate-limit 403 means it was not processed.
+                earlier_attempt_unknown |= response.status().is_server_error();
                 drop(response);
                 tokio::time::sleep(delay).await;
             }
@@ -735,6 +766,35 @@ mod tests {
         // retry nor did the client give up retrying it.
         assert_eq!(sent.retry_after, None);
         assert_eq!(sent.retry_note(), None);
+    }
+
+    /// A DELETE retried after a 5xx may already have been applied, so a
+    /// 404/410 on the retry is noted. A 404 on the first attempt, or after
+    /// a 429 (which was never processed), is a plain answer.
+    #[tokio::test]
+    async fn delete_not_found_after_an_unknown_attempt_is_noted() {
+        let client = shared_client().unwrap();
+        for (first, noted) in [(Some(503), true), (Some(429), false), (None, false)] {
+            let server = MockServer::start().await;
+            let mut responses: Vec<ResponseTemplate> =
+                first.into_iter().map(ResponseTemplate::new).collect();
+            responses.push(ResponseTemplate::new(410));
+            mount_sequence(&server, "DELETE", responses).await;
+            let url = format!("{}/r", server.uri());
+            let sent = send(&fast_policy(), Idempotency::FromMethod, || {
+                client.delete(&url)
+            })
+            .await
+            .unwrap();
+            assert_eq!(sent.response.status(), 410);
+            let note = sent.retry_note();
+            assert_eq!(
+                note.as_deref()
+                    .is_some_and(|n| n.contains("an earlier attempt may already have deleted it")),
+                noted,
+                "{first:?}: {note:?}"
+            );
+        }
     }
 
     #[tokio::test]
