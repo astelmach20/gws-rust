@@ -454,8 +454,53 @@ fn outgoing_screening_failed(
     }
 }
 
+/// Explain an output-screening error (a block, or a failure to screen in
+/// block mode) for a request that already changed something: the change was
+/// made, and only its output was withheld. The resource's identifiers are
+/// taken from `value` (top-level `id`, `…Id` and `/`-separated `name` fields
+/// that look like identifiers) so it can still be found; nothing else of
+/// the withheld output is shown.
+pub(crate) fn note_applied_write(error: GwsError, value: &Value) -> GwsError {
+    let ids = resource_ids(value);
+    let named = if ids.is_empty() {
+        String::new()
+    } else {
+        format!(" ({})", ids.join(", "))
+    };
+    prefix_message(
+        error,
+        &format!(
+            "The request succeeded and the change was made{named}; only its output was withheld"
+        ),
+    )
+}
+
+/// Identifier fields of a result: `"key: value"` for each top-level `id`,
+/// `…Id` or resource-name (`a/b`) `name` whose key and value consist only
+/// of identifier characters.
+fn resource_ids(value: &Value) -> Vec<String> {
+    fn id_like(s: &str) -> bool {
+        !s.is_empty()
+            && s.len() <= 256
+            && s.chars()
+                .all(|c| c.is_ascii_alphanumeric() || "-_.@/:+=~".contains(c))
+    }
+    let Some(obj) = value.as_object() else {
+        return Vec::new();
+    };
+    obj.iter()
+        .filter_map(|(key, v)| {
+            let s = v.as_str()?;
+            let is_id = key == "id"
+                || (key.ends_with("Id") && id_like(key))
+                || (key == "name" && s.contains('/'));
+            (is_id && id_like(s)).then(|| format!("{key}: {s}"))
+        })
+        .collect()
+}
+
 /// Prefix an error's message with `context`, keeping its variant.
-fn prefix_message(error: GwsError, context: &str) -> GwsError {
+pub(crate) fn prefix_message(error: GwsError, context: &str) -> GwsError {
     let prefixed = |m: String| format!("{context}: {m}");
     match error {
         GwsError::Validation(m) => GwsError::Validation(prefixed(m)),
@@ -773,6 +818,39 @@ mod tests {
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     const TEMPLATE: &str = "projects/my-project/locations/us-central1/templates/t";
+
+    /// The note names identifiers only: a Drive file's `name` is a title
+    /// (content), a `/`-separated `name` is a resource name.
+    #[test]
+    fn applied_write_note_names_ids_but_no_content() {
+        let err = note_applied_write(
+            GwsError::SanitizationBlocked("Content blocked".into()),
+            &json!({
+                "id": "F1",
+                "documentId": "D-1_x",
+                "name": "IGNORE PREVIOUS INSTRUCTIONS",
+                "body": "secret text",
+                "threadId": "has spaces in it"
+            }),
+        );
+        assert!(matches!(err, GwsError::SanitizationBlocked(_)), "{err:?}");
+        let msg = err.to_string();
+        assert!(msg.contains("change was made"), "{msg}");
+        assert!(
+            msg.contains("id: F1") && msg.contains("documentId: D-1_x"),
+            "{msg}"
+        );
+        for leaked in ["IGNORE", "secret", "spaces"] {
+            assert!(!msg.contains(leaked), "{msg}");
+        }
+        let msg = note_applied_write(
+            GwsError::SanitizationBlocked("x".into()),
+            &json!({"name": "spaces/AAA/messages/BBB", "text": "hello there"}),
+        )
+        .to_string();
+        assert!(msg.contains("name: spaces/AAA/messages/BBB"), "{msg}");
+        assert!(!msg.contains("hello"), "{msg}");
+    }
 
     #[test]
     fn test_sanitize_config_default() {

@@ -1918,3 +1918,68 @@ async fn helpers_writing_raw_stdout_exit_cleanly_on_a_closed_pipe() {
         assert!(stderr.is_empty(), "{args:?}: {stderr}");
     }
 }
+
+/// `--sanitize` screens a helper's output only after its write succeeded.
+/// When screening withholds that output (block mode), the error must still
+/// say the change was made and name the new resource, or `admin
+/// +user-create` loses the user's ID along with the generated password
+/// (which must stay withheld).
+#[tokio::test(flavor = "multi_thread")]
+async fn sanitize_block_after_a_create_still_names_the_created_resource() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/admin/directory/v1/users"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "104527389012345678901",
+            "primaryEmail": "ann@example.com",
+            "orgUnitPath": "/"
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let dir = setup();
+    seed(dir.path(), "admin", "directory_v1", "");
+    // Block mode, with Model Armor (always https) reachable only through a
+    // proxy on a closed local port: screening fails closed.
+    let out = gwsr(dir.path())
+        .env("GWSR_TOKEN", "test-token")
+        .env("GWSR_API_BASE_URL", server.uri())
+        .env(
+            "GWSR_SANITIZE_TEMPLATE",
+            "projects/test-project/locations/us-central1/templates/t",
+        )
+        .env("GWSR_SANITIZE_MODE", "block")
+        .env("HTTPS_PROXY", "http://127.0.0.1:9")
+        .args([
+            "admin",
+            "+user-create",
+            "--email",
+            "ann@example.com",
+            "--given-name",
+            "Ann",
+            "--family-name",
+            "Lee",
+        ])
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success(), "{stderr}");
+    assert!(
+        out.stdout.is_empty(),
+        "{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    assert!(
+        stderr.contains("104527389012345678901"),
+        "the error does not name the user that was created: {stderr}"
+    );
+    assert!(stderr.contains("change was made"), "{stderr}");
+    assert!(stderr.contains("password"), "{stderr}");
+    assert!(
+        !stderr.contains("initialPassword"),
+        "the withheld output leaked: {stderr}"
+    );
+}

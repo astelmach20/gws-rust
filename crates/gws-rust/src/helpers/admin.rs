@@ -89,11 +89,19 @@ impl Helper for AdminHelper {
                 return Ok(false);
             };
             let dry = crate::args::dry_run(m)?;
+            // Extra context when the output is withheld after the write.
+            let mut withheld_note = None;
             let (api, value) = match name {
                 "+user-create" => {
                     let args = UserCreate::parse(m)?;
                     let api = Api::new(doc, &[SCOPE_USER], dry, sanitize).await?;
                     let v = user_create(&api, &args).await?;
+                    if args.generated {
+                        withheld_note = Some(
+                            "The user was created but its generated initial password cannot be \
+                             shown; set a new password for the user",
+                        );
+                    }
                     (api, v)
                 }
                 "+user-suspend" => {
@@ -133,7 +141,10 @@ impl Helper for AdminHelper {
                 }
                 _ => return Ok(false),
             };
-            api.emit(m, &value).await?;
+            api.emit(m, &value).await.map_err(|e| match withheld_note {
+                Some(note) => crate::helpers::modelarmor::prefix_message(e, note),
+                None => e,
+            })?;
             Ok(true)
         })
     }
