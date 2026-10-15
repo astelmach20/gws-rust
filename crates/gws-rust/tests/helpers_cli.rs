@@ -1953,6 +1953,8 @@ async fn helper_scope_error_hint_names_the_scopes_the_helper_needs() {
                 "2026-06-17T09:00:00Z",
                 "--end",
                 "2026-06-17T10:00:00Z",
+                "--timezone",
+                "UTC",
             ],
             "`gwsr auth login --scopes calendar`",
         ),
