@@ -561,7 +561,7 @@ fn resolve_range(
         (Some(e), _) => time::parse_when(e, "--end")?,
         (None, Some(d)) => start.plus(time::parse_duration(d)?, tz)?,
         (None, None) => match &start {
-            When::Date(d) => When::Date(*d + chrono::Duration::days(1)),
+            When::Date(d) => When::Date(time::next_day(*d)?),
             _ => {
                 return Err(GwsError::Validation(
                     "Timed events need --end or --duration".into(),
@@ -1051,7 +1051,14 @@ async fn update(api: &Api, m: &ArgMatches, tz: &TzInfo) -> Result<Value, GwsErro
             };
             let new_start = time::parse_when(&start_s, "--start")?;
             let end = match (&cs, &ce, &new_start) {
-                (When::Date(a), When::Date(b), When::Date(n)) => When::Date(*n + (*b - *a)),
+                (When::Date(a), When::Date(b), When::Date(n)) => {
+                    When::Date(n.checked_add_signed(*b - *a).ok_or_else(|| {
+                        GwsError::Validation(format!(
+                            "--start {n} plus the event's current length ({} days) is past the latest representable date",
+                            (*b - *a).num_days()
+                        ))
+                    })?)
+                }
                 (When::Date(_), _, _) | (_, _, When::Date(_)) => {
                     return Err(GwsError::Validation(
                         "Switching between all-day and timed needs an explicit --end".into(),
@@ -1289,6 +1296,23 @@ mod tests {
         .unwrap();
         assert_eq!(a.body["start"], json!({"date": "2026-03-18"}));
         assert_eq!(a.body["end"], json!({"date": "2026-03-19"}));
+    }
+
+    /// The last representable date has no next day: an all-day range that
+    /// needs one is a validation error, never a panic.
+    #[test]
+    fn all_day_ranges_at_the_last_representable_date_are_rejected() {
+        let last = chrono::NaiveDate::MAX.format("%Y-%m-%d").to_string();
+        let last = last.as_str();
+        assert!(
+            matches!(time::parse_when(last, "--start"), Ok(When::Date(_))),
+            "{last}"
+        );
+        for (end, duration) in [(None, None), (Some(last), None)] {
+            let err = resolve_range(last, end, duration, chrono_tz::UTC).unwrap_err();
+            assert!(matches!(err, GwsError::Validation(_)), "{end:?}: {err:?}");
+            assert!(err.to_string().contains(last), "{end:?}: {err}");
+        }
     }
 
     #[test]
@@ -1842,6 +1866,33 @@ mod tests {
         )
         .await
         .unwrap();
+    }
+
+    /// Moving an all-day event so its kept length runs past the last
+    /// representable date is a validation error, never a panic.
+    #[tokio::test]
+    async fn update_all_day_move_past_the_last_date_is_rejected() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/calendars/primary/events/E1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "start": {"date": "2026-01-05"},
+                "end": {"date": "2026-01-07"}
+            })))
+            .mount(&server)
+            .await;
+        let api = api(&server.uri(), "");
+        let last = chrono::NaiveDate::MAX.format("%Y-%m-%d").to_string();
+        let m = parse(&["gwsr", "+update", "--event-id", "E1", "--start", &last]);
+        let err = update(
+            &api,
+            m.subcommand_matches("+update").unwrap(),
+            &tz("UTC", false),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, GwsError::Validation(_)), "{err:?}");
+        assert!(err.to_string().contains(&last), "{err}");
     }
 
     /// `--end` alone reuses the event's current start, which the API returns
