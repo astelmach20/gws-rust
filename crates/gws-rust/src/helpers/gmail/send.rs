@@ -79,15 +79,9 @@ fn create_send_raw_message(config: &SendConfig) -> Result<String, GwsError> {
 }
 
 fn parse_send_args(matches: &ArgMatches) -> Result<SendConfig, GwsError> {
-    let to = Mailbox::parse_list(&super::cli::required_str(matches, "to")?);
-    if to.is_empty() {
-        return Err(GwsError::Validation(
-            "--to must specify at least one recipient".to_string(),
-        ));
-    }
     Ok(SendConfig {
-        to,
-        subject: super::cli::required_str(matches, "subject")?,
+        to: super::cli::required_mailboxes(matches, "to")?,
+        subject: super::cli::required_header_text(matches, "subject")?,
         body: super::cli::required_str(matches, "body")?,
         from: super::cli::parse_optional_mailboxes(matches, "from")?,
         cc: super::cli::parse_optional_mailboxes(matches, "cc")?,
