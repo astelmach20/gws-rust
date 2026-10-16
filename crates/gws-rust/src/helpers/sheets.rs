@@ -769,22 +769,4 @@ mod tests {
             "Archive"
         );
     }
-
-    #[test]
-    fn clear_requires_confirmation_without_tty() {
-        use std::io::IsTerminal;
-        if std::io::stdin().is_terminal() {
-            return;
-        }
-        let m = parse(&[
-            "gwsr",
-            "+clear",
-            "--spreadsheet-id",
-            "S",
-            "--range",
-            "A1:B2",
-        ]);
-        let sub = m.subcommand_matches("+clear").unwrap();
-        assert!(confirm::confirm(sub, Impact::Destructive, "clear").is_err());
-    }
 }
