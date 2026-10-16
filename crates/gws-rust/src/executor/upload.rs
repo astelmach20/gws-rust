@@ -220,6 +220,15 @@ impl MultipartFrame {
         })
     }
 
+    /// No framing: the body is the file alone (`uploadType=media`).
+    pub(crate) fn media(media_mime: &str) -> Self {
+        Self {
+            preamble: String::new(),
+            postamble: String::new(),
+            content_type: media_mime.to_string(),
+        }
+    }
+
     pub(crate) fn content_length(&self, data: &UploadData) -> u64 {
         self.preamble.len() as u64 + data.len() + self.postamble.len() as u64
     }
@@ -290,6 +299,34 @@ pub(crate) async fn send_multipart(
     idempotency: Idempotency,
 ) -> Result<Sent, GwsError> {
     let frame = MultipartFrame::new(metadata, media_mime)?;
+    send_simple(transport, method, url, query, &frame, data, idempotency).await
+}
+
+/// Send the file alone as the body, without metadata. `query` must already
+/// contain `uploadType=media`.
+pub(crate) async fn send_media(
+    transport: &Transport,
+    method: Method,
+    url: &str,
+    query: &[(String, String)],
+    data: &UploadData,
+    media_mime: &str,
+    idempotency: Idempotency,
+) -> Result<Sent, GwsError> {
+    let frame = MultipartFrame::media(media_mime);
+    send_simple(transport, method, url, query, &frame, data, idempotency).await
+}
+
+/// Send a simple (single-request) upload framed by `frame`.
+async fn send_simple(
+    transport: &Transport,
+    method: Method,
+    url: &str,
+    query: &[(String, String)],
+    frame: &MultipartFrame,
+    data: &UploadData,
+    idempotency: Idempotency,
+) -> Result<Sent, GwsError> {
     let policy = RetryPolicy {
         response_timeout: upload_timeout(transport.retry.response_timeout, data.len()),
         ..transport.retry.clone()
@@ -354,7 +391,8 @@ struct Progress {
 impl Progress {
     fn new(total: u64) -> Self {
         Self {
-            enabled: std::io::stderr().is_terminal(),
+            // `-q`: errors only on stderr.
+            enabled: std::io::stderr().is_terminal() && !crate::logging::quiet(),
             total,
         }
     }
@@ -541,7 +579,9 @@ pub(crate) async fn resumable_upload(
                     );
                     return Err(transport.error_for(sent, &context).await);
                 }
-                s if gws_rust_core::client::is_retryable_status(s) => ChunkFailure::Status(sent),
+                // `gave_up` marks a failure the client would have retried:
+                // a retryable status or a Google rate-limit 403.
+                _ if sent.gave_up => ChunkFailure::Status(sent),
                 _ => {
                     progress.finish();
                     return Ok(sent);

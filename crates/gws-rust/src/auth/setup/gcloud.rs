@@ -268,10 +268,19 @@ impl Gcloud {
     ///
     /// gcloud fails (e.g. not logged in).
     pub async fn access_token(&self) -> anyhow::Result<SecretString> {
-        let out = self
-            .checked(&["auth", "print-access-token"])
-            .await
-            .context("cannot get a gcloud access token; run `gcloud auth login` first")?;
+        let args = ["auth", "print-access-token"];
+        let out = self.output(&args).await?;
+        if !out.status.success() {
+            // Only stderr: stdout is where a token would be, even when gcloud
+            // fails afterwards (for example writing its credential cache).
+            anyhow::bail!(
+                "`gcloud {}` failed ({}): {}; cannot get a gcloud access token, run \
+                 `gcloud auth login` first",
+                args.join(" "),
+                out.status,
+                crate::output::sanitize_for_terminal(String::from_utf8_lossy(&out.stderr).trim())
+            );
+        }
         let token =
             zeroize::Zeroizing::new(String::from_utf8_lossy(&out.stdout).trim().to_string());
         if token.is_empty() {
@@ -422,6 +431,21 @@ mod tests {
         let err = g.account().await.unwrap_err().to_string();
         assert!(err.contains("ERROR: boom"), "{err}");
         assert_eq!(g.create_project("p").await.unwrap_err(), "ERROR: boom");
+    }
+
+    /// A failing `print-access-token` that already wrote a token to stdout:
+    /// the error keeps gcloud's message but never the token.
+    #[tokio::test]
+    async fn failed_access_token_error_does_not_echo_stdout() {
+        let dir = tempfile::tempdir().unwrap();
+        let g = fake_gcloud(
+            dir.path(),
+            "echo ya29.FAKE-test-token; echo 'ERROR: cannot write cache' >&2; exit 1",
+        );
+        let err = format!("{:#}", g.access_token().await.unwrap_err());
+        assert!(!err.contains("ya29.FAKE-test-token"), "{err}");
+        assert!(err.contains("ERROR: cannot write cache"), "{err}");
+        assert!(err.contains("gcloud auth login"), "{err}");
     }
 
     #[tokio::test]

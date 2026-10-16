@@ -312,7 +312,12 @@ impl Transport {
                 && self.shared.provider.is_some()
                 && !refreshed
             {
-                tracing::debug!(%url, "HTTP 401; refreshing access token and retrying once");
+                // No query string: a resumable session URL carries its
+                // upload_id there, and file logs record debug lines.
+                let mut logged = url.clone();
+                logged.set_query(None);
+                logged.set_fragment(None);
+                tracing::debug!(url = %logged, "HTTP 401; refreshing access token and retrying once");
                 refreshed = true;
                 self.refresh_token().await?;
                 continue;
@@ -751,6 +756,68 @@ mod tests {
                 .contains("Request had invalid authentication credentials."),
             "{err}"
         );
+    }
+
+    /// The 401 refresh is logged at debug (which file logs always record)
+    /// without the query string, such as a resumable upload's `upload_id`.
+    #[tokio::test]
+    async fn refresh_after_401_log_line_omits_the_query_string() {
+        #[derive(Clone, Default)]
+        struct Capture(Arc<Mutex<Vec<u8>>>);
+        impl std::io::Write for Capture {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        struct Provider;
+        #[async_trait::async_trait]
+        impl AccessTokenProvider for Provider {
+            async fn refresh_access_token(&self) -> anyhow::Result<String> {
+                Ok("ya29.FAKE-fresh-token".to_string())
+            }
+        }
+
+        let server = MockServer::start().await;
+        Mock::given(method("PUT"))
+            .respond_with(ResponseTemplate::new(401))
+            .mount(&server)
+            .await;
+        let t = Transport::new(
+            &Credentials::Refreshable {
+                token: "ya29.FAKE-stale-token".to_string(),
+                provider: Arc::new(Provider),
+            },
+            Transport::for_test(&server.uri()).retry,
+            EndpointPolicy::with_override(&server.uri()).unwrap(),
+            None,
+        )
+        .unwrap();
+
+        let capture = Capture::default();
+        let writer = capture.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::DEBUG)
+            .with_writer(move || writer.clone())
+            .finish();
+        let _guard = tracing::subscriber::set_default(subscriber);
+        let url = format!(
+            "{}/upload/drive/v3/files?uploadType=resumable&upload_id=FAKE-upload-id",
+            server.uri()
+        );
+        let sent = t
+            .send(Method::PUT, &url, Idempotency::Idempotent, |rb| rb)
+            .await
+            .unwrap();
+        assert_eq!(sent.response.status(), StatusCode::UNAUTHORIZED);
+
+        let logs = String::from_utf8(capture.0.lock().unwrap().clone()).unwrap();
+        assert!(logs.contains("HTTP 401; refreshing"), "{logs}");
+        assert!(logs.contains("/upload/drive/v3/files"), "{logs}");
+        assert!(!logs.contains("FAKE-upload-id"), "{logs}");
     }
 
     /// Every `#[tokio::test]` runs on its own runtime, and a pooled

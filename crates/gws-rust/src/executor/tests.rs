@@ -1221,6 +1221,113 @@ async fn small_file_uses_multipart() {
     assert_eq!(lines(&em)[0]["id"], "new");
 }
 
+/// `doc()` with `files.create`'s simple protocol documented as
+/// `multipart: false`: that endpoint takes the raw file only.
+fn media_only_simple_doc(root: &str) -> RestDescription {
+    let mut d = doc(root);
+    d.resources
+        .get_mut("files")
+        .and_then(|r| r.methods.get_mut("create"))
+        .and_then(|m| m.media_upload.as_mut())
+        .and_then(|m| m.protocols.as_mut())
+        .and_then(|p| p.simple.as_mut())
+        .unwrap()
+        .multipart = Some(false);
+    d
+}
+
+fn remove_resumable(d: &mut RestDescription) {
+    d.resources
+        .get_mut("files")
+        .and_then(|r| r.methods.get_mut("create"))
+        .and_then(|m| m.media_upload.as_mut())
+        .and_then(|m| m.protocols.as_mut())
+        .unwrap()
+        .resumable = None;
+}
+
+/// A simple endpoint with `multipart: false` gets `uploadType=media`: the
+/// file's bytes as the body, with the file's content type, and no metadata.
+#[tokio::test]
+async fn simple_upload_without_multipart_sends_raw_media() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/upload/drive/v3/files"))
+        .and(query_param("uploadType", "media"))
+        .and(header("content-type", "text/plain"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id": "new"})))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("a.txt");
+    std::fs::write(&file, b"hello").unwrap();
+    let path = file.to_str().unwrap().to_string();
+    let d = media_only_simple_doc(&server.uri());
+    let mut call = Call::new(&d, "create", &server);
+    call.upload = Some(UploadSource {
+        path: &path,
+        content_type: None,
+    });
+    let em = Emitter::capturing();
+    call.run(&em).await.unwrap();
+    let received = server.received_requests().await.unwrap();
+    assert_eq!(received[0].body, b"hello");
+    assert_eq!(lines(&em)[0]["id"], "new");
+}
+
+/// Metadata cannot go to a media-only simple endpoint: resumable carries
+/// it when the method advertises resumable.
+#[tokio::test]
+async fn simple_upload_without_multipart_sends_metadata_resumable() {
+    let server = MockServer::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("a.txt");
+    std::fs::write(&file, b"hello").unwrap();
+    let path = file.to_str().unwrap().to_string();
+    let d = media_only_simple_doc(&server.uri());
+    let mut call = Call::new(&d, "create", &server);
+    call.body = Some(json!({"name": "a.txt"}));
+    call.upload = Some(UploadSource {
+        path: &path,
+        content_type: None,
+    });
+    call.options.dry_run = true;
+    let em = Emitter::capturing();
+    call.run(&em).await.unwrap();
+    let out = lines(&em);
+    assert_eq!(out[0]["upload"]["protocol"], "resumable", "{out:?}");
+    assert_eq!(
+        out[0]["url"],
+        format!("{}/resumable/upload/drive/v3/files", server.uri())
+    );
+    assert!(server.received_requests().await.unwrap().is_empty());
+}
+
+/// Without resumable, metadata with a media-only simple endpoint is refused
+/// before anything is sent.
+#[tokio::test]
+async fn simple_upload_without_multipart_refuses_metadata() {
+    let server = MockServer::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("a.txt");
+    std::fs::write(&file, b"hello").unwrap();
+    let path = file.to_str().unwrap().to_string();
+    let mut d = media_only_simple_doc(&server.uri());
+    remove_resumable(&mut d);
+    let mut call = Call::new(&d, "create", &server);
+    call.body = Some(json!({"name": "a.txt"}));
+    call.upload = Some(UploadSource {
+        path: &path,
+        content_type: None,
+    });
+    let err = call.run(&Emitter::capturing()).await.unwrap_err();
+    assert!(matches!(err, GwsError::Validation(_)), "{err:?}");
+    assert_eq!(err.exit_code(), 3);
+    assert!(err.to_string().contains("metadata"), "{err}");
+    assert!(server.received_requests().await.unwrap().is_empty());
+}
+
 /// The dry run shows the uploadType the upload will actually send.
 #[tokio::test]
 async fn upload_dry_run_lists_the_upload_type() {
@@ -1244,6 +1351,46 @@ async fn upload_dry_run_lists_the_upload_type() {
         out[0]["query_params"],
         json!([["supportsAllDrives", "true"], ["uploadType", "multipart"]]),
         "{out:?}"
+    );
+    assert!(server.received_requests().await.unwrap().is_empty());
+}
+
+/// A method whose Discovery document advertises only the resumable protocol
+/// uploads a small file with it instead of failing for want of a simple
+/// endpoint.
+#[tokio::test]
+async fn small_file_uses_resumable_when_it_is_the_only_protocol() {
+    let server = MockServer::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("a.txt");
+    std::fs::write(&file, b"hello").unwrap();
+    let path = file.to_str().unwrap().to_string();
+    let mut d = doc(&server.uri());
+    let create = d
+        .resources
+        .get_mut("files")
+        .and_then(|r| r.methods.get_mut("create"))
+        .unwrap();
+    create
+        .media_upload
+        .as_mut()
+        .and_then(|m| m.protocols.as_mut())
+        .unwrap()
+        .simple = None;
+    let mut call = Call::new(&d, "create", &server);
+    call.body = Some(json!({"name": "a.txt"}));
+    call.upload = Some(UploadSource {
+        path: &path,
+        content_type: None,
+    });
+    call.options.dry_run = true;
+    let em = Emitter::capturing();
+    call.run(&em).await.unwrap();
+    let out = lines(&em);
+    assert_eq!(out[0]["upload"]["protocol"], "resumable", "{out:?}");
+    assert_eq!(
+        out[0]["url"],
+        format!("{}/resumable/upload/drive/v3/files", server.uri())
     );
     assert!(server.received_requests().await.unwrap().is_empty());
 }
@@ -1478,6 +1625,26 @@ async fn resumable_upload_exhausted_on_503_is_retryable_not_internal() {
     assert!(matches!(err, GwsError::Api { code: 503, .. }), "{err:?}");
     assert_eq!(err.exit_code(), 6, "{err}");
     assert!(err.to_string().contains("backend unavailable"), "{err}");
+}
+
+/// A Google rate-limit 403 on a chunk is transient like a 429: the chunk is
+/// retried, and when retries run out the error stays retryable (exit 6).
+#[tokio::test]
+async fn resumable_chunk_rate_limit_403_is_retried() {
+    let (result, puts) = resumable_against(
+        1000,
+        ResponseTemplate::new(403).set_body_json(json!({
+            "error": {"code": 403, "message": "slow down",
+                      "errors": [{"reason": "userRateLimitExceeded"}]}
+        })),
+    )
+    .await;
+    let err = result.expect("must finish").unwrap_err();
+    assert!(matches!(err, GwsError::Api { code: 403, .. }), "{err:?}");
+    assert_eq!(err.exit_code(), 6, "{err}");
+    let msg = err.to_string();
+    assert!(msg.contains("consecutive retries"), "{msg}");
+    assert!(puts > 1, "a rate-limited chunk was not retried: {msg}");
 }
 
 /// A chunk answered with a `Retry-After` longer than the policy allows

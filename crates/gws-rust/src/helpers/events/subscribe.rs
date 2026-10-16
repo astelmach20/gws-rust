@@ -308,10 +308,8 @@ impl StreamStep for SubscribeStep<'_> {
             // Fail closed: a block-mode sanitization error aborts before emit/ack.
             match sanitize_value(self.sanitize, event)
                 .await
-                .map_err(|e| StepError::Transient {
-                    status: None,
-                    message: e.to_string(),
-                })? {
+                .map_err(StepError::Transient)?
+            {
                 Sanitized::Pass(v) => self.output(&v).await?,
                 Sanitized::Blocked(r) => emit_diagnostic(
                     "warning",
