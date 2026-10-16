@@ -437,6 +437,7 @@ mod tests {
         assert!(err.contains("client_secret.json"), "{err}");
     }
 
+    #[cfg(unix)]
     #[test]
     fn world_readable_client_file_is_refused() {
         use std::os::unix::fs::PermissionsExt;
