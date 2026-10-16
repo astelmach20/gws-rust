@@ -779,17 +779,25 @@ fn format_csv(
         return Ok(csv_cell(value));
     };
 
-    let mut writer = csv::WriterBuilder::new()
-        .flexible(true)
-        .from_writer(Vec::new());
+    // Every record has the same number of fields: strict readers (pandas,
+    // the `csv` crate without `flexible`) reject a ragged file.
+    let mut writer = csv::WriterBuilder::new().from_writer(Vec::new());
 
     if !arr.iter().any(Value::is_object) {
-        // Arrays of rows (e.g. Sheets `values`) or of scalars.
+        // Arrays of rows (e.g. Sheets `values`) or of scalars. The Sheets API
+        // drops trailing empty cells, so rows are padded with empty fields
+        // to the widest one.
+        let width = arr
+            .iter()
+            .map(|item| item.as_array().map_or(1, Vec::len))
+            .max()
+            .unwrap_or(0);
         for item in arr {
-            let record: Vec<String> = match item {
+            let mut record: Vec<String> = match item {
                 Value::Array(inner) => inner.iter().map(csv_cell).collect(),
                 other => vec![csv_cell(other)],
             };
+            record.resize(width, String::new());
             writer.write_record(&record).map_err(csv_error)?;
         }
     } else {
@@ -1290,6 +1298,28 @@ mod tests {
             fmt(&val, OutputFormat::Csv),
             "Name,Class\nAlexandra,4. Senior\n\"Q\"\"uote\",x"
         );
+    }
+
+    /// values.get drops trailing empty cells and returns an empty row as
+    /// `[]`: every record is still padded to the widest row, so strict CSV
+    /// readers accept the output.
+    #[test]
+    fn csv_array_of_ragged_arrays_is_rectangular() {
+        let val = json!({
+            "range": "Sheet1!A1:C4",
+            "majorDimension": "ROWS",
+            "values": [["Title"], [], ["Name", "Email", "Phone"], ["Ann", "a@x"]]
+        });
+        let out = fmt(&val, OutputFormat::Csv);
+        assert_eq!(out, "Title,,\n,,\nName,Email,Phone\nAnn,a@x,");
+        let mut reader = csv::ReaderBuilder::new()
+            .has_headers(false)
+            .from_reader(out.as_bytes());
+        for record in reader.records() {
+            assert_eq!(record.unwrap().len(), 3);
+        }
+        // A scalar among rows is a one-field row, padded the same way.
+        assert_eq!(fmt(&json!(["x", ["a", "b"]]), OutputFormat::Csv), "x,\na,b");
     }
 
     #[test]
