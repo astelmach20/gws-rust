@@ -273,13 +273,19 @@ fn apply_param_defaults(
     {
         *mask = format!("nextPageToken,{mask}");
     }
-    // Drive rejects items in shared drives unless supportsAllDrives is set.
+    apply_shared_drive_default(method, params);
+    Ok(())
+}
+
+/// Drive rejects items in shared drives unless `supportsAllDrives` is set,
+/// so every method that has the parameter sends `true` unless told otherwise
+/// (generated commands and `gwsr batch` alike).
+fn apply_shared_drive_default(method: &RestMethod, params: &mut Map<String, Value>) {
     if method.parameters.contains_key("supportsAllDrives")
         && !params.contains_key("supportsAllDrives")
     {
         params.insert("supportsAllDrives".to_string(), Value::Bool(true));
     }
-    Ok(())
 }
 
 /// Whether a partial-response `mask` selects `field` at the top level. A name
