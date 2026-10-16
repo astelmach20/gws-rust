@@ -1667,8 +1667,9 @@ async fn dot_segment_path_parameters_are_rejected_before_sending() {
 }
 
 /// An empty ID leaves an empty path segment, so `--event-id ""` would
-/// DELETE `events/` (the collection) and `--message-id ""` would GET the
-/// message list: helpers and workflows refuse it, real run and dry run alike.
+/// DELETE `events/` (the collection), `--message-id ""` would GET the
+/// message list, and `--document-id ""` would POST `documents/:batchUpdate`:
+/// helpers and workflows refuse it, real run and dry run alike.
 #[tokio::test(flavor = "multi_thread")]
 async fn empty_path_ids_are_rejected_before_sending() {
     use wiremock::{Mock, MockServer, ResponseTemplate, matchers::any};
@@ -1688,7 +1689,7 @@ async fn empty_path_ids_are_rejected_before_sending() {
             .output()
             .unwrap()
     };
-    let cases: [&[&str]; 6] = [
+    let cases: [&[&str]; 10] = [
         &["calendar", "+delete", "--event-id", "", "--yes"],
         &["calendar", "+delete", "--event-id", "", "--dry-run"],
         &[
@@ -1706,6 +1707,35 @@ async fn empty_path_ids_are_rejected_before_sending() {
             "workflow",
             "+email-to-task",
             "--message-id",
+            "",
+            "--dry-run",
+        ],
+        // An empty ID in front of a custom verb leaves `documents/:batchUpdate`.
+        &["docs", "+write", "--document-id", "", "--text", "hi"],
+        &[
+            "script",
+            "+run",
+            "--script-id",
+            "",
+            "--function",
+            "f",
+            "--dry-run",
+        ],
+        &[
+            "sheets",
+            "+clear",
+            "--spreadsheet-id",
+            "S1",
+            "--range",
+            "",
+            "--yes",
+        ],
+        &[
+            "sheets",
+            "+clear",
+            "--spreadsheet-id",
+            "S1",
+            "--range",
             "",
             "--dry-run",
         ],
