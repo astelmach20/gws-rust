@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::{HashMap, HashSet};
+
 use clap::{Arg, ArgAction, Command};
 
 use crate::discovery::{RestDescription, RestMethod, RestResource};
@@ -40,19 +42,10 @@ pub fn build_cli(doc: &RestDescription) -> Command {
     // Add resource subcommands (unless helper suppresses them)
     let skip_resources = helper.as_ref().is_some_and(|h| h.helper_only());
     if !skip_resources {
-        // Methods declared outside any resource (e.g. `oauth2:v2 tokeninfo`).
-        let mut method_names: Vec<_> = doc.methods.keys().collect();
-        method_names.sort();
-        for name in method_names {
-            root = root.subcommand(build_method_command(doc, name, &doc.methods[name]));
-        }
-        let mut resource_names: Vec<_> = doc.resources.keys().collect();
-        resource_names.sort();
-        for name in resource_names {
-            let resource = &doc.resources[name];
-            if let Some(cmd) = build_resource_command(doc, name, resource) {
-                root = root.subcommand(cmd);
-            }
+        // Methods declared outside any resource (e.g. `oauth2:v2 tokeninfo`),
+        // then the resources.
+        for (cli_name, node) in subcommand_names(&doc.methods, &doc.resources) {
+            root = root.subcommand(build_node_command(doc, &cli_name, node));
         }
     }
 
@@ -316,45 +309,156 @@ fn build_method_command(doc: &RestDescription, name: &str, method: &RestMethod) 
     cmd
 }
 
-/// Recursively builds a Command for a resource.
-/// Returns None if the resource has no methods or sub-resources.
+/// The command for a method or resource, under its command name.
+fn build_node_command(doc: &RestDescription, cli_name: &str, node: Node<'_>) -> Command {
+    match node {
+        Node::Method(_, method) => build_method_command(doc, cli_name, method),
+        Node::Resource(name, resource) => build_resource_command(doc, cli_name, name, resource),
+    }
+}
+
+/// Recursively builds the command for a resource that has commands (see
+/// [`subcommand_names`]), hidden when all its children are.
 fn build_resource_command(
     doc: &RestDescription,
+    cli_name: &str,
     name: &str,
     resource: &RestResource,
-) -> Option<Command> {
-    let mut cmd = Command::new(name.to_string())
+) -> Command {
+    let mut cmd = Command::new(cli_name.to_string())
         .about(format!("Operations on the '{name}' resource"))
         .subcommand_required(true)
         .arg_required_else_help(true);
 
-    let mut has_children = false;
     let mut all_hidden = true;
+    for (child_name, node) in subcommand_names(&resource.methods, &resource.resources) {
+        let child = build_node_command(doc, &child_name, node);
+        all_hidden &= child.is_hide_set();
+        cmd = cmd.subcommand(child);
+    }
+    cmd.hide(all_hidden)
+}
 
-    let mut method_names: Vec<_> = resource.methods.keys().collect();
-    method_names.sort();
-    for method_name in method_names {
-        let method_cmd = build_method_command(doc, method_name, &resource.methods[method_name]);
-        has_children = true;
-        all_hidden &= method_cmd.is_hide_set();
-        cmd = cmd.subcommand(method_cmd);
+/// A Discovery method or resource behind a generated subcommand, with its
+/// Discovery name.
+#[derive(Clone, Copy, Debug)]
+pub enum Node<'a> {
+    Method(&'a str, &'a RestMethod),
+    Resource(&'a str, &'a RestResource),
+}
+
+/// Subcommand names clap claims in every command that has subcommands.
+const RESERVED_NAMES: &[&str] = &["help"];
+
+/// Whether a resource produces a command: it has a method, itself or in a
+/// sub-resource.
+fn has_commands(resource: &RestResource) -> bool {
+    !resource.methods.is_empty() || resource.resources.values().any(has_commands)
+}
+
+/// The subcommands of one level of the Discovery tree, each with its command
+/// name: the methods (sorted), then the resources that have commands
+/// (sorted).
+///
+/// This is the one mapping between command names and Discovery names; the
+/// builder, the request path, `gwsr schema`, `gwsr batch`, the inventory and
+/// the skills generator all go through it. A command name is the Discovery
+/// name, except where two subcommands would share a name (clap allows no
+/// duplicates):
+/// - a method and a resource with the same name: the method keeps the name
+///   and the resource becomes `<name>-resource`;
+/// - a name clap reserves (`help`): `help-method` or `help-resource`.
+///
+/// If that name is taken as well, `-2`, `-3`, ... is appended.
+pub fn subcommand_names<'a>(
+    methods: &'a HashMap<String, RestMethod>,
+    resources: &'a HashMap<String, RestResource>,
+) -> Vec<(String, Node<'a>)> {
+    let mut nodes: Vec<Node<'a>> = methods
+        .iter()
+        .map(|(name, method)| Node::Method(name, method))
+        .collect();
+    nodes.sort_by_key(|node| node.name());
+    let mut resource_nodes: Vec<Node<'a>> = resources
+        .iter()
+        .filter(|(_, resource)| has_commands(resource))
+        .map(|(name, resource)| Node::Resource(name, resource))
+        .collect();
+    resource_nodes.sort_by_key(|node| node.name());
+    nodes.extend(resource_nodes);
+
+    // Every free Discovery name is kept; methods come first, so a method
+    // wins over a resource of the same name.
+    let mut taken: HashSet<String> = HashSet::new();
+    let mut names: Vec<Option<String>> = nodes
+        .iter()
+        .map(|node| {
+            let name = node.name();
+            (!RESERVED_NAMES.contains(&name) && taken.insert(name.to_string()))
+                .then(|| name.to_string())
+        })
+        .collect();
+    // The others get their kind appended.
+    for (node, slot) in nodes.iter().zip(names.iter_mut()) {
+        if slot.is_some() {
+            continue;
+        }
+        let kind = match node {
+            Node::Method(..) => "method",
+            Node::Resource(..) => "resource",
+        };
+        let base = format!("{}-{kind}", node.name());
+        let mut candidate = base.clone();
+        let mut n = 2;
+        while !taken.insert(candidate.clone()) {
+            candidate = format!("{base}-{n}");
+            n += 1;
+        }
+        *slot = Some(candidate);
     }
 
-    let mut sub_names: Vec<_> = resource.resources.keys().collect();
-    sub_names.sort();
-    for sub_name in sub_names {
-        let sub_resource = &resource.resources[sub_name];
-        if let Some(sub_cmd) = build_resource_command(doc, sub_name, sub_resource) {
-            has_children = true;
-            all_hidden &= sub_cmd.is_hide_set();
-            cmd = cmd.subcommand(sub_cmd);
+    names
+        .into_iter()
+        .zip(nodes)
+        .filter_map(|(name, node)| name.map(|name| (name, node)))
+        .collect()
+}
+
+impl<'a> Node<'a> {
+    /// The Discovery name.
+    pub fn name(&self) -> &'a str {
+        match self {
+            Node::Method(name, _) | Node::Resource(name, _) => name,
         }
     }
+}
 
-    if has_children {
-        Some(cmd.hide(all_hidden))
-    } else {
-        None
+/// The method or resource that a path of command names (`["files", "list"]`)
+/// leads to in `doc`, following [`subcommand_names`]. `None` when a name is
+/// unknown or follows a method.
+pub fn resolve_command_path<'a>(doc: &'a RestDescription, path: &[&str]) -> Option<Node<'a>> {
+    let (mut methods, mut resources) = (&doc.methods, &doc.resources);
+    let mut found = None;
+    for name in path {
+        if matches!(found, Some(Node::Method(..))) {
+            return None;
+        }
+        let (_, node) = subcommand_names(methods, resources)
+            .into_iter()
+            .find(|(cli_name, _)| cli_name == name)?;
+        if let Node::Resource(_, resource) = node {
+            (methods, resources) = (&resource.methods, &resource.resources);
+        }
+        found = Some(node);
+    }
+    found
+}
+
+/// The method that a path of command names leads to, if it is a method.
+pub fn command_method<'a>(doc: &'a RestDescription, path: &[&str]) -> Option<&'a RestMethod> {
+    match resolve_command_path(doc, path)? {
+        Node::Method(_, method) => Some(method),
+        Node::Resource(..) => None,
     }
 }
 
@@ -623,5 +727,101 @@ mod tests {
         assert!(team_cmd.is_hide_set());
         assert!(team_cmd.find_subcommand("list").unwrap().is_hide_set());
         assert!(!cmd.find_subcommand("files").unwrap().is_hide_set());
+    }
+
+    fn get(id: &str) -> RestMethod {
+        RestMethod {
+            id: Some(id.into()),
+            http_method: "GET".into(),
+            ..Default::default()
+        }
+    }
+
+    fn resource(methods: &[(&str, &str)]) -> RestResource {
+        let mut r = RestResource::default();
+        for (name, id) in methods {
+            r.methods.insert((*name).into(), get(id));
+        }
+        r
+    }
+
+    /// Every kind of name collision: a top-level method named like a
+    /// resource, a method and a sub-resource of one name, and `help`.
+    fn colliding_doc() -> RestDescription {
+        let mut items = resource(&[("list", "x.items.list"), ("labels", "x.items.labels")]);
+        items.resources.insert(
+            "labels".into(),
+            resource(&[("list", "x.items.labels.list")]),
+        );
+        items
+            .resources
+            .insert("help".into(), resource(&[("list", "x.items.help.list")]));
+        let mut doc = RestDescription {
+            name: "x".into(),
+            ..Default::default()
+        };
+        doc.methods.insert("items".into(), get("x.items"));
+        doc.methods.insert("help".into(), get("x.help"));
+        doc.resources.insert("items".into(), items);
+        doc
+    }
+
+    /// Colliding names never fail clap's own consistency checks (a panic in
+    /// debug builds), and every method runs under its command name.
+    #[test]
+    fn colliding_names_get_distinct_commands() {
+        let doc = colliding_doc();
+        let cmd = build_cli(&doc);
+        cmd.clone().debug_assert();
+        let names: Vec<&str> = cmd.get_subcommands().map(|s| s.get_name()).collect();
+        assert_eq!(names, ["help-method", "items", "items-resource"]);
+        let items = cmd.find_subcommand("items-resource").unwrap();
+        let names: Vec<&str> = items.get_subcommands().map(|s| s.get_name()).collect();
+        assert_eq!(
+            names,
+            ["labels", "list", "help-resource", "labels-resource"]
+        );
+
+        for (path, id) in [
+            (&["items"][..], "x.items"),
+            (&["help-method"], "x.help"),
+            (&["items-resource", "list"], "x.items.list"),
+            (&["items-resource", "labels"], "x.items.labels"),
+            (
+                &["items-resource", "labels-resource", "list"],
+                "x.items.labels.list",
+            ),
+            (
+                &["items-resource", "help-resource", "list"],
+                "x.items.help.list",
+            ),
+        ] {
+            let method = command_method(&doc, path).unwrap();
+            assert_eq!(method.id.as_deref(), Some(id), "{path:?}");
+            let mut argv = vec!["gwsr"];
+            argv.extend_from_slice(path);
+            build_cli(&doc).try_get_matches_from(argv).unwrap();
+        }
+        assert!(command_method(&doc, &["items-resource"]).is_none());
+        assert!(command_method(&doc, &["items", "list"]).is_none());
+        assert!(command_method(&doc, &["help"]).is_none());
+    }
+
+    /// A suffixed name that is itself taken gets a number; a resource
+    /// without methods makes no command, so it renames nothing.
+    #[test]
+    fn suffixed_names_never_collide() {
+        let mut methods = HashMap::new();
+        methods.insert("a".to_string(), get("a"));
+        methods.insert("a-resource".to_string(), get("a-resource"));
+        methods.insert("b".to_string(), get("b"));
+        let mut resources = HashMap::new();
+        resources.insert("a".to_string(), resource(&[("list", "a.list")]));
+        resources.insert("b".to_string(), RestResource::default());
+        let names: Vec<String> = subcommand_names(&methods, &resources)
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect();
+        assert_eq!(names, ["a", "a-resource", "b", "a-resource-2"]);
     }
 }

@@ -517,6 +517,111 @@ fn top_level_discovery_methods_are_commands() {
         .stdout(predicate::str::contains("Tokeninfo"));
 }
 
+/// A Discovery document whose names collide as subcommands: a top-level
+/// method named like a resource, a method and a sub-resource of the same
+/// name under one resource, and a method and a resource named `help`
+/// (clap's own help subcommand). Real APIs do this (`apigee:v1`,
+/// `aiplatform:v1`, `connectors:v2`, `identitytoolkit:v1`).
+fn colliding_doc() -> Value {
+    let get = |id: &str, path: &str| json!({"id": id, "httpMethod": "GET", "path": path});
+    json!({
+        "name": "clash",
+        "version": "v1",
+        "rootUrl": "https://clash.googleapis.com/",
+        "servicePath": "",
+        "methods": {
+            "items": get("clash.items", "items:summary"),
+            "help": get("clash.help", "help")
+        },
+        "resources": {
+            "items": {
+                "methods": {
+                    "list": get("clash.items.list", "items"),
+                    "labels": get("clash.items.labels", "items:labels")
+                },
+                "resources": {
+                    "labels": {"methods": {"list": get("clash.items.labels.list", "items/labels")}},
+                    "help": {"methods": {"list": get("clash.items.help.list", "items/help")}}
+                }
+            }
+        }
+    })
+}
+
+/// Colliding names never panic the command builder, and every method stays
+/// reachable: a method keeps its name, a resource that shares it gets
+/// `-resource` appended, and a name clap reserves (`help`) gets
+/// `-method`/`-resource`.
+#[test]
+fn colliding_discovery_names_keep_every_method_reachable() {
+    let env = Env::new();
+    env.seed_doc(&colliding_doc());
+
+    let cases: &[(&[&str], &str)] = &[
+        (&["items"], "items:summary"),
+        (&["help-method"], "help"),
+        (&["items-resource", "list"], "items"),
+        (&["items-resource", "labels"], "items:labels"),
+        (
+            &["items-resource", "labels-resource", "list"],
+            "items/labels",
+        ),
+        (&["items-resource", "help-resource", "list"], "items/help"),
+    ];
+    for (path, url_path) in cases {
+        let out = env
+            .cmd()
+            .arg("clash:v1")
+            .args(*path)
+            .arg("--dry-run")
+            .assert()
+            .success()
+            .get_output()
+            .clone();
+        let plan: Value = serde_json::from_str(stdout_of(&out).trim()).unwrap();
+        assert_eq!(
+            plan["url"],
+            format!("https://clash.googleapis.com/{url_path}"),
+            "{path:?}"
+        );
+    }
+
+    let help = env
+        .cmd()
+        .args(["clash:v1", "--help"])
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+    let help = stdout_of(&help);
+    for name in ["items", "items-resource", "help-method"] {
+        assert!(help.contains(&format!("  {name} ")), "{name}: {help}");
+    }
+    // clap's `help` subcommand still prints help.
+    env.cmd()
+        .args(["clash:v1", "help", "items-resource"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("labels-resource"));
+
+    // `gwsr schema` accepts the Discovery names and the command names.
+    for path in [
+        "clash:v1.items.labels.list",
+        "clash:v1.items-resource.labels-resource.list",
+    ] {
+        env.cmd()
+            .args(["schema", path])
+            .assert()
+            .success()
+            .stdout(predicate::str::contains("\"path\":\"items/labels\""));
+    }
+    env.cmd()
+        .args(["schema", "clash:v1.help-method"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"path\":\"help\""));
+}
+
 /// API versions may contain dots (`<api>:v3.4`): `gwsr schema` must keep
 /// them in the service spec instead of splitting the version apart, so the
 /// path printed in method help is one that runs.

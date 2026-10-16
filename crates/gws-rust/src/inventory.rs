@@ -21,7 +21,7 @@
 use clap::Command;
 use serde_json::{Value, json};
 
-use crate::discovery::{RestDescription, RestResource};
+use crate::discovery::RestDescription;
 use crate::error::GwsError;
 use crate::services::{ResolvedService, SERVICES, ServiceEntry};
 
@@ -69,15 +69,6 @@ fn flags_of(cmd: &Command) -> Vec<Value> {
         .collect()
 }
 
-fn find_resource<'a>(doc: &'a RestDescription, path: &[&str]) -> Option<&'a RestResource> {
-    let (first, rest) = path.split_first()?;
-    let mut res = doc.resources.get(*first)?;
-    for name in rest {
-        res = res.resources.get(*name)?;
-    }
-    Some(res)
-}
-
 /// Walk a service's command tree into flat command records.
 fn walk(cmd: &Command, doc: &RestDescription, path: &mut Vec<String>, out: &mut Vec<Value>) {
     for sub in cmd.get_subcommands() {
@@ -87,8 +78,8 @@ fn walk(cmd: &Command, doc: &RestDescription, path: &mut Vec<String>, out: &mut 
         if name.starts_with('+') {
             walk_helper(sub, path, out);
         } else if is_leaf {
-            let parents: Vec<&str> = path[..path.len() - 1].iter().map(String::as_str).collect();
-            let method = find_resource(doc, &parents).and_then(|r| r.methods.get(&name));
+            let names: Vec<&str> = path.iter().map(String::as_str).collect();
+            let method = crate::commands::command_method(doc, &names);
             out.push(json!({
                 "path": path.join(" "),
                 "kind": "method",
@@ -272,7 +263,7 @@ pub fn rows(inventory: &Value) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::discovery::RestMethod;
+    use crate::discovery::{RestMethod, RestResource};
 
     fn doc() -> RestDescription {
         let mut files = RestResource::default();
@@ -307,6 +298,45 @@ mod tests {
 
     fn drive_entry() -> &'static ServiceEntry {
         SERVICES.iter().find(|e| e.aliases[0] == "drive").unwrap()
+    }
+
+    /// Commands renamed for a name collision are listed under the name that
+    /// runs them, with the method they run.
+    #[test]
+    fn colliding_names_are_listed_under_their_command_names() {
+        let method = |id: &str| RestMethod {
+            id: Some(id.into()),
+            http_method: "GET".into(),
+            ..Default::default()
+        };
+        let mut doc = doc();
+        doc.methods.insert("files".into(), method("drive.files"));
+        doc.methods.insert("help".into(), method("drive.help"));
+        let files = doc.resources.get_mut("files").unwrap();
+        files
+            .methods
+            .insert("permissions".into(), method("drive.files.permissions"));
+        let inv = service_inventory(drive_entry(), &doc);
+        let ids: Vec<(&str, &str)> = inv["commands"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|c| c["kind"] == "method")
+            .map(|c| (c["path"].as_str().unwrap(), c["id"].as_str().unwrap()))
+            .collect();
+        assert_eq!(
+            ids,
+            [
+                ("files", "drive.files"),
+                ("help-method", "drive.help"),
+                ("files-resource list", "drive.files.list"),
+                ("files-resource permissions", "drive.files.permissions"),
+                (
+                    "files-resource permissions-resource create",
+                    "drive.permissions.create"
+                ),
+            ]
+        );
     }
 
     #[test]
