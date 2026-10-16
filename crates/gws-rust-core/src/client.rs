@@ -20,8 +20,9 @@
 //! * **One client.** [`shared_client`] returns a clone of a single process-wide
 //!   [`reqwest::Client`], so every request shares one connection pool and TLS
 //!   session cache. Its redirect policy refuses HTTPS→HTTP downgrades and
-//!   caps redirect chains; `reqwest` already strips `Authorization` on any
-//!   cross-origin hop.
+//!   caps redirect chains. A redirect to another origin is followed by
+//!   [`send`] itself, as a bare GET carrying no credentials, quota project or
+//!   body, and refused when it would keep a method other than GET/HEAD.
 //! * **One retry policy.** [`send`] retries transient failures with capped exponential
 //!   backoff and full jitter, honours `Retry-After` in both its delta-seconds
 //!   and HTTP-date forms, and never re-sends a non-idempotent request unless
@@ -33,7 +34,10 @@
 use std::sync::OnceLock;
 use std::time::{Duration, SystemTime};
 
-use reqwest::header::{HeaderMap, HeaderValue, RETRY_AFTER};
+use reqwest::header::{
+    ACCEPT, ACCEPT_LANGUAGE, HeaderMap, HeaderName, HeaderValue, LOCATION, RANGE, RETRY_AFTER,
+    USER_AGENT,
+};
 use reqwest::{Method, StatusCode, Url};
 
 use crate::error::GwsError;
@@ -64,9 +68,14 @@ fn build_client_inner() -> Result<reqwest::Client, String> {
         .map_err(|e| format!("Failed to build HTTP client: {e}"))
 }
 
-/// Redirect policy: follow at most [`MAX_REDIRECTS`] hops and never downgrade
-/// from HTTPS to HTTP. `reqwest` removes `Authorization`, `Cookie` and
-/// `Proxy-Authorization` itself whenever scheme, host or port changes.
+/// Redirect policy: follow at most [`MAX_REDIRECTS`] hops, never downgrade
+/// from HTTPS to HTTP, and stop at a hop to another origin.
+///
+/// On a cross-origin hop `reqwest` removes only `Authorization`, `Cookie` and
+/// `Proxy-Authorization`. It would still send `x-goog-user-project` and every
+/// other header the caller set, and on a 307/308 the method and body too.
+/// So such a hop is not followed here: the redirect response goes back to
+/// [`send`], which follows it with [`follow_cross_origin`].
 fn redirect_policy(attempt: reqwest::redirect::Attempt<'_>) -> reqwest::redirect::Action {
     if attempt.previous().len() >= MAX_REDIRECTS {
         return attempt.error(format!("stopped after {MAX_REDIRECTS} redirects"));
@@ -80,7 +89,139 @@ fn redirect_policy(attempt: reqwest::redirect::Attempt<'_>) -> reqwest::redirect
         let target = attempt.url().to_string();
         return attempt.error(format!("refusing HTTPS to HTTP redirect to {target}"));
     }
+    let cross_origin = attempt
+        .previous()
+        .last()
+        .is_some_and(|prev| prev.origin() != attempt.url().origin());
+    if cross_origin {
+        return attempt.stop();
+    }
     attempt.follow()
+}
+
+/// Request headers carried to a redirect target on another origin: only
+/// ones that describe the wanted representation. Everything else, such as
+/// `x-goog-user-project`, upload metadata and any header a caller adds later,
+/// stays with the origin the request was meant for. (`reqwest` adds the
+/// client's default headers to every request itself.)
+const CROSS_ORIGIN_HEADERS: [HeaderName; 4] = [ACCEPT, ACCEPT_LANGUAGE, RANGE, USER_AGENT];
+
+/// The method a `status` redirect turns `method` into, as `reqwest` and
+/// browsers apply RFC 9110: a 303 becomes a GET (a HEAD stays a HEAD), a
+/// 301/302 turns a POST into a GET, and a 307/308 keeps the method.
+fn redirected_method(status: StatusCode, method: &Method) -> Method {
+    match status {
+        StatusCode::SEE_OTHER if *method != Method::HEAD => Method::GET,
+        StatusCode::MOVED_PERMANENTLY | StatusCode::FOUND if *method == Method::POST => Method::GET,
+        _ => method.clone(),
+    }
+}
+
+/// Where `response` redirects to, when that is another origin. A response
+/// that is not a followable redirect, or whose `Location` is not a valid URL
+/// reference, is a final answer: `reqwest` returns those unfollowed too.
+fn cross_origin_target(response: &reqwest::Response) -> Option<Url> {
+    let redirect = matches!(
+        response.status(),
+        StatusCode::MOVED_PERMANENTLY
+            | StatusCode::FOUND
+            | StatusCode::SEE_OTHER
+            | StatusCode::TEMPORARY_REDIRECT
+            | StatusCode::PERMANENT_REDIRECT
+    );
+    if !redirect {
+        return None;
+    }
+    let location = response.headers().get(LOCATION)?.to_str().ok()?;
+    let target = response.url().join(location).ok()?;
+    (target.origin() != response.url().origin()).then_some(target)
+}
+
+/// Follow redirects to another origin that [`redirect_policy`] stopped at.
+///
+/// The request goes there as a fresh GET (or HEAD) with no body and only
+/// [`CROSS_ORIGIN_HEADERS`]. A redirect that would keep any other method,
+/// such as a 307/308 after a POST or PUT, is refused with
+/// [`SendError::Redirect`] rather than followed. Following it would send
+/// the request body (a message, a document, a permission change) to a host
+/// the request was never checked against. Following it without the body
+/// would turn the request into something else. Redirects within the new
+/// origin are followed by `reqwest`, and the whole chain is capped at
+/// [`MAX_REDIRECTS`] cross-origin hops.
+async fn follow_cross_origin(
+    client: &reqwest::Client,
+    mut response: reqwest::Response,
+    mut method: Method,
+    headers: &HeaderMap,
+    response_timeout: Option<Duration>,
+) -> Result<reqwest::Response, SendError> {
+    let mut hops = 0;
+    while let Some(target) = cross_origin_target(&response) {
+        let url = redact_url(response.url());
+        let status = response.status();
+        let refuse = |method: Method, reason: String| SendError::Redirect {
+            method,
+            url: url.clone(),
+            reason,
+        };
+        if hops == MAX_REDIRECTS {
+            return Err(refuse(
+                method,
+                format!("stopped after {MAX_REDIRECTS} redirects to other origins"),
+            ));
+        }
+        hops += 1;
+        let target_origin = target.origin().ascii_serialization();
+        let next = redirected_method(status, &method);
+        if next != Method::GET && next != Method::HEAD {
+            return Err(refuse(
+                method,
+                format!(
+                    "refusing to follow HTTP {} to another origin ({target_origin}): it would \
+                     send the {next} request, and its body, to a host it was not meant for",
+                    status.as_u16()
+                ),
+            ));
+        }
+        if response.url().scheme() == "https" && target.scheme() == "http" {
+            return Err(refuse(
+                method,
+                format!("refusing HTTPS to HTTP redirect to {target_origin}"),
+            ));
+        }
+        tracing::debug!(
+            from = %url, to = %redact_url(&target), status = status.as_u16(),
+            "following a redirect to another origin without credentials"
+        );
+        let mut rb = client.request(next.clone(), target.clone());
+        for name in &CROSS_ORIGIN_HEADERS {
+            for value in headers.get_all(name) {
+                rb = rb.header(name, value);
+            }
+        }
+        let sent =
+            match response_timeout {
+                Some(limit) => tokio::time::timeout(limit, rb.send()).await.map_err(|_| {
+                    SendError::Timeout {
+                        method: next.clone(),
+                        url: redact_url(&target),
+                        timeout: limit,
+                        attempts: 1,
+                        retried_allowed: true,
+                    }
+                })?,
+                None => rb.send().await,
+            };
+        response = sent.map_err(|e| SendError::Transport {
+            method: next.clone(),
+            url: redact_url(&target),
+            attempts: 1,
+            retried_allowed: true,
+            source: e.without_url(),
+        })?;
+        method = next;
+    }
+    Ok(response)
 }
 
 /// Builds a new client, with the same configuration as [`shared_client`] but
@@ -354,6 +495,14 @@ pub enum SendError {
         source: reqwest::Error,
     },
 
+    /// A redirect to another origin that is not followed (see [`send`]).
+    #[error("{method} {url}: {reason}")]
+    Redirect {
+        method: Method,
+        url: String,
+        reason: String,
+    },
+
     #[error(transparent)]
     Config(#[from] GwsError),
 }
@@ -374,7 +523,8 @@ impl From<SendError> for GwsError {
             SendError::Transport { .. }
             | SendError::Timeout { .. }
             | SendError::BodyTimeout { .. }
-            | SendError::ReadBody { .. } => GwsError::Network(Box::new(err)),
+            | SendError::ReadBody { .. }
+            | SendError::Redirect { .. } => GwsError::Network(Box::new(err)),
         }
     }
 }
@@ -529,6 +679,7 @@ pub async fn send(
         // reqwest errors print their full URL; the query is redacted below.
         let request = request.map_err(|e| SendError::Build(e.without_url()))?;
         let method = request.method().clone();
+        let headers = request.headers().clone();
         let url = redact_url(request.url());
         let idempotent = idempotency.resolve(&method);
         let can_retry = attempt < max_attempts;
@@ -583,6 +734,15 @@ pub async fn send(
                 });
             }
         };
+
+        let response = follow_cross_origin(
+            &client,
+            response,
+            method.clone(),
+            &headers,
+            policy.response_timeout,
+        )
+        .await?;
 
         match classify(response, &method, &url, policy.response_timeout).await? {
             Verdict::Done(response) => {
@@ -1298,5 +1458,200 @@ mod tests {
         assert!(!received[0].headers.contains_key("authorization"));
         let first = origin.received_requests().await.unwrap();
         assert!(first[0].headers.contains_key("authorization"));
+    }
+
+    /// Two servers on different ports: `origin` redirects `/r` to `target`'s
+    /// `/landing` with `status`.
+    async fn cross_origin_redirect(status: u16) -> (MockServer, MockServer) {
+        let target = MockServer::start().await;
+        Mock::given(path("/landing"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&target)
+            .await;
+        let origin = MockServer::start().await;
+        Mock::given(path("/r"))
+            .respond_with(
+                ResponseTemplate::new(status)
+                    .insert_header("location", format!("{}/landing", target.uri()).as_str()),
+            )
+            .mount(&origin)
+            .await;
+        (origin, target)
+    }
+
+    /// The quota project, and every other header that is not plainly about
+    /// the content, stays with the origin the request was meant for.
+    #[tokio::test]
+    async fn quota_project_is_not_forwarded_across_origins() {
+        for status in [301, 302, 303, 307, 308] {
+            let (origin, target) = cross_origin_redirect(status).await;
+            let client = shared_client().unwrap();
+            let url = format!("{}/r", origin.uri());
+            let sent = send(&fast_policy(), Idempotency::FromMethod, || {
+                client
+                    .get(&url)
+                    .bearer_auth("secret-token")
+                    .header("x-goog-user-project", "my-quota-project")
+                    .header("x-upload-content-type", "text/plain")
+                    .header("range", "bytes=0-9")
+            })
+            .await
+            .unwrap();
+            assert_eq!(sent.response.status(), 200, "{status}");
+            let first = origin.received_requests().await.unwrap();
+            assert!(first[0].headers.contains_key("x-goog-user-project"));
+            let received = target.received_requests().await.unwrap();
+            assert_eq!(received.len(), 1, "{status}");
+            let headers = &received[0].headers;
+            assert_eq!(received[0].method.as_str(), "GET", "{status}");
+            for name in [
+                "authorization",
+                "x-goog-user-project",
+                "x-upload-content-type",
+            ] {
+                assert!(!headers.contains_key(name), "{status}: {name} forwarded");
+            }
+            assert_eq!(headers.get("range").unwrap(), "bytes=0-9", "{status}");
+        }
+    }
+
+    /// A 307/308 keeps the method and body. To another origin that would
+    /// send the request body (a message, a document) somewhere it was not
+    /// meant for, so the redirect is refused and nothing reaches the target.
+    #[tokio::test]
+    async fn cross_origin_307_308_with_a_body_is_refused() {
+        for status in [307, 308] {
+            let (origin, target) = cross_origin_redirect(status).await;
+            let client = shared_client().unwrap();
+            let url = format!("{}/r", origin.uri());
+            let err = send(&fast_policy(), Idempotency::FromMethod, || {
+                client
+                    .post(&url)
+                    .header("x-goog-user-project", "my-quota-project")
+                    .json(&serde_json::json!({"raw": "private message"}))
+            })
+            .await
+            .unwrap_err();
+            assert!(
+                matches!(err, SendError::Redirect { .. }),
+                "{status}: {err:?}"
+            );
+            let text = err.to_string();
+            assert!(text.contains("another origin"), "{text}");
+            assert!(text.contains(&target.uri()), "{text}");
+            assert!(
+                target.received_requests().await.unwrap().is_empty(),
+                "{status}: the body was re-sent"
+            );
+            assert!(matches!(GwsError::from(err), GwsError::Network(_)));
+        }
+    }
+
+    /// A 303 (and a 301/302 after a POST) turns the request into a GET
+    /// without a body, which may go to another origin, still without the
+    /// quota project.
+    #[tokio::test]
+    async fn cross_origin_see_other_after_post_becomes_a_bare_get() {
+        for status in [301, 302, 303] {
+            let (origin, target) = cross_origin_redirect(status).await;
+            let client = shared_client().unwrap();
+            let url = format!("{}/r", origin.uri());
+            let sent = send(&fast_policy(), Idempotency::FromMethod, || {
+                client
+                    .post(&url)
+                    .header("x-goog-user-project", "my-quota-project")
+                    .json(&serde_json::json!({"raw": "private message"}))
+            })
+            .await
+            .unwrap();
+            assert_eq!(sent.response.status(), 200, "{status}");
+            let received = target.received_requests().await.unwrap();
+            assert_eq!(received.len(), 1);
+            assert_eq!(received[0].method.as_str(), "GET", "{status}");
+            assert!(received[0].body.is_empty(), "{status}");
+            assert!(!received[0].headers.contains_key("x-goog-user-project"));
+            assert!(!received[0].headers.contains_key("content-type"));
+        }
+    }
+
+    /// A PUT, PATCH or DELETE redirected to another origin is refused for
+    /// every redirect status: it would keep its method there.
+    #[tokio::test]
+    async fn cross_origin_redirect_of_other_methods_is_refused() {
+        let (origin, target) = cross_origin_redirect(302).await;
+        let client = shared_client().unwrap();
+        let url = format!("{}/r", origin.uri());
+        for m in [Method::PUT, Method::PATCH, Method::DELETE] {
+            let err = send(&fast_policy(), Idempotency::FromMethod, || {
+                client.request(m.clone(), &url).body("data")
+            })
+            .await
+            .unwrap_err();
+            assert!(matches!(err, SendError::Redirect { .. }), "{m}: {err:?}");
+        }
+        assert!(target.received_requests().await.unwrap().is_empty());
+    }
+
+    /// Redirects within one origin are followed as before, body and
+    /// headers included.
+    #[tokio::test]
+    async fn same_origin_307_keeps_body_and_headers() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/landing"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&server)
+            .await;
+        Mock::given(path("/r"))
+            .respond_with(ResponseTemplate::new(307).insert_header("location", "/landing"))
+            .mount(&server)
+            .await;
+        let client = shared_client().unwrap();
+        let url = format!("{}/r", server.uri());
+        let sent = send(&fast_policy(), Idempotency::FromMethod, || {
+            client
+                .post(&url)
+                .bearer_auth("secret-token")
+                .header("x-goog-user-project", "my-quota-project")
+                .body("payload")
+        })
+        .await
+        .unwrap();
+        assert_eq!(sent.response.status(), 200);
+        let received = server.received_requests().await.unwrap();
+        let landing = received
+            .iter()
+            .find(|r| r.url.path() == "/landing")
+            .unwrap();
+        assert_eq!(landing.body, b"payload");
+        assert!(landing.headers.contains_key("x-goog-user-project"));
+        assert!(landing.headers.contains_key("authorization"));
+    }
+
+    /// A chain that keeps hopping between origins still stops.
+    #[tokio::test]
+    async fn cross_origin_redirect_loops_stop() {
+        let a = MockServer::start().await;
+        let b = MockServer::start().await;
+        Mock::given(path("/r"))
+            .respond_with(
+                ResponseTemplate::new(302)
+                    .insert_header("location", format!("{}/r", b.uri()).as_str()),
+            )
+            .mount(&a)
+            .await;
+        Mock::given(path("/r"))
+            .respond_with(
+                ResponseTemplate::new(302)
+                    .insert_header("location", format!("{}/r", a.uri()).as_str()),
+            )
+            .mount(&b)
+            .await;
+        let client = shared_client().unwrap();
+        let url = format!("{}/r", a.uri());
+        let err = send(&fast_policy(), Idempotency::FromMethod, || client.get(&url))
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("redirects"), "{err}");
     }
 }
