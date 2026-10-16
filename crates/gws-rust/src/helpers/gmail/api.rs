@@ -19,7 +19,7 @@
 
 use super::prelude::*;
 use crate::transport::Transport;
-use gws_rust_core::client::Idempotency;
+use gws_rust_core::client::{Idempotency, RetryPolicy};
 use gws_rust_core::validate::EndpointPolicy;
 use reqwest::Method;
 
@@ -417,8 +417,18 @@ impl GmailApi {
         } else {
             "Failed to send message"
         };
-        let resp = self
-            .rest
+        // The upload gets the same size-scaled time limit as any other
+        // media upload: a large message on a slow link must not time out
+        // while it is still being sent (a send is never retried, so the
+        // timeout would leave it unknown whether the message went out).
+        let rest = self.rest.with_retry(RetryPolicy {
+            response_timeout: crate::transport::upload_timeout(
+                self.rest.retry.response_timeout,
+                body.len() as u64,
+            ),
+            ..self.rest.retry.clone()
+        });
+        let resp = rest
             .send_ok(
                 Method::POST,
                 &self.upload_url(draft),
@@ -720,6 +730,38 @@ mod tests {
             GwsError::Api { code, .. } => assert_eq!(code, 503),
             other => panic!("unexpected {other:?}"),
         }
+    }
+
+    /// A large message gets the size-scaled upload time limit, not the
+    /// plain response timeout: on a slow link the server answers only after
+    /// the whole body has arrived.
+    #[tokio::test]
+    async fn upload_raw_time_limit_scales_with_the_message_size() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/upload/gmail/v1/users/me/messages/send"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({"id": "m1"}))
+                    .set_delay(std::time::Duration::from_millis(1500)),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        let base = Transport::for_test(&server.uri());
+        let rest = base.with_retry(RetryPolicy {
+            response_timeout: Some(std::time::Duration::from_secs(1)),
+            ..base.retry.clone()
+        });
+        let api = GmailApi::with_bases(
+            rest,
+            &format!("{}/gmail/v1", server.uri()),
+            &format!("{}/upload/gmail/v1", server.uri()),
+        );
+        // 128 KiB: two more seconds than the 1s response timeout.
+        let raw = vec![b'x'; 128 * 1024];
+        let v = api.upload_raw(&raw, &json!({}), false).await.unwrap();
+        assert_eq!(v["id"], "m1");
     }
 
     #[tokio::test]
