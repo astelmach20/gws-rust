@@ -771,11 +771,22 @@ pub(crate) async fn run_batch(
                     break;
                 }
             };
-            emitter.page(
+            if let Err(e) = emitter.page(
                 &json!({"id": call.id, "status": part.status, "body": body}),
                 &format,
                 &mut pages,
-            )?;
+            ) {
+                // A `--jq`/format or write failure: this call and the rest
+                // of its group were applied, but their results are lost.
+                let mut unprinted = withheld;
+                unprinted.extend(chunk[index..].iter().map(|c| c.id.as_str()));
+                return Err(batch_stopped(
+                    e,
+                    &unprinted,
+                    "sent and answered, but the result was not printed",
+                    not_sent,
+                ));
+            }
         }
         if let Some(err) = first_error {
             return Err(batch_stopped(

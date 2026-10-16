@@ -2945,6 +2945,74 @@ async fn batch_stopped_by_model_armor_names_withheld_and_unsent_calls() {
     assert_eq!(server.received_requests().await.unwrap().len(), 1);
 }
 
+/// When printing a result fails part-way through a batch (here a `--jq`
+/// error on the first result line), the rest of that group was already
+/// applied but is never printed, and the later groups are not sent. The
+/// error must say which calls are which, as it does when Model Armor
+/// withholds a result.
+#[tokio::test(flavor = "multi_thread")]
+async fn batch_stopped_by_a_print_failure_names_unprinted_and_unsent_calls() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    let mut parts = String::new();
+    for id in 1..=100 {
+        parts.push_str(&format!(
+            "--b\r\nContent-Type: application/http\r\nContent-ID: <response-item-{id}>\r\n\r\n\
+             HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{{\"id\":\"m{id}\"}}\r\n"
+        ));
+    }
+    parts.push_str("--b--\r\n");
+    Mock::given(method("POST"))
+        .and(path("/batch/gmail/v1"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_raw(parts.into_bytes(), "multipart/mixed; boundary=b"),
+        )
+        .mount(&server)
+        .await;
+    let env = Env::new();
+    seed_gmail_get(&env);
+    let input: String = (1..=101)
+        .map(|i| {
+            format!(
+                "{{\"method\":\"users.messages.get\",\"params\":{{\"userId\":\"me\",\"id\":\"m{i}\"}}}}\n"
+            )
+        })
+        .collect();
+    let out = env
+        .cmd()
+        .env("GWSR_TOKEN", "test-token")
+        .env("GWSR_API_BASE_URL", server.uri())
+        .args([
+            "batch",
+            "gmail",
+            "--jq",
+            r#"if .id == "2" then error("boom") else .id end"#,
+        ])
+        .write_stdin(input)
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    assert_eq!(stdout_of(&out).trim(), "1");
+    let stderr = stderr_of(&out);
+    assert!(stderr.contains("boom"), "{stderr}");
+    assert!(
+        stderr.contains("no result for call(s) 2, 3, 4"),
+        "the error does not name the applied calls whose results were not printed: {stderr}"
+    );
+    assert!(
+        !stderr.contains("call(s) 1,"),
+        "the printed call is named: {stderr}"
+    );
+    assert!(
+        stderr.contains("call(s) 101 not sent"),
+        "the error does not name the calls never sent: {stderr}"
+    );
+    assert_eq!(server.received_requests().await.unwrap().len(), 1);
+}
+
 /// `--dry-run` before `auth` must not be silently dropped: `gwsr --dry-run
 /// auth logout` used to delete the profile's credentials (and revoke the
 /// refresh token) for real.
