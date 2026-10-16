@@ -19,7 +19,7 @@ metadata:
 > **PREREQUISITE:** Read `../gwsr-shared/SKILL.md` for auth, global flags, and security rules. If it is missing, install it with `npx skills add https://github.com/astelmach20/gws-rust/tree/main/skills/gwsr-shared`.
 
 ```bash
-gwsr modelarmor <resource> <method> [flags]
+gwsr modelarmor +<helper> [flags]
 ```
 
 ## Helper Commands
@@ -32,15 +32,13 @@ gwsr modelarmor <resource> <method> [flags]
 
 ## Discovering Commands
 
-Before calling any API method, inspect it:
+Before calling a helper, inspect it:
 
 ```bash
-# Browse resources and methods
+# List the helpers
 gwsr modelarmor --help
 
-# Inspect a method's required params, types, and defaults
-gwsr schema modelarmor.<resource>.<method>
+# A helper's flags, examples and tips
+gwsr modelarmor +<helper> --help
 ```
-
-Use `gwsr schema` output to build your `--params` and `--json` flags.
 
