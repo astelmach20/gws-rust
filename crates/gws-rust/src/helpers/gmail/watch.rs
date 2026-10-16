@@ -224,10 +224,17 @@ impl GmailWatchStep<'_> {
                 .history(self.last_history_id, page_token.as_deref())
                 .await
                 .map_err(|e| match e {
-                    GwsError::Api { code: 404, .. } => StepError::Fatal(GwsError::other(format!(
-                        "Gmail history since {} is no longer available ({e}); restart +watch",
-                        self.last_history_id
-                    ))),
+                    // Still an API error (exit 1, Google's reason and
+                    // message); only the remedy is added.
+                    GwsError::Api { code: 404, .. } => {
+                        StepError::Fatal(crate::transport::errors::with_context(
+                            e,
+                            &format!(
+                                "Gmail history since {} is no longer available; restart +watch",
+                                self.last_history_id
+                            ),
+                        ))
+                    }
                     other => StepError::from(other),
                 })?;
             ids.extend(extract_message_ids_from_history(
@@ -764,19 +771,46 @@ mod tests {
         assert!(matches!(err, GwsError::Api { code: 403, .. }), "{err:?}");
     }
 
+    /// History older than Gmail keeps is a fatal API error (exit 1) with
+    /// Google's reason and message, plus the remedy; not an internal error.
     #[tokio::test]
     async fn watch_history_gone_is_fatal() {
         let server = MockServer::start().await;
         mount_pull(&server).await;
         Mock::given(method("GET"))
             .and(path("/gmail/v1/users/me/history"))
-            .respond_with(ResponseTemplate::new(404))
+            .respond_with(ResponseTemplate::new(404).set_body_json(json!({
+                "error": {
+                    "code": 404,
+                    "message": "Requested entity was not found.",
+                    "errors": [{ "reason": "notFound" }]
+                }
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/v1/projects/test/subscriptions/demo:acknowledge"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(0)
             .mount(&server)
             .await;
         let err = run_once(&server, &SanitizeConfig::default())
             .await
             .unwrap_err();
-        assert!(err.to_string().contains("restart +watch"));
+        assert!(
+            matches!(&err, GwsError::Api { code: 404, reason, .. } if reason == "notFound"),
+            "{err:?}"
+        );
+        assert_eq!(err.exit_code(), GwsError::EXIT_CODE_API, "{err:?}");
+        let msg = err.to_string();
+        for needle in [
+            "Requested entity was not found.",
+            "since 1",
+            "restart +watch",
+        ] {
+            assert!(msg.contains(needle), "{needle}: {msg}");
+        }
     }
 
     #[tokio::test]
