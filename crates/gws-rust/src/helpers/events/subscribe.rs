@@ -120,8 +120,10 @@ fn validate_subscribe_config(config: &SubscribeConfig) -> Result<(), GwsError> {
     Ok(())
 }
 
-/// Decode a Pub/Sub message carrying a CloudEvent. Undecodable data is kept
-/// as `null` with an explicit `dataError` rather than silently dropped.
+/// Decode a Pub/Sub message carrying a CloudEvent. Workspace Events uses the
+/// CloudEvents Pub/Sub binary binding, so the context attributes are
+/// `ce-type`, `ce-source` and `ce-time`. Undecodable data is kept as `null`
+/// with an explicit `dataError` rather than silently dropped.
 fn decode_cloud_event(pubsub_msg: &Value) -> Value {
     let attributes = pubsub_msg
         .get("attributes")
@@ -134,9 +136,9 @@ fn decode_cloud_event(pubsub_msg: &Value) -> Value {
             .map(str::to_string)
     };
     let mut event = json!({
-        "type": attr("type"),
-        "source": attr("source"),
-        "time": attr("time"),
+        "type": attr("ce-type"),
+        "source": attr("ce-source"),
+        "time": attr("ce-time"),
         "attributes": attributes,
         "data": Value::Null,
     });
@@ -673,12 +675,25 @@ mod tests {
 
     #[test]
     fn test_decode_cloud_event() {
+        // Workspace Events publishes CloudEvents in the Pub/Sub binary
+        // binding: the context attributes carry a `ce-` prefix.
         let msg = json!({
-            "attributes": { "type": "google.workspace.chat.message.v1.created", "source": "//chat/spaces/A", "time": "2026-02-13T10:00:00Z" },
+            "attributes": {
+                "ce-type": "google.workspace.chat.message.v1.created",
+                "ce-source": "//workspaceevents.googleapis.com/subscriptions/S",
+                "ce-time": "2026-02-13T10:00:00Z",
+                "ce-specversion": "1.0"
+            },
             "data": base64::engine::general_purpose::STANDARD.encode(r#"{"foo":"bar"}"#)
         });
         let e = decode_cloud_event(&msg);
         assert_eq!(e["type"], "google.workspace.chat.message.v1.created");
+        assert_eq!(
+            e["source"],
+            "//workspaceevents.googleapis.com/subscriptions/S"
+        );
+        assert_eq!(e["time"], "2026-02-13T10:00:00Z");
+        assert_eq!(e["attributes"]["ce-specversion"], "1.0");
         assert_eq!(e["data"]["foo"], "bar");
         assert!(e.get("dataError").is_none());
         let bad = decode_cloud_event(&json!({ "data": "!!!" }));
@@ -775,7 +790,7 @@ mod tests {
             .and(header("authorization", "Bearer test-token"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
                 "receivedMessages": [{ "ackId": "ack-1", "message": {
-                    "attributes": { "type": "t" },
+                    "attributes": { "ce-type": "t" },
                     "data": base64::engine::general_purpose::STANDARD.encode(r#"{"id":"evt-1"}"#)
                 }}]
             })))
