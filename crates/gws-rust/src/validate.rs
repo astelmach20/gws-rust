@@ -41,9 +41,22 @@ pub fn validate_safe_file_path(path_str: &str, flag_name: &str) -> Result<PathBu
 /// policy. Like [`validate_safe_file_path`], but an existing directory is
 /// refused up front: it can never be replaced by a file, so accepting it
 /// would only fail after the whole request and download.
+///
+/// A path whose last segment is empty, `.` or `..` (`out/`, `out/.`) names a
+/// directory too, whether or not it exists: resolving it drops that segment,
+/// so it would otherwise be written as a file named `out`.
 pub fn validate_output_file_path(path_str: &str, flag_name: &str) -> Result<PathBuf, GwsError> {
     let path = validate_safe_file_path(path_str, flag_name)?;
     reject_directory(&path, flag_name)?;
+    let last = path_str
+        .rsplit(std::path::is_separator)
+        .next()
+        .unwrap_or_default();
+    if matches!(last, "" | "." | "..") {
+        return Err(GwsError::Validation(format!(
+            "{flag_name} '{path_str}' names a directory; give a file path inside it instead"
+        )));
+    }
     Ok(path)
 }
 
