@@ -540,11 +540,25 @@ pub(crate) async fn resumable_upload(
         };
 
         failures += 1;
-        if failures > MAX_CHUNK_FAILURES {
+        // A retryable status may carry `Retry-After`: wait that long, or stop
+        // at once when it asks for longer than the policy allows, as
+        // `client::send` does for every other request.
+        let retry_after = match &failed_reason {
+            ChunkFailure::Status(sent) => sent.retry_after,
+            ChunkFailure::Error(_) | ChunkFailure::Stalled(_) => None,
+        };
+        let wait_too_long = retry_after.is_some_and(|ra| ra > transport.retry.max_retry_after);
+        if failures > MAX_CHUNK_FAILURES || wait_too_long {
             progress.finish();
-            let context = format!(
-                "resumable upload failed after {MAX_CHUNK_FAILURES} consecutive retries at byte {offset} of {total}"
-            );
+            let context = if wait_too_long {
+                format!(
+                    "resumable upload stopped at byte {offset} of {total}: the server asked to wait longer than gwsr retries for"
+                )
+            } else {
+                format!(
+                    "resumable upload failed after {MAX_CHUNK_FAILURES} consecutive retries at byte {offset} of {total}"
+                )
+            };
             // Keep the class of the last failure: a retryable status stays
             // a retryable API error (exit 6), a lost connection a network
             // error (exit 10).
@@ -556,7 +570,8 @@ pub(crate) async fn resumable_upload(
         }
         let failed_reason = failed_reason.describe();
         tracing::debug!(offset, failures, reason = %failed_reason, "upload chunk failed; querying session status");
-        tokio::time::sleep(transport.retry.backoff(failures - 1)).await;
+        let delay = retry_after.unwrap_or_else(|| transport.retry.backoff(failures - 1));
+        tokio::time::sleep(delay).await;
 
         // Ask the server how much it has.
         let status_range = format!("bytes */{total}");
