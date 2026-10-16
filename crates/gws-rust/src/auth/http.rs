@@ -79,6 +79,20 @@ pub fn is_oauth_response(status: reqwest::StatusCode, body: &[u8]) -> bool {
     }
 }
 
+/// Whether `body` deserializes as the response `oauth2` will parse for
+/// `status`: a token response for `200 OK`, an error response otherwise (the
+/// crate treats every other status as an error). A body that does not (no
+/// `access_token`, a field of the wrong type) is not Google's verdict on the
+/// credential, so [`execute`] reports it with its status instead of letting
+/// `oauth2` fail with a parse error that has none.
+fn parses_as_oauth_response(status: reqwest::StatusCode, body: &[u8]) -> bool {
+    if status == reqwest::StatusCode::OK {
+        serde_json::from_slice::<oauth2::basic::BasicTokenResponse>(body).is_ok()
+    } else {
+        serde_json::from_slice::<oauth2::basic::BasicErrorResponse>(body).is_ok()
+    }
+}
+
 /// Longest excerpt of a failed endpoint's body kept in the error.
 const DETAIL_MAX_CHARS: usize = 200;
 
@@ -157,7 +171,7 @@ pub async fn execute(
         builder = builder.header(name, value);
     }
     let body = response.bytes().await?.to_vec();
-    if !is_oauth_response(status, &body) {
+    if !is_oauth_response(status, &body) || !parses_as_oauth_response(status, &body) {
         return Err(HttpError::NotOAuthResponse {
             status: status.as_u16(),
             detail: body_excerpt(&body),
