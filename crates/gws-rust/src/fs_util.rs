@@ -177,9 +177,9 @@ fn check_owner(path: &Path, meta: &std::fs::Metadata, euid: u32) -> anyhow::Resu
     let owner = meta.uid();
     if owner != euid && owner != 0 {
         anyhow::bail!(
-            "refusing to use '{}': it is owned by another user (uid {owner}, expected uid \
-             {euid}), who could have planted or changed it. Use a directory you own, or take \
-             ownership of it with: chown {euid} '{}'",
+            "refusing to use '{}': it is owned by another user, who could have planted or \
+             changed it. Use a directory you own, or take ownership of it with: \
+             chown \"$(id -u)\" '{}'",
             path.display(),
             path.display()
         );
@@ -563,11 +563,14 @@ mod tests {
                 .unwrap_err()
                 .to_string();
             assert!(err.contains("owned by another user"), "{err}");
-            assert!(err.contains(&format!("chown {other}")), "{err}");
+            assert!(err.contains("chown \"$(id -u)\""), "{err}");
         }
-        // Root-owned files are trusted whoever runs gwsr.
+        // Root-owned files are trusted whoever runs gwsr. `/` is not owned
+        // by root in every build sandbox (Nix), so only check it when it is.
         let root_owned = fs::metadata("/").unwrap();
-        check_owner(Path::new("/"), &root_owned, other).unwrap();
+        if std::os::unix::fs::MetadataExt::uid(&root_owned) == 0 {
+            check_owner(Path::new("/"), &root_owned, other).unwrap();
+        }
     }
 
     #[test]
