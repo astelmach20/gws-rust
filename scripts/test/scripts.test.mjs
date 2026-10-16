@@ -205,6 +205,40 @@ describe("check-changeset.sh", () => {
     assert.equal(res.status, 1);
     assert.match(res.stdout, /Generated google-\* crates are not allowed/);
   });
+
+  // Standard Cargo spellings of the same dependency that the line-start grep did not see.
+  for (const [what, file, manifest, line] of [
+    ["a workspace-inherited dependency", "crates/gws-rust/Cargo.toml", '[dependencies]\ngoogle-drive3.workspace = true\n', 2],
+    ["a [workspace.dependencies] entry in the root manifest", "Cargo.toml", '[workspace]\nmembers = []\n\n[workspace.dependencies]\ngoogle-drive3 = "5"\n', 5],
+    ["a dependency table", "crates/gws-rust/Cargo.toml", '[dependencies.google-drive3]\nversion = "5"\n', 1],
+    ["a renamed dependency", "crates/gws-rust/Cargo.toml", '[dependencies]\ndrive = { package = "google-drive3", version = "5" }\n', 2],
+    ["a target-specific dev-dependency table", "crates/gws-rust/Cargo.toml", "[target.'cfg(unix)'.dev-dependencies.google-drive3]\nversion = \"5\"\n", 1],
+  ]) {
+    it(`rejects a generated google-* API crate added as ${what}`, () => {
+      const r = repo();
+      r.write(file, manifest);
+      r.write(".changeset/fix.md", '---\n"gws-rust": patch\n---\n\nFix\n');
+      r.commit();
+      const res = r.check();
+      assert.equal(res.status, 1, res.stdout + res.stderr);
+      assert.ok(
+        res.stdout.includes(`::error file=${file},line=${line}::Generated google-* crates are not allowed`),
+        res.stdout,
+      );
+    });
+  }
+
+  it("allows google-* names outside dependency tables and as path dependencies", () => {
+    const r = repo();
+    r.write(
+      "crates/gws-rust/Cargo.toml",
+      '[package]\nkeywords = ["google-workspace"]\n\n[dependencies]\ngoogle-local = { path = "../google-local" }\n\n[features]\ngoogle-extras = []\n',
+    );
+    r.write(".changeset/fix.md", '---\n"gws-rust": patch\n---\n\nFix\n');
+    r.commit();
+    const res = r.check();
+    assert.equal(res.status, 0, res.stdout + res.stderr);
+  });
 });
 
 describe("install-hooks.sh", () => {
