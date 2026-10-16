@@ -801,6 +801,113 @@ fn drive_share_rejects_bad_flag_combinations_before_confirm_and_auth() {
     }
 }
 
+/// An empty (or blank) value for a flag that names a folder, grantee,
+/// script or title would be sent as `parents: [""]`, `emailAddress: ""`,
+/// `scriptId=` or `title: ""`. Helpers refuse it as a validation error
+/// (exit 3) before sending anything, in a real run and a dry run alike.
+#[tokio::test(flavor = "multi_thread")]
+async fn empty_flag_values_are_rejected_before_sending() {
+    use wiremock::{Mock, MockServer, ResponseTemplate, matchers::any};
+
+    let server = MockServer::start().await;
+    Mock::given(any())
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+        .mount(&server)
+        .await;
+
+    let dir = setup();
+    std::fs::write(dir.path().join("f.txt"), "hi").unwrap();
+    let cases: [(&[&str], &str); 7] = [
+        (
+            &["drive", "+upload", "--file", "f.txt", "--folder-id", ""],
+            "--folder-id must not be empty",
+        ),
+        (
+            &["drive", "+upload", "--file", "f.txt", "--folder-id", " "],
+            "--folder-id must not be empty",
+        ),
+        (
+            &[
+                "drive",
+                "+share",
+                "--file-id",
+                "F1",
+                "--role",
+                "reader",
+                "--email",
+                "",
+            ],
+            "--email must not be empty",
+        ),
+        (
+            &[
+                "drive",
+                "+share",
+                "--file-id",
+                "F1",
+                "--role",
+                "reader",
+                "--email",
+                "",
+                "--group",
+            ],
+            "--email must not be empty",
+        ),
+        (
+            &[
+                "drive",
+                "+share",
+                "--file-id",
+                "F1",
+                "--role",
+                "reader",
+                "--domain",
+                "",
+            ],
+            "--domain must not be empty",
+        ),
+        (
+            &["script", "+logs", "--script-id", ""],
+            "--script-id must not be empty",
+        ),
+        (
+            &["tasks", "+add", "--title", ""],
+            "--title must not be empty",
+        ),
+    ];
+    for (args, expected) in cases {
+        for mode in ["--yes", "--dry-run"] {
+            // `--yes` is only defined on commands that confirm.
+            let extra: &[&str] = match (mode, args[1]) {
+                ("--yes", "+share") => &["--yes"],
+                ("--yes", _) => &[],
+                _ => &["--dry-run"],
+            };
+            let out = gwsr(dir.path())
+                .env("GWSR_TOKEN", "test-token")
+                .env("GWSR_API_BASE_URL", server.uri())
+                .args(args)
+                .args(extra)
+                .output()
+                .unwrap();
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            assert_eq!(
+                out.status.code(),
+                Some(3),
+                "{args:?} {mode} was not rejected: stdout={} stderr={stderr}",
+                String::from_utf8_lossy(&out.stdout)
+            );
+            assert!(stderr.contains(expected), "{args:?} {mode}: {stderr}");
+        }
+    }
+    let received = server.received_requests().await.unwrap();
+    let sent: Vec<String> = received
+        .iter()
+        .map(|r| format!("{} {}", r.method, r.url.path()))
+        .collect();
+    assert!(sent.is_empty(), "requests reached the server: {sent:?}");
+}
+
 #[test]
 fn drive_download_and_export_check_output_before_auth() {
     // `--output .` names a directory, which no download can write to. The
@@ -1791,7 +1898,11 @@ async fn empty_path_ids_are_rejected_before_sending() {
             "{args:?} was not rejected: stdout={} stderr={stderr}",
             String::from_utf8_lossy(&out.stdout)
         );
-        assert!(stderr.contains("empty segment"), "{args:?}: {stderr}");
+        // `--script-id` is checked as a flag before any path is built.
+        assert!(
+            stderr.contains("empty segment") || stderr.contains("must not be empty"),
+            "{args:?}: {stderr}"
+        );
     }
     let received = server.received_requests().await.unwrap();
     let sent: Vec<String> = received

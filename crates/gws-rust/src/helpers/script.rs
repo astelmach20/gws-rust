@@ -18,7 +18,7 @@
 
 use super::Helper;
 use super::http::{self, Api, ApiRequest};
-use crate::args::{flag, many, optional, required};
+use crate::args::{flag, many, optional, required, required_non_empty};
 use crate::confirm::{self, Impact, with_yes};
 use crate::error::GwsError;
 use crate::validate::encode_path_segment;
@@ -184,7 +184,7 @@ TIPS:
                 return Ok(false);
             }
             let dry = crate::args::dry_run(m)?;
-            let script_id = required(m, "script-id")?;
+            let script_id = required_non_empty(m, "script-id")?;
             let (api, value) = match name {
                 "+push" => {
                     let dir = crate::validate::validate_safe_dir_path(required(m, "dir")?)?;
