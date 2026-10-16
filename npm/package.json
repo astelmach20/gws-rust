@@ -19,7 +19,8 @@
   "files": [
     "bin/",
     "lib/",
-    "platforms.json"
+    "platforms.json",
+    "NOTICE"
   ],
   "engines": {
     "node": ">=22"
