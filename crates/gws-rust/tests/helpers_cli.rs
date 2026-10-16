@@ -1972,6 +1972,17 @@ async fn drive_sync_keeps_local_files_and_exits_with_sync_conflict() {
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     let server = MockServer::start().await;
+    // +sync first checks that --folder-id is a folder.
+    Mock::given(method("GET"))
+        .and(path("/drive/v3/files/ROOT"))
+        .and(query_param("fields", "id,mimeType"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(
+                json!({"id": "ROOT", "mimeType": "application/vnd.google-apps.folder"}),
+            ),
+        )
+        .mount(&server)
+        .await;
     Mock::given(method("GET"))
         .and(path("/drive/v3/files"))
         .and(query_param("q", "'ROOT' in parents and trashed = false"))
@@ -2044,6 +2055,17 @@ async fn drive_sync_interrupted_by_a_signal_saves_its_state() {
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     let server = MockServer::start().await;
+    // +sync first checks that --folder-id is a folder.
+    Mock::given(method("GET"))
+        .and(path("/drive/v3/files/ROOT"))
+        .and(query_param("fields", "id,mimeType"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(
+                json!({"id": "ROOT", "mimeType": "application/vnd.google-apps.folder"}),
+            ),
+        )
+        .mount(&server)
+        .await;
     Mock::given(method("GET"))
         .and(path("/drive/v3/files"))
         .and(query_param("q", "'ROOT' in parents and trashed = false"))
