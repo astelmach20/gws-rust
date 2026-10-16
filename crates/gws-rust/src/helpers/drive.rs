@@ -628,6 +628,33 @@ fn resolve_target(
     Ok(OutputTarget::File { path, overwrite })
 }
 
+/// Placeholder for the Drive file's name, which a dry run does not read.
+const UNKNOWN_NAME: &str = "<file name>";
+
+/// The `--dry-run` counterpart of [`resolve_target`]: `--output`, or a
+/// placeholder in the current directory for the file a real run names after
+/// the Drive file. Nothing is checked on disk for the placeholder, since the
+/// real name is unknown.
+fn planned_target(
+    output: Option<&str>,
+    ext: Option<&str>,
+    overwrite: bool,
+) -> Result<OutputTarget, GwsError> {
+    if let Some(o) = output {
+        return OutputTarget::parse(o, overwrite);
+    }
+    let name = match ext {
+        Some(ext) => format!("{UNKNOWN_NAME}.{ext}"),
+        None => UNKNOWN_NAME.to_string(),
+    };
+    let dir = std::env::current_dir()
+        .map_err(|e| GwsError::Validation(format!("Failed to determine current directory: {e}")))?;
+    Ok(OutputTarget::File {
+        path: dir.join(name),
+        overwrite,
+    })
+}
+
 /// Whether `--output -` sent the payload to stdout, which must then carry
 /// nothing else: no JSON summary after the raw bytes. A dry run still
 /// prints its plan.
@@ -650,8 +677,8 @@ async fn download(
     let meta = get_metadata(api, file_id).await?;
     let (name, target) = if api.is_dry_run() {
         (
-            "<file name>".to_string(),
-            resolve_target(output, "download", None, overwrite)?,
+            UNKNOWN_NAME.to_string(),
+            planned_target(output, None, overwrite)?,
         )
     } else {
         let mime = str_field(&meta, "mimeType")?;
@@ -938,17 +965,21 @@ async fn export(
     let format = export_format(to)?;
     // A dry run plans the metadata read too; the file's name is unknown.
     let meta = get_metadata(api, file_id).await?;
-    let name = if api.is_dry_run() {
-        "export".to_string()
+    let (name, target) = if api.is_dry_run() {
+        (
+            UNKNOWN_NAME.to_string(),
+            planned_target(output, Some(format.ext), overwrite)?,
+        )
     } else {
         let mime = str_field(&meta, "mimeType")?;
         if mime == SHORTCUT {
             return Err(shortcut_error(&meta, file_id, Some(format))?);
         }
         check_export(format, mime)?;
-        str_field(&meta, "name")?.to_string()
+        let name = str_field(&meta, "name")?.to_string();
+        let target = resolve_target(output, &name, Some(format.ext), overwrite)?;
+        (name, target)
     };
-    let target = resolve_target(output, &name, Some(format.ext), overwrite)?;
     let bytes = api
         .download(
             ApiRequest::get(api.url(&format!("files/{}/export", encode_path_segment(file_id))))

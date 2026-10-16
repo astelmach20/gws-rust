@@ -88,6 +88,48 @@ fn stdout_json(out: &std::process::Output) -> Value {
     })
 }
 
+/// Without `--output`, a real run names the local file after the Drive file,
+/// which a dry run does not know: the plan shows a placeholder, never a made-up
+/// `download` or `export.pdf` that a directory of that name would refuse.
+#[test]
+fn drive_download_export_dry_run_without_output_shows_placeholder_name() {
+    let dir = setup();
+    std::fs::create_dir(dir.path().join("download")).unwrap();
+    std::fs::create_dir(dir.path().join("export.pdf")).unwrap();
+    for (args, name) in [
+        (
+            &["drive", "+download", "--file-id", "F1", "--dry-run"][..],
+            "<file name>",
+        ),
+        (
+            &[
+                "drive",
+                "+export",
+                "--file-id",
+                "F1",
+                "--to",
+                "pdf",
+                "--dry-run",
+            ][..],
+            "<file name>.pdf",
+        ),
+    ] {
+        let out = gwsr(dir.path()).args(args).output().unwrap();
+        assert!(
+            out.status.success(),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let v = stdout_json(&out);
+        let output = v["requests"][1]["output"].as_str().unwrap();
+        assert_eq!(
+            Path::new(output).file_name().and_then(|n| n.to_str()),
+            Some(name),
+            "{args:?}: {v}"
+        );
+    }
+}
+
 #[test]
 fn drive_export_dry_run_prints_json_plan() {
     let dir = setup();
