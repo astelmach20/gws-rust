@@ -162,8 +162,32 @@ async fn batch_credentials(calls: &[BatchCall<'_>]) -> Result<Credentials, GwsEr
     Credentials::for_scopes(&scopes).await
 }
 
-/// Resolve `files.get`, `drive.files.get` or `permissions.list` style names.
+/// Resolve `files.get`, `drive.files.get` or `permissions.list` style names,
+/// or a Discovery method id whose prefix is not the API name (the `admin`
+/// API's `directory.users.get`).
 pub(crate) fn find_method<'a>(doc: &'a RestDescription, name: &str) -> Option<&'a RestMethod> {
+    find_method_by_path(doc, name).or_else(|| find_method_by_id(doc, name))
+}
+
+fn find_method_by_id<'a>(doc: &'a RestDescription, id: &str) -> Option<&'a RestMethod> {
+    fn search<'a>(
+        resources: &'a std::collections::HashMap<String, RestResource>,
+        id: &str,
+    ) -> Option<&'a RestMethod> {
+        resources.values().find_map(|r| {
+            r.methods
+                .values()
+                .find(|m| m.id.as_deref() == Some(id))
+                .or_else(|| search(&r.resources, id))
+        })
+    }
+    doc.methods
+        .values()
+        .find(|m| m.id.as_deref() == Some(id))
+        .or_else(|| search(&doc.resources, id))
+}
+
+fn find_method_by_path<'a>(doc: &'a RestDescription, name: &str) -> Option<&'a RestMethod> {
     let prefix = format!("{}.", doc.name);
     let path: Vec<&str> = name
         .strip_prefix(&prefix)
@@ -781,6 +805,35 @@ mod tests {
         assert!(find_method(&doc, "about").is_some());
         assert!(find_method(&doc, "drive.about").is_some());
         assert!(find_method(&doc, "about.get").is_none());
+    }
+
+    /// Discovery method ids do not always start with the API name: the
+    /// `admin` API's are `directory.users.get` and `reports.activities.list`,
+    /// `groupssettings`'s are `groupsSettings.groups.get`.
+    #[test]
+    fn method_lookup_accepts_discovery_method_ids() {
+        let mut users = RestResource::default();
+        users.methods.insert(
+            "get".into(),
+            RestMethod {
+                id: Some("directory.users.get".into()),
+                http_method: "GET".into(),
+                path: "admin/directory/v1/users/{userKey}".into(),
+                ..Default::default()
+            },
+        );
+        let mut doc = RestDescription {
+            name: "admin".into(),
+            version: "directory_v1".into(),
+            ..Default::default()
+        };
+        doc.resources.insert("users".into(), users);
+        for name in ["directory.users.get", "users.get", "admin.users.get"] {
+            let found = find_method(&doc, name).map(|m| m.id.as_deref());
+            assert_eq!(found, Some(Some("directory.users.get")), "{name}");
+        }
+        assert!(find_method(&doc, "directory.users.list").is_none());
+        assert!(find_method(&doc, "reports.users.get").is_none());
     }
 
     #[test]
