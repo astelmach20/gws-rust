@@ -431,6 +431,95 @@ pub(super) fn get_part_header<'a>(part: &'a Value, name: &str) -> Option<&'a str
         })
 }
 
+/// The attachment ID of a body text part whose bytes Gmail returns by
+/// reference instead of inline, which it does for large bodies.
+///
+/// These are the parts [`extract_payload_contents`] would take as the body if
+/// their data were inline: an unnamed `text/plain` or `text/html` part with
+/// no Content-ID that is not marked as an attachment.
+fn referenced_body_attachment_id(part: &Value) -> Option<&str> {
+    let mime_type = part.get("mimeType").and_then(Value::as_str).unwrap_or("");
+    if !(mime_type.eq_ignore_ascii_case("text/plain")
+        || mime_type.eq_ignore_ascii_case("text/html"))
+    {
+        return None;
+    }
+    let body = part.get("body")?;
+    if body.get("data").and_then(Value::as_str).is_some() {
+        return None;
+    }
+    let filename = part.get("filename").and_then(Value::as_str).unwrap_or("");
+    let explicitly_attachment = get_part_header(part, "Content-Disposition")
+        .is_some_and(|d| d.to_ascii_lowercase().starts_with("attachment"));
+    if !filename.is_empty()
+        || get_part_header(part, "Content-ID").is_some()
+        || explicitly_attachment
+    {
+        return None;
+    }
+    body.get("attachmentId")
+        .and_then(Value::as_str)
+        .filter(|id| !id.is_empty())
+}
+
+/// Whether the body walk looks inside `part`: not a part with its own bytes
+/// (an attachment, or an embedded message Gmail exposes as one file), and not
+/// an embedded `message/rfc822`, whose text is another message's body.
+fn walks_into(part: &Value) -> bool {
+    let has_attachment_id = part
+        .get("body")
+        .and_then(|b| b.get("attachmentId"))
+        .and_then(Value::as_str)
+        .is_some_and(|id| !id.is_empty());
+    let mime_type = part.get("mimeType").and_then(Value::as_str).unwrap_or("");
+    !has_attachment_id && !mime_type.eq_ignore_ascii_case("message/rfc822")
+}
+
+/// Attachment IDs of the body text parts of `payload` that Gmail returned by
+/// reference (see [`referenced_body_attachment_id`]), in payload order.
+pub(super) fn referenced_body_attachment_ids(payload: &Value) -> Vec<String> {
+    fn walk(part: &Value, ids: &mut Vec<String>) {
+        if let Some(id) = referenced_body_attachment_id(part) {
+            ids.push(id.to_string());
+        } else if walks_into(part)
+            && let Some(children) = part.get("parts").and_then(Value::as_array)
+        {
+            for child in children {
+                walk(child, ids);
+            }
+        }
+    }
+    let mut ids = Vec::new();
+    walk(payload, &mut ids);
+    ids
+}
+
+/// Put the fetched bytes of every body text part Gmail returned by reference
+/// into the part's `body.data`, as if Gmail had sent them inline, so the
+/// payload walk reads them as the body instead of listing them as files.
+pub(super) fn inline_referenced_bodies(
+    payload: &mut Value,
+    fetched: &std::collections::HashMap<String, Vec<u8>>,
+) -> Result<(), GwsError> {
+    if let Some(id) = referenced_body_attachment_id(payload) {
+        let bytes = fetched.get(id).ok_or_else(|| {
+            GwsError::other(format!("body part {id} was not fetched before parsing"))
+        })?;
+        let data = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
+        if let Some(body) = payload.get_mut("body").and_then(Value::as_object_mut) {
+            body.remove("attachmentId");
+            body.insert("data".to_string(), Value::String(data));
+        }
+    } else if walks_into(payload)
+        && let Some(children) = payload.get_mut("parts").and_then(Value::as_array_mut)
+    {
+        for child in children {
+            inline_referenced_bodies(child, fetched)?;
+        }
+    }
+    Ok(())
+}
+
 /// Walk the MIME payload tree in a single pass, collecting the text body, HTML body,
 /// and metadata for all attachment/inline parts.
 fn extract_payload_contents(payload: &Value) -> Result<PayloadContents, GwsError> {
@@ -1189,6 +1278,67 @@ mod tests {
         assert_eq!(contents.parts.len(), 2);
         assert_eq!(contents.parts[0].attachment_id(), None);
         assert_eq!(contents.parts[1].attachment_id(), Some("INNER"));
+    }
+
+    /// A large body that Gmail returns by attachment ID is read from the
+    /// fetched bytes, and is not listed as a file.
+    #[test]
+    fn test_body_returned_by_reference_is_inlined_and_read_as_the_body() {
+        let mut payload = json!({
+            "mimeType": "multipart/mixed",
+            "parts": [
+                {
+                    "mimeType": "multipart/alternative",
+                    "parts": [
+                        { "mimeType": "text/plain", "body": { "attachmentId": "BODY_T", "size": 900000 } },
+                        { "mimeType": "text/html", "body": { "attachmentId": "BODY_H", "size": 900000 } }
+                    ]
+                },
+                {
+                    "mimeType": "text/plain",
+                    "headers": [{ "name": "Content-Disposition", "value": "attachment" }],
+                    "body": { "attachmentId": "LOG", "size": 10 }
+                },
+                {
+                    "mimeType": "message/rfc822",
+                    "parts": [
+                        { "mimeType": "text/plain", "body": { "attachmentId": "INNER", "size": 10 } }
+                    ]
+                },
+                {
+                    "mimeType": "text/html",
+                    "filename": "page.html",
+                    "body": { "attachmentId": "FILE", "size": 10 }
+                }
+            ]
+        });
+        assert_eq!(
+            referenced_body_attachment_ids(&payload),
+            vec!["BODY_T", "BODY_H"]
+        );
+
+        let fetched = std::collections::HashMap::from([
+            ("BODY_T".to_string(), b"Long plain body".to_vec()),
+            ("BODY_H".to_string(), b"<p>Long HTML body</p>".to_vec()),
+        ]);
+        inline_referenced_bodies(&mut payload, &fetched).unwrap();
+        let contents = extract_payload_contents(&payload).unwrap();
+        assert_eq!(contents.body_text.as_deref(), Some("Long plain body"));
+        assert_eq!(contents.body_html.as_deref(), Some("<p>Long HTML body</p>"));
+        let ids: Vec<_> = contents.parts.iter().map(|p| p.attachment_id()).collect();
+        // The embedded message's text is not fetched as this message's body;
+        // it stays a downloadable part, like the embedded message's other files.
+        assert_eq!(ids, vec![Some("LOG"), Some("INNER"), Some("FILE")]);
+    }
+
+    #[test]
+    fn test_inlining_an_unfetched_body_part_is_an_error() {
+        let mut payload = json!({
+            "mimeType": "text/plain",
+            "body": { "attachmentId": "BODY", "size": 900000 }
+        });
+        let err = inline_referenced_bodies(&mut payload, &Default::default()).unwrap_err();
+        assert!(err.to_string().contains("BODY"), "{err}");
     }
 
     #[test]

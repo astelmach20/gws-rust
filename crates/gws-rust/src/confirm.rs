@@ -18,8 +18,10 @@
 //! Two impact classes:
 //!
 //! - [`Impact::Destructive`]: irreversible actions — any `DELETE` method, the
-//!   non-DELETE methods in [`PERMANENT_DELETE_METHODS`], and helper actions
-//!   such as clearing a range or deleting a filter. Always gated.
+//!   non-DELETE methods in [`PERMANENT_DELETE_METHODS`], the device commands
+//!   in [`BODY_DESTRUCTIVE_METHODS`] when their request body asks for a wipe,
+//!   and helper actions such as clearing a range or deleting a filter. Always
+//!   gated.
 //! - [`Impact::Outbound`]: actions that notify or grant access to other people
 //!   or run code (sending mail or chat messages, sharing, RSVPs, running
 //!   scripts), including the generated methods in [`OUTBOUND_METHODS`] and
@@ -54,6 +56,39 @@ pub(crate) const PERMANENT_DELETE_METHODS: &[&str] = &[
     "cloudidentity.devices.wipe",
     "cloudidentity.devices.deviceUsers.wipe",
 ];
+
+/// Methods that erase data only for some request bodies: `(method id, body
+/// field, values that wipe)`. Other values of the field (approving or
+/// blocking a phone, rebooting a Chromebook) are not gated.
+pub(crate) const BODY_DESTRUCTIVE_METHODS: &[(&str, &str, &[&str])] = &[
+    // Admin SDK Directory: wipe a mobile device, or the work account on it.
+    (
+        "directory.mobiledevices.action",
+        "action",
+        &["admin_remote_wipe", "admin_account_wipe"],
+    ),
+    // Admin SDK Directory: remove every user profile from a ChromeOS device,
+    // or factory-reset it.
+    (
+        "admin.customer.devices.chromeos.issueCommand",
+        "commandType",
+        &["WIPE_USERS", "REMOTE_POWERWASH"],
+    ),
+];
+
+/// Whether `body` asks a [`BODY_DESTRUCTIVE_METHODS`] method `id` to wipe.
+/// Values match case-insensitively, so a differently cased wipe is gated
+/// rather than let through.
+fn body_requests_wipe(id: &str, body: Option<&serde_json::Value>) -> bool {
+    BODY_DESTRUCTIVE_METHODS
+        .iter()
+        .filter(|(method, _, _)| *method == id)
+        .any(|(_, field, wipes)| {
+            body.and_then(|b| b.get(field))
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|v| wipes.iter().any(|w| w.eq_ignore_ascii_case(v)))
+        })
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Impact {
@@ -129,14 +164,15 @@ pub(crate) fn is_destructive_method(method: &RestMethod) -> bool {
             .is_some_and(|id| PERMANENT_DELETE_METHODS.contains(&id))
 }
 
-/// The gate that applies to one call of a Discovery method with `params`,
-/// if any.
+/// The gate that applies to one call of a Discovery method with `params`
+/// and request `body`, if any.
 pub(crate) fn method_impact(
     method: &RestMethod,
     params: &serde_json::Map<String, serde_json::Value>,
+    body: Option<&serde_json::Value>,
 ) -> Option<Impact> {
     let id = method.id.as_deref().unwrap_or_default();
-    if is_destructive_method(method) {
+    if is_destructive_method(method) || body_requests_wipe(id, body) {
         Some(Impact::Destructive)
     } else if OUTBOUND_METHODS.contains(&id)
         || (NOTIFYING_METHODS.contains(&id) && notifies_attendees(params))
@@ -153,6 +189,7 @@ pub(crate) fn may_be_gated(method: &RestMethod) -> bool {
     is_destructive_method(method)
         || OUTBOUND_METHODS.contains(&id)
         || NOTIFYING_METHODS.contains(&id)
+        || BODY_DESTRUCTIVE_METHODS.iter().any(|(m, _, _)| *m == id)
 }
 
 /// The `--yes`/`-y` flag, identical on every gated command.
@@ -407,7 +444,7 @@ mod tests {
         ] {
             assert!(is_destructive_method(&m("POST", id)), "{id}");
             assert_eq!(
-                method_impact(&m("POST", id), &serde_json::Map::new()),
+                method_impact(&m("POST", id), &serde_json::Map::new(), None),
                 Some(Impact::Destructive),
                 "{id}"
             );
@@ -433,7 +470,7 @@ mod tests {
         let none = serde_json::Map::new();
         for id in OUTBOUND_METHODS {
             assert_eq!(
-                method_impact(&m("POST", id), &none),
+                method_impact(&m("POST", id), &none, None),
                 Some(Impact::Outbound),
                 "{id}"
             );
@@ -449,21 +486,21 @@ mod tests {
             "gmail.users.settings.filters.create",
         ] {
             assert_eq!(
-                method_impact(&m("POST", id), &none),
+                method_impact(&m("POST", id), &none, None),
                 Some(Impact::Outbound),
                 "{id}"
             );
         }
         assert_eq!(
-            method_impact(&m("DELETE", "drive.permissions.delete"), &none),
+            method_impact(&m("DELETE", "drive.permissions.delete"), &none, None),
             Some(Impact::Destructive)
         );
         assert_eq!(
-            method_impact(&m("POST", "gmail.users.drafts.create"), &none),
+            method_impact(&m("POST", "gmail.users.drafts.create"), &none, None),
             None
         );
         assert_eq!(
-            method_impact(&m("GET", "drive.permissions.list"), &none),
+            method_impact(&m("GET", "drive.permissions.list"), &none, None),
             None
         );
         assert!(!may_be_gated(&m("GET", "drive.permissions.list")));
@@ -489,7 +526,7 @@ mod tests {
                 serde_json::json!({"sendUpdates": "none", "sendNotifications": true}),
             ] {
                 assert_eq!(
-                    method_impact(&method, &params(notify.clone())),
+                    method_impact(&method, &params(notify.clone()), None),
                     Some(Impact::Outbound),
                     "{id} {notify}"
                 );
@@ -501,7 +538,7 @@ mod tests {
                 serde_json::json!({"sendNotifications": "false"}),
             ] {
                 assert_eq!(
-                    method_impact(&method, &params(quiet.clone())),
+                    method_impact(&method, &params(quiet.clone()), None),
                     None,
                     "{id} {quiet}"
                 );
@@ -511,9 +548,69 @@ mod tests {
         assert_eq!(
             method_impact(
                 &m("DELETE", "calendar.events.delete"),
-                &params(serde_json::json!({"sendUpdates": "none"}))
+                &params(serde_json::json!({"sendUpdates": "none"})),
+                None
             ),
             Some(Impact::Destructive)
+        );
+    }
+
+    #[test]
+    fn device_commands_are_destructive_only_when_the_body_wipes() {
+        use serde_json::json;
+        let m = |id: &str| RestMethod {
+            http_method: "POST".to_string(),
+            id: Some(id.to_string()),
+            ..Default::default()
+        };
+        let none = serde_json::Map::new();
+        let mobile = m("directory.mobiledevices.action");
+        let chromeos = m("admin.customer.devices.chromeos.issueCommand");
+        for (method, body) in [
+            (&mobile, json!({"action": "admin_remote_wipe"})),
+            (&mobile, json!({"action": "admin_account_wipe"})),
+            (&mobile, json!({"action": "ADMIN_REMOTE_WIPE"})),
+            (&chromeos, json!({"commandType": "WIPE_USERS"})),
+            (&chromeos, json!({"commandType": "REMOTE_POWERWASH"})),
+            (&chromeos, json!({"commandType": "remote_powerwash"})),
+        ] {
+            assert_eq!(
+                method_impact(method, &none, Some(&body)),
+                Some(Impact::Destructive),
+                "{body}"
+            );
+        }
+        for (method, body) in [
+            (&mobile, Some(json!({"action": "approve"}))),
+            (
+                &mobile,
+                Some(json!({"action": "cancel_remote_wipe_then_activate"})),
+            ),
+            (&mobile, Some(json!({}))),
+            (&mobile, None),
+            (&chromeos, Some(json!({"commandType": "REBOOT"}))),
+            // The field belongs to the other method.
+            (&chromeos, Some(json!({"action": "admin_remote_wipe"}))),
+        ] {
+            assert_eq!(
+                method_impact(method, &none, body.as_ref()),
+                None,
+                "{body:?}"
+            );
+        }
+        // Both take --yes, and neither is destructive by identity alone.
+        for method in [&mobile, &chromeos] {
+            assert!(may_be_gated(method));
+            assert!(!is_destructive_method(method));
+        }
+        // A wipe-looking body on any other method is not gated.
+        assert_eq!(
+            method_impact(
+                &m("directory.chromeosdevices.action"),
+                &none,
+                Some(&json!({"action": "admin_remote_wipe"}))
+            ),
+            None
         );
     }
 

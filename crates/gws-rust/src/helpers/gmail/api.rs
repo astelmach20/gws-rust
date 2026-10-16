@@ -121,8 +121,24 @@ impl GmailApi {
     }
 
     /// Fetch a message in `full` format and parse it for reply/forward/read.
+    ///
+    /// Gmail returns a large body part by attachment ID instead of inline;
+    /// those parts are fetched first so the body is the real text, not the
+    /// API snippet.
     pub(super) async fn get_original_message(&self, id: &str) -> Result<OriginalMessage, GwsError> {
-        let msg = self.get_message(id, "full", &[]).await?;
+        let mut msg = self.get_message(id, "full", &[]).await?;
+        if let Some(payload) = msg.get_mut("payload") {
+            let mut fetched = std::collections::HashMap::new();
+            for attachment_id in referenced_body_attachment_ids(payload) {
+                if let std::collections::hash_map::Entry::Vacant(slot) =
+                    fetched.entry(attachment_id)
+                {
+                    let bytes = self.get_attachment(id, slot.key()).await?;
+                    slot.insert(bytes);
+                }
+            }
+            inline_referenced_bodies(payload, &fetched)?;
+        }
         parse_original_message(&msg)
     }
 
@@ -602,6 +618,72 @@ mod tests {
         };
         assert_eq!(url, "http://127.0.0.1:9/users/me/messages/batchModify");
         assert_eq!(body["ids"][1], "b");
+    }
+
+    /// A body Gmail returns by attachment ID is fetched and used as the
+    /// body, instead of the snippet with the body listed as a file.
+    #[tokio::test]
+    async fn get_original_message_fetches_a_body_returned_by_reference() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/gmail/v1/users/me/messages/m1"))
+            .and(query_param("format", "full"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id": "m1",
+                "snippet": "Truncated snippet",
+                "payload": {
+                    "mimeType": "text/html",
+                    "headers": [
+                        { "name": "From", "value": "sender@example.com" },
+                        { "name": "Message-ID", "value": "<m1@example.com>" }
+                    ],
+                    "body": { "attachmentId": "BIG", "size": 900000 }
+                }
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/gmail/v1/users/me/messages/m1/attachments/BIG"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": base64::engine::general_purpose::URL_SAFE.encode("<p>The whole body</p>")
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let api = mock_api(&server);
+        let original = api.get_original_message("m1").await.unwrap();
+        assert_eq!(original.body_html.as_deref(), Some("<p>The whole body</p>"));
+        assert_eq!(original.body_text.trim(), "The whole body");
+        assert!(original.parts.is_empty());
+    }
+
+    #[tokio::test]
+    async fn get_original_message_fails_when_a_referenced_body_cannot_be_fetched() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/gmail/v1/users/me/messages/m1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id": "m1",
+                "payload": {
+                    "mimeType": "text/plain",
+                    "headers": [
+                        { "name": "From", "value": "sender@example.com" },
+                        { "name": "Message-ID", "value": "<m1@example.com>" }
+                    ],
+                    "body": { "attachmentId": "BIG", "size": 900000 }
+                }
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/gmail/v1/users/me/messages/m1/attachments/BIG"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+        let api = mock_api(&server);
+        let err = api.get_original_message("m1").await.err().unwrap();
+        assert!(err.to_string().contains("BIG"), "{err}");
     }
 
     #[tokio::test]
