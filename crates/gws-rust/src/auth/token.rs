@@ -112,7 +112,7 @@ pub(crate) fn map_token_error(
             match resp.error() {
                 BasicErrorResponseType::InvalidGrant => AuthError::InvalidGrant {
                     description,
-                    login_command: login_command.to_string(),
+                    remedy: format!("Run `{login_command}` to sign in again"),
                 },
                 BasicErrorResponseType::InvalidScope => AuthError::InvalidScope {
                     requested: requested.to_vec(),
