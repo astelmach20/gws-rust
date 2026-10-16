@@ -267,6 +267,8 @@ mod tests {
     fn create_requires_criteria_and_action() {
         let root = crate::commands::build_cli(&crate::discovery::RestDescription {
             name: "gmail".into(),
+            // Helpers are only offered for the registered API version.
+            version: "v1".into(),
             ..Default::default()
         });
         assert!(
@@ -275,9 +277,13 @@ mod tests {
                 .is_err()
         );
         assert!(
-            root.try_get_matches_from(["gwsr", "+filter", "create", "--from", "x"])
+            root.clone()
+                .try_get_matches_from(["gwsr", "+filter", "create", "--from", "x"])
                 .is_err()
         );
+        // The helper exists, so the rejections above come from its rules.
+        root.try_get_matches_from(["gwsr", "+filter", "create", "--from", "x", "--archive"])
+            .unwrap();
     }
 
     #[test]

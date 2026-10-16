@@ -431,6 +431,8 @@ mod tests {
     fn test_renew_flag_rules_enforced_by_clap() {
         let root = crate::commands::build_cli(&crate::discovery::RestDescription {
             name: "workspaceevents".into(),
+            // Helpers are only offered for the registered API version.
+            version: "v1".into(),
             ..Default::default()
         });
         assert!(
@@ -458,10 +460,14 @@ mod tests {
                 .is_err()
         );
         assert!(
-            root.try_get_matches_from(["gwsr", "+renew", "--name", "a"])
+            root.clone()
+                .try_get_matches_from(["gwsr", "+renew", "--name", "a"])
                 .is_err(),
             "--name was removed"
         );
+        // The helper exists, so the rejections above come from its rules.
+        root.try_get_matches_from(["gwsr", "+renew", "--subscription-id", "a"])
+            .unwrap();
     }
 
     /// The dry-run plan names a list filter only when `run` lists: with

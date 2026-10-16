@@ -2008,9 +2008,11 @@ mod tests {
     #[test]
     fn every_helper_tip_is_a_whole_sentence() {
         let mut bad = Vec::new();
+        let mut checked = 0;
         for entry in services::SERVICES {
             let doc = crate::discovery::RestDescription {
                 name: entry.api_name.to_string(),
+                version: entry.version.to_string(),
                 ..Default::default()
             };
             let cli = crate::commands::build_cli(&doc);
@@ -2018,6 +2020,7 @@ mod tests {
                 .get_subcommands()
                 .filter(|s| s.get_name().starts_with('+'))
             {
+                checked += 1;
                 let md =
                     render_helper_skill(entry.aliases[0], helper.get_name(), helper, entry, "Test");
                 let Some(tips) = md.split("## Tips\n\n").nth(1) else {
@@ -2035,6 +2038,9 @@ mod tests {
             }
         }
         assert!(bad.is_empty(), "tips cut mid-sentence:\n{}", bad.join("\n"));
+        // Helpers are only offered for the registered API version: without
+        // it the loop above would check no helper at all.
+        assert!(checked > 40, "only {checked} helpers checked");
     }
 
     /// A helper group (`gmail +filter create|list|delete`) documents each
