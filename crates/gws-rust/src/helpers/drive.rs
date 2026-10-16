@@ -1900,8 +1900,10 @@ async fn sync_walk(
             let child_id = str_field(&child, "id")?;
             let name = str_field(&child, "name")?;
             let mime = str_field(&child, "mimeType")?;
-            // NFC so that names equal on macOS file systems compare equal below.
-            let local_name = nfc(&safe_filename(name, child_id)).into_owned();
+            // NFC so that names equal on macOS file systems compare equal
+            // below. Normalize before `safe_filename` caps the length: NFC can
+            // double a name's UTF-8 length (U+0958 becomes U+0915 U+093C).
+            let local_name = safe_filename(&nfc(name), child_id);
             let kind = if mime == FOLDER_MIME {
                 SyncKind::Folder
             } else if mime.starts_with("application/vnd.google-apps.") {
@@ -3292,6 +3294,31 @@ mod tests {
         assert!(file_name.starts_with('\u{1F4C4}'), "{file_name}");
         assert!(file_name.ends_with(".docx"), "{file_name}");
         assert_eq!(std::fs::read(&doc).unwrap(), b"DOCX");
+    }
+
+    /// NFC can make a name longer (U+0958 has no composed form and becomes
+    /// two characters, 3 UTF-8 bytes to 6), so the length cap must apply to
+    /// the normalized name, or ext4 refuses to create the file.
+    #[tokio::test]
+    async fn sync_caps_the_length_of_names_that_normalization_expands() {
+        let long_name = "\u{0958}".repeat(66);
+        let server = MockServer::start().await;
+        mount_listing(
+            &server,
+            "ROOT",
+            json!([{"id": "Q", "name": long_name, "mimeType": "text/plain"}]),
+        )
+        .await;
+        let api = api(&server.uri(), "drive/v3/");
+        let dir = tempfile::tempdir().unwrap();
+        let v = sync(&api, "ROOT", dir.path()).await.unwrap();
+        assert_eq!(v["downloaded"].as_array().unwrap().len(), 1, "{v}");
+        let file = PathBuf::from(v["downloaded"][0]["path"].as_str().unwrap());
+        let file_name = file.file_name().unwrap().to_str().unwrap();
+        assert!(file_name.len() <= 255, "{} bytes", file_name.len());
+        assert_eq!(file_name, nfc(file_name), "the local name is NFC");
+        assert!(file_name.starts_with("\u{0915}\u{093C}"), "{file_name}");
+        assert_eq!(std::fs::read(&file).unwrap(), b"Q");
     }
 
     /// Long names that collide get an ID prefix; shortening the prefixed name
