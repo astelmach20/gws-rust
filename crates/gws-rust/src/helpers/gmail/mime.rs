@@ -20,7 +20,8 @@ use super::prelude::*;
 ///
 /// IDs must be bare (no angle brackets) — `set_threading_headers` passes them to
 /// mail-builder which adds angle brackets per RFC 5322. `in_reply_to` is a single
-/// message ID (the direct parent); `references` is the full ordered chain.
+/// message ID (the direct parent), empty when the parent has no `Message-ID`;
+/// `references` is the full ordered chain, possibly empty.
 /// The references chain should be fully assembled via `build_references_chain`
 /// before constructing this.
 pub(super) struct ThreadingHeaders<'a> {
@@ -51,27 +52,41 @@ pub(super) fn build_references_chain(original: &OriginalMessage) -> Vec<String> 
 /// Every ID is checked before it is written: mail-builder wraps it in angle
 /// brackets verbatim, so an ID containing `<`, `>`, white space or a control
 /// character would produce a malformed `In-Reply-To`/`References` header.
+///
+/// When the parent has no `Message-ID` (`in_reply_to` is empty), RFC 5322
+/// §3.6.4 leaves the new message without `In-Reply-To`, and without
+/// `References` when the parent had no chain either. The message still goes
+/// out: Gmail files it in the parent's thread by thread ID, but other mail
+/// clients may not thread it, which is said on stderr.
 pub(super) fn set_threading_headers<'x>(
-    mb: mail_builder::MessageBuilder<'x>,
+    mut mb: mail_builder::MessageBuilder<'x>,
     threading: &ThreadingHeaders<'x>,
 ) -> Result<mail_builder::MessageBuilder<'x>, GwsError> {
-    validate_bare_msg_id(threading.in_reply_to)?;
     for id in threading.references {
         validate_bare_msg_id(id)?;
     }
 
     use mail_builder::headers::message_id::MessageId;
 
-    let in_reply_to = MessageId::new(threading.in_reply_to);
-    let refs = MessageId {
-        id: threading
-            .references
-            .iter()
-            .map(|id| id.as_str().into())
-            .collect(),
-    };
-
-    Ok(mb.in_reply_to(in_reply_to).references(refs))
+    if threading.in_reply_to.is_empty() {
+        tracing::warn!(
+            "the original message has no Message-ID header: sending without In-Reply-To; \
+             Gmail keeps the message in the same thread, other mail clients may not"
+        );
+    } else {
+        validate_bare_msg_id(threading.in_reply_to)?;
+        mb = mb.in_reply_to(MessageId::new(threading.in_reply_to));
+    }
+    if !threading.references.is_empty() {
+        mb = mb.references(MessageId {
+            id: threading
+                .references
+                .iter()
+                .map(|id| id.as_str().into())
+                .collect(),
+        });
+    }
+    Ok(mb)
 }
 
 /// Reject a message ID that cannot be written as `<id>` in a threading header.
@@ -256,7 +271,6 @@ mod tests {
     #[test]
     fn set_threading_headers_rejects_ids_that_break_the_header() {
         for bad in [
-            "",
             "a<b@example.com",
             "a>b@example.com",
             "a b@example.com",
@@ -282,6 +296,43 @@ mod tests {
                 "{bad:?} accepted in References"
             );
         }
+    }
+
+    #[test]
+    fn set_threading_headers_omits_headers_the_parent_cannot_supply() {
+        let write = |threading: &ThreadingHeaders<'_>| {
+            let mb = mail_builder::MessageBuilder::new()
+                .to(MbAddress::new_address(None::<&str>, "test@example.com"))
+                .subject("test");
+            let mb = set_threading_headers(mb, threading).unwrap();
+            finalize_message(mb, "b", false, &[]).unwrap()
+        };
+
+        // Parent without a Message-ID or a chain: neither header.
+        let raw = write(&ThreadingHeaders {
+            in_reply_to: "",
+            references: &[],
+        });
+        assert!(extract_header(&raw, "In-Reply-To").is_none(), "{raw}");
+        assert!(extract_header(&raw, "References").is_none(), "{raw}");
+
+        // Parent without a Message-ID but with a chain: References only.
+        let refs = vec!["root@example.com".to_string()];
+        let raw = write(&ThreadingHeaders {
+            in_reply_to: "",
+            references: &refs,
+        });
+        assert!(extract_header(&raw, "In-Reply-To").is_none(), "{raw}");
+        let references = extract_header(&raw, "References").unwrap();
+        assert!(references.contains("<root@example.com>"), "{raw}");
+
+        // An empty ID inside the chain is still rejected.
+        let refs = vec![String::new()];
+        let threading = ThreadingHeaders {
+            in_reply_to: "ok@example.com",
+            references: &refs,
+        };
+        assert!(set_threading_headers(mail_builder::MessageBuilder::new(), &threading).is_err());
     }
 
     #[test]

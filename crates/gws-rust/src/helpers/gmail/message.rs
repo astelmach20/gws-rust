@@ -74,7 +74,8 @@ impl OriginalPart {
 #[derive(Default, Serialize)]
 pub(super) struct OriginalMessage {
     pub thread_id: Option<String>,
-    /// Bare message ID (no angle brackets), e.g. `"abc@example.com"`.
+    /// Bare message ID (no angle brackets), e.g. `"abc@example.com"`; empty
+    /// when the message has no `Message-ID` header.
     pub message_id: String,
     /// Bare message IDs (no angle brackets) forming the references chain.
     pub references: Vec<String>,
@@ -206,10 +207,13 @@ pub(super) fn parse_original_message(msg: &Value) -> Result<OriginalMessage, Gws
         return Err(GwsError::other("Message is missing From header"));
     }
 
+    // A message without a Message-ID can still be replied to or forwarded:
+    // the outgoing message then has no In-Reply-To (RFC 5322 §3.6.4), and
+    // Gmail keeps it in the thread by thread ID.
     let message_id = parse_msg_ids(&parsed_headers.message_id)
         .into_iter()
         .next()
-        .ok_or_else(|| GwsError::other("Message is missing Message-ID header"))?;
+        .unwrap_or_default();
 
     let PayloadContents {
         body_text: extracted_text,
@@ -923,9 +927,10 @@ mod tests {
                 "body": { "data": URL_SAFE.encode("Hello") }
             }
         });
-        let result = parse_original_message(&msg);
-        assert!(result.is_err());
-        assert!(result.err().unwrap().to_string().contains("Message-ID"));
+        // Replies and forwards then go out without In-Reply-To.
+        let original = parse_original_message(&msg).unwrap();
+        assert_eq!(original.message_id, "");
+        assert_eq!(original.from.email, "alice@example.com");
     }
 
     #[test]
@@ -1456,11 +1461,8 @@ mod tests {
                 ]
             }
         });
-        let err = parse_original_message(&msg).err().unwrap();
-        assert!(
-            err.to_string().contains("missing Message-ID header"),
-            "{err}"
-        );
+        // No Message-ID header (only a look-alike name): parsed, with no ID.
+        assert_eq!(parse_original_message(&msg).unwrap().message_id, "");
     }
 
     #[test]
