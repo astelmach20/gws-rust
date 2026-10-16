@@ -103,7 +103,7 @@ gwsr <service> +<helper> [flags]
 |---|---|
 | `gwsr <service> ...` | Call any method in the service's Discovery document |
 | `gwsr schema <service>.<resource>.<method>` | Parameters (API-wide ones such as `fields` and `quotaUser` under `apiParameters`), request/response schema, pagination and upload info for a method; `gwsr schema drive.File --resolve-refs` for a type |
-| `gwsr commands [SERVICE]...` | JSON inventory of every service, resource, method and helper with its flags (`--format table\|csv` for one row per command) |
+| `gwsr commands [SERVICE]...` | JSON inventory of every service, resource, method and helper with its flags (`--format table\|csv` for one row per command). A service is an alias or `<api>:<version>` |
 | `gwsr batch <service>` | Many calls in `multipart/mixed` batch requests (see [Batch](#batch)) |
 | `gwsr auth ...` | `setup`, `login`, `status`, `list`, `use`, `export`, `logout` |
 | `gwsr cache clear` | Delete cached Discovery documents (`--dry-run` lists what would be deleted) |
