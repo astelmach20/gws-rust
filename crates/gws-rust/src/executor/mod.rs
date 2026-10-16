@@ -67,11 +67,6 @@ pub struct UploadSource<'a> {
     pub content_type: Option<&'a str>,
 }
 
-/// Whether `method` is destructive (see [`crate::confirm`]).
-pub fn is_destructive(method: &RestMethod) -> bool {
-    crate::confirm::is_destructive_method(method)
-}
-
 /// Whether `method` is behind the confirmation gate and so takes `--yes`.
 pub fn is_gated(method: &RestMethod) -> bool {
     crate::confirm::may_be_gated(method)
@@ -544,7 +539,7 @@ pub(crate) async fn execute_to(
         return Ok(None);
     }
 
-    match crate::confirm::method_impact(method, &params) {
+    match crate::confirm::method_impact(method, &params, body.as_ref()) {
         Some(impact @ crate::confirm::Impact::Destructive) => options
             .gate()
             .check(impact, &format!("run destructive method {method_id}"))?,

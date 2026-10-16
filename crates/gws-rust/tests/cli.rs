@@ -2058,6 +2058,162 @@ async fn require_confirm_gates_raw_send_methods_and_batch() {
     assert_eq!(server.received_requests().await.unwrap().len(), 2);
 }
 
+/// Seed an Admin SDK Directory v1 Discovery document with the two device
+/// methods whose request body decides whether they erase data.
+fn seed_admin_device_commands(env: &Env) {
+    let doc = json!({
+        "name": "admin",
+        "version": "directory_v1",
+        "rootUrl": "https://admin.googleapis.com/",
+        "servicePath": "",
+        "batchPath": "batch",
+        "schemas": {
+            "MobileDeviceAction": {"id": "MobileDeviceAction", "type": "object",
+                "properties": {"action": {"type": "string"}}},
+            "DirectoryChromeosdevicesIssueCommandRequest": {
+                "id": "DirectoryChromeosdevicesIssueCommandRequest", "type": "object",
+                "properties": {
+                    "commandType": {"type": "string", "enum": [
+                        "COMMAND_TYPE_UNSPECIFIED", "REBOOT", "TAKE_A_SCREENSHOT",
+                        "SET_VOLUME", "WIPE_USERS", "REMOTE_POWERWASH"]},
+                    "payload": {"type": "string"}
+                }},
+            "DirectoryChromeosdevicesIssueCommandResponse": {
+                "id": "DirectoryChromeosdevicesIssueCommandResponse", "type": "object",
+                "properties": {"commandId": {"type": "string"}}}
+        },
+        "resources": {
+            "mobiledevices": {"methods": {"action": {
+                "id": "directory.mobiledevices.action",
+                "httpMethod": "POST",
+                "path": "admin/directory/v1/customer/{customerId}/devices/mobile/{resourceId}/action",
+                "parameters": {
+                    "customerId": {"type": "string", "location": "path", "required": true},
+                    "resourceId": {"type": "string", "location": "path", "required": true}
+                },
+                "parameterOrder": ["customerId", "resourceId"],
+                "request": {"$ref": "MobileDeviceAction"},
+                "scopes": ["https://www.googleapis.com/auth/admin.directory.device.mobile.action"]
+            }}},
+            "customer": {"resources": {"devices": {"resources": {"chromeos": {"methods": {"issueCommand": {
+                "id": "admin.customer.devices.chromeos.issueCommand",
+                "httpMethod": "POST",
+                "path": "admin/directory/v1/customer/{customerId}/devices/chromeos/{deviceId}:issueCommand",
+                "parameters": {
+                    "customerId": {"type": "string", "location": "path", "required": true},
+                    "deviceId": {"type": "string", "location": "path", "required": true}
+                },
+                "parameterOrder": ["customerId", "deviceId"],
+                "request": {"$ref": "DirectoryChromeosdevicesIssueCommandRequest"},
+                "response": {"$ref": "DirectoryChromeosdevicesIssueCommandResponse"},
+                "scopes": ["https://www.googleapis.com/auth/admin.directory.device.chromeos"]
+            }}}}}}}
+        }
+    });
+    std::fs::write(
+        env.cache_dir().join("discovery/admin+directory_v1.json"),
+        serde_json::to_string(&doc).unwrap(),
+    )
+    .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn device_wipes_requested_in_the_body_are_destructive() {
+    use wiremock::matchers::any;
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    Mock::given(any())
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+        .mount(&server)
+        .await;
+    let env = Env::new();
+    seed_admin_device_commands(&env);
+    let run = |args: &[String], stdin: Option<&str>| {
+        let mut c = env.cmd();
+        c.env("GWSR_TOKEN", "test-token")
+            .env("GWSR_API_BASE_URL", server.uri())
+            .env("GWSR_REQUIRE_CONFIRM", "0")
+            .args(args);
+        if let Some(s) = stdin {
+            c.write_stdin(s);
+        }
+        c.output().unwrap()
+    };
+    let mobile = |action: &str, extra: &[&str]| {
+        let mut v: Vec<String> = [
+            "admin",
+            "mobiledevices",
+            "action",
+            "--params",
+            r#"{"customerId":"my_customer","resourceId":"r1"}"#,
+            "--json",
+        ]
+        .map(String::from)
+        .to_vec();
+        v.push(json!({ "action": action }).to_string());
+        v.extend(extra.iter().map(|s| s.to_string()));
+        v
+    };
+    let chromeos = |command: &str| {
+        let mut v: Vec<String> = [
+            "admin",
+            "customer",
+            "devices",
+            "chromeos",
+            "issueCommand",
+            "--params",
+            r#"{"customerId":"my_customer","deviceId":"d1"}"#,
+            "--json",
+        ]
+        .map(String::from)
+        .to_vec();
+        v.push(json!({ "commandType": command }).to_string());
+        v
+    };
+    let refused = |out: &std::process::Output, what: &str| {
+        assert_eq!(out.status.code(), Some(7), "{what}: {}", stderr_of(out));
+        assert_eq!(
+            stderr_error(out)["error"]["reason"],
+            "confirmationRequired",
+            "{what}"
+        );
+    };
+
+    // A wipe is destructive even with GWSR_REQUIRE_CONFIRM off: refused
+    // without --yes when no one can answer a prompt.
+    for a in [
+        mobile("admin_remote_wipe", &[]),
+        mobile("admin_account_wipe", &[]),
+        chromeos("WIPE_USERS"),
+        chromeos("REMOTE_POWERWASH"),
+    ] {
+        refused(&run(&a, None), &a.join(" "));
+    }
+    // ... and in `gwsr batch`.
+    let batch = ["batch", "admin"].map(String::from);
+    for line in [
+        r#"{"method":"mobiledevices.action","params":{"customerId":"c","resourceId":"r1"},"json":{"action":"admin_remote_wipe"}}"#,
+        r#"{"method":"customer.devices.chromeos.issueCommand","params":{"customerId":"c","deviceId":"d1"},"json":{"commandType":"REMOTE_POWERWASH"}}"#,
+    ] {
+        refused(&run(&batch, Some(line)), line);
+    }
+    assert!(
+        server.received_requests().await.unwrap().is_empty(),
+        "nothing may be sent before confirmation"
+    );
+
+    // --yes confirms a wipe.
+    let out = run(&mobile("admin_remote_wipe", &["--yes"]), None);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    // The same methods' other actions are not gated.
+    for a in [mobile("approve", &[]), chromeos("REBOOT")] {
+        let out = run(&a, None);
+        assert!(out.status.success(), "{}: {}", a.join(" "), stderr_of(&out));
+    }
+    assert_eq!(server.received_requests().await.unwrap().len(), 3);
+}
+
 /// Seed a Calendar v3 Discovery document with `events.insert` (which can
 /// email attendees) and `acl.insert` (which shares the calendar).
 fn seed_calendar_outbound(env: &Env) {
