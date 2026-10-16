@@ -799,6 +799,15 @@ pub(crate) async fn execute_to(
             };
         }
 
+        // The method already changed something: a failure to save or print
+        // its result must say so, and name it, or a retry repeats it.
+        let applied = |e: GwsError| {
+            if matches!(http, Method::GET | Method::HEAD | Method::OPTIONS) {
+                e
+            } else {
+                crate::helpers::modelarmor::note_applied_write(e, &value)
+            }
+        };
         match &output {
             Some(OutputTarget::File(path)) => {
                 let summary = download::save_json_response(
@@ -808,15 +817,17 @@ pub(crate) async fn execute_to(
                     path,
                     options.decode_field.as_deref(),
                 )
-                .await?;
-                out.single(summary)?;
+                .await
+                .map_err(applied)?;
+                out.single(summary).map_err(applied)?;
                 break;
             }
             Some(OutputTarget::Stdout) => {
                 // `-o -` with a base64 payload streams the decoded bytes;
                 // otherwise the JSON is printed as usual.
                 if let Some((_, bytes)) =
-                    download::decoded_payload(doc, method, &value, options.decode_field.as_deref())?
+                    download::decoded_payload(doc, method, &value, options.decode_field.as_deref())
+                        .map_err(applied)?
                 {
                     emitter.bytes(&bytes).await?;
                     emitter.flush().await?;

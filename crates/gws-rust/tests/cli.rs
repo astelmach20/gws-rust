@@ -2121,6 +2121,55 @@ async fn jq_failure_after_a_generated_write_says_the_change_was_made() {
     assert!(!stderr.contains("change was made"), "{stderr}");
 }
 
+/// With `-o`, a generated write whose result cannot be saved (a bad
+/// `--decode-field`) or whose saved-file summary fails `--jq` must still say
+/// the change was made, or the error reads as "nothing was sent".
+#[tokio::test(flavor = "multi_thread")]
+async fn output_file_failure_after_a_generated_write_says_the_change_was_made() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/gmail/v1/users/me/messages/send"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id": "SENT-1"})))
+        .expect(3)
+        .mount(&server)
+        .await;
+    let env = Env::new();
+    seed_gmail_send(&env);
+
+    let cases: [&[&str]; 3] = [
+        &["-o", "sent.json", "--decode-field", "nosuch"],
+        &["-o", "-", "--decode-field", "nosuch"],
+        &["-o", "summary.json", "--jq", ". + 1"],
+    ];
+    for extra in cases {
+        let out = env
+            .cmd()
+            .env("GWSR_TOKEN", "test-token")
+            .env("GWSR_API_BASE_URL", server.uri())
+            .args([
+                "gmail",
+                "users",
+                "messages",
+                "send",
+                "--params",
+                r#"{"userId":"me"}"#,
+                "--json",
+                r#"{"raw":"eA"}"#,
+            ])
+            .args(extra)
+            .output()
+            .unwrap();
+        let stderr = stderr_of(&out);
+        assert_eq!(out.status.code(), Some(3), "{extra:?}: {stderr}");
+        assert!(stderr.contains("change was made"), "{extra:?}: {stderr}");
+        assert!(stderr.contains("id: SENT-1"), "{extra:?}: {stderr}");
+    }
+    assert!(!env.work_dir().join("sent.json").exists());
+}
+
 /// Seed an Admin SDK Directory v1 Discovery document with the two device
 /// methods whose request body decides whether they erase data.
 fn seed_admin_device_commands(env: &Env) {
