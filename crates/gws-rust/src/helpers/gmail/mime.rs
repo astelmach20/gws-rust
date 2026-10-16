@@ -152,11 +152,7 @@ pub(super) fn finalize_message(
                         att.filename
                     )));
                 };
-                related_parts.push(
-                    MimePart::new(att.content_type.as_str(), att.data.as_slice())
-                        .inline()
-                        .cid(cid),
-                );
+                related_parts.push(attachment_part(att).inline().cid(cid));
             }
             MimePart::new("multipart/related", related_parts)
         };
@@ -173,10 +169,7 @@ pub(super) fn finalize_message(
     } else {
         let mut mixed_parts = vec![content];
         for att in &regular {
-            mixed_parts.push(
-                MimePart::new(att.content_type.as_str(), att.data.as_slice())
-                    .attachment(att.filename.as_str()),
-            );
+            mixed_parts.push(attachment_part(att).attachment(att.filename.as_str()));
         }
         MimePart::new("multipart/mixed", mixed_parts)
     };
@@ -184,6 +177,68 @@ pub(super) fn finalize_message(
     mb.body(root)
         .write_to_string()
         .map_err(|e| GwsError::other(format!("Failed to serialize email: {e}")))
+}
+
+/// The MIME leaf for an attachment's bytes.
+///
+/// RFC 2046 §5.2.1 allows only `7bit`, `8bit` or `binary` for a
+/// `message/rfc822` body, but mail-builder base64-encodes every non-text part.
+/// A message that is already in canonical form (CRLF line endings, lines of at
+/// most 998 octets, no NUL) is therefore sent as-is with `7bit` or, when it is
+/// UTF-8 with 8-bit octets, `8bit`. Anything else (bare LF line endings, long
+/// lines, NUL, non-UTF-8 octets) cannot be sent unencoded without changing
+/// it, so it is labelled `application/octet-stream` and base64-encoded: the
+/// recipient gets the file byte for byte, under its original name.
+fn attachment_part(att: &Attachment) -> mail_builder::mime::MimePart<'_> {
+    use mail_builder::mime::MimePart;
+
+    if !is_message_rfc822(&att.content_type) {
+        return MimePart::new(att.content_type.as_str(), att.data.as_slice());
+    }
+    match unencoded_transfer_encoding(&att.data) {
+        Some(encoding) => MimePart::new(att.content_type.as_str(), att.data.as_slice())
+            .transfer_encoding(encoding),
+        None => MimePart::new("application/octet-stream", att.data.as_slice()),
+    }
+}
+
+fn is_message_rfc822(content_type: &str) -> bool {
+    content_type
+        .split(';')
+        .next()
+        .is_some_and(|t| t.trim().eq_ignore_ascii_case("message/rfc822"))
+}
+
+/// `7bit` or `8bit` when `data` can be written into the message unchanged
+/// (RFC 2045 §2.7/§2.8), else `None`.
+fn unencoded_transfer_encoding(data: &[u8]) -> Option<&'static str> {
+    const MAX_LINE: usize = 998;
+    let mut line_len = 0;
+    let mut bytes = data.iter().peekable();
+    while let Some(&b) = bytes.next() {
+        match b {
+            0 | b'\n' => return None,
+            b'\r' => {
+                if bytes.next() != Some(&b'\n') {
+                    return None;
+                }
+                line_len = 0;
+            }
+            _ => {
+                line_len += 1;
+                if line_len > MAX_LINE {
+                    return None;
+                }
+            }
+        }
+    }
+    if data.is_ascii() {
+        Some("7bit")
+    } else if std::str::from_utf8(data).is_ok() {
+        Some("8bit")
+    } else {
+        None
+    }
 }
 
 #[cfg(test)]
@@ -355,6 +410,67 @@ mod tests {
         assert!(raw.contains("report.pdf"));
         assert!(raw.contains("application/pdf"));
         assert!(raw.contains("Body"));
+    }
+
+    #[test]
+    fn message_rfc822_attachment_is_never_base64() {
+        let canonical = b"From: a@example.com\r\nSubject: Hi\r\n\r\nBody\r\n".to_vec();
+        let utf8 = "Subject: Caf\u{e9}\r\n\r\nCaf\u{e9}\r\n"
+            .as_bytes()
+            .to_vec();
+        let bare_lf = b"Subject: Hi\n\nBody\n".to_vec();
+        let latin1 = b"Subject: Caf\xe9\r\n\r\nBody\r\n".to_vec();
+        let long_line = [b"Subject: Hi\r\n\r\n".as_slice(), &[b'x'; 999]].concat();
+        let cases: [(&[u8], &str, &str); 5] = [
+            (&canonical, "message/rfc822", "7bit"),
+            (&utf8, "message/rfc822", "8bit"),
+            (&bare_lf, "application/octet-stream", "base64"),
+            (&latin1, "application/octet-stream", "base64"),
+            (&long_line, "application/octet-stream", "base64"),
+        ];
+        for (data, want_type, want_cte) in cases {
+            let att = Attachment {
+                filename: "note.eml".to_string(),
+                content_type: "message/rfc822".to_string(),
+                data: data.to_vec(),
+                content_id: None,
+            };
+            let mb = mail_builder::MessageBuilder::new()
+                .to(MbAddress::new_address(None::<&str>, "test@example.com"))
+                .subject("test");
+            let Ok(raw) = finalize_message(mb, "Body", false, &[att]) else {
+                panic!("{want_type} {want_cte}: not serialized");
+            };
+            let part = raw
+                .split("--")
+                .find(|p| p.contains("note.eml"))
+                .unwrap_or_else(|| panic!("no attachment part: {raw}"));
+            let (headers, body) = part.split_once("\r\n\r\n").unwrap();
+            let headers = headers.to_ascii_lowercase();
+            assert!(
+                headers.contains(&format!("content-type: {want_type}")),
+                "{headers}"
+            );
+            assert!(
+                headers.contains(&format!("content-transfer-encoding: {want_cte}")),
+                "{headers}"
+            );
+            if want_cte == "base64" {
+                let joined: String = body.split_whitespace().collect();
+                let decoded = base64::engine::general_purpose::STANDARD
+                    .decode(joined)
+                    .unwrap();
+                assert_eq!(decoded, data, "{want_type}: file changed");
+            } else {
+                // The part body is the file, followed by the CRLF that
+                // belongs to the next boundary delimiter.
+                assert_eq!(body.as_bytes().strip_suffix(b"\r\n"), Some(data));
+            }
+        }
+
+        // Other content types are untouched.
+        assert!(is_message_rfc822("Message/RFC822; x=y"));
+        assert!(!is_message_rfc822("message/global"));
     }
 
     #[test]
