@@ -828,7 +828,15 @@ pub(crate) async fn execute_to(
 
         let next = pagination::next_token(&value).map(str::to_string);
         if !page_all {
-            out.single(value)?;
+            if matches!(http, Method::GET | Method::HEAD | Method::OPTIONS) {
+                out.single(value)?;
+            } else {
+                // The method already changed something: a `--jq` or format
+                // failure must say so, and name it, or a retry repeats it.
+                let applied = value.clone();
+                out.single(value)
+                    .map_err(|e| crate::helpers::modelarmor::note_applied_write(e, &applied))?;
+            }
             break;
         }
         match &options.page_items {

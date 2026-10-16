@@ -171,7 +171,9 @@ pub(super) async fn handle_filter(
                 None => created,
             };
             let format = crate::helpers::http::output_format(sub)?;
-            crate::output::emit(&crate::formatter::format_value(&created, &format)?)
+            crate::formatter::format_value(&created, &format)
+                .and_then(|text| crate::output::emit(&text))
+                .map_err(|e| crate::helpers::modelarmor::note_applied_write(e, &created))
         }
         Some(("delete", sub)) => {
             let id = required_str(sub, "filter-id")?;

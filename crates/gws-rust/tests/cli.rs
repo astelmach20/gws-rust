@@ -2058,6 +2058,69 @@ async fn require_confirm_gates_raw_send_methods_and_batch() {
     assert_eq!(server.received_requests().await.unwrap().len(), 2);
 }
 
+/// A `--jq` filter that fails on the response of a generated method that
+/// changed something (here a raw send) must say the change was made, or the
+/// validation error reads as "nothing was sent" and a retry sends twice. The
+/// same failure after a read stays a plain validation error.
+#[tokio::test(flavor = "multi_thread")]
+async fn jq_failure_after_a_generated_write_says_the_change_was_made() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/gmail/v1/users/me/messages/send"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id": "SENT-1"})))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/drive/v3/files"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"files": []})))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let env = Env::new();
+    seed_gmail_send(&env);
+    env.seed_drive("");
+
+    let out = env
+        .cmd()
+        .env("GWSR_TOKEN", "test-token")
+        .env("GWSR_API_BASE_URL", server.uri())
+        .args([
+            "gmail",
+            "users",
+            "messages",
+            "send",
+            "--params",
+            r#"{"userId":"me"}"#,
+            "--json",
+            r#"{"raw":"eA"}"#,
+            "--jq",
+            ". + 1",
+        ])
+        .output()
+        .unwrap();
+    let stderr = stderr_of(&out);
+    assert_eq!(out.status.code(), Some(3), "{stderr}");
+    assert!(stderr.contains("--jq"), "{stderr}");
+    assert!(stderr.contains("change was made"), "{stderr}");
+    assert!(stderr.contains("id: SENT-1"), "{stderr}");
+
+    let out = env
+        .cmd()
+        .env("GWSR_TOKEN", "test-token")
+        .env("GWSR_API_BASE_URL", server.uri())
+        .args(["drive", "files", "list", "--jq", ". + 1"])
+        .output()
+        .unwrap();
+    let stderr = stderr_of(&out);
+    assert_eq!(out.status.code(), Some(3), "{stderr}");
+    assert!(stderr.contains("--jq"), "{stderr}");
+    assert!(!stderr.contains("change was made"), "{stderr}");
+}
+
 /// Seed an Admin SDK Directory v1 Discovery document with the two device
 /// methods whose request body decides whether they erase data.
 fn seed_admin_device_commands(env: &Env) {

@@ -85,8 +85,9 @@ pub(super) async fn emit_screened(
 }
 
 /// [`emit_screened`] for the result of a helper that changed the mailbox
-/// (labels, trash, a deleted filter). If screening withholds the result,
-/// the error says the change was made, so it is not mistaken for a refusal.
+/// (labels, trash, a deleted filter). If screening, `--jq` or the format
+/// withholds the result, the error says the change was made, so it is not
+/// mistaken for a refusal.
 pub(super) async fn emit_applied(
     sanitize: &crate::helpers::modelarmor::SanitizeConfig,
     format: &crate::formatter::OutputFormat,
@@ -100,7 +101,9 @@ pub(super) async fn emit_applied(
         Ok(v) => v,
         Err(e) => return Err(note_applied_write(e, &value)),
     };
-    crate::output::emit(&crate::formatter::format_value(&screened, format)?)
+    crate::formatter::format_value(&screened, format)
+        .and_then(|text| crate::output::emit(&text))
+        .map_err(|e| note_applied_write(e, &value))
 }
 
 pub struct GmailHelper;

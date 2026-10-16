@@ -146,7 +146,11 @@ async fn deliver_with(
         Some(annotation) => annotate(response.clone(), annotation),
         None => response.clone(),
     };
-    crate::output::emit(&format_value(&printed, &delivery.format)?)?;
+    // The message is already sent (or the draft saved): a `--jq` or format
+    // failure must say so, or a retry sends it twice.
+    format_value(&printed, &delivery.format)
+        .and_then(|text| crate::output::emit(&text))
+        .map_err(|e| crate::helpers::modelarmor::note_applied_write(e, &response))?;
 
     if delivery.draft {
         let id = response

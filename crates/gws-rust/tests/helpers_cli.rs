@@ -3041,3 +3041,99 @@ async fn user_create_refuses_an_org_unit_without_a_leading_slash() {
     assert_eq!(stdout_json(&out)["orgUnitPath"], "/Sales");
     assert_eq!(server.received_requests().await.unwrap().len(), 1);
 }
+
+/// A `--jq` expression is compiled before any request, but it can still fail
+/// at run time on the response (`. + 1` on an object). After a helper that
+/// changed something (sent a message, trashed one, created a task or a Meet
+/// space), that failure must say the change was made: a bare validation
+/// error (exit 3) reads as "nothing happened, fix the input and retry", and
+/// the retry sends the message twice.
+#[tokio::test(flavor = "multi_thread")]
+async fn jq_failure_after_a_helper_write_says_the_change_was_made() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/upload/gmail/v1/users/me/messages/send"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id": "SENT-1"})))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/gmail/v1/users/me/messages/M1/trash"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id": "M1"})))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/gmail/v1/users/me/messages/M1"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "M1",
+            "payload": {"headers": [{"name": "Subject", "value": "Hello"}]}
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/tasks/v1/lists/L1/tasks"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id": "TASK-1"})))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v2/spaces"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "name": "spaces/SPACE-1",
+            "meetingUri": "https://meet.google.com/abc-defg-hij",
+            "meetingCode": "abc-defg-hij"
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let dir = setup();
+    seed(dir.path(), "gmail", "v1", "");
+    seed(dir.path(), "meet", "v2", "");
+
+    let cases: [(&[&str], &str); 4] = [
+        (
+            &[
+                "gmail",
+                "+send",
+                "--to",
+                "a@example.com",
+                "--subject",
+                "s",
+                "--body",
+                "b",
+            ],
+            "id: SENT-1",
+        ),
+        (&["gmail", "+trash", "--message-id", "M1"], "M1"),
+        (
+            &[
+                "workflow",
+                "+email-to-task",
+                "--message-id",
+                "M1",
+                "--tasklist-id",
+                "L1",
+            ],
+            "TASK-1",
+        ),
+        (&["meet", "+create"], "name: spaces/SPACE-1"),
+    ];
+    for (args, names) in cases {
+        let out = gwsr(dir.path())
+            .env("GWSR_TOKEN", "test-token")
+            .env("GWSR_API_BASE_URL", server.uri())
+            .args(args)
+            .args(["--jq", ". + 1"])
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(3), "{args:?}: {stderr}");
+        assert!(stderr.contains("--jq"), "{args:?}: {stderr}");
+        assert!(stderr.contains("change was made"), "{args:?}: {stderr}");
+        assert!(stderr.contains(names), "{args:?}: {stderr}");
+    }
+}

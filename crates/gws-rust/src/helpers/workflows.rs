@@ -295,8 +295,9 @@ async fn print_applied(
         Ok(v) => v,
         Err(e) => return Err(note_applied_write(e, ids)),
     };
-    crate::output::emit(&crate::formatter::format_value(&value, &fmt)?)?;
-    Ok(())
+    crate::formatter::format_value(&value, &fmt)
+        .and_then(|text| crate::output::emit(&text))
+        .map_err(|e| note_applied_write(e, ids))
 }
 
 /// GET every page of a list endpoint and concatenate its `items`.
