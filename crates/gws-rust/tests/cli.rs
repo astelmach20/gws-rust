@@ -1955,7 +1955,9 @@ fn gcloud_does_not_inherit_gwsr_variables() {
     let status = std::process::Command::new("/bin/sh")
         .args(["-c", r#"printf '%s\n' "$1" > "$2" && chmod 755 "$2""#, "sh"])
         .arg(format!(
-            "#!/bin/sh\n/usr/bin/env > '{}'\nexit 1",
+            // `export -p` is a shell builtin: the Nix build sandbox has no
+            // `/usr/bin/env`.
+            "#!/bin/sh\nexport -p > '{}'\nexit 1",
             dump.display()
         ))
         .arg(&gcloud)
@@ -1978,11 +1980,24 @@ fn gcloud_does_not_inherit_gwsr_variables() {
     let seen = std::fs::read_to_string(&dump).unwrap_or_else(|e| {
         panic!("the fake gcloud did not run ({e}): {out:?}");
     });
-    // The rest of the environment is passed on.
-    assert!(seen.contains("UNRELATED_TEST_VAR=kept"), "{seen}");
-    assert!(seen.contains("CLOUDSDK_CORE_DISABLE_PROMPTS=1"), "{seen}");
+    // The rest of the environment is passed on. `export -p` quotes values
+    // differently per shell, so match on the name and the value separately.
+    let exported = |name: &str| {
+        seen.lines()
+            .filter_map(|l| l.strip_prefix("export "))
+            .find(|l| l.starts_with(&format!("{name}=")))
+    };
+    assert!(
+        exported("UNRELATED_TEST_VAR").is_some_and(|l| l.contains("kept")),
+        "{seen}"
+    );
+    assert!(
+        exported("CLOUDSDK_CORE_DISABLE_PROMPTS").is_some_and(|l| l.contains('1')),
+        "{seen}"
+    );
     for line in seen.lines() {
-        assert!(!line.starts_with("GWSR_"), "gcloud inherited {line}");
+        let name = line.strip_prefix("export ").unwrap_or(line);
+        assert!(!name.starts_with("GWSR_"), "gcloud inherited {line}");
     }
     assert!(!seen.contains("fake-test-token"), "{seen}");
     assert!(!seen.contains("fake-test-secret"), "{seen}");
