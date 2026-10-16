@@ -14,7 +14,7 @@
 
 //! `gmail +forward`: forward a message (with its attachments) to new recipients.
 
-use super::cli::{parse_optional_mailboxes, parse_optional_trimmed, required_str};
+use super::cli::{parse_optional_mailboxes, parse_optional_trimmed};
 use super::dispatch::{Delivery, deliver, outgoing_content};
 use super::prelude::*;
 use super::sender::resolve_sender;
@@ -256,15 +256,9 @@ fn format_forwarded_message_html(original: &OriginalMessage) -> String {
 // --- Argument parsing ---
 
 fn parse_forward_args(matches: &ArgMatches) -> Result<ForwardConfig, GwsError> {
-    let to = Mailbox::parse_list(&required_str(matches, "to")?);
-    if to.is_empty() {
-        return Err(GwsError::Validation(
-            "--to must specify at least one recipient".to_string(),
-        ));
-    }
     Ok(ForwardConfig {
         message_id: super::cli::required_message_id(matches)?,
-        to,
+        to: super::cli::required_mailboxes(matches, "to")?,
         from: parse_optional_mailboxes(matches, "from")?,
         cc: parse_optional_mailboxes(matches, "cc")?,
         bcc: parse_optional_mailboxes(matches, "bcc")?,

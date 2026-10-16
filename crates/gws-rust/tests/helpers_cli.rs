@@ -1960,6 +1960,118 @@ fn gmail_threading_helpers_reject_non_api_message_ids() {
     }
 }
 
+/// Header-bound text (`--subject`, recipient lists and their display names)
+/// with a control character or invisible Unicode is a validation error, exit
+/// 3, before any request; it is never encoded into the header or stripped.
+#[tokio::test(flavor = "multi_thread")]
+async fn gmail_outgoing_helpers_reject_control_characters_in_headers() {
+    use wiremock::MockServer;
+
+    let server = MockServer::start().await;
+    let dir = setup();
+    seed(dir.path(), "gmail", "v1", "");
+    let send = |flag: &str, value: &'static str| -> Vec<&'static str> {
+        let mut args = vec!["gmail", "+send", "--body", "b"];
+        for (name, default) in [
+            ("--to", "a@example.com"),
+            ("--subject", "s"),
+            ("--cc", "c@example.com"),
+            ("--bcc", "d@example.com"),
+            ("--from", "e@example.com"),
+        ] {
+            args.extend([name, if name == flag { value } else { default }]);
+        }
+        args
+    };
+    let cases: Vec<(Vec<&str>, &str)> = vec![
+        (
+            send("--subject", "Hi\r\nBcc: evil@example.com"),
+            "--subject",
+        ),
+        (send("--subject", "Hi\nthere"), "--subject"),
+        (send("--subject", "Hi\u{7}"), "--subject"),
+        (send("--subject", "Hi \u{202E}fdp.exe"), "--subject"),
+        (send("--to", "Al\nice <a@example.com>"), "--to"),
+        (send("--cc", "c@example.com\r\nX-Injected: yes"), "--cc"),
+        (send("--bcc", "\u{1}d@example.com"), "--bcc"),
+        (send("--from", "Me\r <e@example.com>"), "--from"),
+        (
+            vec![
+                "gmail",
+                "+forward",
+                "--message-id",
+                "M1",
+                "--to",
+                "Dave\r\n <d@example.com>",
+            ],
+            "--to",
+        ),
+        (
+            vec![
+                "gmail",
+                "+reply",
+                "--message-id",
+                "M1",
+                "--body",
+                "b",
+                "--cc",
+                "c@example.com\nBcc: evil@example.com",
+            ],
+            "--cc",
+        ),
+        (
+            vec![
+                "gmail",
+                "+reply-all",
+                "--message-id",
+                "M1",
+                "--body",
+                "b",
+                "--to",
+                "T\t<t@example.com>",
+            ],
+            "--to",
+        ),
+    ];
+    for (args, flag) in cases {
+        let out = gwsr(dir.path())
+            .env("GWSR_TOKEN", "test-token")
+            .env("GWSR_API_BASE_URL", server.uri())
+            .env("HTTPS_PROXY", "http://127.0.0.1:9")
+            .args(&args)
+            .args(["--draft", "--yes"])
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(3), "{args:?}: {stderr}");
+        assert!(stderr.contains(flag), "{args:?}: {stderr}");
+        assert!(out.stdout.is_empty(), "{args:?}");
+    }
+    let received = server.received_requests().await.unwrap();
+    assert!(received.is_empty(), "{received:?}");
+
+    // Ordinary non-ASCII text is still accepted.
+    let out = gwsr(dir.path())
+        .args([
+            "gmail",
+            "+send",
+            "--to",
+            "Zoë <z@example.com>",
+            "--subject",
+            "Café — שלום",
+            "--body",
+            "b",
+            "--dry-run",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
 #[test]
 fn gmail_filter_forward_is_gated_under_policy() {
     let dir = setup();

@@ -28,6 +28,34 @@ pub(super) fn required_str(matches: &ArgMatches, name: &str) -> Result<String, G
     Ok(crate::args::required(matches, name)?.to_string())
 }
 
+/// Read a required free-text value that is written into a message header
+/// (`--subject`). Control characters (CR/LF included) and invisible or bidi
+/// Unicode are rejected rather than encoded or stripped: the argument may come
+/// from an LLM, and a header that differs from what was asked for must fail.
+pub(super) fn required_header_text(matches: &ArgMatches, name: &str) -> Result<String, GwsError> {
+    let value = required_str(matches, name)?;
+    crate::validate::reject_dangerous_chars(&value, &format!("--{name}"))?;
+    Ok(value)
+}
+
+/// Read a required comma-separated mailbox list (`--to`), rejecting control
+/// characters and invisible Unicode, which would otherwise be stripped from
+/// the addresses and display names without a word.
+pub(super) fn required_mailboxes(
+    matches: &ArgMatches,
+    name: &str,
+) -> Result<Vec<Mailbox>, GwsError> {
+    let value = required_str(matches, name)?;
+    crate::validate::reject_dangerous_chars(&value, &format!("--{name}"))?;
+    let mailboxes = Mailbox::parse_list(&value);
+    if mailboxes.is_empty() {
+        return Err(GwsError::Validation(format!(
+            "--{name} must specify at least one recipient"
+        )));
+    }
+    Ok(mailboxes)
+}
+
 /// Read a required Gmail API message ID (`--message-id`).
 ///
 /// Gmail API IDs are opaque ASCII tokens (hex in practice). Anything else,
@@ -72,13 +100,16 @@ pub(super) fn parse_optional_trimmed(
 
 /// Parse an optional clap argument as a comma-separated mailbox list.
 /// Returns `None` when the argument is absent, empty, or yields no valid addresses.
+/// Control characters and invisible Unicode are rejected, as for `--to`.
 pub(super) fn parse_optional_mailboxes(
     matches: &ArgMatches,
     name: &str,
 ) -> Result<Option<Vec<Mailbox>>, GwsError> {
-    Ok(parse_optional_trimmed(matches, name)?
-        .map(|s| Mailbox::parse_list(&s))
-        .filter(|v| !v.is_empty()))
+    let Some(value) = parse_optional_trimmed(matches, name)? else {
+        return Ok(None);
+    };
+    crate::validate::reject_dangerous_chars(&value, &format!("--{name}"))?;
+    Ok(Some(Mailbox::parse_list(&value)).filter(|v| !v.is_empty()))
 }
 
 /// Collect a repeatable, comma-separable list argument (`--x a,b --x c`).
