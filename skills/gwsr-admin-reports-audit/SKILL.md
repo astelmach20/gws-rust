@@ -49,6 +49,7 @@ gwsr admin-reports +audit --application admin --format table
 ## Tips
 
 - Read-only. Newest first. The output says when --limit cut results short.
+- Gmail queries cover at most 30 days; --until defaults to now.
 
 ## See Also
 
