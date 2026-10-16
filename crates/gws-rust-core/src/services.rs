@@ -299,18 +299,40 @@ pub fn resolve_service(spec: &str) -> Result<(String, String), GwsError> {
     Ok((resolved.api_name, resolved.version))
 }
 
+/// Edit distance between a typed word and a candidate name, ignoring ASCII
+/// case: the Damerau-Levenshtein distance, so a transposition (`auht` for
+/// `auth`) is one edit. Every "did you mean" ranking of services and
+/// commands uses it, so their candidates can be compared directly.
+pub fn typo_distance(typed: &str, candidate: &str) -> usize {
+    strsim::damerau_levenshtein(&typed.to_ascii_lowercase(), &candidate.to_ascii_lowercase())
+}
+
 /// The registered alias closest to `name`, if any is plausibly a typo of it.
 pub fn suggest_service(name: &str) -> Option<&'static str> {
+    suggest_service_with_distance(name).map(|(alias, _)| alias)
+}
+
+/// [`suggest_service`] with the alias's [`typo_distance`] from `name`.
+///
+/// An alias qualifies when it is similar (Jaro-Winkler 0.85 or more) or,
+/// for aliases over three characters, within two edits. The closest
+/// qualifying alias wins; ties go to the higher Jaro-Winkler score, then
+/// to the earlier alias in [`SERVICES`].
+pub fn suggest_service_with_distance(name: &str) -> Option<(&'static str, usize)> {
     let lowered = name.to_ascii_lowercase();
     SERVICES
         .iter()
         .flat_map(|e| e.aliases.iter().copied())
-        .map(|alias| (alias, strsim::jaro_winkler(&lowered, alias)))
-        .filter(|(alias, score)| {
-            *score >= 0.85 || strsim::damerau_levenshtein(&lowered, alias) <= 2 && alias.len() > 3
+        .map(|alias| {
+            (
+                alias,
+                typo_distance(&lowered, alias),
+                strsim::jaro_winkler(&lowered, alias),
+            )
         })
-        .max_by(|a, b| a.1.total_cmp(&b.1))
-        .map(|(alias, _)| alias)
+        .filter(|&(alias, distance, score)| score >= 0.85 || distance <= 2 && alias.len() > 3)
+        .min_by(|a, b| a.1.cmp(&b.1).then_with(|| b.2.total_cmp(&a.2)))
+        .map(|(alias, distance, _)| (alias, distance))
 }
 
 fn unknown_service_error(name: &str) -> GwsError {
@@ -449,7 +471,19 @@ mod tests {
         assert_eq!(suggest_service("calender"), Some("calendar"));
         assert_eq!(suggest_service("Sheets"), Some("sheets"));
         assert_eq!(suggest_service("xyzzyqq"), None);
+        assert_eq!(suggest_service_with_distance("drvie"), Some(("drive", 1)));
+        assert_eq!(suggest_service_with_distance("gmial"), Some(("gmail", 1)));
+        assert_eq!(suggest_service_with_distance("xyzzyqq"), None);
         let msg = resolve_service("drvie").unwrap_err().to_string();
         assert!(msg.contains("Did you mean 'drive'?"), "{msg}");
+    }
+
+    #[test]
+    fn typo_distance_counts_a_transposition_as_one_edit() {
+        assert_eq!(typo_distance("auht", "auth"), 1);
+        assert_eq!(typo_distance("hlep", "help"), 1);
+        assert_eq!(typo_distance("GMIAL", "gmail"), 1);
+        assert_eq!(typo_distance("auht", "vault"), 2);
+        assert_eq!(typo_distance("hlep", "keep"), 2);
     }
 }

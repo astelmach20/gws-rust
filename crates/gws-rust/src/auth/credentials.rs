@@ -475,12 +475,18 @@ fn path_exists(path: &Path, what: &str, kind: fn(String) -> AuthError) -> Result
 
 fn read_token_file(path: &Path) -> Result<SecretString, AuthError> {
     crate::fs_util::check_private_file(path).map_err(|e| AuthError::Config(format!("{e:#}")))?;
-    let contents = Zeroizing::new(std::fs::read_to_string(path).map_err(|e| {
-        AuthError::Config(format!(
-            "cannot read GWSR_TOKEN_FILE '{}': {e}",
-            path.display()
-        ))
-    })?);
+    // A leading byte order mark (Windows PowerShell writes one) is an
+    // encoding signature, not part of the token.
+    let contents = Zeroizing::new(
+        std::fs::read_to_string(path)
+            .map(crate::executor::strip_utf8_bom)
+            .map_err(|e| {
+                AuthError::Config(format!(
+                    "cannot read GWSR_TOKEN_FILE '{}': {e}",
+                    path.display()
+                ))
+            })?,
+    );
     let token = contents.trim();
     if token.is_empty() {
         return Err(AuthError::Config(format!(
@@ -503,6 +509,7 @@ fn read_plaintext_credential(path: &Path) -> Result<Credential, AuthError> {
     crate::fs_util::check_private_file(path).map_err(|e| AuthError::Config(format!("{e:#}")))?;
     let contents = Zeroizing::new(
         std::fs::read_to_string(path)
+            .map(crate::executor::strip_utf8_bom)
             .map_err(|e| AuthError::Config(format!("cannot read '{}': {e}", path.display())))?,
     );
     Credential::from_json(&contents, &format!("'{}'", path.display()))
@@ -652,6 +659,32 @@ mod tests {
             let text = err.to_string();
             assert!(text.contains("GWSR_TOKEN_FILE"), "{text}");
             assert!(!text.contains("ya29"), "the value is echoed: {text}");
+        }
+    }
+
+    /// Windows PowerShell 5.1 (`Set-Content -Encoding UTF8`, `Out-File`)
+    /// and older Notepad write a UTF-8 byte order mark. It is an encoding
+    /// signature, not part of the token or the JSON, so it is dropped like
+    /// in every other file gwsr reads text from.
+    #[test]
+    fn auth_files_with_a_utf8_bom_are_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let token = dir.path().join("token");
+        write_private(&token, "\u{feff}ya29.abc\r\n");
+        let mut env = env_in(dir.path(), ProfileSource::Default);
+        env.token_file = Some(token);
+        match env.load().unwrap().1 {
+            Resolved::Token(t) => assert_eq!(t.expose_secret(), "ya29.abc"),
+            other => panic!("{other:?}"),
+        }
+
+        let creds = dir.path().join("creds.json");
+        write_private(&creds, &format!("\u{feff}{USER_JSON}\r\n"));
+        let mut env = env_in(dir.path(), ProfileSource::Default);
+        env.credentials_file = Some(creds);
+        match env.load().unwrap().1 {
+            Resolved::Credential(c) => assert_eq!(c.kind(), "authorized_user"),
+            other => panic!("{other:?}"),
         }
     }
 

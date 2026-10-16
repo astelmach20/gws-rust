@@ -104,9 +104,23 @@ pub fn is_server_failure(status: reqwest::StatusCode) -> bool {
 }
 
 /// A short, terminal-safe excerpt of an error body (an HTML error page can be
-/// large).
+/// large). In a JSON body the value of every credential-bearing field
+/// ([`is_secret_field`]) is replaced: a token response that fails to parse
+/// (a field of the wrong type) still carries live tokens, and the excerpt is
+/// printed to stderr.
 pub fn body_excerpt(body: &[u8]) -> String {
-    let text = crate::output::sanitize_for_terminal(&String::from_utf8_lossy(body));
+    let redacted = serde_json::from_slice::<serde_json::Value>(body)
+        .ok()
+        .and_then(|mut value| {
+            redact_secrets(&mut value)
+                .then(|| serde_json::to_string(&value).ok())
+                .flatten()
+        });
+    let raw = match &redacted {
+        Some(json) => std::borrow::Cow::Borrowed(json.as_str()),
+        None => String::from_utf8_lossy(body),
+    };
+    let text = crate::output::sanitize_for_terminal(&raw);
     let text = text.trim();
     if text.chars().count() > DETAIL_MAX_CHARS {
         let cut: String = text.chars().take(DETAIL_MAX_CHARS).collect();
@@ -114,6 +128,39 @@ pub fn body_excerpt(body: &[u8]) -> String {
     } else {
         text.to_string()
     }
+}
+
+/// Whether a JSON field named `key` can hold a credential: an access,
+/// refresh or ID token, a client secret, a signed assertion.
+fn is_secret_field(key: &str) -> bool {
+    let key = key.to_ascii_lowercase();
+    key != "token_type"
+        && (key.contains("token") || key.contains("secret") || key.contains("assertion"))
+}
+
+/// Replace the value of every [`is_secret_field`] in `value`, at any depth.
+/// Returns whether anything was replaced.
+fn redact_secrets(value: &mut serde_json::Value) -> bool {
+    let mut redacted = false;
+    match value {
+        serde_json::Value::Object(map) => {
+            for (key, field) in map.iter_mut() {
+                if is_secret_field(key) {
+                    *field = serde_json::Value::String("[redacted]".to_string());
+                    redacted = true;
+                } else {
+                    redacted |= redact_secrets(field);
+                }
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                redacted |= redact_secrets(item);
+            }
+        }
+        _ => {}
+    }
+    redacted
 }
 
 /// The shared OAuth HTTP client.

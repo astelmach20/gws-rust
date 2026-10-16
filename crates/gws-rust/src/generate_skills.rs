@@ -1988,6 +1988,57 @@ mod tests {
         );
     }
 
+    /// The committed helper skills match what the generator renders from the
+    /// helpers' own clap definitions (no Discovery document needed): usage,
+    /// required flag groups, flags, examples and tips. The CI drift check is
+    /// only a warning, so a stale helper skill could otherwise be committed.
+    #[test]
+    fn committed_helper_skills_match_the_helpers() {
+        let section = |md: &str| -> String {
+            let start = md.find("## Usage\n").unwrap_or(md.len());
+            let end = md.find("## See Also\n").unwrap_or(md.len());
+            md[start..end.max(start)].to_string()
+        };
+        let mut stale = Vec::new();
+        let mut checked = 0;
+        for entry in services::SERVICES {
+            let doc = crate::discovery::RestDescription {
+                name: entry.api_name.to_string(),
+                version: entry.version.to_string(),
+                ..Default::default()
+            };
+            let cli = crate::commands::build_cli(&doc);
+            let alias = entry.aliases[0];
+            for helper in cli
+                .get_subcommands()
+                .filter(|s| s.get_name().starts_with('+'))
+            {
+                let short = helper.get_name().trim_start_matches('+');
+                let path = format!(
+                    "{}/../../skills/gwsr-{alias}-{short}/SKILL.md",
+                    env!("CARGO_MANIFEST_DIR")
+                );
+                let committed = std::fs::read_to_string(&path)
+                    .unwrap_or_else(|e| panic!("cannot read {path}: {e}"));
+                let rendered = render_helper_skill(alias, helper.get_name(), helper, entry, "P");
+                checked += 1;
+                if section(&committed) != section(&rendered) {
+                    stale.push(format!(
+                        "gwsr-{alias}-{short}:\n--- committed\n{}\n--- generated\n{}",
+                        section(&committed),
+                        section(&rendered)
+                    ));
+                }
+            }
+        }
+        assert!(checked > 40, "only {checked} helper skills checked");
+        assert!(
+            stale.is_empty(),
+            "stale helper skills (run `just skills`):\n{}",
+            stale.join("\n")
+        );
+    }
+
     /// A tip wrapped over several help lines is one bullet in the skill, not
     /// one fragment per line.
     #[test]
@@ -2001,6 +2052,71 @@ mod tests {
             "{md}"
         );
         assert!(!md.contains("\n- a Model Armor failure"), "{md}");
+    }
+
+    /// The streaming helpers' tips say what `--max-failures N` does (it
+    /// tolerates N consecutive failures and exits on the next one), and the
+    /// committed skills carry the same tips as the generator renders.
+    #[test]
+    fn max_failures_tips_match_stream_semantics_and_committed_skills() {
+        let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .ancestors()
+            .nth(2)
+            .expect("repository root");
+        let tips = |md: &str| -> String {
+            md.split("## Tips\n\n")
+                .nth(1)
+                .and_then(|t| t.split("\n\n").next())
+                .expect("tips section")
+                .to_string()
+        };
+        for (alias, helper_name) in [("events", "+subscribe"), ("gmail", "+watch")] {
+            let entry = services::SERVICES
+                .iter()
+                .find(|e| e.aliases[0] == alias)
+                .expect("service entry");
+            // Helpers attach only to the registered API version.
+            let doc = crate::discovery::RestDescription {
+                name: entry.api_name.to_string(),
+                version: entry.version.to_string(),
+                ..Default::default()
+            };
+            let cli = crate::commands::build_cli(&doc);
+            let helper = cli
+                .get_subcommands()
+                .find(|s| s.get_name() == helper_name)
+                .expect("helper command");
+            let rendered = tips(&render_helper_skill(
+                alias,
+                helper_name,
+                helper,
+                entry,
+                "Test",
+            ));
+            assert!(
+                rendered.contains(
+                    "tolerates --max-failures consecutive failures and exits on the next one"
+                ),
+                "{alias} {helper_name}: {rendered}"
+            );
+            assert!(
+                !rendered.contains("exits after --max-failures"),
+                "{alias} {helper_name}: {rendered}"
+            );
+
+            let short = helper_name.trim_start_matches('+');
+            let path = repo_root
+                .join("skills")
+                .join(format!("gwsr-{alias}-{short}"))
+                .join("SKILL.md");
+            let committed = std::fs::read_to_string(&path).expect("committed skill");
+            assert_eq!(
+                tips(&committed),
+                rendered,
+                "{} is stale: run `just skills`",
+                path.display()
+            );
+        }
     }
 
     /// Every helper tip line that starts a tip ends a sentence, so a tip

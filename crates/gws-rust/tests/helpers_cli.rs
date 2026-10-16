@@ -714,14 +714,38 @@ fn drive_helpers_are_not_offered_for_another_api_version() {
     );
 }
 
+/// `GWSR_RESTRICT_PATHS=cwd` refuses an upload from outside the working
+/// directory. The file exists and is readable, so the refusal can only come
+/// from the path policy: without it, the same command plans the upload.
 #[test]
 fn upload_rejects_paths_outside_cwd() {
     let dir = setup();
-    let out = gwsr(dir.path())
-        .args(["drive", "+upload", "--file", "../outside.txt", "--dry-run"])
-        .output()
-        .unwrap();
-    assert_eq!(out.status.code(), Some(3));
+    let work = dir.path().join("work");
+    std::fs::create_dir(&work).unwrap();
+    std::fs::write(dir.path().join("outside.txt"), "data").unwrap();
+    let run = |restrict: Option<&str>| {
+        let mut cmd = gwsr(dir.path());
+        cmd.current_dir(&work);
+        if let Some(policy) = restrict {
+            cmd.env("GWSR_RESTRICT_PATHS", policy);
+        }
+        cmd.args(["drive", "+upload", "--file", "../outside.txt", "--dry-run"])
+            .output()
+            .unwrap()
+    };
+
+    let out = run(Some("cwd"));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(3), "{stderr}");
+    assert!(stderr.contains("GWSR_RESTRICT_PATHS"), "{stderr}");
+    assert!(out.stdout.is_empty(), "{out:?}");
+
+    let out = run(None);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 }
 
 #[test]
@@ -799,6 +823,113 @@ fn drive_share_rejects_bad_flag_combinations_before_confirm_and_auth() {
             assert!(!stderr.contains("confirm"), "{args:?}: {stderr}");
         }
     }
+}
+
+/// An empty (or blank) value for a flag that names a folder, grantee,
+/// script or title would be sent as `parents: [""]`, `emailAddress: ""`,
+/// `scriptId=` or `title: ""`. Helpers refuse it as a validation error
+/// (exit 3) before sending anything, in a real run and a dry run alike.
+#[tokio::test(flavor = "multi_thread")]
+async fn empty_flag_values_are_rejected_before_sending() {
+    use wiremock::{Mock, MockServer, ResponseTemplate, matchers::any};
+
+    let server = MockServer::start().await;
+    Mock::given(any())
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+        .mount(&server)
+        .await;
+
+    let dir = setup();
+    std::fs::write(dir.path().join("f.txt"), "hi").unwrap();
+    let cases: [(&[&str], &str); 7] = [
+        (
+            &["drive", "+upload", "--file", "f.txt", "--folder-id", ""],
+            "--folder-id must not be empty",
+        ),
+        (
+            &["drive", "+upload", "--file", "f.txt", "--folder-id", " "],
+            "--folder-id must not be empty",
+        ),
+        (
+            &[
+                "drive",
+                "+share",
+                "--file-id",
+                "F1",
+                "--role",
+                "reader",
+                "--email",
+                "",
+            ],
+            "--email must not be empty",
+        ),
+        (
+            &[
+                "drive",
+                "+share",
+                "--file-id",
+                "F1",
+                "--role",
+                "reader",
+                "--email",
+                "",
+                "--group",
+            ],
+            "--email must not be empty",
+        ),
+        (
+            &[
+                "drive",
+                "+share",
+                "--file-id",
+                "F1",
+                "--role",
+                "reader",
+                "--domain",
+                "",
+            ],
+            "--domain must not be empty",
+        ),
+        (
+            &["script", "+logs", "--script-id", ""],
+            "--script-id must not be empty",
+        ),
+        (
+            &["tasks", "+add", "--title", ""],
+            "--title must not be empty",
+        ),
+    ];
+    for (args, expected) in cases {
+        for mode in ["--yes", "--dry-run"] {
+            // `--yes` is only defined on commands that confirm.
+            let extra: &[&str] = match (mode, args[1]) {
+                ("--yes", "+share") => &["--yes"],
+                ("--yes", _) => &[],
+                _ => &["--dry-run"],
+            };
+            let out = gwsr(dir.path())
+                .env("GWSR_TOKEN", "test-token")
+                .env("GWSR_API_BASE_URL", server.uri())
+                .args(args)
+                .args(extra)
+                .output()
+                .unwrap();
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            assert_eq!(
+                out.status.code(),
+                Some(3),
+                "{args:?} {mode} was not rejected: stdout={} stderr={stderr}",
+                String::from_utf8_lossy(&out.stdout)
+            );
+            assert!(stderr.contains(expected), "{args:?} {mode}: {stderr}");
+        }
+    }
+    let received = server.received_requests().await.unwrap();
+    let sent: Vec<String> = received
+        .iter()
+        .map(|r| format!("{} {}", r.method, r.url.path()))
+        .collect();
+    assert!(sent.is_empty(), "requests reached the server: {sent:?}");
 }
 
 #[test]
@@ -1529,6 +1660,65 @@ fn modelarmor_sanitize_rejects_unreadable_stdin_as_validation() {
     );
 }
 
+/// A Model Armor `--json` body must be a JSON object without repeated keys,
+/// as every other `--json` body is: an array or a string is not a request,
+/// and `{"a":1,"a":2}` would silently send only the last value.
+#[test]
+fn modelarmor_json_bodies_must_be_objects() {
+    let dir = setup();
+    seed(dir.path(), "modelarmor", "v1", "");
+    let template = "projects/my-project/locations/us-central1/templates/t";
+    let commands: [&[&str]; 3] = [
+        &[
+            "modelarmor",
+            "+create-template",
+            "--project",
+            "my-project",
+            "--location",
+            "us-central1",
+            "--template-id",
+            "t",
+        ],
+        &["modelarmor", "+sanitize-prompt", "--template", template],
+        &["modelarmor", "+sanitize-response", "--template", template],
+    ];
+    let cases = [
+        ("[]", "--json must be a JSON object, got array"),
+        ("\"x\"", "--json must be a JSON object, got string"),
+        ("null", "--json must be a JSON object, got null"),
+        ("{\"a\":1,\"a\":2}", "duplicate key 'a'"),
+    ];
+    for command in commands {
+        for (body, expected) in cases {
+            let out = gwsr(dir.path())
+                .args(command)
+                .args(["--json", body, "--dry-run"])
+                .output()
+                .unwrap();
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            assert_eq!(
+                out.status.code(),
+                Some(3),
+                "{command:?} --json {body} was accepted: stdout={} stderr={stderr}",
+                String::from_utf8_lossy(&out.stdout)
+            );
+            assert!(stderr.contains(expected), "{command:?} {body}: {stderr}");
+        }
+        // An object is still sent as given.
+        let out = gwsr(dir.path())
+            .args(command)
+            .args(["--json", "{\"a\":1}", "--dry-run"])
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{command:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(stdout_json(&out)["requests"][0]["body"], json!({"a": 1}));
+    }
+}
+
 // ── -q and stream diagnostics ───────────────────────────────────────────
 
 /// `-q` means "only print errors on stderr": the info/warning diagnostics of
@@ -1791,7 +1981,11 @@ async fn empty_path_ids_are_rejected_before_sending() {
             "{args:?} was not rejected: stdout={} stderr={stderr}",
             String::from_utf8_lossy(&out.stdout)
         );
-        assert!(stderr.contains("empty segment"), "{args:?}: {stderr}");
+        // `--script-id` is checked as a flag before any path is built.
+        assert!(
+            stderr.contains("empty segment") || stderr.contains("must not be empty"),
+            "{args:?}: {stderr}"
+        );
     }
     let received = server.received_requests().await.unwrap();
     let sent: Vec<String> = received
@@ -2617,6 +2811,57 @@ async fn gmail_outgoing_helpers_reject_control_characters_in_headers() {
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );
+}
+
+/// Zero-width joiner and non-joiner are part of ordinary text (emoji
+/// sequences, Persian and Indic scripts), so a subject or display name that
+/// uses them is sent. Other invisible characters are still refused, and an
+/// email address may contain none of them.
+#[test]
+fn gmail_send_accepts_joiners_in_subject_and_display_names() {
+    let dir = setup();
+    seed(dir.path(), "gmail", "v1", "");
+    let out = gwsr(dir.path())
+        .args([
+            "gmail",
+            "+send",
+            "--to",
+            "Fam\u{200D}ily <a@example.com>",
+            "--cc",
+            "\u{645}\u{6CC}\u{200C}\u{62E}\u{648}\u{627}\u{647}\u{645} <c@example.com>",
+            "--subject",
+            "Family dinner \u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}",
+            "--body",
+            "b",
+            "--dry-run",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    for (flag, value) in [
+        ("--subject", "Hi \u{200B}there"),
+        ("--subject", "Hi \u{2060}there"),
+        ("--to", "a\u{200D}@example.com"),
+        ("--cc", "Name <c\u{200C}@example.com>"),
+    ] {
+        let mut args = vec!["gmail", "+send", "--body", "b", "--dry-run"];
+        if flag != "--to" {
+            args.extend(["--to", "a@example.com"]);
+        }
+        if flag != "--subject" {
+            args.extend(["--subject", "s"]);
+        }
+        args.extend([flag, value]);
+        let out = gwsr(dir.path()).args(&args).output().unwrap();
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(3), "{flag} {value:?}: {stderr}");
+        assert!(stderr.contains(flag), "{flag} {value:?}: {stderr}");
+    }
 }
 
 /// Label names are resolved to IDs with a `users.labels.list` read before

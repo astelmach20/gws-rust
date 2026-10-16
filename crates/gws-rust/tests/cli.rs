@@ -873,6 +873,33 @@ fn mistyped_static_command_suggests_the_command() {
     }
 }
 
+/// An unregistered API named without a version is an unknown service with
+/// the `<api>:<version>` hint, not a typo of a short command like `dev`.
+#[test]
+fn unregistered_api_without_version_is_an_unknown_service() {
+    let env = Env::new();
+    for name in ["dns", "dlp", "oauth2"] {
+        let out = env
+            .cmd()
+            .args(["--dry-run", name])
+            .assert()
+            .code(3)
+            .get_output()
+            .clone();
+        assert!(stdout_of(&out).is_empty());
+        let message = stderr_error(&out)["error"]["message"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert!(
+            message.starts_with(&format!("Unknown service '{name}'.")),
+            "{message}"
+        );
+        assert!(message.contains("'<api>:<version>'"), "{message}");
+        assert!(!message.contains("Did you mean `gwsr"), "{message}");
+    }
+}
+
 #[test]
 fn human_errors_are_opt_in_via_a_human_format() {
     let env = Env::new();
@@ -4307,6 +4334,154 @@ async fn require_confirm_gates_chat_space_member_adds() {
     assert_eq!(server.received_requests().await.unwrap().len(), 2);
 }
 
+/// A global option given before a built-in command (or a service) and again
+/// after one of its subcommand names is a repeat, exactly like one given
+/// twice in a row: clap's global propagation used to let the later value
+/// silently replace the earlier one.
+#[test]
+fn global_option_repeated_across_subcommand_levels_is_rejected() {
+    let env = Env::new();
+    env.seed_drive("List files.");
+    let dir = env.work_dir().join("man");
+    let dir = dir.to_str().unwrap();
+    let cases: &[(&str, &[&str])] = &[
+        (
+            "--profile",
+            &["--profile", "a", "auth", "--profile", "b", "list"],
+        ),
+        (
+            "--impersonate",
+            &[
+                "--impersonate",
+                "a@example.com",
+                "auth",
+                "--impersonate",
+                "b@example.com",
+                "status",
+            ],
+        ),
+        (
+            "--profile",
+            &[
+                "--profile",
+                "a",
+                "schema",
+                "--profile",
+                "b",
+                "drive.files.list",
+            ],
+        ),
+        (
+            "--format",
+            &["--format", "json", "commands", "--format", "table", "drive"],
+        ),
+        (
+            "--profile",
+            &["--profile=a", "cache", "clear", "--profile=b", "--dry-run"],
+        ),
+        ("--dry-run", &["--dry-run", "cache", "--dry-run", "clear"]),
+        (
+            "--impersonate",
+            &[
+                "--impersonate",
+                "a@example.com",
+                "batch",
+                "--impersonate",
+                "b@example.com",
+                "drive",
+                "--dry-run",
+            ],
+        ),
+        (
+            "--jq",
+            &[
+                "--jq",
+                ".",
+                "dev",
+                "man",
+                "--jq",
+                ".x",
+                "--output-dir",
+                dir,
+                "--dry-run",
+            ],
+        ),
+        ("--quiet", &["-q", "completions", "-q", "bash"]),
+        (
+            "--format",
+            &[
+                "--format",
+                "json",
+                "drive",
+                "files",
+                "list",
+                "--format",
+                "table",
+                "--dry-run",
+            ],
+        ),
+        (
+            "--profile",
+            &[
+                "drive",
+                "--profile",
+                "a",
+                "files",
+                "--profile",
+                "b",
+                "list",
+                "--dry-run",
+            ],
+        ),
+    ];
+    for (flag, args) in cases {
+        let out = env.cmd().args(*args).write_stdin("").output().unwrap();
+        assert_eq!(out.status.code(), Some(3), "{args:?}: {}", stderr_of(&out));
+        // A human --format makes the error human-readable too.
+        let stderr = stderr_of(&out);
+        assert!(
+            stderr.contains(&format!("{flag} was given more than once")),
+            "{args:?}: {stderr}"
+        );
+        assert!(stdout_of(&out).is_empty(), "{args:?}");
+    }
+    assert!(!env.work_dir().join("man").exists());
+}
+
+/// The repeat check follows clap's own reading of the command line: a
+/// counted flag may repeat, and a look-alike after `--` is a value.
+#[test]
+fn global_option_lookalikes_and_counted_flags_are_not_repeats() {
+    let env = Env::new();
+    env.seed_drive("List files.");
+    env.cmd()
+        .args(["-v", "schema", "-v", "drive.files.list"])
+        .assert()
+        .success();
+    env.cmd()
+        .args([
+            "--profile",
+            "a",
+            "schema",
+            "drive.files.list",
+            "--format",
+            "json",
+        ])
+        .assert()
+        .success();
+    // `--profile` after `--` is the schema path, not a second --profile.
+    let out = env
+        .cmd()
+        .args(["--profile", "a", "schema", "--", "--profile"])
+        .output()
+        .unwrap();
+    assert!(
+        !stderr_of(&out).contains("more than once"),
+        "{}",
+        stderr_of(&out)
+    );
+}
+
 /// `GWSR_TOKEN` is a fixed access token: gwsr cannot mint a new one, so a 401
 /// is final. The request is sent once (no "refresh" that resends the same
 /// rejected token), and the error is an auth error (exit 2) that says the
@@ -4345,4 +4520,48 @@ async fn static_token_rejected_with_401_is_not_resent() {
     let message = err["error"]["message"].as_str().unwrap();
     assert!(message.contains("GWSR_TOKEN"), "{err}");
     assert!(message.contains("expired or was revoked"), "{err}");
+}
+
+/// An unknown first word gets the single closest suggestion across built-in
+/// commands and services: `auht` is `auth` (one transposition), not `vault`.
+#[test]
+fn unknown_first_word_suggests_the_closest_command_or_service() {
+    let env = Env::new();
+    for (word, hint) in [
+        ("auht", "Did you mean `gwsr auth`?"),
+        ("hlep", "Did you mean `gwsr help`?"),
+        ("drvie", "Did you mean 'drive'?"),
+        ("gmial", "Did you mean 'gmail'?"),
+    ] {
+        let out = env
+            .cmd()
+            .args(["--dry-run", word])
+            .assert()
+            .code(3)
+            .get_output()
+            .clone();
+        assert!(stdout_of(&out).is_empty());
+        let message = stderr_error(&out)["error"]["message"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert!(message.contains(hint), "{word}: {message}");
+        assert_eq!(message.matches("Did you mean").count(), 1, "{message}");
+    }
+    let out = env
+        .cmd()
+        .args(["--dry-run", "xyzzyqq"])
+        .assert()
+        .code(3)
+        .get_output()
+        .clone();
+    let message = stderr_error(&out)["error"]["message"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(
+        message.starts_with("Unknown service 'xyzzyqq'."),
+        "{message}"
+    );
+    assert!(!message.contains("Did you mean"), "{message}");
 }

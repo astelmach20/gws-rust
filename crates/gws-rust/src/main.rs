@@ -55,7 +55,7 @@ pub(crate) mod validate;
 use std::ffi::OsString;
 use std::process::ExitCode;
 
-use clap::{FromArgMatches, Parser};
+use clap::{CommandFactory, FromArgMatches, Parser};
 
 use cli_args::{CacheCommand, Cli, DevCommand, GlobalArgs, PreScan, TopCommand};
 use config::{JsonStylePref, Settings};
@@ -255,6 +255,7 @@ fn parse_top_level(args: &[OsString]) -> Result<Option<(Cli, Vec<OsString>)>, Cl
         }
         Err(e) => return Err(e.into()),
     };
+    cli_args::reject_repeated_globals(&Cli::command(), args)?;
     let Some(TopCommand::Help { path }) = &cli.command else {
         return Ok(Some((cli, args.to_vec())));
     };
@@ -482,22 +483,41 @@ pub fn parse_service_and_version(
 }
 
 /// The static command `token` is plausibly a typo of (`gwsr completion` for
-/// `gwsr completions`), when it names no service and resembles none.
+/// `gwsr completions`), when it names no service.
 ///
 /// Every first word that is not a static command is taken as a service, so
 /// without this a mistyped command is reported as an unknown service with
 /// suggestions drawn from services only. A `<api>:<version>` spec, or any
 /// name with `--api-version`, is a Discovery API and never a command.
+///
+/// The command names are short, so only a near miss counts: one edit (a
+/// transposition is one), or one per four characters of the longer word.
+/// Anything further is more likely an unregistered API named without its
+/// version (`dlp`, `oauth2`) and gets the unknown-service error and hint.
 fn mistyped_command(token: &str, api_version_given: bool) -> Option<&'static str> {
-    if api_version_given
-        || token.contains(':')
-        || services::find_service(token).is_some()
-        || services::suggest_service(token).is_some()
-    {
+    if api_version_given || token.contains(':') || services::find_service(token).is_some() {
         return None;
     }
-    let names = cli_args::STATIC_COMMANDS.iter().copied();
-    executor::input::closest(token, names)
+    let lower = token.to_ascii_lowercase();
+    cli_args::STATIC_COMMANDS
+        .iter()
+        .map(|&command| (command, strsim::damerau_levenshtein(&lower, command)))
+        .filter(|&(command, distance)| distance <= (command.len().max(lower.len()) / 4).max(1))
+        .min_by_key(|&(_, distance)| distance)
+        .map(|(command, _)| command)
+}
+
+/// The static command to suggest for an unknown first word, when it is a
+/// strictly closer [`services::typo_distance`] match than the closest
+/// service alias (`gwsr auht` is `auth`, not `vault`). On a tie the service
+/// wins, and its suggestion comes from the unknown-service error.
+fn command_suggestion(token: &str, api_version_given: bool) -> Option<&'static str> {
+    let command = mistyped_command(token, api_version_given)?;
+    let command_distance = services::typo_distance(token, command);
+    match services::suggest_service_with_distance(token) {
+        Some((_, service_distance)) if service_distance <= command_distance => None,
+        _ => Some(command),
+    }
 }
 
 /// argv for the dynamic service command: the top-level global flags that
@@ -521,7 +541,7 @@ async fn run_service(
         .first()
         .and_then(|s| s.to_str())
         .ok_or_else(|| GwsError::Validation("the service name must be valid UTF-8".into()))?;
-    if let Some(command) = mistyped_command(service_token, prescan.api_version.is_some()) {
+    if let Some(command) = command_suggestion(service_token, prescan.api_version.is_some()) {
         return Err(GwsError::Validation(format!(
             "Unknown command or service '{service_token}'. Did you mean `gwsr {command}`? \
              Run `gwsr --help` to list commands and services."
@@ -535,11 +555,17 @@ async fn run_service(
     let doc = service::load_document(&api_name, &version).await?;
     // Usage lines show the service as typed, so `youtube:v3` stays runnable.
     let cmd = service::build_command(service_token, &doc);
-    let matches = match cmd.try_get_matches_from(service_argv(args, service_args, service_token)) {
+    let argv = service_argv(args, service_args, service_token);
+    // Kept only when a global is named twice: the tree can be large.
+    let repeat_check = cli_args::may_repeat_globals(&cmd, &argv).then(|| cmd.clone());
+    let matches = match cmd.try_get_matches_from(&argv) {
         Ok(m) => m,
         Err(e) if is_display_request(&e) => return print_display(&e),
         Err(e) => return Err(e.into()),
     };
+    if let Some(cmd) = repeat_check {
+        cli_args::reject_repeated_globals(&cmd, &argv)?;
+    }
 
     let global = GlobalArgs::from_arg_matches(&matches)?;
     install_output(&global, settings)?;
@@ -737,6 +763,49 @@ mod tests {
         assert_eq!(mistyped_command("completion:v1", false), None);
         assert_eq!(mistyped_command("completion", true), None);
         assert_eq!(mistyped_command("youtube", false), None);
+        assert_eq!(mistyped_command("cahce", false), Some("cache"));
+        assert_eq!(mistyped_command("completoins", false), Some("completions"));
+    }
+
+    /// Unregistered Discovery APIs typed without a version are unknown
+    /// services, not typos of a short command such as `dev` or `auth`.
+    #[test]
+    fn unregistered_api_names_are_not_mistyped_commands() {
+        for name in [
+            "dns",
+            "dlp",
+            "oauth2",
+            "iam",
+            "iap",
+            "run",
+            "file",
+            "fcm",
+            "apikeys",
+            "pubsub",
+            "bigquery",
+            "compute",
+            "storage",
+            "logging",
+            "monitoring",
+            "redis",
+            "spanner",
+            "dataflow",
+            "datastore",
+            "firestore",
+            "translate",
+            "vision",
+            "books",
+            "blogger",
+            "fitness",
+            "webmasters",
+            "chrome",
+            "admob",
+            "dataproc",
+            "speech",
+            "language",
+        ] {
+            assert_eq!(mistyped_command(name, false), None, "{name}");
+        }
     }
 
     #[test]
@@ -787,5 +856,24 @@ mod tests {
             }
             other => panic!("unexpected {other:?}"),
         }
+    }
+
+    /// The closest name wins across services and commands, by one metric.
+    #[test]
+    fn closest_of_commands_and_services_is_suggested() {
+        // A transposed command beats a service two edits away.
+        assert_eq!(command_suggestion("auht", false), Some("auth"));
+        assert_eq!(command_suggestion("hlep", false), Some("help"));
+        // A transposed service beats every command.
+        assert_eq!(command_suggestion("drvie", false), None);
+        assert_eq!(services::suggest_service("drvie"), Some("drive"));
+        assert_eq!(command_suggestion("gmial", false), None);
+        assert_eq!(services::suggest_service("gmial"), Some("gmail"));
+        // Nothing close: no command, and no service either.
+        assert_eq!(command_suggestion("xyzzyqq", false), None);
+        assert_eq!(services::suggest_service("xyzzyqq"), None);
+        // Discovery API specs are never commands.
+        assert_eq!(command_suggestion("auht:v1", false), None);
+        assert_eq!(command_suggestion("auht", true), None);
     }
 }

@@ -50,12 +50,18 @@ fn essence(content_type: &str) -> String {
     ct.trim().to_ascii_lowercase()
 }
 
-/// Whether a content type is a JSON API response (`application/json` or
-/// `text/json`, in any letter case and with any parameters).
+/// Whether a content type is a JSON API response, in any letter case and with
+/// any parameters: `application/json`, `text/json`, or
+/// `application/json+protobuf` (Google's JSON encoding of protobuf messages,
+/// returned for `$alt=json+protobuf`).
+///
+/// Other `+json` structured syntax types (`application/problem+json`, a Drive
+/// `application/vnd.google-apps.script+json` export) are content rather than
+/// API responses: they are inlined as text by [`is_textual`].
 pub(crate) fn is_json(content_type: &str) -> bool {
     matches!(
         essence(content_type).as_str(),
-        "application/json" | "text/json"
+        "application/json" | "text/json" | "application/json+protobuf"
     )
 }
 
@@ -334,6 +340,13 @@ mod tests {
         assert!(!is_json("text/plain; note=application/json"));
         assert!(!is_json(""));
         assert!(is_textual("TEXT/CSV"));
+        // `application/json+protobuf` is JSON; other `+json` structured
+        // syntax types (a Drive Apps Script export) stay inlined as text.
+        assert!(is_json("application/json+protobuf"));
+        assert!(is_json("APPLICATION/JSON+PROTOBUF; charset=utf-8"));
+        assert!(!is_json("application/vnd.google-apps.script+json"));
+        assert!(!is_json("application/problem+json"));
+        assert!(!is_json("text/plain; note=application/json+protobuf"));
     }
 
     #[test]
