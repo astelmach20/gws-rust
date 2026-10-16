@@ -22,8 +22,9 @@
 //!   in [`BODY_DESTRUCTIVE_METHODS`] when their request body asks for a wipe
 //!   or a deprovision, the Drive permission writes in [`PERMISSION_METHODS`]
 //!   when they transfer ownership or give a whole domain or anyone edit
-//!   access, and helper actions such as clearing a range or deleting a
-//!   filter. Always gated.
+//!   access, the Directory user writes in [`USER_WRITE_METHODS`] when they
+//!   suspend the user, and helper actions such as clearing a range or
+//!   deleting a filter. Always gated.
 //! - [`Impact::Outbound`]: actions that notify or grant access to other people
 //!   or run code (sending mail or chat messages, sharing, RSVPs, running
 //!   scripts), including the generated methods in [`OUTBOUND_METHODS`] and
@@ -196,8 +197,17 @@ pub(crate) const OUTBOUND_METHODS: &[&str] = &[
     // add-on or API executable that other people can run.
     "script.projects.deployments.create",
     "script.projects.deployments.update",
-    // A Classroom guardian invitation emails the guardian.
+    // A Classroom guardian invitation emails the guardian, and a course
+    // invitation emails the invitee.
     "classroom.userProfiles.guardianInvitations.create",
+    "classroom.invitations.create",
+    // Adding a student or teacher to a course notifies them and gives them
+    // access to the course.
+    "classroom.courses.students.create",
+    "classroom.courses.teachers.create",
+    // An announcement is posted to the whole class (Discovery does not say
+    // whether it emails them; Classroom's notification settings decide).
+    "classroom.courses.announcements.create",
     // Commenting on a Drive approval notifies its initiator and reviewers.
     "drive.approvals.comment",
     "directory.members.insert",
@@ -289,6 +299,24 @@ fn opens_group(id: &str, body: Option<&serde_json::Value>) -> bool {
         })
 }
 
+/// Directory user writes. Like `admin +user-suspend`, they are destructive
+/// when the body suspends the user (see [`suspends_user`]): the user is
+/// signed out and blocked at once.
+pub(crate) const USER_WRITE_METHODS: &[&str] = &["directory.users.update", "directory.users.patch"];
+
+/// Whether a [`USER_WRITE_METHODS`] body suspends the user. Any `suspended`
+/// other than absent, `null` or `false` counts, so an unexpected value is
+/// gated rather than let through.
+fn suspends_user(id: &str, body: Option<&serde_json::Value>) -> bool {
+    use serde_json::Value;
+    USER_WRITE_METHODS.contains(&id)
+        && match body.and_then(|b| b.get("suspended")) {
+            None | Some(Value::Null) | Some(Value::Bool(false)) => false,
+            Some(Value::String(s)) => !s.eq_ignore_ascii_case("false"),
+            Some(_) => true,
+        }
+}
+
 /// Whether a Discovery method is destructive.
 pub(crate) fn is_destructive_method(method: &RestMethod) -> bool {
     method.http_method.eq_ignore_ascii_case("DELETE")
@@ -309,6 +337,7 @@ pub(crate) fn method_impact(
     if is_destructive_method(method)
         || body_requests_wipe(id, body)
         || transfers_ownership_or_broad_edit(id, params, body)
+        || suspends_user(id, body)
     {
         Some(Impact::Destructive)
     } else if OUTBOUND_METHODS.contains(&id)
@@ -330,6 +359,7 @@ pub(crate) fn may_be_gated(method: &RestMethod) -> bool {
         || NOTIFYING_METHODS.contains(&id)
         || AUTO_REPLY_METHODS.contains(&id)
         || GROUP_SETTINGS_METHODS.contains(&id)
+        || USER_WRITE_METHODS.contains(&id)
         || BODY_DESTRUCTIVE_METHODS.iter().any(|(m, _, _)| *m == id)
 }
 
@@ -1053,6 +1083,102 @@ mod tests {
         assert!(!may_be_gated(&get));
         assert_eq!(
             method_impact(&get, &none, Some(&json!({"whoCanJoin": "ANYONE_CAN_JOIN"}))),
+            None
+        );
+    }
+
+    /// Inviting someone to a course, adding a student or teacher, and
+    /// posting an announcement reach other people whatever the body.
+    #[test]
+    fn classroom_invitations_enrollments_and_announcements_are_outbound() {
+        let m = |http: &str, id: &str| RestMethod {
+            http_method: http.to_string(),
+            id: Some(id.to_string()),
+            ..Default::default()
+        };
+        let none = serde_json::Map::new();
+        for id in [
+            "classroom.invitations.create",
+            "classroom.courses.students.create",
+            "classroom.courses.teachers.create",
+            "classroom.courses.announcements.create",
+        ] {
+            let method = m("POST", id);
+            assert!(may_be_gated(&method), "{id}");
+            assert!(!is_destructive_method(&method), "{id}");
+            assert_eq!(
+                method_impact(&method, &none, None),
+                Some(Impact::Outbound),
+                "{id}"
+            );
+        }
+        // Reading rosters, accepting an invitation, creating a course or
+        // editing an existing announcement is not gated.
+        for (http, id) in [
+            ("GET", "classroom.courses.students.list"),
+            ("GET", "classroom.invitations.list"),
+            ("POST", "classroom.invitations.accept"),
+            ("POST", "classroom.courses.create"),
+            ("PATCH", "classroom.courses.announcements.patch"),
+        ] {
+            let method = m(http, id);
+            assert!(!may_be_gated(&method), "{id}");
+            assert_eq!(method_impact(&method, &none, None), None, "{id}");
+        }
+    }
+
+    /// Suspending a user through the generated Directory method is
+    /// destructive, like `admin +user-suspend`; other user edits, and
+    /// unsuspending, are not gated.
+    #[test]
+    fn user_writes_are_destructive_only_when_they_suspend() {
+        use serde_json::json;
+        let m = |http: &str, id: &str| RestMethod {
+            http_method: http.to_string(),
+            id: Some(id.to_string()),
+            ..Default::default()
+        };
+        let none = serde_json::Map::new();
+        for method in [
+            m("PUT", "directory.users.update"),
+            m("PATCH", "directory.users.patch"),
+        ] {
+            assert!(may_be_gated(&method));
+            assert!(!is_destructive_method(&method));
+            for body in [
+                json!({"suspended": true}),
+                json!({"suspended": true, "orgUnitPath": "/Leavers"}),
+                json!({"suspended": "true"}),
+                json!({"suspended": "TRUE"}),
+                json!({"suspended": 1}),
+            ] {
+                assert_eq!(
+                    method_impact(&method, &none, Some(&body)),
+                    Some(Impact::Destructive),
+                    "{body}"
+                );
+            }
+            for body in [
+                Some(json!({"suspended": false})),
+                Some(json!({"suspended": "false"})),
+                Some(json!({"suspended": null})),
+                Some(json!({"name": {"givenName": "Ann"}})),
+                Some(json!({"suspensionReason": "ADMIN"})),
+                Some(json!({})),
+                None,
+            ] {
+                assert_eq!(
+                    method_impact(&method, &none, body.as_ref()),
+                    None,
+                    "{body:?}"
+                );
+            }
+        }
+        // The field on another Directory method is not a suspension.
+        let insert = m("POST", "directory.users.insert");
+        assert!(!may_be_gated(&insert));
+        assert_eq!(
+            method_impact(&insert, &none, Some(&json!({"suspended": true}))),
             None
         );
     }
