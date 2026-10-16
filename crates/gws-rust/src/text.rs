@@ -56,7 +56,11 @@ pub fn truncate_description(desc: &str, max_chars: usize, strip_links: bool) -> 
     // Try to find the last complete sentence within the limit.
     // A sentence ends with ". " followed by more text, or "." at the end of
     // the prefix. We look for the last ". " to find a sentence boundary.
-    if let Some(sentence_end) = find_last_sentence_boundary(&prefix) {
+    // The character after the prefix decides whether a period that ends the
+    // prefix ends a sentence (`file. Next`) or sits inside a word
+    // (`developers.google.com`, `v1.5`).
+    let next = trimmed.chars().nth(max_chars);
+    if let Some(sentence_end) = find_last_sentence_boundary(&prefix, next) {
         let truncated: String = trimmed.chars().take(sentence_end).collect();
         return truncated;
     }
@@ -110,18 +114,21 @@ fn find_char_from(chars: &[char], target: char, from: usize) -> Option<usize> {
 
 /// Finds the last sentence boundary within a char-indexed string.
 /// A sentence boundary is a position right after ". " where we can cleanly cut.
+/// `next` is the character that follows `prefix` in the full text (`None` at
+/// its end), so a period ending the prefix counts only when the text does not
+/// go on with a non-space character.
 /// Returns the char-count to include (up to and including the period).
-fn find_last_sentence_boundary(prefix: &str) -> Option<usize> {
+fn find_last_sentence_boundary(prefix: &str, next: Option<char>) -> Option<usize> {
     let chars: Vec<char> = prefix.chars().collect();
     let mut last_boundary = None;
 
     for (i, _) in chars.iter().enumerate() {
         if chars[i] == '.' {
             let after_period = i + 1;
-            // Sentence boundary: period followed by a space, or period at end of prefix
-            if after_period == chars.len()
-                || (after_period < chars.len() && chars[after_period] == ' ')
-            {
+            // Sentence boundary: period followed by whitespace, in the prefix
+            // or (for a period ending it) in the rest of the text.
+            let followed_by = chars.get(after_period).copied().or(next);
+            if followed_by.is_none_or(char::is_whitespace) {
                 last_boundary = Some(after_period);
             }
         }
@@ -256,6 +263,23 @@ mod tests {
         let desc = "This is a complete sentence. And more text follows here.";
         let result = truncate_description(desc, 28, true);
         assert_eq!(result, "This is a complete sentence.");
+    }
+
+    #[test]
+    fn a_period_inside_a_word_at_the_limit_is_not_a_sentence_end() {
+        // The limit cuts right after the period of `developers.` / `v1.`;
+        // the text goes on without a space, so no sentence ends there.
+        let desc = "See the docs at developers.google.com for more details";
+        assert_eq!(truncate_description(desc, 27, true), "See the docs at…");
+        let desc = "Uses version v1.5 of the API for the request";
+        assert_eq!(truncate_description(desc, 15, true), "Uses version…");
+        // A period followed by a space still ends a sentence.
+        let desc = "Deletes a user. More";
+        assert_eq!(truncate_description(desc, 16, true), "Deletes a user.");
+        // So does one followed by a line break, at the limit or before it.
+        let desc = "Deletes a user.\nMore text follows";
+        assert_eq!(truncate_description(desc, 15, true), "Deletes a user.");
+        assert_eq!(truncate_description(desc, 20, true), "Deletes a user.");
     }
 
     #[test]
