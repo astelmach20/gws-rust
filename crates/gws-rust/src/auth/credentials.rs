@@ -460,6 +460,14 @@ fn read_token_file(path: &Path) -> Result<SecretString, AuthError> {
             path.display()
         )));
     }
+    // The same rule as GWSR_TOKEN: the token goes into an HTTP header. The
+    // value itself is never echoed.
+    crate::env::check_printable(token).map_err(|problem| {
+        AuthError::Config(format!(
+            "GWSR_TOKEN_FILE '{}' {problem}; it must hold exactly one access token",
+            path.display()
+        ))
+    })?;
     Ok(SecretString::from(token.to_string()))
 }
 
@@ -590,6 +598,32 @@ mod tests {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
             assert!(env.load().is_err());
+        }
+    }
+
+    /// GWSR_TOKEN_FILE follows the same rule as GWSR_TOKEN: a value with
+    /// inner whitespace, control or non-ASCII characters (two tokens, a JSON
+    /// token response, a pasted `Bearer ` prefix) is refused with a config
+    /// error that names the file and never echoes the value.
+    #[test]
+    fn token_file_with_more_than_one_token_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("token");
+        let mut env = env_in(dir.path(), ProfileSource::Default);
+        env.token_file = Some(path.clone());
+        for bad in [
+            "ya29.first\nya29.second\n",
+            "Bearer ya29.secret",
+            "{\"access_token\": \"ya29.secret\"}",
+            "ya29.tab\tsecret",
+            "ya29.ünicode",
+        ] {
+            write_private(&path, bad);
+            let err = env.load().unwrap_err();
+            assert!(matches!(err, AuthError::Config(_)), "{bad:?}: {err:?}");
+            let text = err.to_string();
+            assert!(text.contains("GWSR_TOKEN_FILE"), "{text}");
+            assert!(!text.contains("ya29"), "the value is echoed: {text}");
         }
     }
 
