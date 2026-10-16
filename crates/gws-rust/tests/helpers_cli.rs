@@ -1163,6 +1163,71 @@ async fn stream_helpers_honor_jq_and_format() {
     }
 }
 
+/// When `events +subscribe` fails partway through a pulled batch (here a
+/// `--jq` error on the second event; a closed stdout pipe or a failed file
+/// write behaves the same), the events it already printed are acknowledged,
+/// so Pub/Sub does not redeliver them and they are not printed twice. The
+/// failed event and the ones after it stay unacknowledged.
+#[tokio::test(flavor = "multi_thread")]
+async fn events_subscribe_acks_the_events_printed_before_a_failure() {
+    use base64::Engine as _;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let b64 = |s: &str| base64::engine::general_purpose::STANDARD.encode(s);
+    let server = MockServer::start().await;
+    let received: Vec<Value> = (1..=3)
+        .map(|n| {
+            json!({ "ackId": format!("a{n}"), "message": {
+                "attributes": { "type": "t" },
+                "data": b64(&format!(r#"{{"n":{n}}}"#))
+            }})
+        })
+        .collect();
+    Mock::given(method("POST"))
+        .and(path("/v1/projects/p/subscriptions/ev:pull"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({ "receivedMessages": received })),
+        )
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/projects/p/subscriptions/ev:acknowledge"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+        .mount(&server)
+        .await;
+
+    let dir = tempfile::tempdir().unwrap();
+    seed(dir.path(), "workspaceevents", "v1", "");
+    let out = gwsr(dir.path())
+        .env("GWSR_TOKEN", "test-token")
+        .env("GWSR_API_BASE_URL", format!("{}/", server.uri()))
+        .env("HTTPS_PROXY", "http://127.0.0.1:9")
+        .args([
+            "events",
+            "+subscribe",
+            "--subscription",
+            "projects/p/subscriptions/ev",
+            "--once",
+            "--jq",
+            r#"if .data.n == 2 then error("boom") else .data.n end"#,
+        ])
+        .output()
+        .unwrap();
+    assert!(!out.status.success(), "{out:?}");
+    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "1", "{out:?}");
+
+    let acks: Vec<Value> = server
+        .received_requests()
+        .await
+        .unwrap()
+        .iter()
+        .filter(|r| r.url.path().ends_with(":acknowledge"))
+        .map(|r| serde_json::from_slice(&r.body).unwrap())
+        .collect();
+    assert_eq!(acks, vec![json!({ "ackIds": ["a1"] })], "{out:?}");
+}
+
 // ── Model Armor input from stdin ────────────────────────────────────────
 
 /// Unreadable stdin (here: not UTF-8) is bad input (exit 3), as it is for
