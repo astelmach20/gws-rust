@@ -108,10 +108,19 @@ pub(crate) fn item_field(
     }
     let schema_arrays: Vec<String> = response_schema
         .map(|s| {
-            let mut v: Vec<String> = s
+            let arrays: Vec<(&String, bool)> = s
                 .properties
                 .iter()
                 .filter(|(k, p)| p.prop_type.as_deref() == Some("array") && !is_list_metadata(k))
+                .map(|(k, p)| (k, p.deprecated))
+                .collect();
+            // A deprecated list kept beside its replacement (Chat
+            // `spaces.search`: `spaces` vs `results`) is a duplicate, not a
+            // second list; only fall back to it when nothing else is left.
+            let has_current = arrays.iter().any(|(_, deprecated)| !deprecated);
+            let mut v: Vec<String> = arrays
+                .into_iter()
+                .filter(|(_, deprecated)| !(has_current && *deprecated))
                 .map(|(k, _)| k.clone())
                 .collect();
             v.sort();
@@ -262,6 +271,65 @@ mod tests {
         // Without a schema, the page's own arrays are filtered the same way.
         let bare = RestMethod::default();
         assert_eq!(item_field(&doc, &bare, &page, None).unwrap(), "items");
+    }
+
+    #[test]
+    fn item_field_skips_deprecated_duplicate_list() {
+        // Chat `SearchSpacesResponse`: `spaces` is deprecated in favor of
+        // `results`, and both carry the same items.
+        let mut resp = schema(&[("results", "array"), ("nextPageToken", "string")]);
+        resp.properties.insert(
+            "spaces".to_string(),
+            JsonSchemaProperty {
+                prop_type: Some("array".to_string()),
+                deprecated: true,
+                ..Default::default()
+            },
+        );
+        let mut schemas = HashMap::new();
+        schemas.insert("SearchSpacesResponse".to_string(), resp);
+        let doc = RestDescription {
+            schemas,
+            ..Default::default()
+        };
+        let search = RestMethod {
+            response: sref("SearchSpacesResponse"),
+            ..Default::default()
+        };
+        let page = json!({"results": [{"name": "spaces/a"}], "spaces": [{"name": "spaces/a"}]});
+        assert_eq!(item_field(&doc, &search, &page, None).unwrap(), "results");
+        // Asking for the deprecated field explicitly still works.
+        assert_eq!(
+            item_field(&doc, &search, &page, Some("spaces")).unwrap(),
+            "spaces"
+        );
+    }
+
+    #[test]
+    fn item_field_keeps_a_deprecated_list_when_it_is_the_only_one() {
+        let mut resp = schema(&[("nextPageToken", "string")]);
+        resp.properties.insert(
+            "old".to_string(),
+            JsonSchemaProperty {
+                prop_type: Some("array".to_string()),
+                deprecated: true,
+                ..Default::default()
+            },
+        );
+        let mut schemas = HashMap::new();
+        schemas.insert("Old".to_string(), resp);
+        let doc = RestDescription {
+            schemas,
+            ..Default::default()
+        };
+        let m = RestMethod {
+            response: sref("Old"),
+            ..Default::default()
+        };
+        assert_eq!(
+            item_field(&doc, &m, &json!({"old": []}), None).unwrap(),
+            "old"
+        );
     }
 
     #[test]

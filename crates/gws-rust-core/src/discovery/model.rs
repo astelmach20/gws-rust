@@ -200,6 +200,10 @@ pub struct JsonSchemaProperty {
     pub properties: HashMap<String, JsonSchemaProperty>,
     #[serde(default)]
     pub read_only: bool,
+    /// Discovery's `deprecated: true` (e.g. Chat `SearchSpacesResponse.spaces`,
+    /// superseded by `results`).
+    #[serde(default)]
+    pub deprecated: bool,
     pub default: Option<String>,
     #[serde(rename = "enum")]
     pub enum_values: Option<Vec<String>>,
