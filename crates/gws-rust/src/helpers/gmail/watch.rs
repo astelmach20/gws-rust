@@ -347,8 +347,10 @@ async fn setup(
             pubsub
                 .set_topic_publisher(&t, GMAIL_PUSH_MEMBER)
                 .await
-                .map_err(|e| GwsError::other(format!(
-                    "{e}. Grant it manually: gcloud pubsub topics add-iam-policy-binding {t} --member={GMAIL_PUSH_MEMBER} --role=roles/pubsub.publisher"
+                // Keep the error's class (a refused permission exits 1, a
+                // lost connection 10); only the manual fix is added.
+                .map_err(|e| crate::helpers::modelarmor::prefix_message(e, &format!(
+                    "Gmail cannot publish to {t} (grant it manually: gcloud pubsub topics add-iam-policy-binding {t} --member={GMAIL_PUSH_MEMBER} --role=roles/pubsub.publisher)"
                 )))?;
             (t.clone(), Some(t))
         }
@@ -632,6 +634,52 @@ mod tests {
         run_stream(&opts, &mut step)
             .await
             .map(|()| step.last_history_id)
+    }
+
+    /// A refused grant on the new topic keeps the API error's class (a
+    /// permission error exits 1, not 5) and still says how to grant it.
+    #[tokio::test]
+    async fn topic_grant_failure_keeps_the_api_error_class() {
+        let server = MockServer::start().await;
+        Mock::given(method("PUT"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(403).set_body_json(json!({
+                "error": {"code": 403, "message": "denied", "status": "PERMISSION_DENIED"}
+            })))
+            .mount(&server)
+            .await;
+        let config = WatchConfig {
+            project: Some("p".into()),
+            subscription: None,
+            topic: None,
+            label_ids: Vec::new(),
+            max_messages: 10,
+            poll_interval: 1,
+            max_failures: 3,
+            format: "full".into(),
+            once: true,
+            cleanup: false,
+            output_dir: None,
+        };
+        let pubsub = PubSubClient::with_base(
+            &Transport::for_test(&server.uri()),
+            &format!("{}/v1", server.uri()),
+        );
+        let gmail = crate::helpers::gmail::test_support::mock_api(&server);
+        let Err(err) = setup(&config, &pubsub, &gmail).await else {
+            panic!("setup must fail");
+        };
+        assert!(matches!(err, GwsError::Api { code: 403, .. }), "{err:?}");
+        assert_eq!(err.exit_code(), GwsError::EXIT_CODE_API, "{err:?}");
+        let msg = err.to_string();
+        assert!(msg.contains("denied"), "{msg}");
+        assert!(
+            msg.contains("gcloud pubsub topics add-iam-policy-binding"),
+            "{msg}"
+        );
     }
 
     async fn mount_pull(server: &MockServer) {
