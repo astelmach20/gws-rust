@@ -491,6 +491,8 @@ gwsr gmail users messages get --params '{"userId":"me","id":"MSG"}' \
 - In `block` mode a match (exit `11`) or a Model Armor failure (the cause's exit code) sends or creates nothing. In `warn` mode the action goes ahead after a warning on stderr, and the printed result carries the `_sanitization` annotation.
 - `--dry-run` never calls Model Armor; it prints the planned request unscreened.
 
+If a response labelled JSON doesn't parse, the error normally quotes the first 200 bytes of it. With `--sanitize` set, in either mode, the error withholds the content instead, because it was never screened.
+
 `gwsr modelarmor +create-template --project my-project --location us-central1 --template-id my-tmpl --preset jailbreak` creates a template from the built-in preset.
 
 ## Configuration
