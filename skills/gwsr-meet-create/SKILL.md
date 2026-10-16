@@ -41,8 +41,7 @@ gwsr meet +create --access-type restricted
 
 ## Tips
 
-- Prints meetingUri and meetingCode. To attach a Meet link to a calendar
-- event use `gwsr calendar +insert` with `--meet` instead.
+- Prints meetingUri and meetingCode. To attach a Meet link to a calendar event use `gwsr calendar +insert` with `--meet` instead.
 
 ## See Also
 

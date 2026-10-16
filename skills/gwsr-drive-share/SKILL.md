@@ -52,9 +52,7 @@ gwsr drive +share --file-id FILE_ID --email bob@example.com --role owner --yes
 ## Tips
 
 - --role is mandatory so access is never granted implicitly.
-- Transferring ownership, or granting writer/organizer to a domain or to
-- anyone with the link, always requires confirmation (--yes, or a prompt on
-- a terminal). Other grants require it when GWSR_REQUIRE_CONFIRM=1.
+- Transferring ownership, or granting writer/organizer to a domain or to anyone with the link, always requires confirmation (--yes, or a prompt on a terminal). Other grants require it when GWSR_REQUIRE_CONFIRM=1.
 
 > [!CAUTION]
 > This is a **write** command — confirm with the user before executing.

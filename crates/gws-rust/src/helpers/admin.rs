@@ -168,7 +168,7 @@ EXAMPLES:
 
 TIPS:
   Without --password-file a random 24-character password is generated and
-  printed once as initialPassword; share it over a secure channel.
+    printed once as initialPassword; share it over a secure channel.
   The user must change the password at first sign-in unless --no-password-change.",
             ),
     )
@@ -191,7 +191,7 @@ EXAMPLES:
 TIPS:
   Suspending requires --yes (or a prompt on a terminal).
   The Directory API cannot record a suspension reason (its suspensionReason
-  field is output-only).",
+    field is output-only).",
             ),
     ))
     .subcommand(with_yes(

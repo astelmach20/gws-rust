@@ -62,7 +62,7 @@ EXAMPLES:
 
 TIPS:
   Read-only. Text from shapes, tables and groups is returned per slide,
-  in page order, with the speaker notes.",
+    in page order, with the speaker notes.",
                 ),
         )
     }

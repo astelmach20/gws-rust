@@ -193,7 +193,7 @@ EXAMPLES:
 
 TIPS:
   Read-only. Every page of every selected calendar is fetched (no truncation);
-  a calendar that cannot be read fails the command with its name.",
+    a calendar that cannot be read fails the command with its name.",
                 ),
         )
         .subcommand(start_end_args(
@@ -272,8 +272,8 @@ EXAMPLES:
 
 TIPS:
   Only the given fields change. Moving --start without --end/--duration keeps
-  the event's current length. Times with an offset keep the event's own
-  time zone unless --timezone is given.",
+    the event's current length. Times with an offset keep the event's own
+    time zone unless --timezone is given.",
                 ),
             false,
         )))

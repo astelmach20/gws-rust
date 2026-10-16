@@ -138,7 +138,7 @@ EXAMPLES:
 TIPS:
   Read-only. Combines today's calendar agenda (account time zone) with open tasks.
   Meetings leave out declined and cancelled events and working-location,
-  out-of-office, focus-time and birthday entries.",
+    out-of-office, focus-time and birthday entries.",
         )
 }
 
@@ -160,8 +160,8 @@ EXAMPLES:
 
 TIPS:
   Read-only. Shows the next timed event that has not started yet, skipping
-  all-day, cancelled and declined events and working-location, out-of-office,
-  focus-time and birthday entries, with attendees and description.",
+    all-day, cancelled and declined events and working-location, out-of-office,
+    focus-time and birthday entries, with attendees and description.",
         )
 }
 
@@ -206,7 +206,7 @@ EXAMPLES:
 TIPS:
   Read-only. The unread count is Gmail's estimate for is:unread.
   Meetings leave out declined and cancelled events and working-location,
-  out-of-office, focus-time and birthday entries.",
+    out-of-office, focus-time and birthday entries.",
         )
 }
 

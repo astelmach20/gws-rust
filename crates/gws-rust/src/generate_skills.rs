@@ -774,7 +774,7 @@ metadata:
             let mut in_examples = false;
             let mut in_tips = false;
             let mut examples = Vec::new();
-            let mut tips = Vec::new();
+            let mut tips: Vec<String> = Vec::new();
 
             for line in after_str.lines() {
                 let trimmed = line.trim();
@@ -792,7 +792,16 @@ metadata:
                     examples.push(trimmed.to_string());
                 }
                 if in_tips && !trimmed.is_empty() {
-                    tips.push(trimmed.to_string());
+                    // A tip wrapped over several lines continues with a
+                    // hanging indent (deeper than the two spaces that start
+                    // each tip); it stays one bullet.
+                    match tips.last_mut() {
+                        Some(tip) if line.starts_with("   ") => {
+                            tip.push(' ');
+                            tip.push_str(trimmed);
+                        }
+                        _ => tips.push(trimmed.to_string()),
+                    }
                 }
             }
 
@@ -1885,6 +1894,55 @@ mod tests {
             entry,
             &product_name_from_title("Gmail API"),
         )
+    }
+
+    /// A tip wrapped over several help lines is one bullet in the skill, not
+    /// one fragment per line.
+    #[test]
+    fn wrapped_helper_tip_is_one_bullet() {
+        let md = render_gmail_helper("+send");
+        assert!(
+            md.contains(
+                "- --sanitize screens the subject and body before sending; in block mode a match or \
+                 a Model Armor failure sends nothing. --dry-run does not call Model Armor.\n"
+            ),
+            "{md}"
+        );
+        assert!(!md.contains("\n- a Model Armor failure"), "{md}");
+    }
+
+    /// Every helper tip line that starts a tip ends a sentence, so a tip
+    /// wrapped without a hanging indent cannot turn into fragment bullets.
+    #[test]
+    fn every_helper_tip_is_a_whole_sentence() {
+        let mut bad = Vec::new();
+        for entry in services::SERVICES {
+            let doc = crate::discovery::RestDescription {
+                name: entry.api_name.to_string(),
+                ..Default::default()
+            };
+            let cli = crate::commands::build_cli(&doc);
+            for helper in cli
+                .get_subcommands()
+                .filter(|s| s.get_name().starts_with('+'))
+            {
+                let md =
+                    render_helper_skill(entry.aliases[0], helper.get_name(), helper, entry, "Test");
+                let Some(tips) = md.split("## Tips\n\n").nth(1) else {
+                    continue;
+                };
+                for tip in tips.lines().take_while(|l| l.starts_with("- ")) {
+                    // `drive +export` lists formats per file type, one per line.
+                    let listing = ["Docs: ", "Sheets: ", "Slides: ", "Drawings: "]
+                        .iter()
+                        .any(|p| tip[2..].starts_with(p));
+                    if !listing && !tip.ends_with(['.', '!', '?', ')', '`']) {
+                        bad.push(format!("{} {}: {tip}", entry.aliases[0], helper.get_name()));
+                    }
+                }
+            }
+        }
+        assert!(bad.is_empty(), "tips cut mid-sentence:\n{}", bad.join("\n"));
     }
 
     /// A helper group (`gmail +filter create|list|delete`) documents each

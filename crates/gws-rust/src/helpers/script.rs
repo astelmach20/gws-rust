@@ -72,7 +72,7 @@ TIPS:
   Hidden files/directories and node_modules are skipped.
   A symlink to a pushed file or a directory is refused: copy its target in.
   Destructive: this REPLACES ALL files in the project, so it requires --yes
-  (or a confirmation prompt on a terminal).",
+    (or a confirmation prompt on a terminal).",
                 ),
         ))
         .subcommand(
@@ -135,7 +135,7 @@ EXAMPLES:
 
 TIPS:
   The project must be deployed as an API executable and share a Cloud
-  project with your OAuth client. Prints the function's return value.
+    project with your OAuth client. Prints the function's return value.
   A script error fails the command with the script's message and stack.",
                 ),
         ))
@@ -164,7 +164,7 @@ EXAMPLES:
 
 TIPS:
   Lists executions (function, status, start time, duration). console.log
-  output is stored in Cloud Logging, not returned by this API.",
+    output is stored in Cloud Logging, not returned by this API.",
                 ),
         )
     }

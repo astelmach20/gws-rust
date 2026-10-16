@@ -50,8 +50,7 @@ gwsr calendar +agenda --today --timezone America/New_York
 
 ## Tips
 
-- Read-only. Every page of every selected calendar is fetched (no truncation);
-- a calendar that cannot be read fails the command with its name.
+- Read-only. Every page of every selected calendar is fetched (no truncation); a calendar that cannot be read fails the command with its name.
 
 ## See Also
 

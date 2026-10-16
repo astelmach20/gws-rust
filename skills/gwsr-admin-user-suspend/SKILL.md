@@ -44,8 +44,7 @@ gwsr admin +user-suspend --user ann@example.com --unsuspend
 ## Tips
 
 - Suspending requires --yes (or a prompt on a terminal).
-- The Directory API cannot record a suspension reason (its suspensionReason
-- field is output-only).
+- The Directory API cannot record a suspension reason (its suspensionReason field is output-only).
 
 > [!CAUTION]
 > This is a **write** command — confirm with the user before executing.

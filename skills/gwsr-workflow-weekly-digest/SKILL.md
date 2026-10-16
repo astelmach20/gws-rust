@@ -36,8 +36,7 @@ gwsr workflow +weekly-digest --format table
 ## Tips
 
 - Read-only. The unread count is Gmail's estimate for is:unread.
-- Meetings leave out declined and cancelled events and working-location,
-- out-of-office, focus-time and birthday entries.
+- Meetings leave out declined and cancelled events and working-location, out-of-office, focus-time and birthday entries.
 
 ## See Also
 

@@ -43,8 +43,7 @@ gwsr script +logs --script-id SCRIPT_ID --function main --limit 10
 
 ## Tips
 
-- Lists executions (function, status, start time, duration). console.log
-- output is stored in Cloud Logging, not returned by this API.
+- Lists executions (function, status, start time, duration). console.log output is stored in Cloud Logging, not returned by this API.
 
 ## See Also
 

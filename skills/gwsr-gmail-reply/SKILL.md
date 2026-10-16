@@ -56,8 +56,7 @@ gwsr gmail +reply --message-id 18f1a2b3c4d --body 'Draft reply' --draft
 - With --html, inline images in the quoted message are preserved via cid: references.
 - Replying to a message you sent goes to its original To recipients, as in Gmail.
 - For reply-all, use +reply-all instead.
-- --sanitize screens the subject and body, quoted original included, before sending;
-- in block mode a match or a Model Armor failure sends nothing. --dry-run does not call Model Armor.
+- --sanitize screens the subject and body, quoted original included, before sending; in block mode a match or a Model Armor failure sends nothing. --dry-run does not call Model Armor.
 
 > [!CAUTION]
 > This is a **write** command — confirm with the user before executing.
