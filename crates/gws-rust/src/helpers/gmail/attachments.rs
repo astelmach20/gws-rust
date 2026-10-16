@@ -173,15 +173,21 @@ pub(super) fn parse_attachments(matches: &ArgMatches) -> Result<Vec<Attachment>,
                 MAX_TOTAL_ATTACHMENT_BYTES / (1024 * 1024)
             )));
         }
+        // Name (and type) the attachment after the path as given, not after
+        // the file a symlink resolves to: `report.pdf -> blobs/9f3a…` must
+        // reach the recipient as `report.pdf`. A path ending in `..` has no
+        // name of its own, so it falls back to the resolved file's.
         // file_name() is None for paths like "/", "..", or "." — already caught by is_file().
         // to_str() is None only for non-UTF-8 filenames — impossible since path is &String.
-        let filename = canonical
-            .file_name()
-            .and_then(|n| n.to_str())
-            .ok_or_else(|| {
-                GwsError::Validation(format!("--attach '{path}': could not extract filename"))
-            })?;
-        let content_type = mime_guess2::from_path(&canonical)
+        let given = std::path::Path::new(path.as_str());
+        let named = match given.file_name() {
+            Some(_) => given,
+            None => canonical.as_path(),
+        };
+        let filename = named.file_name().and_then(|n| n.to_str()).ok_or_else(|| {
+            GwsError::Validation(format!("--attach '{path}': could not extract filename"))
+        })?;
+        let content_type = mime_guess2::from_path(named)
             .first_or_octet_stream()
             .to_string();
 
@@ -250,6 +256,28 @@ mod tests {
         assert_eq!(attachments[0].filename, "test.txt");
         assert_eq!(attachments[0].content_type, "text/plain");
         assert_eq!(attachments[0].data, b"hello world");
+    }
+
+    /// A symlinked file is attached under the name it was given, not the
+    /// name of its target (content-addressed stores such as git-annex keep
+    /// files as links to opaque blob names).
+    #[cfg(unix)]
+    #[test]
+    fn test_parse_attachments_names_a_symlink_after_the_link() {
+        let cwd = std::env::current_dir().unwrap().canonicalize().unwrap();
+        let dir = tempfile::tempdir_in(&cwd).unwrap();
+        let blob = dir.path().join("9f3a0c.blob");
+        std::fs::write(&blob, b"%PDF-1.7").unwrap();
+        let link = dir.path().join("report.pdf");
+        std::os::unix::fs::symlink(&blob, &link).unwrap();
+
+        let path_str = link.to_str().unwrap().to_string();
+        let matches = make_attach_matches(&["test", "-a", &path_str]);
+        let attachments = parse_attachments(&matches).unwrap();
+
+        assert_eq!(attachments[0].filename, "report.pdf");
+        assert_eq!(attachments[0].content_type, "application/pdf");
+        assert_eq!(attachments[0].data, b"%PDF-1.7");
     }
 
     #[test]
