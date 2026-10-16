@@ -416,13 +416,26 @@ struct Audit {
     limit: Option<usize>,
 }
 
+/// An RFC 3339 time in UTC, keeping its fractional seconds: truncating them
+/// would move `--since` earlier (returning events before it) and `--until`
+/// earlier (dropping events in the range's last second).
+fn utc_rfc3339(t: chrono::DateTime<chrono::FixedOffset>) -> String {
+    t.with_timezone(&chrono::Utc)
+        .to_rfc3339_opts(chrono::SecondsFormat::AutoSi, true)
+}
+
+/// `--until`: an RFC 3339 time.
+fn parse_until(s: &str) -> Result<String, GwsError> {
+    chrono::DateTime::parse_from_rfc3339(s)
+        .map(utc_rfc3339)
+        .map_err(|_| GwsError::Validation(format!("--until '{s}' is not an RFC 3339 time")))
+}
+
 /// `--since`: RFC 3339, or a look-back like `24h`/`7d`/`30m` relative to `now`.
 fn parse_since(s: &str, now: chrono::DateTime<chrono::Utc>) -> Result<String, GwsError> {
     // Not RFC 3339 is not an error yet: it may be a look-back, parsed next.
     if let Ok(t) = chrono::DateTime::parse_from_rfc3339(s) {
-        return Ok(t
-            .with_timezone(&chrono::Utc)
-            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true));
+        return Ok(utc_rfc3339(t));
     }
     let invalid = || {
         GwsError::Validation(format!(
@@ -453,18 +466,7 @@ fn parse_since(s: &str, now: chrono::DateTime<chrono::Utc>) -> Result<String, Gw
 
 impl Audit {
     fn parse(m: &ArgMatches) -> Result<Self, GwsError> {
-        let end = optional(m, "until")?
-            .map(|u| {
-                chrono::DateTime::parse_from_rfc3339(u)
-                    .map(|t| {
-                        t.with_timezone(&chrono::Utc)
-                            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
-                    })
-                    .map_err(|_| {
-                        GwsError::Validation(format!("--until '{u}' is not an RFC 3339 time"))
-                    })
-            })
-            .transpose()?;
+        let end = optional(m, "until")?.map(parse_until).transpose()?;
         Ok(Self {
             application: required(m, "application")?.to_string(),
             user: optional(m, "user")?.unwrap_or("all").to_string(),
@@ -665,6 +667,35 @@ mod tests {
         for bad in ["", "7", "7w", "-1d", "0h"] {
             assert!(parse_since(bad, now).is_err(), "{bad}");
         }
+    }
+
+    #[test]
+    fn since_and_until_keep_fractional_seconds() {
+        let now = chrono::DateTime::parse_from_rfc3339("2026-01-10T00:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        // Truncating --until to whole seconds would drop events in the last
+        // sub-second of the range; truncating --since would add earlier ones.
+        assert_eq!(
+            parse_until("2026-01-01T12:34:56.789Z").unwrap(),
+            "2026-01-01T12:34:56.789Z"
+        );
+        assert_eq!(
+            parse_until("2026-01-01T13:34:56.5+01:00").unwrap(),
+            "2026-01-01T12:34:56.500Z"
+        );
+        assert_eq!(
+            parse_since("2026-01-01T12:34:56.123456Z", now).unwrap(),
+            "2026-01-01T12:34:56.123456Z"
+        );
+        assert_eq!(
+            parse_until("2026-01-01T12:34:56Z").unwrap(),
+            "2026-01-01T12:34:56Z"
+        );
+        assert!(matches!(
+            parse_until("tomorrow"),
+            Err(GwsError::Validation(_))
+        ));
     }
 
     #[test]
