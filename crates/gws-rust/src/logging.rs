@@ -39,6 +39,7 @@
 use std::path::{Path, PathBuf};
 
 use tracing_subscriber::EnvFilter;
+use tracing_subscriber::fmt::MakeWriter;
 use tracing_subscriber::prelude::*;
 
 use crate::error::GwsError;
@@ -124,6 +125,40 @@ fn create_private_dir(dir: &Path) -> Result<(), GwsError> {
     })
 }
 
+/// Wraps the stderr writer of the JSON log layer so every record has C1
+/// controls and bidi overrides escaped, as the error envelope does: log
+/// messages carry API-derived text, and serde_json writes those characters
+/// raw.
+#[derive(Debug, Clone, Copy)]
+struct TerminalSafeJson<M>(M);
+
+impl<'a, M: MakeWriter<'a>> MakeWriter<'a> for TerminalSafeJson<M> {
+    type Writer = TerminalSafeWriter<M::Writer>;
+
+    fn make_writer(&'a self) -> Self::Writer {
+        TerminalSafeWriter(self.0.make_writer())
+    }
+}
+
+struct TerminalSafeWriter<W>(W);
+
+impl<W: std::io::Write> std::io::Write for TerminalSafeWriter<W> {
+    /// tracing-subscriber writes each formatted record with one `write_all`;
+    /// the whole buffer is consumed so a record is never split mid-character.
+    /// Records are formatted into a `String`, so the lossy conversion is
+    /// lossless; anything else could only gain U+FFFD, which is harmless.
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let line =
+            crate::output::escape_json_for_terminal(String::from_utf8_lossy(buf).into_owned());
+        self.0.write_all(line.as_bytes())?;
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.0.flush()
+    }
+}
+
 /// Set by [`init`] when `-q` was given.
 static QUIET: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
@@ -150,7 +185,7 @@ pub fn init(opts: &LogOptions) -> Result<LogGuard, GwsError> {
     } else {
         let layer = tracing_subscriber::fmt::layer()
             .json()
-            .with_writer(std::io::stderr)
+            .with_writer(TerminalSafeJson(std::io::stderr))
             .with_target(true)
             .with_ansi(false)
             .with_filter(stderr_filter);
@@ -196,6 +231,43 @@ pub fn init(opts: &LogOptions) -> Result<LogGuard, GwsError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A JSON log record that carries API-derived text never puts C1
+    /// controls (U+009B is an 8-bit CSI) or bidi overrides on stderr raw.
+    #[test]
+    fn json_log_lines_escape_c1_and_bidi_controls() {
+        #[derive(Clone, Default)]
+        struct Capture(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+        impl std::io::Write for Capture {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let capture = Capture::default();
+        let sink = capture.clone();
+        let layer = tracing_subscriber::fmt::layer()
+            .json()
+            .with_writer(TerminalSafeJson(move || sink.clone()))
+            .with_ansi(false);
+        let text = "a\u{9b}31mb\u{202E}c\u{2066}d\u{85}e\u{1b}[2Jf";
+        tracing::subscriber::with_default(tracing_subscriber::registry().with(layer), || {
+            tracing::warn!(detail = text, "api said {text}");
+        });
+        let out = String::from_utf8(capture.0.lock().unwrap().clone()).unwrap();
+        assert!(
+            !out.chars()
+                .any(|c| (c.is_control() && c != '\n') || crate::output::is_dangerous_unicode(c)),
+            "{out:?}"
+        );
+        assert!(out.contains("\\u009b") && out.contains("\\u202e"), "{out}");
+        let v: serde_json::Value = serde_json::from_str(out.trim()).unwrap();
+        assert_eq!(v["fields"]["detail"], text);
+        assert_eq!(v["fields"]["message"], format!("api said {text}"));
+    }
 
     fn opts(verbosity: i8) -> LogOptions {
         LogOptions {
