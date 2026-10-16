@@ -678,6 +678,25 @@ fn errors_are_one_json_object_on_stderr_and_stdout_stays_clean() {
     );
 }
 
+/// Every unknown first word is taken as a service, so a mistyped static
+/// command needs its own suggestion instead of a list of services.
+#[test]
+fn mistyped_static_command_suggests_the_command() {
+    let env = Env::new();
+    for (word, command) in [("completion", "completions"), ("comands", "commands")] {
+        let out = env.cmd().arg(word).assert().code(3).get_output().clone();
+        assert!(stdout_of(&out).is_empty());
+        let message = stderr_error(&out)["error"]["message"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert!(
+            message.contains(&format!("Did you mean `gwsr {command}`?")),
+            "{message}"
+        );
+    }
+}
+
 #[test]
 fn human_errors_are_opt_in_via_a_human_format() {
     let env = Env::new();

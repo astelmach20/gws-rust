@@ -480,6 +480,25 @@ pub fn parse_service_and_version(
     Ok((alias.to_string(), resolved.api_name, resolved.version))
 }
 
+/// The static command `token` is plausibly a typo of (`gwsr completion` for
+/// `gwsr completions`), when it names no service and resembles none.
+///
+/// Every first word that is not a static command is taken as a service, so
+/// without this a mistyped command is reported as an unknown service with
+/// suggestions drawn from services only. A `<api>:<version>` spec, or any
+/// name with `--api-version`, is a Discovery API and never a command.
+fn mistyped_command(token: &str, api_version_given: bool) -> Option<&'static str> {
+    if api_version_given
+        || token.contains(':')
+        || services::find_service(token).is_some()
+        || services::suggest_service(token).is_some()
+    {
+        return None;
+    }
+    let names = cli_args::STATIC_COMMANDS.iter().copied();
+    executor::input::closest(token, names)
+}
+
 /// argv for the dynamic service command: the top-level global flags that
 /// preceded the service name, then everything after it.
 fn service_argv(args: &[OsString], service_args: &[OsString], alias: &str) -> Vec<OsString> {
@@ -501,6 +520,13 @@ async fn run_service(
         .first()
         .and_then(|s| s.to_str())
         .ok_or_else(|| GwsError::Validation("the service name must be valid UTF-8".into()))?;
+    if let Some(command) = mistyped_command(service_token, prescan.api_version.is_some()) {
+        return Err(GwsError::Validation(format!(
+            "Unknown command or service '{service_token}'. Did you mean `gwsr {command}`? \
+             Run `gwsr --help` to list commands and services."
+        ))
+        .into());
+    }
     let (alias, api_name, version) =
         parse_service_and_version(service_token, prescan.api_version.as_deref())?;
     tracing::debug!(service = %alias, api = %api_name, version = %version, "resolving service");
@@ -725,6 +751,19 @@ mod tests {
             service_argv(&args, &service_args, "drive"),
             os(&["gwsr drive", "--jq", "drive", "files"])
         );
+    }
+
+    #[test]
+    fn mistyped_static_commands_are_suggested() {
+        assert_eq!(mistyped_command("completion", false), Some("completions"));
+        assert_eq!(mistyped_command("comands", false), Some("commands"));
+        assert_eq!(mistyped_command("shcema", false), Some("schema"));
+        // Services, service typos and Discovery API specs are not commands.
+        assert_eq!(mistyped_command("drive", false), None);
+        assert_eq!(mistyped_command("drvie", false), None);
+        assert_eq!(mistyped_command("completion:v1", false), None);
+        assert_eq!(mistyped_command("completion", true), None);
+        assert_eq!(mistyped_command("youtube", false), None);
     }
 
     #[test]
