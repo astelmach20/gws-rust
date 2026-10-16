@@ -3484,6 +3484,108 @@ async fn output_saves_a_resource_that_only_looks_like_an_operation() {
     assert_eq!(saved, group);
 }
 
+// ── Drive permission grants through the generated method ────────────────
+
+/// `drive permissions create` with an ownership transfer, or edit access for
+/// anyone with the link, is gated as destructive like `drive +share`: it is
+/// refused without `--yes` even when `GWSR_REQUIRE_CONFIRM` is off, directly
+/// and in `gwsr batch`. It used to be outbound, so it went through.
+#[tokio::test(flavor = "multi_thread")]
+async fn drive_ownership_transfer_through_the_generated_method_is_destructive() {
+    use wiremock::matchers::any;
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    Mock::given(any())
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id": "p1"})))
+        .mount(&server)
+        .await;
+    let env = Env::new();
+    let doc = json!({
+        "name": "drive",
+        "version": "v3",
+        "rootUrl": "https://www.googleapis.com/",
+        "servicePath": "drive/v3/",
+        "batchPath": "batch/drive/v3",
+        "schemas": {"Permission": {"id": "Permission", "type": "object", "properties": {
+            "role": {"type": "string"},
+            "type": {"type": "string"},
+            "emailAddress": {"type": "string"}
+        }}},
+        "resources": {"permissions": {"methods": {"create": {
+            "id": "drive.permissions.create",
+            "httpMethod": "POST",
+            "path": "files/{fileId}/permissions",
+            "parameters": {
+                "fileId": {"type": "string", "location": "path", "required": true},
+                "transferOwnership": {"type": "boolean", "location": "query"}
+            },
+            "parameterOrder": ["fileId"],
+            "request": {"$ref": "Permission"},
+            "response": {"$ref": "Permission"},
+            "scopes": ["https://www.googleapis.com/auth/drive"]
+        }}}}
+    });
+    std::fs::write(
+        env.seeded_drive_path(),
+        serde_json::to_string(&doc).unwrap(),
+    )
+    .unwrap();
+    let run = |args: &[&str], stdin: Option<&str>| {
+        let mut c = env.cmd();
+        c.env("GWSR_TOKEN", "test-token")
+            .env("GWSR_API_BASE_URL", server.uri())
+            .env("GWSR_REQUIRE_CONFIRM", "0")
+            .args(args);
+        if let Some(s) = stdin {
+            c.write_stdin(s);
+        }
+        c.output().unwrap()
+    };
+    let owner = r#"{"role":"owner","type":"user","emailAddress":"new-owner@example.com"}"#;
+    let anyone_writer = r#"{"role":"writer","type":"anyone"}"#;
+    let transfer = r#"{"fileId":"f1","transferOwnership":true}"#;
+    let create = |params: &'static str, body: &'static str| {
+        vec![
+            "drive",
+            "permissions",
+            "create",
+            "--params",
+            params,
+            "--json",
+            body,
+        ]
+    };
+    for (args, what) in [
+        (create(transfer, owner), "owner transfer"),
+        (create(r#"{"fileId":"f1"}"#, anyone_writer), "anyone writer"),
+    ] {
+        let out = run(&args, None);
+        assert_eq!(out.status.code(), Some(7), "{what}: {}", stderr_of(&out));
+        assert_eq!(
+            stderr_error(&out)["error"]["reason"],
+            "confirmationRequired"
+        );
+    }
+    let line = format!(r#"{{"method":"permissions.create","params":{transfer},"json":{owner}}}"#);
+    let out = run(&["batch", "drive"], Some(&line));
+    assert_eq!(out.status.code(), Some(7), "batch: {}", stderr_of(&out));
+    assert!(
+        server.received_requests().await.unwrap().is_empty(),
+        "nothing may be sent before confirmation"
+    );
+
+    // --yes confirms it, and an ordinary grant is not gated.
+    let mut confirmed = create(transfer, owner);
+    confirmed.push("--yes");
+    let out = run(&confirmed, None);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    let reader = r#"{"role":"reader","type":"user","emailAddress":"a@example.com"}"#;
+    let out = run(&create(r#"{"fileId":"f1"}"#, reader), None);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert_eq!(server.received_requests().await.unwrap().len(), 2);
+}
+
 // ── Outbound confirmation for membership grants ─────────────────────────
 
 /// Adding someone to a Chat space notifies them and opens the space's

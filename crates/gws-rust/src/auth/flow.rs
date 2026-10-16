@@ -67,6 +67,9 @@ pub struct LoginOptions {
     pub open_browser: bool,
     pub timeout: Duration,
     pub login_hint: Option<String>,
+    /// The `gwsr auth login` command for the profile being signed in to,
+    /// named in errors that say to start over.
+    pub login_command: String,
 }
 
 /// Result of a successful login.
@@ -426,6 +429,7 @@ pub async fn exchange_code(
     code: &str,
     verifier: PkceCodeVerifier,
     requested: &[String],
+    login_command: &str,
 ) -> Result<LoginTokens, AuthError> {
     let oauth = super::token::oauth_client(&client.client_id, &client.client_secret, endpoints)?
         .set_redirect_uri(
@@ -439,13 +443,23 @@ pub async fn exchange_code(
         .set_pkce_verifier(verifier)
         .request_async(&|req| http::execute(http_client.clone(), req))
         .await
-        .map_err(|e| super::token::map_token_error(e, "gwsr auth login", requested))?;
+        .map_err(|e| {
+            match super::token::map_token_error(e, login_command, requested) {
+                // At this step `invalid_grant` is about the authorization
+                // code just received, not a stored refresh token.
+                AuthError::InvalidGrant { description, .. } => AuthError::Denied(format!(
+                    "Google rejected the authorization code ({description}): it expired, was \
+                     already used, or does not belong to this login attempt. Nothing was saved; \
+                     run `{login_command}` again and finish the sign-in promptly"
+                )),
+                other => other,
+            }
+        })?;
     let refresh_token = response.refresh_token().ok_or_else(|| {
-        AuthError::TokenEndpoint(
+        AuthError::TokenEndpoint(format!(
             "Google returned no refresh token. Revoke gwsr's access at \
-             https://myaccount.google.com/permissions and run `gwsr auth login` again"
-                .to_string(),
-        )
+             https://myaccount.google.com/permissions and run `{login_command}` again"
+        ))
     })?;
     let granted_scopes = match response.scopes() {
         Some(s) => s.iter().map(|x| x.as_str().to_string()).collect(),
@@ -540,6 +554,7 @@ pub async fn run(
                 &code,
                 req.verifier,
                 &opts.scopes,
+                &opts.login_command,
             )
             .await
         }
@@ -575,6 +590,7 @@ pub async fn run(
                 &code,
                 req.verifier,
                 &opts.scopes,
+                &opts.login_command,
             )
             .await
         }
@@ -893,6 +909,7 @@ mod tests {
             "4/abc",
             verifier,
             &["https://www.googleapis.com/auth/drive.readonly".into()],
+            "gwsr auth login",
         )
         .await
         .unwrap();
@@ -917,10 +934,48 @@ mod tests {
             "c",
             PkceCodeVerifier::new("v".repeat(50)),
             &[],
+            "gwsr auth login --profile work",
         )
         .await
         .unwrap_err();
         assert!(err.to_string().contains("no refresh token"), "{err}");
+        assert!(
+            err.to_string()
+                .contains("`gwsr auth login --profile work` again"),
+            "{err}"
+        );
+    }
+
+    /// `invalid_grant` from the code exchange rejects the authorization code
+    /// just received (expired or already used). It is not a stored refresh
+    /// token "expired or revoked", and the retry must sign in to the same
+    /// profile.
+    #[tokio::test]
+    async fn rejected_authorization_code_is_not_a_rejected_refresh_token() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/token"))
+            .respond_with(ResponseTemplate::new(400).set_body_json(serde_json::json!({
+                "error": "invalid_grant", "error_description": "Bad Request"
+            })))
+            .mount(&server)
+            .await;
+        let err = exchange_code(
+            &client(),
+            &super::super::token::tests::endpoints(&server),
+            "http://127.0.0.1:9/",
+            "4/expired",
+            PkceCodeVerifier::new("v".repeat(50)),
+            &[],
+            "gwsr auth login --profile work",
+        )
+        .await
+        .unwrap_err();
+        let text = err.to_string();
+        assert!(!text.contains("refresh token"), "{text}");
+        assert!(text.contains("authorization code"), "{text}");
+        assert!(text.contains("`gwsr auth login --profile work`"), "{text}");
+        assert_eq!(crate::error::GwsError::from(err).exit_code(), 2, "{text}");
     }
 
     #[tokio::test]
