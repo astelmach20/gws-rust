@@ -527,10 +527,14 @@ fn resolve_target(
         return OutputTarget::parse(o, overwrite);
     }
     let safe = safe_filename(default_name, "download");
-    match ext {
-        Some(ext) => OutputTarget::parse(&with_extension(&safe, ext), overwrite),
-        None => OutputTarget::parse(&safe, overwrite),
-    }
+    let name = match ext {
+        Some(ext) => with_extension(&safe, ext),
+        None => safe,
+    };
+    // A name taken from Drive is always a file, never `-` (stdout): only
+    // the user's own `--output -` may send raw bytes to stdout.
+    let path = crate::validate::validate_output_file_path(&name, "--output")?;
+    Ok(OutputTarget::File { path, overwrite })
 }
 
 /// Whether `--output -` sent the payload to stdout, which must then carry
@@ -2508,6 +2512,20 @@ mod tests {
             assert!(name.ends_with("r.pdf"), "{name}");
             assert!(name.len() <= 255, "{name}");
         }
+    }
+
+    #[test]
+    fn a_drive_file_named_dash_is_saved_to_a_file_not_stdout() {
+        let target = resolve_target(None, "-", None, false).unwrap();
+        assert!(
+            matches!(&target, OutputTarget::File { path, .. } if path.file_name().unwrap() == "-"),
+            "a Drive name must never select stdout: {target:?}"
+        );
+        // The user's own `--output -` still streams to stdout.
+        assert_eq!(
+            resolve_target(Some("-"), "a.pdf", None, false).unwrap(),
+            OutputTarget::Stdout
+        );
     }
 
     #[test]
