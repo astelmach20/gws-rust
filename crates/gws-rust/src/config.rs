@@ -530,7 +530,7 @@ log_file = '{ABS_LOG_DIR}'
         ] {
             match result {
                 Err(GwsError::Config(msg)) => {
-                    assert!(msg.contains("writable by group or others"), "{msg}")
+                    assert!(msg.contains("writable by group or others"));
                 }
                 other => panic!("expected a config error, got {other:?}"),
             }
