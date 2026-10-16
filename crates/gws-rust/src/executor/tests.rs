@@ -1248,6 +1248,46 @@ async fn upload_dry_run_lists_the_upload_type() {
     assert!(server.received_requests().await.unwrap().is_empty());
 }
 
+/// A method whose Discovery document advertises only the resumable protocol
+/// uploads a small file with it instead of failing for want of a simple
+/// endpoint.
+#[tokio::test]
+async fn small_file_uses_resumable_when_it_is_the_only_protocol() {
+    let server = MockServer::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("a.txt");
+    std::fs::write(&file, b"hello").unwrap();
+    let path = file.to_str().unwrap().to_string();
+    let mut d = doc(&server.uri());
+    let create = d
+        .resources
+        .get_mut("files")
+        .and_then(|r| r.methods.get_mut("create"))
+        .unwrap();
+    create
+        .media_upload
+        .as_mut()
+        .and_then(|m| m.protocols.as_mut())
+        .unwrap()
+        .simple = None;
+    let mut call = Call::new(&d, "create", &server);
+    call.body = Some(json!({"name": "a.txt"}));
+    call.upload = Some(UploadSource {
+        path: &path,
+        content_type: None,
+    });
+    call.options.dry_run = true;
+    let em = Emitter::capturing();
+    call.run(&em).await.unwrap();
+    let out = lines(&em);
+    assert_eq!(out[0]["upload"]["protocol"], "resumable", "{out:?}");
+    assert_eq!(
+        out[0]["url"],
+        format!("{}/resumable/upload/drive/v3/files", server.uri())
+    );
+    assert!(server.received_requests().await.unwrap().is_empty());
+}
+
 /// `--upload` chooses the upload protocol itself. A `uploadType` in --params
 /// used to be sent as well (`uploadType=media&uploadType=multipart`), so the
 /// server could read the multipart envelope as the file's raw content.
