@@ -158,7 +158,7 @@ Uses `gcloud` to pick or create a project, enable the Workspace APIs, and create
 
 ### `gwsr auth login`
 
-Signs in with the OAuth authorization-code flow: PKCE (S256), a random `state` that is checked, and a loopback redirect to `http://127.0.0.1:<port>/`. The browser opens automatically. stdout gets two JSON lines, so an agent can drive the flow:
+Signs in with the OAuth authorization-code flow: PKCE (S256), a random `state` that is checked, and a loopback redirect to `http://127.0.0.1:<port>/`. The browser opens automatically: on Unix the commands in `$BROWSER` (`:`-separated, `%s` for the URL) are tried first, then `open`, `xdg-open` or `wslview`. stdout gets two JSON lines, so an agent can drive the flow:
 
 ```json
 {"event":"authorization_url","url":"https://accounts.google.com/...","mode":"loopback","timeout_seconds":300,"next":"open the URL in a browser on this machine and approve"}
