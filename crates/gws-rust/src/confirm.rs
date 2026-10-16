@@ -20,8 +20,10 @@
 //! - [`Impact::Destructive`]: irreversible actions — any `DELETE` method, the
 //!   non-DELETE methods in [`PERMANENT_DELETE_METHODS`], the device commands
 //!   in [`BODY_DESTRUCTIVE_METHODS`] when their request body asks for a wipe
-//!   or a deprovision, and helper actions such as clearing a range or deleting a filter. Always
-//!   gated.
+//!   or a deprovision, the Drive permission writes in [`PERMISSION_METHODS`]
+//!   when they transfer ownership or give a whole domain or anyone edit
+//!   access, and helper actions such as clearing a range or deleting a
+//!   filter. Always gated.
 //! - [`Impact::Outbound`]: actions that notify or grant access to other people
 //!   or run code (sending mail or chat messages, sharing, RSVPs, running
 //!   scripts), including the generated methods in [`OUTBOUND_METHODS`] and
@@ -105,6 +107,48 @@ fn body_requests_wipe(id: &str, body: Option<&serde_json::Value>) -> bool {
         })
 }
 
+/// Drive permission writes (`create`/`update` in v3, `insert`/`update`/
+/// `patch` in v2). Like `drive +share`, they are destructive when they
+/// transfer ownership or give edit-level access to a whole domain or to
+/// anyone with the link, and outbound otherwise.
+pub(crate) const PERMISSION_METHODS: &[&str] = &[
+    "drive.permissions.create",
+    "drive.permissions.insert",
+    "drive.permissions.update",
+    "drive.permissions.patch",
+];
+
+/// Whether a [`PERMISSION_METHODS`] call `id` transfers ownership (the
+/// `transferOwnership` parameter, role `owner`, or `pendingOwner`) or gives
+/// a `domain` or `anyone` grantee a role above `reader`/`commenter`. Values
+/// match case-insensitively and an unexpected `transferOwnership` value
+/// counts as true, so a variant is gated rather than let through.
+fn transfers_ownership_or_broad_edit(
+    id: &str,
+    params: &serde_json::Map<String, serde_json::Value>,
+    body: Option<&serde_json::Value>,
+) -> bool {
+    use serde_json::Value;
+    if !PERMISSION_METHODS.contains(&id) {
+        return false;
+    }
+    let transfer = match params.get("transferOwnership") {
+        None | Some(Value::Null) | Some(Value::Bool(false)) => false,
+        Some(Value::String(s)) => !s.eq_ignore_ascii_case("false"),
+        Some(_) => true,
+    };
+    let field = |name: &str| body.and_then(|b| b.get(name));
+    let role = field("role").and_then(Value::as_str);
+    let owner = role.is_some_and(|r| r.eq_ignore_ascii_case("owner"))
+        || field("pendingOwner").is_some_and(|v| v != &Value::Bool(false) && !v.is_null());
+    let broad = field("type")
+        .and_then(Value::as_str)
+        .is_some_and(|t| t.eq_ignore_ascii_case("domain") || t.eq_ignore_ascii_case("anyone"));
+    let edit = role
+        .is_some_and(|r| !r.eq_ignore_ascii_case("reader") && !r.eq_ignore_ascii_case("commenter"));
+    transfer || owner || (broad && edit)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Impact {
     /// Irreversible changes. Always gated.
@@ -127,8 +171,11 @@ pub(crate) const OUTBOUND_METHODS: &[&str] = &[
     "gmail.users.settings.sendAs.create",
     "gmail.users.settings.filters.create",
     "chat.spaces.messages.create",
+    // Drive v3 and v2 sharing; see also PERMISSION_METHODS.
     "drive.permissions.create",
+    "drive.permissions.insert",
     "drive.permissions.update",
+    "drive.permissions.patch",
     // Calendar sharing (notifies the grantee unless sendNotifications=false,
     // and grants access either way).
     "calendar.acl.insert",
@@ -187,7 +234,10 @@ pub(crate) fn method_impact(
     body: Option<&serde_json::Value>,
 ) -> Option<Impact> {
     let id = method.id.as_deref().unwrap_or_default();
-    if is_destructive_method(method) || body_requests_wipe(id, body) {
+    if is_destructive_method(method)
+        || body_requests_wipe(id, body)
+        || transfers_ownership_or_broad_edit(id, params, body)
+    {
         Some(Impact::Destructive)
     } else if OUTBOUND_METHODS.contains(&id)
         || (NOTIFYING_METHODS.contains(&id) && notifies_attendees(params))
@@ -692,6 +742,92 @@ mod tests {
             assert!(may_be_gated(method));
             assert!(!is_destructive_method(method));
         }
+    }
+
+    /// The generated Drive permission methods are gated like `drive +share`:
+    /// an ownership transfer, or edit access for a whole domain or anyone
+    /// with the link, is destructive (gated without `GWSR_REQUIRE_CONFIRM`).
+    #[test]
+    fn drive_ownership_transfers_and_broad_edit_grants_are_destructive() {
+        use serde_json::json;
+        let m = |http: &str, id: &str| RestMethod {
+            http_method: http.to_string(),
+            id: Some(id.to_string()),
+            ..Default::default()
+        };
+        let params = |v: serde_json::Value| v.as_object().cloned().unwrap_or_default();
+        let user =
+            |role: &str| json!({"role": role, "type": "user", "emailAddress": "a@example.com"});
+        for (http, id) in [
+            ("POST", "drive.permissions.create"),
+            ("POST", "drive.permissions.insert"),
+            ("PATCH", "drive.permissions.update"),
+            ("PUT", "drive.permissions.update"),
+            ("PATCH", "drive.permissions.patch"),
+        ] {
+            let method = m(http, id);
+            assert!(may_be_gated(&method), "{id}");
+            for (p, body) in [
+                (json!({"transferOwnership": true}), Some(user("owner"))),
+                (json!({}), Some(user("owner"))),
+                (json!({}), Some(user("OWNER"))),
+                (
+                    json!({"transferOwnership": true}),
+                    Some(json!({"role": "writer"})),
+                ),
+                (json!({"transferOwnership": "true"}), None),
+                (
+                    json!({}),
+                    Some(json!({"role": "writer", "pendingOwner": true})),
+                ),
+                (json!({}), Some(json!({"role": "writer", "type": "anyone"}))),
+                (
+                    json!({}),
+                    Some(
+                        json!({"role": "fileOrganizer", "type": "domain", "domain": "example.com"}),
+                    ),
+                ),
+                (
+                    json!({}),
+                    Some(json!({"role": "organizer", "type": "Domain", "domain": "example.com"})),
+                ),
+            ] {
+                assert_eq!(
+                    method_impact(&method, &params(p.clone()), body.as_ref()),
+                    Some(Impact::Destructive),
+                    "{id} {p} {body:?}"
+                );
+            }
+            for (p, body) in [
+                (json!({}), Some(user("writer"))),
+                (json!({"transferOwnership": false}), Some(user("reader"))),
+                (json!({}), Some(json!({"role": "reader", "type": "anyone"}))),
+                (
+                    json!({}),
+                    Some(json!({"role": "commenter", "type": "domain", "domain": "example.com"})),
+                ),
+                (
+                    json!({}),
+                    Some(json!({"role": "writer", "pendingOwner": false})),
+                ),
+                (json!({}), None),
+            ] {
+                assert_eq!(
+                    method_impact(&method, &params(p.clone()), body.as_ref()),
+                    Some(Impact::Outbound),
+                    "{id} {p} {body:?}"
+                );
+            }
+        }
+        // The same body on another method is not a Drive grant.
+        assert_eq!(
+            method_impact(
+                &m("POST", "drive.files.create"),
+                &params(json!({})),
+                Some(&json!({"role": "owner", "type": "anyone"}))
+            ),
+            None
+        );
     }
 
     #[test]
