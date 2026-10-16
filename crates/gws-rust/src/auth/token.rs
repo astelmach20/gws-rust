@@ -832,6 +832,56 @@ pub(crate) mod tests {
         }
     }
 
+    /// A token response that fails to parse (here `expires_in` is a string)
+    /// still carries live tokens: the error, printed to stderr, must not
+    /// repeat them.
+    #[tokio::test]
+    async fn token_endpoint_unparseable_token_responses_do_not_leak_tokens() {
+        use crate::error::GwsError;
+        let body = serde_json::json!({
+            "access_token": "ya29.SECRET-ACCESS",
+            "refresh_token": "1//SECRET-REFRESH",
+            "id_token": "eyJ.SECRET-ID",
+            "token_type": "Bearer",
+            "expires_in": "3599",
+        });
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(body))
+            .mount(&server)
+            .await;
+        let refresh = refresh_user(&user(), None, &endpoints(&server), "gwsr auth login")
+            .await
+            .unwrap_err();
+        let sa = service_account_token(&test_sa_key(), &["s".into()], None, &endpoints(&server))
+            .await
+            .unwrap_err();
+        for err in [refresh, sa] {
+            assert!(
+                matches!(err, AuthError::TokenEndpointFailed { status: 200, .. }),
+                "{err:?}"
+            );
+            let debug = format!("{err:?}");
+            let text = format!("{debug} {}", GwsError::from(err));
+            assert!(!text.contains("SECRET"), "{text}");
+            assert!(text.contains("expires_in"), "{text}");
+        }
+    }
+
+    #[test]
+    fn body_excerpt_redacts_token_values() {
+        let excerpt = http::body_excerpt(
+            br#"{"access_token":"ya29.SECRET","error":"x","nested":{"refresh_token":"SECRET"}}"#,
+        );
+        assert!(!excerpt.contains("SECRET"), "{excerpt}");
+        assert!(excerpt.contains(r#""error":"x""#), "{excerpt}");
+        assert_eq!(
+            http::body_excerpt(b"<html>Portal</html>"),
+            "<html>Portal</html>"
+        );
+    }
+
     #[test]
     fn oauth_responses_are_recognized() {
         use reqwest::StatusCode;
