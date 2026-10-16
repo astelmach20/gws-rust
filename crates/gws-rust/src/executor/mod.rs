@@ -537,6 +537,12 @@ pub(crate) async fn execute_to(
     // Page tokens already followed: an API that repeats one would otherwise
     // loop forever under the default unlimited --page-limit.
     let mut seen_tokens: std::collections::HashSet<String> = std::collections::HashSet::new();
+    // A run resumed from a token (`--params '{"pageToken": ...}'`) has
+    // already requested that token's page: following it again would print
+    // that page twice before the repeat is noticed.
+    if let Some(start) = page_all.then(|| current_token(&query, &body)).flatten() {
+        seen_tokens.insert(start.to_string());
+    }
 
     loop {
         let sent = match (&upload_plan, pages) {
@@ -846,7 +852,18 @@ fn non_json_page(
     query: &[(String, String)],
     body: &Option<Value>,
 ) -> GwsError {
-    let token = query
+    let token = current_token(query, body).unwrap_or("(unknown)");
+    GwsError::other(anyhow::anyhow!(
+        "{method_id} returned a response that is not JSON (content type {content_type}) for page {} \
+         of --page-all; the {pages_done} page(s) already printed are incomplete. Resume with \
+         pageToken {token}",
+        pages_done + 1
+    ))
+}
+
+/// The page token the next request carries, in the query or the body.
+fn current_token<'a>(query: &'a [(String, String)], body: &'a Option<Value>) -> Option<&'a str> {
+    query
         .iter()
         .find(|(k, _)| k == "pageToken")
         .map(|(_, v)| v.as_str())
@@ -855,13 +872,6 @@ fn non_json_page(
                 .and_then(|b| b.get("pageToken"))
                 .and_then(Value::as_str)
         })
-        .unwrap_or("(unknown)");
-    GwsError::other(anyhow::anyhow!(
-        "{method_id} returned a response that is not JSON (content type {content_type}) for page {} \
-         of --page-all; the {pages_done} page(s) already printed are incomplete. Resume with \
-         pageToken {token}",
-        pages_done + 1
-    ))
 }
 
 /// Report an empty success response (204, or no body). The first response
