@@ -315,6 +315,8 @@ The fields are `code`, `message`, `reason` and `retryable`, plus `hint` when the
 
 Exit code 5 also covers internal programming errors, such as a command reading an argument it doesn't define.
 
+`events +renew --all` renews each subscription on its own and reports every failure. When any renewal fails (reason `renewPartialFailure`), it exits `6` if every failure was retryable, so running it again can succeed, and `1` as soon as one failure is permanent, because retrying won't fix that one.
+
 ### Logging
 
 stderr log lines are JSON objects, unless `-v` is given or the output format is human. The default level is warnings and errors. Precedence: `-v`/`-vv`/`-vvv` or `-q` > `GWSR_LOG` (a filter such as `gwsr=debug`) > `RUST_LOG` > `log` in `config.toml`. `GWSR_LOG_FILE` (or `log_file`) names a directory that receives daily `gwsr.log.YYYY-MM-DD` JSON files at debug level (directory `0700`, including an existing one, files `0600`). Progress messages appear only with `-v`.
