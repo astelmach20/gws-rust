@@ -182,7 +182,8 @@ pub enum TopCommand {
     /// Inventory of services, resources, methods and helpers with their flags
     /// (JSON; `--format table|csv` gives one row per command)
     Commands {
-        /// Limit the listing to these services (default: all)
+        /// Limit the listing to these services: an alias or `<api>:<version>`
+        /// (default: all registered services)
         #[arg(value_name = "SERVICE")]
         services: Vec<String>,
     },

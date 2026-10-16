@@ -23,7 +23,7 @@ use serde_json::{Value, json};
 
 use crate::discovery::{RestDescription, RestResource};
 use crate::error::GwsError;
-use crate::services::{SERVICES, ServiceEntry};
+use crate::services::{ResolvedService, SERVICES, ServiceEntry};
 
 /// Describe one argument.
 fn flag_json(arg: &clap::Arg) -> Value {
@@ -124,7 +124,7 @@ fn walk_helper(cmd: &Command, path: &mut Vec<String>, out: &mut Vec<Value>) {
     }
 }
 
-/// Inventory for one service.
+/// Inventory for one registered service.
 pub fn service_inventory(entry: &ServiceEntry, doc: &RestDescription) -> Value {
     let cmd = crate::service::build_command(entry.aliases[0], doc);
     let mut commands = Vec::new();
@@ -135,6 +135,23 @@ pub fn service_inventory(entry: &ServiceEntry, doc: &RestDescription) -> Value {
         "api": entry.api_name,
         "version": entry.version,
         "description": entry.description,
+        "commands": commands,
+    })
+}
+
+/// Inventory for an API that is not in the registry, named as
+/// `<api>:<version>`: its name is the API name and its description comes
+/// from the Discovery document.
+fn unregistered_inventory(api: &str, version: &str, doc: &RestDescription) -> Value {
+    let cmd = crate::service::build_command(api, doc);
+    let mut commands = Vec::new();
+    walk(&cmd, doc, &mut Vec::new(), &mut commands);
+    json!({
+        "name": api,
+        "aliases": [],
+        "api": api,
+        "version": version,
+        "description": doc.description.as_deref().unwrap_or_default(),
         "commands": commands,
     })
 }
@@ -163,71 +180,69 @@ fn static_commands() -> Vec<Value> {
     out
 }
 
-/// Select service entries by alias, in the order first named; all when
-/// `names` is empty. A service named twice, or by two of its aliases
-/// (`reports admin-reports`), is listed once.
-fn select_services(names: &[String]) -> Result<Vec<&'static ServiceEntry>, GwsError> {
+/// Resolve the services to list, each with the version to list; all
+/// registered services at their default versions when `names` is empty.
+///
+/// A name is resolved like the service argument of a normal command: an
+/// alias, `<alias>:<version>` or any Discovery API as `<api>:<version>`.
+/// `api_version` (`--api-version`) wins over a `:version` suffix. It picks
+/// one version, so it needs the services named: applied to every registered
+/// service it would ask for a version most of them do not have. A service
+/// named twice, or by two of its aliases (`reports admin-reports`), is
+/// listed once.
+fn select_services(
+    names: &[String],
+    api_version: Option<&str>,
+) -> Result<Vec<ResolvedService>, GwsError> {
     if names.is_empty() {
-        return Ok(SERVICES.iter().collect());
-    }
-    let mut selected: Vec<&'static ServiceEntry> = Vec::new();
-    for n in names {
-        let entry = SERVICES
+        if api_version.is_some() {
+            return Err(GwsError::Validation(
+                "--api-version needs the services to list, e.g. `gwsr commands drive --api-version v2`"
+                    .to_string(),
+            ));
+        }
+        return Ok(SERVICES
             .iter()
-            .find(|e| e.aliases.contains(&n.as_str()))
-            .ok_or_else(|| GwsError::Validation(format!("unknown service '{n}'")))?;
-        if !selected.iter().any(|e| std::ptr::eq(*e, entry)) {
-            selected.push(entry);
+            .map(|e| ResolvedService {
+                api_name: e.api_name.to_string(),
+                version: e.version.to_string(),
+                entry: Some(e),
+            })
+            .collect());
+    }
+    let mut selected: Vec<ResolvedService> = Vec::new();
+    for n in names {
+        let r = crate::services::resolve_service_spec(n, api_version)?;
+        if !selected
+            .iter()
+            .any(|s| s.api_name == r.api_name && s.version == r.version)
+        {
+            selected.push(r);
         }
     }
     Ok(selected)
 }
 
-/// The API version to list for each of `entries`: `api_version`
-/// (`--api-version`) when given, else each service's default.
-///
-/// The flag picks one version, so it needs the services named: applied to
-/// every registered service it would ask for a version most of them do not
-/// have.
-fn versions(
-    entries: &[&'static ServiceEntry],
-    names: &[String],
-    api_version: Option<&str>,
-) -> Result<Vec<String>, GwsError> {
-    if api_version.is_some() && names.is_empty() {
-        return Err(GwsError::Validation(
-            "--api-version needs the services to list, e.g. `gwsr commands drive --api-version v2`"
-                .to_string(),
-        ));
-    }
-    entries
-        .iter()
-        .map(|e| {
-            crate::services::resolve_service_spec(e.aliases[0], api_version).map(|r| r.version)
-        })
-        .collect()
-}
-
 /// Build the full inventory (fetches Discovery documents as needed).
 /// `api_version` (`--api-version`) lists that version of the named services.
 pub async fn build(names: &[String], api_version: Option<&str>) -> Result<Value, GwsError> {
-    let entries = select_services(names)?;
-    let versions = versions(&entries, names, api_version)?;
+    let selected = select_services(names, api_version)?;
     let docs = futures_util::future::try_join_all(
-        entries
+        selected
             .iter()
-            .zip(&versions)
-            .map(|(e, version)| crate::service::load_document(e.api_name, version)),
+            .map(|s| crate::service::load_document(&s.api_name, &s.version)),
     )
     .await?;
-    let services: Vec<Value> = entries
+    let services: Vec<Value> = selected
         .iter()
         .zip(&docs)
-        .zip(&versions)
-        .map(|((entry, doc), version)| {
-            let mut inventory = service_inventory(entry, doc);
-            inventory["version"] = json!(version);
-            inventory
+        .map(|(s, doc)| match s.entry {
+            Some(entry) => {
+                let mut inventory = service_inventory(entry, doc);
+                inventory["version"] = json!(s.version);
+                inventory
+            }
+            None => unregistered_inventory(&s.api_name, &s.version, doc),
         })
         .collect();
     Ok(json!({
@@ -390,6 +405,15 @@ mod tests {
         }
     }
 
+    fn selected(names: &[&str], api_version: Option<&str>) -> Vec<(String, String, bool)> {
+        let names: Vec<String> = names.iter().map(|s| (*s).to_string()).collect();
+        select_services(&names, api_version)
+            .unwrap()
+            .into_iter()
+            .map(|s| (s.api_name, s.version, s.entry.is_some()))
+            .collect()
+    }
+
     /// `auth` parses its own arguments, so the static tree only has a
     /// passthrough for it; the inventory must list the real `auth`
     /// subcommands and their flags instead.
@@ -434,40 +458,81 @@ mod tests {
 
     #[test]
     fn unknown_service_is_rejected() {
-        assert!(select_services(&["nope".into()]).is_err());
-        assert_eq!(select_services(&["drive".into()]).unwrap().len(), 1);
+        let err = select_services(&["nope".into()], None).unwrap_err();
+        assert!(matches!(err, GwsError::Validation(_)), "{err:?}");
+        assert!(err.to_string().contains("<api>:<version>"), "{err}");
+        assert_eq!(selected(&["drive"], None).len(), 1);
+        assert_eq!(selected(&[], None).len(), SERVICES.len());
+    }
+
+    /// `<api>:<version>` is accepted as it is by `schema`, `batch` and
+    /// normal commands, for registered and unregistered APIs alike.
+    #[test]
+    fn api_version_specs_are_accepted() {
+        assert_eq!(
+            selected(&["youtube:v3", "drive:v2", "drive"], None),
+            [
+                ("youtube".into(), "v3".into(), false),
+                ("drive".into(), "v2".into(), true),
+                ("drive".into(), "v3".into(), true),
+            ]
+        );
+        // The spec is validated like everywhere else.
+        assert!(select_services(&["youtube:".into()], None).is_err());
+        assert!(select_services(&["youtube:../v3".into()], None).is_err());
+        assert!(select_services(&["../x:v1".into()], None).is_err());
+    }
+
+    #[test]
+    fn unregistered_api_is_listed_under_its_api_name() {
+        let inv = unregistered_inventory("drive", "v3", &doc());
+        assert_eq!(inv["name"], "drive");
+        assert_eq!(inv["aliases"], json!([]));
+        assert_eq!(inv["version"], "v3");
+        assert!(!inv["commands"].as_array().unwrap().is_empty(), "{inv}");
     }
 
     /// Naming a service twice, or by two aliases, listed (and fetched) it
     /// twice, so `services` held duplicate entries.
     #[test]
     fn a_service_named_twice_is_listed_once() {
-        let names: Vec<String> = ["drive", "reports", "drive", "admin-reports", "gmail"]
-            .iter()
-            .map(|s| (*s).to_string())
-            .collect();
-        let selected: Vec<&str> = select_services(&names)
-            .unwrap()
-            .iter()
-            .map(|e| e.aliases[0])
-            .collect();
-        assert_eq!(selected, ["drive", "admin-reports", "gmail"]);
+        let listed: Vec<(String, String)> = selected(
+            &["drive", "reports", "drive", "admin-reports", "gmail"],
+            None,
+        )
+        .into_iter()
+        .map(|(api, version, _)| (api, version))
+        .collect();
+        assert_eq!(
+            listed,
+            [
+                ("drive".into(), "v3".into()),
+                ("admin".into(), "reports_v1".into()),
+                ("gmail".into(), "v1".into()),
+            ]
+        );
     }
 
     #[test]
     fn api_version_applies_to_the_named_services() {
-        let drive = select_services(&["drive".into()]).unwrap();
         assert_eq!(
-            versions(&drive, &["drive".into()], Some("v2")).unwrap(),
-            ["v2"]
+            selected(&["drive"], Some("v2")),
+            [("drive".into(), "v2".into(), true)]
         );
-        assert_eq!(versions(&drive, &["drive".into()], None).unwrap(), ["v3"]);
+        assert_eq!(
+            selected(&["drive"], None),
+            [("drive".into(), "v3".into(), true)]
+        );
+        // --api-version wins over a `:version` suffix.
+        assert_eq!(
+            selected(&["drive:v3"], Some("v2")),
+            [("drive".into(), "v2".into(), true)]
+        );
         // Without named services the flag would apply to every API.
-        let all = select_services(&[]).unwrap();
-        let err = versions(&all, &[], Some("v2")).unwrap_err();
+        let err = select_services(&[], Some("v2")).unwrap_err();
         assert!(matches!(err, GwsError::Validation(_)), "{err:?}");
         // The version is validated like everywhere else.
-        assert!(versions(&drive, &["drive".into()], Some("../v2")).is_err());
+        assert!(select_services(&["drive".into()], Some("../v2")).is_err());
     }
 
     #[test]
