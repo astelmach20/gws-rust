@@ -17,8 +17,9 @@
 //!
 //! * **Transient failures do not kill the stream.** 408/429/5xx responses,
 //!   network errors and token-refresh failures are retried with capped
-//!   exponential backoff and jitter. The loop exits with an error only after
-//!   `--max-failures` consecutive failures, or immediately on a permanent
+//!   exponential backoff and jitter. `--max-failures N` tolerates N
+//!   consecutive failures: the loop exits with an error on failure N+1, or
+//!   immediately on a permanent
 //!   failure (other 4xx, invalid configuration, local I/O errors).
 //! * **Errors carry the real HTTP status.**
 //! * **Diagnostics are single-line JSON on stderr**, so stdout stays a clean

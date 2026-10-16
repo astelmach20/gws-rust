@@ -52,7 +52,7 @@ gwsr events +subscribe --target '//chat.googleapis.com/spaces/SPACE' --event-typ
 
 ## Tips
 
-- stdout carries one JSON event per line. Transient errors are retried with backoff and reported as single-line JSON on stderr; the stream exits after --max-failures consecutive failures. Delivery is at-least-once.
+- stdout carries one JSON event per line. Transient errors are retried with backoff and reported as single-line JSON on stderr; the stream tolerates --max-failures consecutive failures and exits on the next one. Delivery is at-least-once.
 - Without --cleanup, Pub/Sub resources persist for reconnection. Press Ctrl-C to stop.
 
 > [!CAUTION]

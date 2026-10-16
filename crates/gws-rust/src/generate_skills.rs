@@ -2003,14 +2003,82 @@ mod tests {
         assert!(!md.contains("\n- a Model Armor failure"), "{md}");
     }
 
+    /// The streaming helpers' tips say what `--max-failures N` does (it
+    /// tolerates N consecutive failures and exits on the next one), and the
+    /// committed skills carry the same tips as the generator renders.
+    #[test]
+    fn max_failures_tips_match_stream_semantics_and_committed_skills() {
+        let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .ancestors()
+            .nth(2)
+            .expect("repository root");
+        let tips = |md: &str| -> String {
+            md.split("## Tips\n\n")
+                .nth(1)
+                .and_then(|t| t.split("\n\n").next())
+                .expect("tips section")
+                .to_string()
+        };
+        for (alias, helper_name) in [("events", "+subscribe"), ("gmail", "+watch")] {
+            let entry = services::SERVICES
+                .iter()
+                .find(|e| e.aliases[0] == alias)
+                .expect("service entry");
+            // Helpers attach only to the registered API version.
+            let doc = crate::discovery::RestDescription {
+                name: entry.api_name.to_string(),
+                version: entry.version.to_string(),
+                ..Default::default()
+            };
+            let cli = crate::commands::build_cli(&doc);
+            let helper = cli
+                .get_subcommands()
+                .find(|s| s.get_name() == helper_name)
+                .expect("helper command");
+            let rendered = tips(&render_helper_skill(
+                alias,
+                helper_name,
+                helper,
+                entry,
+                "Test",
+            ));
+            assert!(
+                rendered.contains(
+                    "tolerates --max-failures consecutive failures and exits on the next one"
+                ),
+                "{alias} {helper_name}: {rendered}"
+            );
+            assert!(
+                !rendered.contains("exits after --max-failures"),
+                "{alias} {helper_name}: {rendered}"
+            );
+
+            let short = helper_name.trim_start_matches('+');
+            let path = repo_root
+                .join("skills")
+                .join(format!("gwsr-{alias}-{short}"))
+                .join("SKILL.md");
+            let committed = std::fs::read_to_string(&path).expect("committed skill");
+            assert_eq!(
+                tips(&committed),
+                rendered,
+                "{} is stale: run `just skills`",
+                path.display()
+            );
+        }
+    }
+
     /// Every helper tip line that starts a tip ends a sentence, so a tip
     /// wrapped without a hanging indent cannot turn into fragment bullets.
     #[test]
     fn every_helper_tip_is_a_whole_sentence() {
         let mut bad = Vec::new();
+        let mut checked = 0;
         for entry in services::SERVICES {
+            // Helpers attach only to the registered API version.
             let doc = crate::discovery::RestDescription {
                 name: entry.api_name.to_string(),
+                version: entry.version.to_string(),
                 ..Default::default()
             };
             let cli = crate::commands::build_cli(&doc);
@@ -2023,6 +2091,7 @@ mod tests {
                 let Some(tips) = md.split("## Tips\n\n").nth(1) else {
                     continue;
                 };
+                checked += 1;
                 for tip in tips.lines().take_while(|l| l.starts_with("- ")) {
                     // `drive +export` lists formats per file type, one per line.
                     let listing = ["Docs: ", "Sheets: ", "Slides: ", "Drawings: "]
@@ -2034,6 +2103,7 @@ mod tests {
                 }
             }
         }
+        assert!(checked > 0, "no helper with tips was rendered");
         assert!(bad.is_empty(), "tips cut mid-sentence:\n{}", bad.join("\n"));
     }
 
