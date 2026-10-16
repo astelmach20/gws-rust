@@ -48,8 +48,7 @@ gwsr script +push --script-id SCRIPT_ID --dir ./src --yes
 - Files in sub-directories keep their path (e.g. lib/util.gs -> lib/util).
 - Hidden files/directories and node_modules are skipped.
 - A symlink to a pushed file or a directory is refused: copy its target in.
-- Destructive: this REPLACES ALL files in the project, so it requires --yes
-- (or a confirmation prompt on a terminal).
+- Destructive: this REPLACES ALL files in the project, so it requires --yes (or a confirmation prompt on a terminal).
 
 > [!CAUTION]
 > This is a **write** command — confirm with the user before executing.

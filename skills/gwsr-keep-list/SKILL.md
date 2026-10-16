@@ -43,8 +43,7 @@ gwsr keep +list --changed-since 2026-01-01T00:00:00Z
 
 ## Tips
 
-- Read-only. The Keep API is only available to Workspace accounts and
-- usually requires a service account with domain-wide delegation.
+- Read-only. The Keep API is only available to Workspace accounts and usually requires a service account with domain-wide delegation.
 
 ## See Also
 

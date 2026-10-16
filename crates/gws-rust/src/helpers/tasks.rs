@@ -76,7 +76,7 @@ EXAMPLES:
 
 TIPS:
   The Tasks API keeps only the due date; a --due with a time other than
-  midnight is rejected rather than silently truncated.",
+    midnight is rejected rather than silently truncated.",
                 ),
         )
         .subcommand(

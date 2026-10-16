@@ -129,7 +129,7 @@ EXAMPLES:
 TIPS:
   Read-only. Prints JSON {documentId, title, bodyFormat, body} by default.
   Headings, lists, bold/italic/strikethrough, inline code, links and tables
-  are rendered; images appear as [image] placeholders.
+    are rendered; images appear as [image] placeholders.
   Only the first tab of multi-tab documents is read.",
                 ),
         )
@@ -151,11 +151,11 @@ Some **bold** text and a [link](https://example.com).
 
 TIPS:
   Without --markdown the text is appended verbatim to the last paragraph;
-  start it with a newline to begin a new paragraph.
+    start it with a newline to begin a new paragraph.
   With --markdown the content starts on a new paragraph and headings,
-  bold/italic/strikethrough, inline and fenced code, links, block quotes,
-  horizontal rules and (nested) bullet/numbered lists become native Docs
-  formatting. Tables, images and raw HTML are rejected with an error.",
+    bold/italic/strikethrough, inline and fenced code, links, block quotes,
+    horizontal rules and (nested) bullet/numbered lists become native Docs
+    formatting. Tables, images and raw HTML are rejected with an error.",
                 ),
             true,
         ))

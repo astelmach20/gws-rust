@@ -41,8 +41,7 @@ gwsr slides +read --presentation-id PRES_ID --format yaml
 
 ## Tips
 
-- Read-only. Text from shapes, tables and groups is returned per slide,
-- in page order, with the speaker notes.
+- Read-only. Text from shapes, tables and groups is returned per slide, in page order, with the speaker notes.
 
 ## See Also
 

@@ -95,7 +95,7 @@ Helpers implement the `Helper` trait in `mod.rs` and are registered in the `HELP
    - Results go to stdout as JSON through the shared output path; progress and warnings go to stderr.
 4. **Supports `--dry-run`:** it prints the planned requests and needs no credentials.
 5. **Has tests:** command registration, required arguments, the happy path (wiremock) and the rejection paths.
-6. **Regenerate the skills** (`just skills`) and add a changeset.
+6. **Regenerate the skills** (`just skills`) and add a changeset. Each line of the help's `TIPS:` block becomes one bullet in the skill, so a tip wrapped over several lines continues with a hanging indent (four spaces instead of two).
 
 ### Development steps
 

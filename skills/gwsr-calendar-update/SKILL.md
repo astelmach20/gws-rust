@@ -54,9 +54,7 @@ gwsr calendar +update --event-id EVENT_ID --add-attendee carol@example.com --rem
 
 ## Tips
 
-- Only the given fields change. Moving --start without --end/--duration keeps
-- the event's current length. Times with an offset keep the event's own
-- time zone unless --timezone is given.
+- Only the given fields change. Moving --start without --end/--duration keeps the event's current length. Times with an offset keep the event's own time zone unless --timezone is given.
 
 > [!CAUTION]
 > This is a **write** command — confirm with the user before executing.

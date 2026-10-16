@@ -268,7 +268,7 @@ TIPS:
   Sends are never retried automatically: a timeout may still have delivered the message.
   With GWSR_REQUIRE_CONFIRM=1, sending requires --yes (drafts do not).
   --sanitize screens the subject and body before sending; in block mode a match or
-  a Model Armor failure sends nothing. --dry-run does not call Model Armor.",
+    a Model Armor failure sends nothing. --dry-run does not call Model Armor.",
     )
 }
 
@@ -291,7 +291,7 @@ TIPS:
   Replying to a message you sent goes to its original To recipients, as in Gmail.
   For reply-all, use +reply-all instead.
   --sanitize screens the subject and body, quoted original included, before sending;
-  in block mode a match or a Model Armor failure sends nothing. --dry-run does not call Model Armor.",
+    in block mode a match or a Model Armor failure sends nothing. --dry-run does not call Model Armor.",
     )
 }
 
@@ -318,7 +318,7 @@ TIPS:
   Replies to the sender and all original To/CC recipients, excluding yourself.
   The command fails if no To recipient remains after exclusions and --to additions.
   --sanitize screens the subject and body, quoted original included, before sending;
-  in block mode a match or a Model Armor failure sends nothing. --dry-run does not call Model Armor.",
+    in block mode a match or a Model Armor failure sends nothing. --dry-run does not call Model Armor.",
     )
 }
 
@@ -361,7 +361,7 @@ TIPS:
   In plain-text mode, inline images are not included (matching Gmail web).
   Combined size of original and added attachments is limited to 25MB.
   --sanitize screens the subject, note and forwarded message before sending;
-  in block mode a match or a Model Armor failure sends nothing. --dry-run does not call Model Armor.",
+    in block mode a match or a Model Armor failure sends nothing. --dry-run does not call Model Armor.",
     )
 }
 
@@ -708,9 +708,9 @@ EXAMPLES:
 TIPS:
   Requires the gmail.settings.basic scope (gwsr auth login --scopes gmail.settings.basic).
   Label names must already exist. Deleting a filter always requires --yes;
-  a filter with --forward requires it when GWSR_REQUIRE_CONFIRM=1.
+    a filter with --forward requires it when GWSR_REQUIRE_CONFIRM=1.
   With --sanitize, create screens the new filter before creating it (block mode:
-  a match or a Model Armor failure creates nothing); list screens its output.",
+    a match or a Model Armor failure creates nothing); list screens its output.",
         )
 }
 
@@ -728,13 +728,13 @@ EXAMPLES:
 
 TIPS:
   One-click unsubscribe is performed only when the message advertises
-  List-Unsubscribe-Post: List-Unsubscribe=One-Click with an https URL and
-  Gmail verified its DKIM signature. Otherwise the available unsubscribe
-  links are printed and nothing is sent.
+    List-Unsubscribe-Post: List-Unsubscribe=One-Click with an https URL and
+    Gmail verified its DKIM signature. Otherwise the available unsubscribe
+    links are printed and nothing is sent.
   With --sanitize, the unsubscribe URL is screened before the POST (block mode:
-  a match or a Model Armor failure sends nothing).
+    a match or a Model Armor failure sends nothing).
   --dry-run loads no credentials and reads nothing: it shows the metadata
-  read and the one-click POST, with the URL as a placeholder.",
+    read and the one-click POST, with the URL as a placeholder.",
     )
 }
 
@@ -896,8 +896,8 @@ EXAMPLES:
 
 TIPS:
   stdout carries one JSON message per line. Transient errors are retried with
-  backoff and reported as single-line JSON on stderr; the watcher exits after
-  --max-failures consecutive failures. Delivery is at-least-once.
+    backoff and reported as single-line JSON on stderr; the watcher exits after
+    --max-failures consecutive failures. Delivery is at-least-once.
   Gmail watch expires after 7 days; re-run to renew. Press Ctrl-C to stop.",
         )
 }

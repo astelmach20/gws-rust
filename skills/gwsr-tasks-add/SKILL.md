@@ -44,8 +44,7 @@ gwsr tasks +add --title 'File taxes' --due 2026-04-15 --notes 'Use the new form'
 
 ## Tips
 
-- The Tasks API keeps only the due date; a --due with a time other than
-- midnight is rejected rather than silently truncated.
+- The Tasks API keeps only the due date; a --due with a time other than midnight is rejected rather than silently truncated.
 
 ## See Also
 

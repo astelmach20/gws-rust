@@ -46,8 +46,7 @@ gwsr docs +read --document-id DOC_ID --output - | less
 ## Tips
 
 - Read-only. Prints JSON {documentId, title, bodyFormat, body} by default.
-- Headings, lists, bold/italic/strikethrough, inline code, links and tables
-- are rendered; images appear as [image] placeholders.
+- Headings, lists, bold/italic/strikethrough, inline code, links and tables are rendered; images appear as [image] placeholders.
 - Only the first tab of multi-tab documents is read.
 
 ## See Also

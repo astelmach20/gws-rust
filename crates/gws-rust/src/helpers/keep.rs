@@ -58,7 +58,7 @@ EXAMPLES:
 
 TIPS:
   Read-only. The Keep API is only available to Workspace accounts and
-  usually requires a service account with domain-wide delegation.",
+    usually requires a service account with domain-wide delegation.",
                 ),
         )
     }

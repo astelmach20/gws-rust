@@ -48,12 +48,8 @@ cat notes.md | gwsr docs +write --document-id DOC_ID --markdown --text-file -
 
 ## Tips
 
-- Without --markdown the text is appended verbatim to the last paragraph;
-- start it with a newline to begin a new paragraph.
-- With --markdown the content starts on a new paragraph and headings,
-- bold/italic/strikethrough, inline and fenced code, links, block quotes,
-- horizontal rules and (nested) bullet/numbered lists become native Docs
-- formatting. Tables, images and raw HTML are rejected with an error.
+- Without --markdown the text is appended verbatim to the last paragraph; start it with a newline to begin a new paragraph.
+- With --markdown the content starts on a new paragraph and headings, bold/italic/strikethrough, inline and fenced code, links, block quotes, horizontal rules and (nested) bullet/numbered lists become native Docs formatting. Tables, images and raw HTML are rejected with an error.
 
 > [!CAUTION]
 > This is a **write** command — confirm with the user before executing.

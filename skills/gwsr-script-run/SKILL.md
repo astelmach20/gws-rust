@@ -46,8 +46,7 @@ gwsr script +run --script-id SCRIPT_ID --function add --args '[1, 2]' --dev-mode
 
 ## Tips
 
-- The project must be deployed as an API executable and share a Cloud
-- project with your OAuth client. Prints the function's return value.
+- The project must be deployed as an API executable and share a Cloud project with your OAuth client. Prints the function's return value.
 - A script error fails the command with the script's message and stack.
 
 > [!CAUTION]

@@ -46,8 +46,7 @@ printf '%s' "$PW" | gwsr admin +user-create --email ann@example.com --given-name
 
 ## Tips
 
-- Without --password-file a random 24-character password is generated and
-- printed once as initialPassword; share it over a secure channel.
+- Without --password-file a random 24-character password is generated and printed once as initialPassword; share it over a secure channel.
 - The user must change the password at first sign-in unless --no-password-change.
 
 ## See Also
