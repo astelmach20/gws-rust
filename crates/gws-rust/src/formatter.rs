@@ -776,7 +776,9 @@ fn format_csv(
             page,
         );
     } else {
-        return Ok(csv_cell(value));
+        // A lone scalar is a one-field record, quoted by the writer like
+        // every other field (a comma or line break must not split it).
+        std::slice::from_ref(value)
     };
 
     // Every record has the same number of fields: strict readers (pandas,
@@ -1326,6 +1328,33 @@ mod tests {
     fn csv_flat_scalars() {
         let val = json!(["plain", "has,comma"]);
         assert_eq!(fmt(&val, OutputFormat::Csv), "plain\n\"has,comma\"");
+    }
+
+    /// A lone scalar (a `--jq` result, a `--page-items` item) is one CSV
+    /// field, quoted like any other: a comma, quote or line break in it must
+    /// not split it into several fields or records.
+    #[test]
+    fn csv_single_scalar_is_one_quoted_field() {
+        for (value, expected) in [
+            (json!("has,comma"), "\"has,comma\""),
+            (json!("say \"hi\""), "\"say \"\"hi\"\"\""),
+            (json!("line one\nline two"), "\"line one\nline two\""),
+            (json!("=1+1"), "'=1+1"),
+            (json!("plain"), "plain"),
+            (json!(-5), "-5"),
+        ] {
+            assert_eq!(fmt(&value, OutputFormat::Csv), expected, "{value}");
+        }
+        let settings = OutputSettings {
+            jq: Some(JqFilter::compile(".name").unwrap()),
+            ..Default::default()
+        };
+        assert_eq!(
+            fmt_with(&json!({"name": "Doe, Jane"}), OutputFormat::Csv, &settings),
+            "\"Doe, Jane\""
+        );
+        let (out, _) = stream_items(&[json!("a,b"), json!("c")], OutputFormat::Csv, &plain());
+        assert_eq!(out, ["\"a,b\"", "c"]);
     }
 
     #[test]
