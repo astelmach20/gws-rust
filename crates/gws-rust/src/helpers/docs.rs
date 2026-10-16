@@ -555,6 +555,39 @@ mod tests {
     }
 
     #[test]
+    fn text_file_drops_a_utf8_bom() {
+        // Windows editors save UTF-8 with a BOM. Kept, it is an invisible
+        // character in the document and, with --markdown, it stops the first
+        // line from being read as a heading.
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("notes.md");
+        std::fs::write(&file, "\u{feff}# Title\r\n\r\nBody\r\n").unwrap();
+        let file = file.to_str().unwrap();
+        let m = parse(&[
+            "gwsr",
+            "+write",
+            "--document-id",
+            "D",
+            "--text-file",
+            file,
+            "--markdown",
+        ]);
+        let c = Content::parse(m.subcommand_matches("+write").unwrap())
+            .unwrap()
+            .unwrap();
+        assert_eq!(c.text, "# Title\r\n\r\nBody\r\n");
+        let reqs = markdown::render(&c.text).unwrap().to_requests(1, false);
+        assert_eq!(reqs[0]["insertText"]["text"], "Title\nBody");
+        assert!(
+            reqs.iter().any(
+                |r| r.pointer("/updateParagraphStyle/paragraphStyle/namedStyleType")
+                    == Some(&json!("HEADING_1"))
+            ),
+            "{reqs:?}"
+        );
+    }
+
+    #[test]
     fn create_markdown_without_content_is_error() {
         let m = parse(&["gwsr", "+create", "--title", "T", "--markdown"]);
         assert!(Content::parse(m.subcommand_matches("+create").unwrap()).is_err());
