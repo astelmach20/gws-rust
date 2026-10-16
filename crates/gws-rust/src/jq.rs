@@ -26,8 +26,15 @@ use crate::error::GwsError;
 
 type Data = data::JustLut<Val>;
 
-/// jq builtins `--jq` does not offer (see [`JqFilter::compile`]).
-const DISABLED_FUNS: &[&str] = &["env"];
+/// Native jq builtins `--jq` does not offer (see [`JqFilter::compile`]).
+///
+/// - `env` returns the whole process environment.
+/// - `stderr_empty` and `debug_empty` write a value to stderr unsanitized.
+const DISABLED_FUNS: &[&str] = &["env", "stderr_empty", "debug_empty"];
+
+/// jq-defined builtins `--jq` does not offer: every definition that calls
+/// one of the stderr-writing natives in [`DISABLED_FUNS`].
+const DISABLED_DEFS: &[&str] = &["stderr", "debug", "halt_error"];
 
 /// A compiled jq filter.
 pub struct JqFilter {
@@ -48,11 +55,20 @@ impl JqFilter {
     pub fn compile(expr: &str) -> Result<Self, GwsError> {
         let defs = jaq_core::defs()
             .chain(jaq_std::defs())
-            .chain(jaq_json::defs());
+            .chain(jaq_json::defs())
+            .filter(|def| !DISABLED_DEFS.contains(&def.name));
         // jq's `env` returns the whole process environment, secrets such as
         // `GWSR_TOKEN` and `GWSR_CLIENT_SECRET` included, which gwsr never
         // prints. A `--jq` expression (often written by an LLM) must not be
         // able to put them on stdout, so `env` is left undefined.
+        //
+        // `stderr`, `debug` and `halt_error` write their input to stderr
+        // as is, bypassing `output::sanitize_for_terminal`: an API string
+        // with escape sequences (a message subject, a file name) would reach
+        // the terminal raw. They and their natives are left undefined too,
+        // so an expression using them fails to compile. jq's `input`/`inputs`
+        // need an input stream, which `--jq` never provides; jaq's std
+        // leaves them undefined here already.
         let funs = jaq_core::funs()
             .chain(jaq_std::funs())
             .chain(jaq_json::funs())
@@ -247,6 +263,36 @@ mod tests {
         assert_eq!(
             run("now | type", json!(null)).unwrap(),
             vec![json!("number")]
+        );
+    }
+
+    /// `stderr`, `debug` and `halt_error` write a value straight to the
+    /// terminal, bypassing gwsr's sanitization, so an API string carrying
+    /// escape sequences could drive the terminal. They are not defined.
+    /// `input`/`inputs` have no input stream under `--jq` and stay undefined.
+    #[test]
+    fn terminal_writing_builtins_are_not_available() {
+        for expr in [
+            "stderr",
+            ".name | stderr",
+            "debug",
+            "debug(\"msg\")",
+            "debug(.name)",
+            "halt_error",
+            "halt_error(1)",
+            "input",
+            "inputs",
+            "[limit(1; inputs)]",
+        ] {
+            let err = JqFilter::compile(expr).unwrap_err();
+            assert!(matches!(err, GwsError::Validation(_)), "{expr}: {err:?}");
+            assert!(err.to_string().contains("undefined name"), "{expr}: {err}");
+        }
+        // Defining a function of the same name is still allowed: it cannot
+        // reach the removed natives.
+        assert_eq!(
+            run("def debug: .; debug", json!(1)).unwrap(),
+            vec![json!(1)]
         );
     }
 }
