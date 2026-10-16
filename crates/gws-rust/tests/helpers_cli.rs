@@ -629,6 +629,25 @@ fn upload_rejects_paths_outside_cwd() {
 }
 
 #[test]
+fn upload_convert_of_unconvertible_type_is_a_validation_error_before_auth() {
+    // No credentials exist here: `--convert` of a type no Google format
+    // imports is a validation error (exit 3), not an auth error (2).
+    let dir = setup();
+    std::fs::write(dir.path().join("blob.bin"), "data").unwrap();
+    let out = gwsr(dir.path())
+        .args(["drive", "+upload", "--file", "blob.bin", "--convert"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(3),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(String::from_utf8_lossy(&out.stderr).contains("--convert"));
+}
+
+#[test]
 fn drive_share_rejects_bad_flag_combinations_before_confirm_and_auth() {
     // No credentials exist here, and ownership transfers always need
     // confirmation: a flag combination the helper can never send is a
