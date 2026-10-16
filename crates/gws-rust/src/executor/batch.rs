@@ -61,6 +61,9 @@ pub(crate) struct BatchCall<'a> {
     /// Path and query relative to the API host, e.g. `/drive/v3/files/1?fields=id`.
     pub path_and_query: String,
     pub body: Option<Value>,
+    /// Whether this call may be sent more than once: its HTTP method is
+    /// idempotent, or it carries a `requestId` the API de-duplicates on.
+    pub idempotent: bool,
     /// The confirmation gate this call needs, from its method and params.
     pub impact: Option<crate::confirm::Impact>,
 }
@@ -299,12 +302,14 @@ pub(crate) fn parse_calls<'a>(
             )));
         }
         let impact = crate::confirm::method_impact(method, &params);
+        let idempotent = super::idempotency(&params, &body).resolve(&http);
         calls.push(BatchCall {
             id,
             method,
             http,
             path_and_query,
             body,
+            idempotent,
             impact,
         });
     }
@@ -509,9 +514,10 @@ async fn send_group(
 ) -> Result<Vec<PartResponse>, GwsError> {
     let boundary = format!("gwsr_batch_{:016x}", rand::random::<u64>());
     let (content_type, body) = build_batch_body(chunk, &boundary)?;
-    let all_idempotent = chunk
-        .iter()
-        .all(|c| matches!(c.http, Method::GET | Method::PUT | Method::DELETE));
+    // The batch request is re-sent as a whole, so it may be retried only
+    // when every call in it is safe to repeat (a POST with a `requestId`
+    // the API de-duplicates on counts, as for a single call).
+    let all_idempotent = chunk.iter().all(|c| c.idempotent);
     let idem = if all_idempotent {
         Idempotency::Idempotent
     } else {
