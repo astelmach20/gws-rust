@@ -44,14 +44,29 @@ fn int64_number(format: Option<&str>, n: &serde_json::Number) -> bool {
     }
 }
 
-/// Whether `s` is a valid proto3 JSON string form of an integer property of
-/// Discovery `format` `int32`, `uint32` (or no format: any 64-bit integer).
-fn integer_string(format: Option<&str>, s: &str) -> bool {
+/// Whether `v` is in range for an integer property of Discovery `format`
+/// `int32`, `uint32` (or no format: any 64-bit integer, signed or unsigned).
+fn integer_in_range(format: Option<&str>, v: i128) -> bool {
     match format {
-        Some("int32") => s.parse::<i32>().is_ok(),
-        Some("uint32") => s.parse::<u32>().is_ok(),
-        _ => s.parse::<i64>().is_ok() || s.parse::<u64>().is_ok(),
+        Some("int32") => i32::try_from(v).is_ok(),
+        Some("uint32") => u32::try_from(v).is_ok(),
+        _ => i64::try_from(v).is_ok() || u64::try_from(v).is_ok(),
     }
+}
+
+/// Whether `n` is a valid JSON number for an integer property: a whole
+/// number (`1.0` is a float, refused) in the range of its `format`.
+fn integer_number(format: Option<&str>, n: &serde_json::Number) -> bool {
+    n.as_i64()
+        .map(i128::from)
+        .or_else(|| n.as_u64().map(i128::from))
+        .is_some_and(|v| integer_in_range(format, v))
+}
+
+/// Whether `s` is a valid proto3 JSON string form of an integer property,
+/// with the same range check as [`integer_number`] (`"1.0"` is refused).
+fn integer_string(format: Option<&str>, s: &str) -> bool {
+    s.parse::<i128>().is_ok_and(|v| integer_in_range(format, v))
 }
 
 /// Whether `s` is a valid proto3 JSON string form of a `double` or `float`:
@@ -193,7 +208,7 @@ impl Checker<'_> {
                 // Discovery types 64-bit integers as strings; the API's JSON
                 // parser takes them as numbers too (proto3 JSON mapping).
                 ("string", Value::Number(n)) => int64_number(prop.format.as_deref(), n),
-                ("integer", Value::Number(n)) => n.is_i64() || n.is_u64(),
+                ("integer", Value::Number(n)) => integer_number(prop.format.as_deref(), n),
                 // Proto3 JSON also takes integers and floating-point numbers
                 // as strings ("5", "1.5", "NaN", "Infinity").
                 ("integer", Value::String(s)) => integer_string(prop.format.as_deref(), s),
@@ -513,6 +528,50 @@ mod tests {
         ] {
             let msg = check(body.clone()).unwrap_err().to_string();
             assert!(msg.contains(needle), "{body}: {msg}");
+        }
+    }
+
+    /// An `int32`/`uint32` field gets the same range check whether its value
+    /// is a JSON number or its proto3 JSON string form, and a fraction such as
+    /// `1.0` is refused in both forms.
+    #[test]
+    fn int32_and_uint32_numbers_are_range_checked_like_strings() {
+        let doc: RestDescription = serde_json::from_value(json!({
+            "name": "x", "version": "v1", "rootUrl": "https://x.googleapis.com/",
+            "schemas": { "Req": { "id": "Req", "type": "object", "properties": {
+                "count": { "type": "integer", "format": "int32" },
+                "size": { "type": "integer", "format": "uint32" },
+                "plain": { "type": "integer" }
+            } } }
+        }))
+        .unwrap();
+        let check = |body: Value| validate_body(&body, "Req", &doc, false);
+        for body in [
+            json!({"count": 2147483647, "size": 4294967295u64}),
+            json!({"count": -2147483648, "size": 0}),
+            json!({"count": "2147483647", "size": "4294967295"}),
+            json!({"plain": 9223372036854775807i64}),
+            json!({"plain": 18446744073709551615u64}),
+            json!({"plain": -9223372036854775808i64}),
+        ] {
+            check(body.clone()).unwrap_or_else(|e| panic!("{body}: {e}"));
+        }
+        for body in [
+            json!({"count": 5000000000i64}),
+            json!({"count": "5000000000"}),
+            json!({"count": 2147483648i64}),
+            json!({"count": -2147483649i64}),
+            json!({"count": 1.0}),
+            json!({"count": "1.0"}),
+            json!({"size": -1}),
+            json!({"size": "-1"}),
+            json!({"size": 4294967296u64}),
+            json!({"size": "4294967296"}),
+            json!({"size": 1.0}),
+            json!({"plain": 1.0}),
+        ] {
+            let msg = check(body.clone()).unwrap_err().to_string();
+            assert!(msg.contains("Expected type 'integer'"), "{body}: {msg}");
         }
     }
 
