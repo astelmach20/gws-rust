@@ -123,23 +123,41 @@ fn render_paragraph(p: &Value, document: &Value, markdown: bool, out: &mut Strin
         }
     }
     flush(&mut line, &mut pending);
-    // A vertical tab is a line break inside the paragraph (Shift+Enter).
-    // Markdown needs a hard break (`\` before the newline) to keep it; a
-    // trailing one has nothing to break and would leave a literal `\`, also
-    // when only white space follows it (Markdown drops that anyway).
-    let line = if markdown {
-        escape_line_starts(
-            &line
-                .trim_end_matches(|c: char| c == '\u{000b}' || c.is_whitespace())
-                .replace('\u{000b}', "\\\n"),
-        )
-    } else {
-        line.replace('\u{000b}', "\n")
-    };
     let style = p
         .pointer("/paragraphStyle/namedStyleType")
         .and_then(Value::as_str)
         .unwrap_or("NORMAL_TEXT");
+    let heading_prefix = match style {
+        _ if p.get("bullet").is_some() => "",
+        "TITLE" | "HEADING_1" => "# ",
+        "SUBTITLE" | "HEADING_2" => "## ",
+        "HEADING_3" => "### ",
+        "HEADING_4" => "#### ",
+        "HEADING_5" => "##### ",
+        "HEADING_6" => "###### ",
+        _ => "",
+    };
+    // A vertical tab is a line break inside the paragraph (Shift+Enter).
+    // Markdown needs a hard break (`\` before the newline) to keep it; a
+    // trailing one has nothing to break and would leave a literal `\`, also
+    // when only white space follows it (Markdown drops that anyway). An ATX
+    // heading is a single line, so there the break becomes a space: a newline
+    // would end the heading with a literal `\` and turn the rest into a
+    // paragraph.
+    let line = if markdown {
+        let line_break = if heading_prefix.is_empty() {
+            "\\\n"
+        } else {
+            " "
+        };
+        escape_line_starts(
+            &line
+                .trim_end_matches(|c: char| c == '\u{000b}' || c.is_whitespace())
+                .replace('\u{000b}', line_break),
+        )
+    } else {
+        line.replace('\u{000b}', "\n")
+    };
 
     if let Some(bullet) = p.get("bullet") {
         let level = bullet
@@ -165,19 +183,10 @@ fn render_paragraph(p: &Value, document: &Value, markdown: bool, out: &mut Strin
         return;
     }
     if markdown {
-        let prefix = match style {
-            "TITLE" | "HEADING_1" => "# ",
-            "SUBTITLE" | "HEADING_2" => "## ",
-            "HEADING_3" => "### ",
-            "HEADING_4" => "#### ",
-            "HEADING_5" => "##### ",
-            "HEADING_6" => "###### ",
-            _ => "",
-        };
         if line.trim().is_empty() {
             out.push('\n');
         } else {
-            out.push_str(&format!("{prefix}{line}\n\n"));
+            out.push_str(&format!("{heading_prefix}{line}\n\n"));
         }
     } else {
         out.push_str(&line);
@@ -670,6 +679,49 @@ mod tests {
         assert_eq!(
             render(&document, false),
             "one\ntwo\ntrailing\n\n- item\n- more\n"
+        );
+    }
+
+    #[test]
+    fn line_breaks_in_headings_stay_in_the_heading() {
+        // An ATX heading is one line: a hard break would end it with a
+        // literal backslash and make the rest a separate paragraph.
+        use pulldown_cmark::{Event, HeadingLevel, Parser, Tag, TagEnd};
+        let heading = |style: &str, t: &str| {
+            json!({"paragraph": {
+                "paragraphStyle": {"namedStyleType": style},
+                "elements": [{"textRun": {"content": t}}]
+            }})
+        };
+        let document = json!({"body": {"content": [
+            heading("TITLE", "Q3 review\u{000b}All regions\n"),
+            heading("HEADING_2", "Part\u{000b}- one\u{000b}\n"),
+        ]}});
+        let md = render(&document, true);
+        assert_eq!(md, "# Q3 review All regions\n\n## Part - one\n\n");
+        let mut headings = Vec::new();
+        let mut outside = Vec::new();
+        let mut current: Option<String> = None;
+        for event in Parser::new(&md) {
+            match event {
+                Event::Start(Tag::Heading { level, .. }) => {
+                    assert!(matches!(level, HeadingLevel::H1 | HeadingLevel::H2));
+                    current = Some(String::new());
+                }
+                Event::Text(t) => match &mut current {
+                    Some(h) => h.push_str(&t),
+                    None => outside.push(t.to_string()),
+                },
+                Event::End(TagEnd::Heading(_)) => headings.extend(current.take()),
+                _ => {}
+            }
+        }
+        assert_eq!(headings, ["Q3 review All regions", "Part - one"]);
+        assert!(outside.is_empty(), "text outside a heading: {outside:?}");
+        // Plain text keeps the line break.
+        assert_eq!(
+            render(&document, false),
+            "Q3 review\nAll regions\nPart\n- one\n\n"
         );
     }
 
