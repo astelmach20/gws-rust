@@ -211,13 +211,30 @@ fn is_display_request(e: &clap::Error) -> bool {
 
 /// Print help/version text to stdout (exit status 0).
 fn print_display(e: &clap::Error) -> Result<(), CliError> {
+    let text = display_text(
+        e,
+        output::stdout_is_terminal(),
+        output::no_color(),
+        output::console_renders_ansi,
+    );
+    output::emit(text.trim_end()).map_err(CliError::from)
+}
+
+/// Help/version text, styled only for a terminal that renders ANSI codes
+/// (not a Windows console without virtual terminal processing, which would
+/// print them as `←[1m`) and without `NO_COLOR`.
+fn display_text(
+    e: &clap::Error,
+    terminal: bool,
+    no_color: bool,
+    renders_ansi: impl FnOnce() -> bool,
+) -> String {
     let styled = e.render();
-    let text = if output::stdout_is_terminal() && !output::no_color() {
+    if output::color_enabled(terminal, no_color, renders_ansi) {
         styled.ansi().to_string()
     } else {
         styled.to_string()
-    };
-    output::emit(text.trim_end()).map_err(CliError::from)
+    }
 }
 
 /// Parse the static top-level command line. `Ok(None)` means help or version
@@ -604,6 +621,22 @@ fn resolve_method_from_matches<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `--help` on a console that prints escape sequences literally (a
+    /// Windows console without VT processing) is plain text.
+    #[test]
+    fn help_is_styled_only_for_a_console_that_renders_ansi() {
+        let help = clap::Command::new("gwsr")
+            .arg(clap::Arg::new("flag").long("flag").help("A flag"))
+            .try_get_matches_from(["gwsr", "--help"])
+            .unwrap_err();
+        assert!(display_text(&help, true, false, || true).contains('\x1b'));
+        let plain = display_text(&help, true, false, || false);
+        assert!(!plain.contains('\x1b'), "{plain:?}");
+        assert!(plain.contains("--flag"), "{plain}");
+        assert!(!display_text(&help, false, false, || true).contains('\x1b'));
+        assert!(!display_text(&help, true, true, || true).contains('\x1b'));
+    }
 
     #[test]
     fn test_resolve_method_from_matches_basic() {

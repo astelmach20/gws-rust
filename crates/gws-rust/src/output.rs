@@ -84,7 +84,11 @@ fn no_color_requested(value: Option<&std::ffi::OsStr>) -> bool {
 /// Whether to color: a terminal, no `NO_COLOR`, and a console that turns
 /// escape sequences into color (asked last, since asking may change the
 /// console's mode).
-fn color_enabled(terminal: bool, no_color: bool, renders_ansi: impl FnOnce() -> bool) -> bool {
+pub(crate) fn color_enabled(
+    terminal: bool,
+    no_color: bool,
+    renders_ansi: impl FnOnce() -> bool,
+) -> bool {
     terminal && !no_color && renders_ansi()
 }
 
@@ -95,13 +99,13 @@ fn color_enabled(terminal: bool, no_color: bool, renders_ansi: impl FnOnce() -> 
 /// for consoles that accepted the mode, and for terminals such as mintty
 /// that set `TERM`).
 #[cfg(windows)]
-fn console_renders_ansi() -> bool {
+pub(crate) fn console_renders_ansi() -> bool {
     crossterm::ansi_support::supports_ansi()
 }
 
 /// Unix terminals render ANSI sequences.
 #[cfg(not(windows))]
-fn console_renders_ansi() -> bool {
+pub(crate) fn console_renders_ansi() -> bool {
     true
 }
 
