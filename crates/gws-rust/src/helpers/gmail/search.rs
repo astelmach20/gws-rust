@@ -47,7 +47,9 @@ pub(super) struct SearchResults {
 }
 
 /// List message IDs page by page until `max` is reached or results run out,
-/// then fetch metadata for each. Any failed request fails the whole search.
+/// then fetch metadata for each. A message deleted between the listing and
+/// its fetch (404) is no longer a result: it is skipped with a warning, as
+/// `+watch` does. Any other failed request fails the whole search.
 pub(super) async fn search(
     api: &GmailApi,
     params: &SearchParams,
@@ -100,11 +102,24 @@ pub(super) async fn search(
         }
     }
 
-    let messages = stream::iter(ids)
-        .map(|id| async move { api.get_message(&id, "metadata", SUMMARY_HEADERS).await })
+    let fetched: Vec<Option<Value>> = stream::iter(ids)
+        .map(|id| async move {
+            match api.get_message(&id, "metadata", SUMMARY_HEADERS).await {
+                Ok(m) => Ok(Some(m)),
+                Err(GwsError::Api { code: 404, .. }) => {
+                    tracing::warn!(
+                        "Message {} was deleted after it was listed; skipping it",
+                        sanitize_for_terminal(&id)
+                    );
+                    Ok(None)
+                }
+                Err(e) => Err(e),
+            }
+        })
         .buffered(FETCH_CONCURRENCY)
         .try_collect()
         .await?;
+    let messages = fetched.into_iter().flatten().collect();
 
     Ok(SearchResults {
         messages,
@@ -384,6 +399,44 @@ mod tests {
         assert!(err.to_string().contains("'same' twice"), "{err}");
     }
 
+    /// A message deleted between `messages.list` and `messages.get` is
+    /// skipped; the rest of the results are still returned.
+    #[tokio::test]
+    async fn search_skips_a_message_deleted_after_listing() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/gmail/v1/users/me/messages"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "messages": [{"id": "m1"}, {"id": "m2"}, {"id": "m3"}],
+                "resultSizeEstimate": 3
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/gmail/v1/users/me/messages/m2"))
+            .respond_with(ResponseTemplate::new(404).set_body_json(json!({"error": {
+                "code": 404, "message": "Requested entity was not found.",
+                "errors": [{"reason": "notFound"}]
+            }})))
+            .with_priority(1)
+            .mount(&server)
+            .await;
+        mount_messages(&server).await;
+        let params = SearchParams {
+            query: None,
+            max: 5,
+            page_token: None,
+            include_spam_trash: false,
+        };
+        let results = search(&mock_api(&server), &params).await.unwrap();
+        let ids: Vec<&str> = results
+            .messages
+            .iter()
+            .map(|m| m["id"].as_str().unwrap())
+            .collect();
+        assert_eq!(ids, ["m1", "m3"]);
+    }
+
     #[tokio::test]
     async fn search_fails_loudly_when_a_message_fetch_fails() {
         let server = MockServer::start().await;
@@ -396,7 +449,7 @@ mod tests {
             .await;
         Mock::given(method("GET"))
             .and(path("/gmail/v1/users/me/messages/m1"))
-            .respond_with(ResponseTemplate::new(404))
+            .respond_with(ResponseTemplate::new(403))
             .mount(&server)
             .await;
         let params = SearchParams {
@@ -406,7 +459,7 @@ mod tests {
             include_spam_trash: false,
         };
         let err = search(&mock_api(&server), &params).await.unwrap_err();
-        assert!(matches!(err, GwsError::Api { code: 404, .. }));
+        assert!(matches!(err, GwsError::Api { code: 403, .. }), "{err:?}");
     }
 
     #[tokio::test]
