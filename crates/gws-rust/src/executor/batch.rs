@@ -24,7 +24,7 @@
 //! `method` is the resource path plus method name (the service prefix is
 //! optional). Output is NDJSON, one line per call, in input order:
 //! `{"id": ..., "status": 200, "body": ...}`. Calls are grouped into batches
-//! of at most 100 (Google's limit). The command fails (exit 1) when any call
+//! of at most 100 (Google's limit; 50 for Classroom, see [`batch_limit`]). The command fails (exit 1) when any call
 //! failed, after printing every result. With `--sanitize`, every result body
 //! is screened by Model Armor before it is printed, as for a single call.
 
@@ -48,6 +48,19 @@ use crate::transport::{Credentials, Transport, read_body};
 
 /// Google's maximum number of calls per batch request.
 pub(crate) const MAX_BATCH: usize = 100;
+
+/// APIs that accept fewer than [`MAX_BATCH`] calls per batch request, and
+/// their limit. Classroom: "You're limited to 50 calls in a single batch
+/// request." A larger request is rejected as a whole.
+const SMALLER_BATCH_LIMITS: &[(&str, usize)] = &[("classroom", 50)];
+
+/// The most calls one batch request to `doc`'s API may carry.
+pub(crate) fn batch_limit(doc: &RestDescription) -> usize {
+    SMALLER_BATCH_LIMITS
+        .iter()
+        .find(|(api, _)| *api == doc.name)
+        .map_or(MAX_BATCH, |(_, limit)| *limit)
+}
 
 /// The keys an input line may carry.
 const LINE_KEYS: &[&str] = &["id", "method", "params", "json"];
@@ -633,8 +646,9 @@ pub(crate) async fn run_batch(
     // stream: NDJSON, or one CSV/table header followed by one row per line.
     let format = crate::formatter::default_format();
     let mut pages = crate::formatter::PageStream::items();
+    let limit = batch_limit(doc);
     if options.dry_run {
-        for chunk in calls.chunks(MAX_BATCH) {
+        for chunk in calls.chunks(limit) {
             let (content_type, body) = build_batch_body(chunk, "batch_dry_run")?;
             emitter.page(
                 &json!({"dry_run": true, "url": batch_url, "contentType": content_type, "body": body}),
@@ -681,8 +695,8 @@ pub(crate) async fn run_batch(
     )?;
     let auth = credentials.auth_method();
     let mut failures = 0usize;
-    for (group, chunk) in calls.chunks(MAX_BATCH).enumerate() {
-        let not_sent = &calls[(group * MAX_BATCH + chunk.len()).min(calls.len())..];
+    for (group, chunk) in calls.chunks(limit).enumerate() {
+        let not_sent = &calls[(group * limit + chunk.len()).min(calls.len())..];
         let parts = match send_group(&transport, &batch_url, chunk, options, &auth).await {
             Ok(parts) => parts,
             Err(e) => {

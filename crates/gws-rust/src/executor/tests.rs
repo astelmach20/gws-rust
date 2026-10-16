@@ -2831,3 +2831,64 @@ fn batch_ids_must_be_unique() {
     };
     assert!(err.contains("duplicate id \"2\""), "{err}");
 }
+
+/// Classroom accepts at most 50 calls per batch request and rejects a larger
+/// one as a whole, so its calls are split into groups of 50 (other APIs
+/// keep Google's usual 100), in input order.
+#[tokio::test]
+async fn batch_splits_classroom_calls_into_groups_of_50() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/batch/drive/v3"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_raw(batch_parts(1, 50), "multipart/mixed; boundary=b"),
+        )
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/batch/drive/v3"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_raw(batch_parts(51, 10), "multipart/mixed; boundary=b"),
+        )
+        .mount(&server)
+        .await;
+    let mut d = doc(&server.uri());
+    d.name = "classroom".into();
+    assert_eq!(batch::batch_limit(&d), 50);
+    assert_eq!(batch::batch_limit(&doc(&server.uri())), 100);
+    let opts = options(&server);
+    let input: String = (1..=60)
+        .map(|i| format!("{{\"method\":\"files.get\",\"params\":{{\"fileId\":\"{i}\"}}}}\n"))
+        .collect();
+    let calls = batch::parse_calls(&d, &input, &opts).unwrap();
+    let em = Emitter::capturing();
+    batch::run_batch(
+        &d,
+        &calls,
+        Some(Credentials::Static("tok".into())),
+        &opts,
+        &SanitizeConfig::default(),
+        &em,
+    )
+    .await
+    .unwrap();
+    let ids: Vec<String> = lines(&em)
+        .iter()
+        .map(|l| l["id"].as_str().unwrap().to_string())
+        .collect();
+    let expected: Vec<String> = (1..=60).map(|i| i.to_string()).collect();
+    assert_eq!(ids, expected);
+    let sent = server.received_requests().await.unwrap();
+    let per_request: Vec<usize> = sent
+        .iter()
+        .map(|r| {
+            String::from_utf8_lossy(&r.body)
+                .matches("Content-ID:")
+                .count()
+        })
+        .collect();
+    assert_eq!(per_request, vec![50, 10]);
+}
