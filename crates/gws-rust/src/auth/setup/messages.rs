@@ -147,9 +147,17 @@ mod tests {
     fn in_use_guidance() {
         for out in [
             "Project ID already in use",
+            "ERROR: the project ID you specified already exists",
+            "ERROR: the project ID is already being used",
             "Project IDs are immutable and can be set only during project creation.",
         ] {
-            assert!(format_project_create_failure("p", "", out).contains("already in use"));
+            // Not just "already in use", which the raw gcloud output that
+            // the fallback echoes may contain too.
+            let msg = format_project_create_failure("p", "", out);
+            assert!(
+                msg.contains("because the ID is already in use"),
+                "{out}: {msg}"
+            );
         }
     }
 

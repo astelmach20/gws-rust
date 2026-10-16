@@ -408,7 +408,8 @@ mod tests {
                 Ok(c) => panic!("accepted {:?} from {json}", c.map(|c| c.client_id)),
                 Err(e) => format!("{e:#}"),
             };
-            assert!(err.contains(field), "{err}");
+            // Quoted: the file name `client_secret.json` is in every error.
+            assert!(err.contains(&format!("\"{field}\" in")), "{err}");
             assert!(!err.contains("\"cs"), "secret must not be echoed: {err}");
         }
         assert!(
