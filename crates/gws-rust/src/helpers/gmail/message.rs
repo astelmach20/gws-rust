@@ -320,10 +320,14 @@ fn decode_text_body(
             encoding_rs::UTF_8
         }
         Some(label) => match encoding_rs::Encoding::for_label(label.as_bytes()) {
-            Some(encoding) => encoding,
-            None => {
+            // encoding_rs maps the labels it cannot decode (ISO-2022-KR,
+            // HZ-GB-2312, ISO-2022-CN) to the replacement encoding, which
+            // turns the whole body into a single U+FFFD. UTF-8 at least
+            // keeps its ASCII text.
+            Some(encoding) if encoding != encoding_rs::REPLACEMENT => encoding,
+            _ => {
                 tracing::warn!(
-                    "{mime_label} body has unknown charset {:?}; decoding it as UTF-8",
+                    "{mime_label} body has unknown or unsupported charset {:?}; decoding it as UTF-8",
                     sanitize_for_terminal(label)
                 );
                 encoding_rs::UTF_8
@@ -1086,6 +1090,36 @@ mod tests {
                 extract_plain_text_body(&payload).unwrap(),
                 "caf\u{e9}",
                 "{ct}"
+            );
+        }
+    }
+
+    /// Charsets encoding_rs cannot decode map to its replacement encoding,
+    /// which would turn the whole body into one U+FFFD. They are decoded as
+    /// UTF-8 instead, so the ASCII text survives.
+    #[test]
+    fn test_unsupported_charset_body_keeps_its_ascii_text() {
+        for (ct, bytes) in [
+            (
+                "text/plain; charset=ISO-2022-KR",
+                b"\x1b$)C\x0e\x30\x21\x0f Meeting at 10:00, see https://example.com/agenda"
+                    .as_slice(),
+            ),
+            (
+                "text/plain; charset=hz-gb-2312",
+                b"~{<:Ky2;S{#,NpJ)l6HK!#~} Meeting at 10:00, see https://example.com/agenda"
+                    .as_slice(),
+            ),
+        ] {
+            let payload = json!({
+                "mimeType": "text/plain",
+                "headers": [{ "name": "Content-Type", "value": ct }],
+                "body": { "data": URL_SAFE.encode(bytes) }
+            });
+            let text = extract_plain_text_body(&payload).unwrap();
+            assert!(
+                text.contains("Meeting at 10:00, see https://example.com/agenda"),
+                "{ct}: {text:?}"
             );
         }
     }
