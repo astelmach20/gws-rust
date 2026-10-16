@@ -241,6 +241,47 @@ fn still_at_path(_file: &File, _path: &Path) -> io::Result<bool> {
     Ok(true)
 }
 
+/// Whether paths `a` and `b` name the same existing file (same device and
+/// inode, or volume and file index). A missing path is never the same file.
+/// On a case-insensitive file system two spellings that differ only in case
+/// are the same file; on a case-sensitive one they are not.
+#[cfg(unix)]
+pub fn same_file(a: &Path, b: &Path) -> io::Result<bool> {
+    use std::os::unix::fs::MetadataExt;
+    let (Some(a), Some(b)) = (metadata_if_exists(a)?, metadata_if_exists(b)?) else {
+        return Ok(false);
+    };
+    Ok(a.dev() == b.dev() && a.ino() == b.ino())
+}
+
+#[cfg(unix)]
+fn metadata_if_exists(path: &Path) -> io::Result<Option<std::fs::Metadata>> {
+    match std::fs::metadata(path) {
+        Ok(m) => Ok(Some(m)),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
+/// Whether paths `a` and `b` name the same existing file (see the Unix
+/// variant).
+#[cfg(windows)]
+pub fn same_file(a: &Path, b: &Path) -> io::Result<bool> {
+    let handle = |p: &Path| match same_file::Handle::from_path(p) {
+        Ok(h) => Ok(Some(h)),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e),
+    };
+    Ok(matches!((handle(a)?, handle(b)?), (Some(a), Some(b)) if a == b))
+}
+
+/// Other platforms: no file identity to compare, so two paths are never
+/// known to be one file.
+#[cfg(not(any(unix, windows)))]
+pub fn same_file(_a: &Path, _b: &Path) -> io::Result<bool> {
+    Ok(false)
+}
+
 impl Drop for FileLock {
     fn drop(&mut self) {
         // Closing the descriptor releases the lock too; unlocking explicitly
