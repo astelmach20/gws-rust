@@ -456,6 +456,18 @@ pub(crate) async fn execute_to(
             "--output cannot be combined with --page-all; redirect stdout instead".to_string(),
         ));
     }
+    // `-o -` streams the payload raw to stdout (`alt=media`, an export, any
+    // non-JSON body), where Model Armor cannot screen it. With `--sanitize`
+    // in effect (either mode) the combination is refused before anything is
+    // sent rather than passing the content through unscreened.
+    if sanitize.template.is_some() && matches!(output, Some(OutputTarget::Stdout)) {
+        return Err(GwsError::Validation(
+            "--sanitize cannot be combined with -o -: a payload streamed raw to stdout \
+             cannot be screened by Model Armor; pass -o PATH to save it to a file instead, \
+             or omit -o to print the JSON response screened"
+                .to_string(),
+        ));
+    }
     if upload.is_some() && page_all {
         return Err(GwsError::Validation(
             "--upload cannot be combined with --page-all".to_string(),
@@ -967,8 +979,10 @@ fn invalid_json_error(
 }
 
 /// Screen a text response inlined into the JSON output with Model Armor, like
-/// a JSON response. Summaries of bodies saved to a file (`-o PATH`) or
-/// streamed raw on request (`-o -`) carry no API content and pass unchanged.
+/// a JSON response. Summaries of bodies saved to a file (`-o PATH`) carry no
+/// API content and pass unchanged. `-o -` never gets here with `--sanitize`:
+/// `execute_to` refuses that combination up front, because the raw bytes it
+/// streams cannot be screened.
 async fn screen_inline(
     sanitize: &SanitizeConfig,
     output: Option<&OutputTarget>,
