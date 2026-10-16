@@ -391,7 +391,8 @@ struct Progress {
 impl Progress {
     fn new(total: u64) -> Self {
         Self {
-            enabled: std::io::stderr().is_terminal(),
+            // `-q`: errors only on stderr.
+            enabled: std::io::stderr().is_terminal() && !crate::logging::quiet(),
             total,
         }
     }

@@ -84,8 +84,12 @@ impl StreamPrinter {
     }
 }
 
-/// Write one diagnostic record to stderr as a single JSON line.
+/// Write one diagnostic record to stderr as a single JSON line. With `-q`
+/// only `error` records are written.
 pub(crate) fn emit_diagnostic(level: &str, event: &str, fields: Value) {
+    if level != "error" && crate::logging::quiet() {
+        return;
+    }
     let mut record = json!({ "level": level, "event": event });
     if let (Some(obj), Value::Object(extra)) = (record.as_object_mut(), fields) {
         obj.extend(extra);

@@ -124,8 +124,18 @@ fn create_private_dir(dir: &Path) -> Result<(), GwsError> {
     })
 }
 
+/// Set by [`init`] when `-q` was given.
+static QUIET: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Whether `-q` asked for errors only on stderr. Output that bypasses the
+/// tracing subscriber (stream diagnostics, progress bars) checks this.
+pub fn quiet() -> bool {
+    QUIET.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// Install the global tracing subscriber.
 pub fn init(opts: &LogOptions) -> Result<LogGuard, GwsError> {
+    QUIET.store(opts.verbosity < 0, std::sync::atomic::Ordering::Relaxed);
     let stderr_filter = parse_filter(&stderr_directive(opts))?;
     // Machine-readable by default: one JSON object per stderr line. `-v` or a
     // human output format switches to compact human lines.
