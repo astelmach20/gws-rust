@@ -412,15 +412,24 @@ mod tests {
             .respond_with(
                 ResponseTemplate::new(400).set_body_string(r#"{"error":"invalid_token"}"#),
             )
+            // Only the first logout revokes; --no-revoke sends nothing.
+            .expect(1)
             .mount(&server)
             .await;
         let env = logged_in_env(dir.path(), &server);
         let out = logout(&env, false).await.unwrap();
         assert!(out.revoke_error.is_none());
+        assert_eq!(out.report["revoked"], true, "{}", out.report);
+        assert_eq!(
+            out.report["revoke_note"], "the token was already expired or revoked",
+            "{}",
+            out.report
+        );
 
         let env = logged_in_env(dir.path(), &server);
         let out = logout(&env, true).await.unwrap();
         assert_eq!(out.report["revoked"], false);
+        assert_eq!(out.report["revoke_note"], "skipped (--no-revoke)");
         assert!(out.revoke_error.is_none());
     }
 
