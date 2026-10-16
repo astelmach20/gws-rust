@@ -590,7 +590,7 @@ pub(crate) async fn run_batch(
     // Every line honours --format, --jq and --columns like a paginated
     // stream: NDJSON, or one CSV/table header followed by one row per line.
     let format = crate::formatter::default_format();
-    let mut pages = crate::formatter::PageStream::default();
+    let mut pages = crate::formatter::PageStream::items();
     if options.dry_run {
         for chunk in calls.chunks(MAX_BATCH) {
             let (content_type, body) = build_batch_body(chunk, "batch_dry_run")?;
@@ -600,7 +600,7 @@ pub(crate) async fn run_batch(
                 &mut pages,
             )?;
         }
-        return Ok(());
+        return pages.finish();
     }
     if !destructive.is_empty() {
         options.gate().check(
@@ -702,7 +702,8 @@ pub(crate) async fn run_batch(
             enable_url: None,
         });
     }
-    Ok(())
+    // A `--columns` field that no result line had.
+    pages.finish()
 }
 
 #[cfg(test)]

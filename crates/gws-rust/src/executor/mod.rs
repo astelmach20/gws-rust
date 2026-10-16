@@ -522,7 +522,7 @@ pub(crate) async fn execute_to(
         captured: Vec::new(),
         // Whole pages, unless --page-items splits them into items.
         pages: if options.page_items.is_some() {
-            PageStream::default()
+            PageStream::items()
         } else {
             PageStream::list_pages()
         },
@@ -842,6 +842,8 @@ pub(crate) async fn execute_to(
         }
     }
 
+    // A `--columns` field that no `--page-items` item had.
+    out.pages.finish()?;
     Ok(out.finish())
 }
 

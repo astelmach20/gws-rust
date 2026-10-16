@@ -166,6 +166,13 @@ pub(crate) fn csv_text_cell(s: &str) -> String {
 /// already written. Such keys are omitted from CSV/table output, and a warning
 /// naming them is logged once per key (unless `--columns` chose the columns
 /// explicitly).
+///
+/// In a finite stream of items ([`PageStream::items`]: `--page-items`, `gwsr
+/// batch`), one item does not show which fields exist: APIs omit unset
+/// fields, so a `--columns` field missing from the first item is an empty
+/// cell, like in later items. A selected column that no item of the stream
+/// had is reported by [`PageStream::finish`] once the stream ends, so a typo
+/// still fails.
 #[derive(Debug, Default)]
 pub struct PageStream {
     /// The stream carries whole list pages (`--page-all`), not single items.
@@ -176,6 +183,10 @@ pub struct PageStream {
     started: bool,
     /// Late keys that have already been reported.
     omitted: Vec<String>,
+    /// A finite item stream: check `--columns` at [`PageStream::finish`].
+    defer_columns: bool,
+    /// `--columns` fields no rendered item has had yet.
+    unseen: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone)]
@@ -194,6 +205,16 @@ impl PageStream {
     pub fn list_pages() -> Self {
         Self {
             list_pages: true,
+            ..Self::default()
+        }
+    }
+
+    /// State for a finite stream of items (`--page-items`, `gwsr batch`) that
+    /// is [`finish`](PageStream::finish)ed: a `--columns` field missing from
+    /// the first item is not an error by itself.
+    pub fn items() -> Self {
+        Self {
+            defer_columns: true,
             ..Self::default()
         }
     }
@@ -221,6 +242,29 @@ impl PageStream {
             names.join(", ")
         );
         self.omitted.extend(new);
+    }
+
+    /// Item streams: note the `selected` columns this batch of rows has
+    /// (`keys` are every flattened key of the rows).
+    fn saw_columns(&mut self, selected: &[String], keys: &[String]) {
+        self.unseen
+            .get_or_insert_with(|| selected.to_vec())
+            .retain(|c| !keys.contains(c));
+    }
+
+    /// End of the stream: a `--columns` field that no item had is an error
+    /// (most likely a typo), reported after the rows that were printed.
+    pub fn finish(&self) -> Result<(), GwsError> {
+        match &self.unseen {
+            Some(unseen) if !unseen.is_empty() => {
+                let names: Vec<String> = unseen.iter().map(|c| sanitize_for_terminal(c)).collect();
+                Err(GwsError::Validation(format!(
+                    "--columns: no item had the column(s): {}",
+                    names.join(", ")
+                )))
+            }
+            _ => Ok(()),
+        }
     }
 
     /// Keys omitted from the output because they appeared after the header.
@@ -454,23 +498,26 @@ fn flatten(obj: &Map<String, Value>) -> Vec<(String, &Value)> {
     out
 }
 
-/// Rows of an array of objects: `(ordered column names, row maps, late keys)`.
+/// Rows of an array of objects: `(ordered column names, row maps, late keys,
+/// every key of the rows)`.
 ///
 /// With `selected`, only those columns are kept (in the given order); a
 /// selected column that appears in no row is an error so typos are not
-/// silently rendered as empty columns.
+/// silently rendered as empty columns, unless `defer_missing` (an item
+/// stream, which checks at its end: see [`PageStream::finish`]).
 ///
 /// With `fixed` (a later page of a paginated stream), the columns are exactly
 /// `fixed`; keys outside it are returned as late keys, except when `selected`
 /// chose the columns (then leaving the others out is what was asked for).
 type Row<'a> = std::collections::HashMap<String, &'a Value>;
 
-type Table<'a> = (Vec<String>, Vec<Row<'a>>, Vec<String>);
+type Table<'a> = (Vec<String>, Vec<Row<'a>>, Vec<String>, Vec<String>);
 
 fn tabulate<'a>(
     arr: &'a [Value],
     selected: Option<&[String]>,
     fixed: Option<&[String]>,
+    defer_missing: bool,
 ) -> Result<Table<'a>, GwsError> {
     let mut columns: Vec<String> = Vec::new();
     let mut rows = Vec::with_capacity(arr.len());
@@ -490,9 +537,13 @@ fn tabulate<'a>(
         let late = if selected.is_some() {
             Vec::new()
         } else {
-            columns.into_iter().filter(|c| !fixed.contains(c)).collect()
+            columns
+                .iter()
+                .filter(|c| !fixed.contains(c))
+                .cloned()
+                .collect()
         };
-        return Ok((fixed.to_vec(), rows, late));
+        return Ok((fixed.to_vec(), rows, late, columns));
     }
     if let Some(selected) = selected {
         let missing: Vec<&str> = selected
@@ -500,16 +551,16 @@ fn tabulate<'a>(
             .filter(|c| !columns.contains(c))
             .map(|c| c.as_str())
             .collect();
-        if !missing.is_empty() && !arr.is_empty() {
+        if !missing.is_empty() && !arr.is_empty() && !defer_missing {
             return Err(GwsError::Validation(format!(
                 "--columns: no such column(s): {}. Available: {}",
                 missing.join(", "),
                 columns.join(", ")
             )));
         }
-        columns = selected.to_vec();
+        return Ok((selected.to_vec(), rows, Vec::new(), columns));
     }
-    Ok((columns, rows, Vec::new()))
+    Ok((columns.clone(), rows, Vec::new(), columns))
 }
 
 const MAX_COLUMN_WIDTH: usize = 60;
@@ -620,8 +671,13 @@ fn format_array_as_table(
     }
 
     let fixed = page.as_ref().and_then(|p| p.layout());
-    let (raw_columns, rows, late) =
-        tabulate(arr, selected, fixed.as_ref().map(|l| l.columns.as_slice()))?;
+    let items = page.as_ref().is_some_and(|p| p.defer_columns);
+    let (raw_columns, rows, late, keys) = tabulate(
+        arr,
+        selected,
+        fixed.as_ref().map(|l| l.columns.as_slice()),
+        items,
+    )?;
     let columns: Vec<String> = raw_columns
         .iter()
         .map(|c| sanitize_for_terminal(c))
@@ -679,6 +735,9 @@ fn format_array_as_table(
         out.push('\n');
     }
     if let Some(p) = page {
+        if let (true, Some(selected)) = (items, selected) {
+            p.saw_columns(selected, &keys);
+        }
         p.record(
             Layout {
                 columns: raw_columns,
@@ -735,8 +794,13 @@ fn format_csv(
         }
     } else {
         let fixed = page.as_ref().and_then(|p| p.layout());
-        let (columns, rows, late) =
-            tabulate(arr, selected, fixed.as_ref().map(|l| l.columns.as_slice()))?;
+        let items = page.as_ref().is_some_and(|p| p.defer_columns);
+        let (columns, rows, late, keys) = tabulate(
+            arr,
+            selected,
+            fixed.as_ref().map(|l| l.columns.as_slice()),
+            items,
+        )?;
         if fixed.is_none() {
             let header: Vec<String> = columns.iter().map(|c| csv_text(c)).collect();
             writer.write_record(&header).map_err(csv_error)?;
@@ -749,6 +813,9 @@ fn format_csv(
             writer.write_record(&record).map_err(csv_error)?;
         }
         if let Some(p) = page {
+            if let (true, Some(selected)) = (items, selected) {
+                p.saw_columns(selected, &keys);
+            }
             p.record(
                 Layout {
                     columns,
@@ -1324,6 +1391,55 @@ mod tests {
             Some(&mut state),
         )
         .unwrap_err();
+        assert!(err.to_string().contains("no such column"), "{err}");
+    }
+
+    /// APIs omit unset fields, so in a stream of items the first item
+    /// lacking a `--columns` field (a Google Doc has no `size`) is an empty
+    /// cell, not an error that ends the stream.
+    #[test]
+    fn item_stream_columns_missing_from_the_first_item_are_empty_cells() {
+        let stream_items = |items: &[Value], format, settings: &OutputSettings| {
+            render_stream(PageStream::items(), items, format, settings)
+        };
+        let settings = OutputSettings {
+            columns: Some(vec!["name".into(), "size".into()]),
+            ..OutputSettings::default()
+        };
+        let items = [json!({"name": "doc"}), json!({"name": "f", "size": "3"})];
+        let (csv, state) = stream_items(&items, OutputFormat::Csv, &settings);
+        assert_eq!(csv, ["name,size\ndoc,", "f,3"]);
+        state.finish().unwrap();
+        let (table, state) = stream_items(&items, OutputFormat::Table, &settings);
+        assert_eq!(table, ["name  size\n────  ────\ndoc", "f     3"]);
+        state.finish().unwrap();
+    }
+
+    /// A `--columns` field that no item of the stream has is still an error
+    /// (most likely a typo), reported when the stream ends.
+    #[test]
+    fn item_stream_column_no_item_has_fails_at_the_end() {
+        let stream_items = |items: &[Value], format, settings: &OutputSettings| {
+            render_stream(PageStream::items(), items, format, settings)
+        };
+        let settings = OutputSettings {
+            columns: Some(vec!["name".into(), "nope".into()]),
+            ..OutputSettings::default()
+        };
+        let items = [json!({"name": "a"}), json!({"name": "b"})];
+        for format in [OutputFormat::Csv, OutputFormat::Table] {
+            let (_, state) = stream_items(&items, format, &settings);
+            let err = state.finish().unwrap_err();
+            assert!(matches!(err, GwsError::Validation(_)), "{err:?}");
+            assert!(err.to_string().contains("nope"), "{err}");
+            assert!(!err.to_string().contains("name"), "{err}");
+        }
+        // Without --columns there is nothing to check.
+        let (_, state) = stream_items(&items, OutputFormat::Csv, &plain());
+        state.finish().unwrap();
+        // A stream that never ends (`+watch`) still checks its first record.
+        let mut live = PageStream::default();
+        let err = render(&items[0], OutputFormat::Csv, &settings, Some(&mut live)).unwrap_err();
         assert!(err.to_string().contains("no such column"), "{err}");
     }
 

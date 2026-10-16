@@ -283,7 +283,7 @@ gwsr auth export --unmasked --output ci-credentials.json
 
 Table output escapes terminal control characters. CSV cells that start with a formula character get a `'` prefix.
 
-With `--page-all` or `--page-items`, `table` and `csv` print one header: the first page with rows fixes the columns (the `--columns` selection, or that page's fields), and every later row is aligned to them, with empty cells for missing fields. A field that first appears on a later page is left out, and a warning on stderr names it; pass `--columns` or use `--format json` to keep it.
+With `--page-all` or `--page-items`, `table` and `csv` print one header: the first page with rows fixes the columns (the `--columns` selection, or that page's fields), and every later row is aligned to them, with empty cells for missing fields. A field that first appears on a later page is left out, and a warning on stderr names it; pass `--columns` or use `--format json` to keep it. With `--page-items` and `gwsr batch`, a `--columns` field that an item lacks is an empty cell; a column that no item has fails the run (exit `3`) after the rows are printed.
 
 ### Errors
 
