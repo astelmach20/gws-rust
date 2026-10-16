@@ -85,8 +85,9 @@ fn main() -> ExitCode {
     // Before the config file is read, the error format comes from the flag or env.
     let early_human = human_output(prescan.format.as_deref(), env.format);
 
-    let cli = match parse_top_level(&args) {
-        Ok(Some(cli)) => cli,
+    // `cli` was parsed from `args`, rewritten for `gwsr help <path>`.
+    let (cli, args) = match parse_top_level(&args) {
+        Ok(Some(parsed)) => parsed,
         Ok(None) => return finish(Ok(()), early_human),
         Err(e) => return finish(Err(e), early_human),
     };
@@ -239,7 +240,12 @@ fn display_text(
 
 /// Parse the static top-level command line. `Ok(None)` means help or version
 /// was printed. `gwsr help <path>` is rewritten to `gwsr <path> --help`.
-fn parse_top_level(args: &[OsString]) -> Result<Option<Cli>, CliError> {
+///
+/// Returns the parsed command with the argv it was parsed from: the
+/// rewritten one for `gwsr help <path>`. A service command is parsed again
+/// from that argv, so it must not be handed the original one, whose words
+/// do not line up with the parsed service arguments.
+fn parse_top_level(args: &[OsString]) -> Result<Option<(Cli, Vec<OsString>)>, CliError> {
     let cli = match Cli::try_parse_from(args) {
         Ok(cli) => cli,
         Err(e) if is_display_request(&e) => {
@@ -249,7 +255,7 @@ fn parse_top_level(args: &[OsString]) -> Result<Option<Cli>, CliError> {
         Err(e) => return Err(e.into()),
     };
     let Some(TopCommand::Help { path }) = &cli.command else {
-        return Ok(Some(cli));
+        return Ok(Some((cli, args.to_vec())));
     };
     let bin = args
         .first()
@@ -267,7 +273,7 @@ fn parse_top_level(args: &[OsString]) -> Result<Option<Cli>, CliError> {
         }
         Err(e) => Err(e.into()),
         // `auth` and services handle `--help` themselves.
-        Ok(cli) => Ok(Some(cli)),
+        Ok(cli) => Ok(Some((cli, rewritten))),
     }
 }
 
@@ -759,9 +765,10 @@ mod tests {
                 .is_none()
         );
         // `gwsr help drive files` becomes `gwsr drive files --help`.
-        let cli = parse_top_level(&os(&["gwsr", "help", "drive", "files"]))
+        let (cli, argv) = parse_top_level(&os(&["gwsr", "help", "drive", "files"]))
             .unwrap()
             .unwrap();
+        assert_eq!(argv, os(&["gwsr", "drive", "files", "--help"]));
         match cli.command {
             Some(TopCommand::Service(args)) => {
                 assert_eq!(args, os(&["drive", "files", "--help"]));
