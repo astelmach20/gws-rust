@@ -246,6 +246,19 @@ pub fn login_command_hint(login: &str, scopes: &[String]) -> String {
     format!("{login} --scopes {list}")
 }
 
+/// The scope a sign-in hint names for a method that accepts any one of
+/// `method_scopes`: the first one a user login can be granted. App-only
+/// scopes (`chat.bot`, `chat.app.*`, `chat.import`) come first for many
+/// Chat methods, but Google refuses them in a user consent, so a hint naming
+/// one could never fix the failure. `None` when the method declares no
+/// scope; the first scope when every one is app-only.
+pub fn login_hint_scope(method_scopes: &[String]) -> Option<&String> {
+    method_scopes
+        .iter()
+        .find(|s| !is_app_only_scope(s))
+        .or_else(|| method_scopes.first())
+}
+
 /// Map a user-facing service name to OAuth scope short-name prefixes.
 pub fn service_scope_prefixes(service: &str) -> Vec<&str> {
     match service {
@@ -727,6 +740,26 @@ mod tests {
             "openid",
         ]));
         assert_eq!(out, s(&[&a("drive"), "openid"]));
+    }
+
+    #[test]
+    fn login_hint_scope_skips_app_only_scopes() {
+        // chat.spaces.messages.create: chat.bot and chat.import are app-only.
+        let create = s(&[
+            &a("chat.bot"),
+            &a("chat.import"),
+            &a("chat.messages"),
+            &a("chat.messages.create"),
+        ]);
+        assert_eq!(login_hint_scope(&create), Some(&a("chat.messages")));
+        let list = s(&[&a("chat.app.messages.readonly"), &a("chat.messages")]);
+        assert_eq!(login_hint_scope(&list), Some(&a("chat.messages")));
+        let drive = s(&[&a("drive"), &a("drive.file")]);
+        assert_eq!(login_hint_scope(&drive), Some(&a("drive")));
+        // Nothing a user can be granted: the first scope is still named.
+        let bot = s(&[&a("chat.bot")]);
+        assert_eq!(login_hint_scope(&bot), Some(&a("chat.bot")));
+        assert_eq!(login_hint_scope(&[]), None);
     }
 
     #[test]

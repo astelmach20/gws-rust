@@ -369,7 +369,10 @@ fn login_fix(ctx: &ErrorContext) -> String {
     if !ctx.helper_scopes.is_empty() {
         return crate::auth::scopes::login_command_hint(login, &missing_helper_scopes(ctx));
     }
-    match (ctx.required_scopes.first(), ctx.service.as_deref()) {
+    match (
+        crate::auth::scopes::login_hint_scope(&ctx.required_scopes),
+        ctx.service.as_deref(),
+    ) {
         (Some(scope), _) => {
             crate::auth::scopes::login_command_hint(login, std::slice::from_ref(scope))
         }
@@ -728,6 +731,33 @@ mod tests {
         let hint = hint_for(&api(403, "ACCESS_TOKEN_SCOPE_INSUFFICIENT"), &ctx).unwrap();
         assert!(hint.contains("gwsr auth status"), "{hint}");
         assert!(hint.contains("`gwsr auth login -s drive`"), "{hint}");
+    }
+
+    /// Chat methods list app-only scopes (chat.bot, chat.import) first;
+    /// Google refuses those in a user sign-in, so the fix names the first
+    /// scope a user can grant.
+    #[test]
+    fn login_fix_skips_app_only_scopes() {
+        let ctx = ErrorContext {
+            service: Some("chat".into()),
+            required_scopes: vec![
+                "https://www.googleapis.com/auth/chat.bot".into(),
+                "https://www.googleapis.com/auth/chat.import".into(),
+                "https://www.googleapis.com/auth/chat.messages".into(),
+            ],
+            ..Default::default()
+        };
+        for err in [
+            GwsError::Auth("x".into()),
+            api(403, "insufficientPermissions"),
+        ] {
+            let hint = hint_for(&err, &ctx).unwrap();
+            assert!(
+                hint.contains("`gwsr auth login --scopes chat.messages`"),
+                "{hint}"
+            );
+            assert!(!hint.contains("--scopes chat.bot"), "{hint}");
+        }
     }
 
     /// The fix in a hint signs in to the profile the failed command used.
