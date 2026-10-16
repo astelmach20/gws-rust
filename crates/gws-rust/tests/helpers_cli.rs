@@ -1918,6 +1918,119 @@ fn gmail_unsubscribe_dry_run_needs_no_credentials() {
     assert_eq!(reqs[1]["body"], "List-Unsubscribe=One-Click");
 }
 
+/// An original without a Message-ID header can still be replied to and
+/// forwarded: the draft has no In-Reply-To, keeps the original's References
+/// chain (RFC 5322 §3.6.4), and stays in the original's Gmail thread.
+#[tokio::test(flavor = "multi_thread")]
+async fn gmail_reply_and_forward_an_original_without_a_message_id() {
+    use base64::Engine as _;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    // (original's extra headers, expected References)
+    type Original<'a> = (&'a [(&'a str, &'a str)], Option<&'a str>);
+    let originals: [Original<'_>; 2] = [
+        (&[], None),
+        (
+            &[("References", "<root@example.com>")],
+            Some("<root@example.com>"),
+        ),
+    ];
+    for (extra, want_refs) in originals {
+        let mut headers = vec![
+            json!({"name": "From", "value": "alice@example.com"}),
+            json!({"name": "To", "value": "me@example.com"}),
+            json!({"name": "Subject", "value": "Plan"}),
+        ];
+        headers.extend(
+            extra
+                .iter()
+                .map(|(name, value)| json!({"name": name, "value": value})),
+        );
+        let original = json!({
+            "id": "M1",
+            "threadId": "T1",
+            "payload": {
+                "mimeType": "text/plain",
+                "headers": headers,
+                "body": {"data": base64::engine::general_purpose::URL_SAFE.encode("Original")}
+            }
+        });
+        for verb in [
+            vec!["+reply", "--body", "Hi"],
+            vec!["+reply-all", "--body", "Hi"],
+            vec!["+forward", "--to", "dave@example.com"],
+        ] {
+            let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .and(path("/gmail/v1/users/me/messages/M1"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(&original))
+                .mount(&server)
+                .await;
+            Mock::given(method("GET"))
+                .and(path("/gmail/v1/users/me/profile"))
+                .respond_with(
+                    ResponseTemplate::new(200)
+                        .set_body_json(json!({"emailAddress": "me@example.com"})),
+                )
+                .mount(&server)
+                .await;
+            Mock::given(method("GET"))
+                .and(path("/gmail/v1/users/me/settings/sendAs"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({"sendAs": [
+                    {"sendAsEmail": "me@example.com", "isPrimary": true, "isDefault": true}
+                ]})))
+                .mount(&server)
+                .await;
+            Mock::given(method("POST"))
+                .and(path("/upload/gmail/v1/users/me/drafts"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id": "D1"})))
+                .expect(1)
+                .mount(&server)
+                .await;
+            let dir = setup();
+            seed(dir.path(), "gmail", "v1", "");
+
+            let out = gwsr(dir.path())
+                .env("GWSR_TOKEN", "test-token")
+                .env("GWSR_API_BASE_URL", server.uri())
+                .env("HTTPS_PROXY", "http://127.0.0.1:9")
+                .args(["gmail"])
+                .args(&verb)
+                .args(["--message-id", "M1", "--draft"])
+                .output()
+                .unwrap();
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            assert!(out.status.success(), "{verb:?}: {stderr}");
+            assert!(
+                stderr.contains("no Message-ID header"),
+                "{verb:?}: {stderr}"
+            );
+
+            let requests = server.received_requests().await.unwrap();
+            let upload = requests
+                .iter()
+                .find(|r| r.url.path().ends_with("/drafts"))
+                .unwrap();
+            let body = String::from_utf8_lossy(&upload.body);
+            assert!(body.contains(r#""threadId":"T1""#), "{verb:?}: {body}");
+            let raw_headers = body.split("\r\n\r\n").nth(2).unwrap().to_ascii_lowercase();
+            let header = |name: &str| {
+                raw_headers
+                    .lines()
+                    .find_map(|l| l.strip_prefix(&format!("{name}: ")))
+                    .map(str::to_string)
+            };
+            assert_eq!(header("in-reply-to"), None, "{verb:?}: {raw_headers}");
+            assert_eq!(
+                header("references").as_deref(),
+                want_refs,
+                "{verb:?}: {raw_headers}"
+            );
+        }
+    }
+}
+
 #[test]
 fn gmail_threading_helpers_reject_non_api_message_ids() {
     let dir = setup();
