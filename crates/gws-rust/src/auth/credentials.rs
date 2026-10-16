@@ -21,6 +21,7 @@
 //! 3. the active profile's encrypted credentials (`gwsr auth login`)
 //! 4. `GOOGLE_APPLICATION_CREDENTIALS`
 //! 5. `~/.config/gcloud/application_default_credentials.json`
+//!    (`%APPDATA%\gcloud\application_default_credentials.json` on Windows)
 //!
 //! Once a source exists it is used or the command fails: a broken encrypted
 //! credentials file never silently falls through to another identity, and a
@@ -184,13 +185,28 @@ fn process_adc_paths() -> (Option<PathBuf>, Option<PathBuf>) {
     let from_env = std::env::var_os("GOOGLE_APPLICATION_CREDENTIALS")
         .filter(|v| !v.is_empty())
         .map(PathBuf::from);
-    // gcloud always uses ~/.config/gcloud, even on macOS and Windows.
-    let well_known = dirs::home_dir().map(|h| {
-        h.join(".config")
-            .join("gcloud")
-            .join("application_default_credentials.json")
-    });
+    let well_known = gcloud_adc_file(cfg!(windows), dirs::home_dir(), dirs::config_dir());
     (from_env, well_known)
+}
+
+/// gcloud's Application Default Credentials file. gcloud keeps its
+/// configuration in `~/.config/gcloud` on Linux and macOS, but in
+/// `%APPDATA%\gcloud` (the roaming application-data directory, `roaming`)
+/// on Windows, where nothing reads `~/.config`.
+fn gcloud_adc_file(
+    windows: bool,
+    home: Option<PathBuf>,
+    roaming: Option<PathBuf>,
+) -> Option<PathBuf> {
+    let config = if windows {
+        roaming
+    } else {
+        home.map(|h| h.join(".config"))
+    };
+    config.map(|c| {
+        c.join("gcloud")
+            .join("application_default_credentials.json")
+    })
 }
 
 /// Unit tests never read the developer's gcloud credentials.
@@ -474,6 +490,33 @@ mod tests {
         };
         let paths = ProfilePaths::new(dir, DEFAULT_PROFILE);
         AuthEnv::new(dir.to_path_buf(), profile, paths)
+    }
+
+    /// `gcloud auth application-default login` writes to `%APPDATA%\gcloud`
+    /// on Windows; looking in `~/.config/gcloud` there never finds it.
+    #[test]
+    fn gcloud_adc_file_follows_gclouds_config_dir() {
+        let home = PathBuf::from("home");
+        let roaming = PathBuf::from("roaming");
+        let file = |windows| gcloud_adc_file(windows, Some(home.clone()), Some(roaming.clone()));
+        assert_eq!(
+            file(true),
+            Some(
+                roaming
+                    .join("gcloud")
+                    .join("application_default_credentials.json")
+            )
+        );
+        assert_eq!(
+            file(false),
+            Some(
+                home.join(".config")
+                    .join("gcloud")
+                    .join("application_default_credentials.json")
+            )
+        );
+        assert_eq!(gcloud_adc_file(true, Some(home), None), None);
+        assert_eq!(gcloud_adc_file(false, None, Some(roaming)), None);
     }
 
     fn write_private(path: &Path, contents: &str) {
