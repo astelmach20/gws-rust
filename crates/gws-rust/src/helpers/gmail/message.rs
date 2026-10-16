@@ -337,6 +337,10 @@ fn decode_text_body(
         {
             encoding_rs::UTF_8
         }
+        // RFC 2781 §4.3: `charset=utf-16` text without a byte-order mark is
+        // big-endian. (encoding_rs follows WHATWG, which maps the label to
+        // UTF-16LE.) A BOM still decides the byte order below.
+        Some(label) if label.trim().eq_ignore_ascii_case("utf-16") => encoding_rs::UTF_16BE,
         Some(label) => match encoding_rs::Encoding::for_label(label.as_bytes()) {
             // encoding_rs maps the labels it cannot decode (ISO-2022-KR,
             // HZ-GB-2312, ISO-2022-CN) to the replacement encoding, which
@@ -1153,6 +1157,42 @@ mod tests {
             (
                 "text/plain; charset=utf-16",
                 b"\xFF\xFEH\x00i\x00 \x00c\x00a\x00f\x00\xE9\x00".to_vec(),
+            ),
+        ] {
+            let payload = json!({
+                "mimeType": "text/plain",
+                "headers": [{ "name": "Content-Type", "value": ct }],
+                "body": { "data": URL_SAFE.encode(&bytes) }
+            });
+            assert_eq!(
+                extract_plain_text_body(&payload).unwrap(),
+                "Hi caf\u{e9}",
+                "{ct}: {bytes:02X?}"
+            );
+        }
+    }
+
+    /// A `charset=utf-16` body without a byte-order mark is big-endian
+    /// (RFC 2781 §4.3). The explicit `utf-16le` / `utf-16be` labels keep
+    /// their own byte order.
+    #[test]
+    fn test_utf16_body_without_bom_is_big_endian() {
+        for (ct, bytes) in [
+            (
+                "text/plain; charset=utf-16",
+                b"\x00H\x00i\x00 \x00c\x00a\x00f\x00\xE9".to_vec(),
+            ),
+            (
+                "text/plain; charset=\"UTF-16\"",
+                b"\x00H\x00i\x00 \x00c\x00a\x00f\x00\xE9".to_vec(),
+            ),
+            (
+                "text/plain; charset=utf-16be",
+                b"\x00H\x00i\x00 \x00c\x00a\x00f\x00\xE9".to_vec(),
+            ),
+            (
+                "text/plain; charset=utf-16le",
+                b"H\x00i\x00 \x00c\x00a\x00f\x00\xE9\x00".to_vec(),
             ),
         ] {
             let payload = json!({
