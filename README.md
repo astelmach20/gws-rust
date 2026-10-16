@@ -392,7 +392,7 @@ File path flags (`-o`, `--upload`, `--output-dir`, `--dir`, `@file`) accept any 
 
 ### Long-running operations
 
-`--wait` polls a returned long-running operation through the API's `operations.get` until it finishes, then prints its result. `--wait-timeout SECS` sets the limit (default 600). A failed operation is an error.
+`--wait` polls a returned long-running operation through the API's `operations.get` until it finishes, then prints its result. `--wait-timeout SECS` sets the limit (default 600). A failed operation is an error. The flag appears only on methods whose result that `operations.get` can poll, so APIs that poll elsewhere (Compute Engine's `zoneOperations`, for example) do not offer it.
 
 ### Batch
 
