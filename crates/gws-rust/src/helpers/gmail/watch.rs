@@ -267,10 +267,8 @@ impl GmailWatchStep<'_> {
             // iteration before anything is emitted or acknowledged.
             match sanitize_value(self.sanitize, msg)
                 .await
-                .map_err(|e| StepError::Transient {
-                    status: None,
-                    message: e.to_string(),
-                })? {
+                .map_err(StepError::Transient)?
+            {
                 Sanitized::Pass(v) => self.output(&id, &v).await?,
                 Sanitized::Blocked(result) => emit_diagnostic(
                     "warning",
