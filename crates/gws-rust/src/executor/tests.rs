@@ -2612,6 +2612,9 @@ async fn batch_retries_a_post_only_when_it_carries_a_request_id() {
     for (body, expected_requests) in [
         (json!({"name": "x", "requestId": "r-1"}), 2),
         (json!({"name": "x"}), 1),
+        // A blank requestId names nothing to de-duplicate on.
+        (json!({"name": "x", "requestId": ""}), 1),
+        (json!({"name": "x", "requestId": "  "}), 1),
     ] {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
@@ -2830,6 +2833,27 @@ fn batch_ids_must_be_unique() {
         Err(e) => e.to_string(),
     };
     assert!(err.contains("duplicate id \"2\""), "{err}");
+}
+
+/// Only a non-blank `requestId` makes a POST safe to repeat: an empty or
+/// null one gives the API nothing to de-duplicate on, so a retry after a
+/// 503 could apply the call twice.
+#[test]
+fn a_blank_or_null_request_id_does_not_make_a_post_idempotent() {
+    let params = |v: Value| v.as_object().cloned().unwrap();
+    for (p, body, idempotent) in [
+        (json!({"requestId": "r-1"}), None, true),
+        (json!({}), Some(json!({"requestId": "r-1"})), true),
+        (json!({"requestId": ""}), None, false),
+        (json!({"requestId": " "}), None, false),
+        (json!({"requestId": null}), None, false),
+        (json!({}), Some(json!({"requestId": ""})), false),
+        (json!({}), Some(json!({"requestId": null})), false),
+        (json!({}), None, false),
+    ] {
+        let got = idempotency(&params(p.clone()), &body).resolve(&reqwest::Method::POST);
+        assert_eq!(got, idempotent, "{p} {body:?}");
+    }
 }
 
 /// Classroom accepts at most 50 calls per batch request and rejects a larger

@@ -367,13 +367,16 @@ fn append_point(document: &Value) -> Result<(u64, bool), GwsError> {
 
 async fn write_markdown(api: &Api, document_id: &str, md: &str) -> Result<Value, GwsError> {
     let rendered = markdown::render(md)?;
+    // The read is sent (and so planned) in both modes: a dry run lists every
+    // request a real run makes, but cannot know the end index it returns.
+    let document = get_document(api, document_id).await?;
     let (index, needs_break) = if api.is_dry_run() {
         api.plan_note(json!({
-            "note": "the real run first reads the document to find its end index; this plan assumes an empty document (index 1)"
+            "note": "the real run finds the end index from the document read above; this plan assumes an empty document (index 1)"
         }))?;
         (1, false)
     } else {
-        append_point(&get_document(api, document_id).await?)?
+        append_point(&document)?
     };
     let requests = rendered.to_requests(index, needs_break);
     api.send(batch_update_request(api, document_id, requests))
@@ -631,6 +634,42 @@ mod tests {
     fn create_markdown_without_content_is_error() {
         let m = parse(&["gwsr", "+create", "--title", "T", "--markdown"]);
         assert!(Content::parse(m.subcommand_matches("+create").unwrap()).is_err());
+    }
+
+    #[tokio::test]
+    async fn markdown_write_dry_run_plans_the_document_read() {
+        // A real run reads the document for its end index before the
+        // batchUpdate; the dry-run plan lists that read too.
+        let api = dry_api("");
+        write(
+            &api,
+            "DOC",
+            &Content {
+                text: "**b**".into(),
+                markdown: true,
+            },
+        )
+        .await
+        .unwrap();
+        let requests: Vec<Value> = api
+            .planned()
+            .into_iter()
+            .filter(|p| p.get("url").is_some())
+            .collect();
+        assert_eq!(requests.len(), 2, "{requests:?}");
+        assert_eq!(requests[0]["method"], "GET");
+        assert!(
+            requests[0]["url"]
+                .as_str()
+                .unwrap()
+                .ends_with("/v1/documents/DOC")
+        );
+        assert!(
+            requests[1]["url"]
+                .as_str()
+                .unwrap()
+                .ends_with("/v1/documents/DOC:batchUpdate")
+        );
     }
 
     #[tokio::test]

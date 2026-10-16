@@ -167,12 +167,13 @@ pub fn complete_if_requested() -> Result<bool, clap::Error> {
 }
 
 /// Replace the top-level `auth` passthrough argument with the real `gwsr auth`
-/// tree, which `auth` parses on its own, so completion and man pages cover its
-/// subcommands and flags. The top-level description is kept.
+/// tree, which `auth` parses on its own, so completion, man pages and the
+/// `gwsr commands` inventory cover its subcommands and flags. The top-level
+/// description is kept.
 ///
 /// `auth setup` is a passthrough inside that tree as well (it parses its own
 /// flags), so it is replaced by the command `setup` actually parses with.
-fn with_auth_tree(root: Command) -> Command {
+pub(crate) fn with_auth_tree(root: Command) -> Command {
     root.mut_subcommands(|sub| {
         if sub.get_name() != "auth" {
             return sub;

@@ -332,6 +332,80 @@ fn load_cached_is_offline_and_returns_stale_docs() {
     assert_eq!(DiscoveryLoader::new().clear_cache().unwrap(), 0);
 }
 
+/// A loader for `my_api` (not a DNS label, so only the directory endpoint is
+/// tried) against `base`, with the given retry policy (`None`: the default).
+fn single_url_loader(base: &str, policy: Option<crate::client::RetryPolicy>) -> DiscoveryLoader {
+    let loader = DiscoveryLoader {
+        discovery_base: Some(Url::parse(&format!("{base}/")).unwrap()),
+        ..DiscoveryLoader::default()
+    };
+    match policy {
+        Some(policy) => loader.with_retry_policy(policy),
+        None => loader,
+    }
+}
+
+/// The default policy is the installed process-wide request timeout
+/// (`GWSR_TIMEOUT` / `timeout_secs`), not a fixed 60 seconds. This is the only
+/// test in this binary that installs it.
+#[tokio::test]
+async fn default_policy_uses_the_installed_request_timeout() {
+    crate::client::install_request_timeout(Some(Duration::from_millis(200))).unwrap();
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/discovery/v1/apis/my_api/v1/rest"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_string(r#"{"name":"my_api","version":"v1"}"#)
+                .set_delay(Duration::from_secs(20)),
+        )
+        .mount(&server)
+        .await;
+    let loader = single_url_loader(&server.uri(), None);
+    let result = tokio::time::timeout(Duration::from_secs(15), loader.load("my_api", "v1"))
+        .await
+        .expect("the installed timeout must bound the fetch");
+    let err = result.unwrap_err();
+    assert!(matches!(err, DiscoveryError::Fetch { .. }), "{err:?}");
+}
+
+/// A body that stalls is bounded by the policy's response timeout, not a
+/// fixed 60-second total.
+#[tokio::test]
+async fn a_stalled_body_is_bounded_by_the_policy_timeout() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (mut sock, _) = listener.accept().await.unwrap();
+        let mut buf = [0u8; 4096];
+        let _read = sock.read(&mut buf).await.unwrap();
+        sock.write_all(
+            b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 1000\r\n\r\n{\"name\":",
+        )
+        .await
+        .unwrap();
+        sock.flush().await.unwrap();
+        // Hold the connection open without sending the rest of the body.
+        tokio::time::sleep(Duration::from_secs(120)).await;
+        drop(sock);
+    });
+    let loader = single_url_loader(
+        &format!("http://{addr}"),
+        Some(crate::client::RetryPolicy {
+            max_attempts: 1,
+            response_timeout: Some(Duration::from_millis(200)),
+            ..crate::client::RetryPolicy::default()
+        }),
+    );
+    let result = tokio::time::timeout(Duration::from_secs(10), loader.load("my_api", "v1"))
+        .await
+        .expect("the policy timeout must bound the body read");
+    server.abort();
+    let err = result.unwrap_err();
+    assert!(err.to_string().contains("no data received"), "{err}");
+}
+
 /// On a case-insensitive file system (the macOS and Windows defaults)
 /// `Drive+v3.json` is the cache file of `drive`. Loading `Drive:v3` must
 /// treat it as a miss, not as a corrupt entry: deleting it threw away the
