@@ -914,8 +914,8 @@ async fn export(
 // ── +move ────────────────────────────────────────────────────────────
 
 async fn move_file(api: &Api, file_id: &str, folder_id: &str) -> Result<Value, GwsError> {
-    let current_parents = if api.is_dry_run() {
-        "<current parents>".to_string()
+    let (dest, current_parents) = if api.is_dry_run() {
+        (folder_id.to_string(), "<current parents>".to_string())
     } else {
         let meta = get_metadata(api, file_id).await?;
         let parents: Vec<&str> = meta
@@ -923,19 +923,24 @@ async fn move_file(api: &Api, file_id: &str, folder_id: &str) -> Result<Value, G
             .and_then(Value::as_array)
             .map(|a| a.iter().filter_map(Value::as_str).collect())
             .unwrap_or_default();
-        if parents.contains(&folder_id) && parents.len() == 1 {
+        // `parents` holds real IDs, never an alias such as `root`: compare
+        // them with the destination's real ID, or a move into the folder the
+        // file is already in would ask Drive to remove that very folder.
+        let dest = folder_real_id(api, folder_id).await?;
+        if parents.contains(&dest.as_str()) && parents.len() == 1 {
             return Err(GwsError::Validation(format!(
                 "File is already in folder {folder_id}"
             )));
         }
-        parents
+        let others = parents
             .into_iter()
-            .filter(|p| *p != folder_id)
+            .filter(|p| *p != dest)
             .collect::<Vec<_>>()
-            .join(",")
+            .join(",");
+        (dest, others)
     };
     let mut req = ApiRequest::patch(api.url(&format!("files/{}", encode_path_segment(file_id))))
-        .query("addParents", folder_id)
+        .query("addParents", dest)
         .query("supportsAllDrives", "true")
         .query("fields", FILE_FIELDS)
         .json(json!({}));
@@ -943,6 +948,19 @@ async fn move_file(api: &Api, file_id: &str, folder_id: &str) -> Result<Value, G
         req = req.query("removeParents", current_parents);
     }
     api.send(req).await
+}
+
+/// The real ID of the folder `folder_id` names, which may be an alias
+/// (`root`, the user's My Drive).
+async fn folder_real_id(api: &Api, folder_id: &str) -> Result<String, GwsError> {
+    let meta = api
+        .send(
+            ApiRequest::get(api.url(&format!("files/{}", encode_path_segment(folder_id))))
+                .query("supportsAllDrives", "true")
+                .query("fields", "id"),
+        )
+        .await?;
+    Ok(str_field(&meta, "id")?.to_string())
 }
 
 // ── +share ───────────────────────────────────────────────────────────
@@ -2300,8 +2318,62 @@ mod tests {
             .expect(1)
             .mount(&server)
             .await;
+        Mock::given(method("GET"))
+            .and(path("/drive/v3/files/DEST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id": "DEST"})))
+            .mount(&server)
+            .await;
         let api = api(&server.uri(), "drive/v3/");
         move_file(&api, "F1", "DEST").await.unwrap();
+    }
+
+    /// Mounts a file `F1` with `parents` and the `root` alias resolving to
+    /// `0AROOT`, as Drive answers `files.get` for `root`.
+    async fn mount_move_to_root(server: &MockServer, parents: Value) {
+        Mock::given(method("GET"))
+            .and(path("/drive/v3/files/F1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(
+                json!({"id": "F1", "name": "a", "mimeType": "text/plain", "parents": parents}),
+            ))
+            .mount(server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/drive/v3/files/root"))
+            .and(query_param("fields", "id"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id": "0AROOT"})))
+            .mount(server)
+            .await;
+    }
+
+    /// `parents` holds real IDs, never `root`: moving a file that is only in
+    /// My Drive's root to `root` must not ask Drive to remove it from there.
+    #[tokio::test]
+    async fn move_to_the_root_alias_compares_the_real_root_id() {
+        let server = MockServer::start().await;
+        mount_move_to_root(&server, json!(["0AROOT"])).await;
+        Mock::given(method("PATCH"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id": "F1"})))
+            .expect(0)
+            .mount(&server)
+            .await;
+        let api = api(&server.uri(), "drive/v3/");
+        let err = move_file(&api, "F1", "root").await.unwrap_err();
+        assert!(matches!(err, GwsError::Validation(_)), "{err:?}");
+        assert!(err.to_string().contains("already in folder root"), "{err}");
+
+        // In root and elsewhere: only the other parent is removed.
+        let server = MockServer::start().await;
+        mount_move_to_root(&server, json!(["0AROOT", "P2"])).await;
+        Mock::given(method("PATCH"))
+            .and(path("/drive/v3/files/F1"))
+            .and(query_param("addParents", "0AROOT"))
+            .and(query_param("removeParents", "P2"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id": "F1"})))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let api = super::super::http::test_support::api(&server.uri(), "drive/v3/");
+        move_file(&api, "F1", "root").await.unwrap();
     }
 
     #[test]
