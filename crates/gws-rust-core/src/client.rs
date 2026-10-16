@@ -442,7 +442,7 @@ async fn classify(
             method: method.clone(),
             url: url.to_string(),
             status,
-            source,
+            source: source.without_url(),
         })?;
     let rate_limited = is_rate_limit_body(&body);
     let response = rebuild_response(status, version, headers, body);
@@ -481,7 +481,8 @@ pub async fn send(
     loop {
         attempt += 1;
         let (client, request) = build().build_split();
-        let request = request.map_err(SendError::Build)?;
+        // reqwest errors print their full URL; the query is redacted below.
+        let request = request.map_err(|e| SendError::Build(e.without_url()))?;
         let method = request.method().clone();
         let url = redact_url(request.url());
         let idempotent = idempotency.resolve(&method);
@@ -498,6 +499,8 @@ pub async fn send(
         let response = match outcome {
             Ok(response) => response,
             Err(Some(err)) => {
+                // reqwest's message names the full URL, query string included.
+                let err = err.without_url();
                 // Connect errors mean nothing was sent; any method may retry.
                 let retryable = err.is_connect() || (idempotent && err.is_timeout());
                 if retryable && can_retry {
@@ -979,6 +982,39 @@ mod tests {
             SendError::Transport { attempts, .. } => assert_eq!(attempts, 4),
             other => panic!("unexpected error: {other}"),
         }
+    }
+
+    /// reqwest's own error message names the full URL; the query string
+    /// (an API key, a search term, a resumable upload_id) must not reach the
+    /// error message or a debug log through it.
+    #[tokio::test]
+    async fn transport_error_does_not_echo_the_query_string() {
+        let port = {
+            let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            l.local_addr().unwrap().port()
+        };
+        let client = shared_client().unwrap();
+        let url = format!("http://127.0.0.1:{port}/r?key=FAKE-api-key&q=private-term");
+        let err = send(&fast_policy(), Idempotency::FromMethod, || client.get(&url))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, SendError::Transport { .. }), "{err}");
+        let mut chain = vec![err.to_string(), format!("{err:?}")];
+        let mut source = std::error::Error::source(&err);
+        while let Some(e) = source {
+            chain.push(e.to_string());
+            source = e.source();
+        }
+        for text in chain {
+            assert!(
+                !text.contains("FAKE-api-key") && !text.contains("private-term"),
+                "{text}"
+            );
+        }
+        assert!(
+            err.to_string().contains(&format!("127.0.0.1:{port}/r")),
+            "{err}"
+        );
     }
 
     #[tokio::test]
