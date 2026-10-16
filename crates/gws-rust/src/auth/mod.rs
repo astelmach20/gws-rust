@@ -103,8 +103,10 @@ pub enum AuthError {
     )]
     TokenEndpointUnavailable { status: u16, detail: String },
     /// The token endpoint answered a 5xx that is not retryable (501, 505,
-    /// ...): a permanent failure on Google's side. The credential itself was
-    /// not rejected, and retrying unchanged will not help.
+    /// ...), or another error status without an OAuth error body (an HTML
+    /// page or empty body from a proxy or captive portal): a permanent
+    /// failure that is no verdict on the credential. The credential itself
+    /// was not rejected, and retrying unchanged will not help.
     #[error(
         "Google's OAuth token endpoint failed (HTTP {status}): {detail}. The credentials were \
          not rejected; this status is not retryable"
