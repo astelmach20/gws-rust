@@ -161,6 +161,24 @@ fn filter_subscriptions_to_reactivate(subs: &[Value]) -> Result<Vec<String>, Gws
     Ok(result)
 }
 
+/// The error for a renewal whose long-running operation finished with an
+/// `error` (a `google.rpc.Status`).
+fn failed_operation(name: &str, reactivate: bool, err: &Value) -> GwsError {
+    let (code, status) = crate::executor::operation::status_code(err);
+    let verb = if reactivate { "reactivate" } else { "renew" };
+    GwsError::Api {
+        code,
+        message: format!(
+            "Failed to {verb} {name}: the operation failed ({status}): {}",
+            err.get("message")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown error")
+        ),
+        reason: "operationFailed".to_string(),
+        enable_url: None,
+    }
+}
+
 /// Workspace Events client (base URL injectable for tests).
 struct EventsApi {
     rest: Transport,
@@ -168,7 +186,18 @@ struct EventsApi {
 }
 
 impl EventsApi {
+    /// Renew (or reactivate) one subscription and return its operation. An
+    /// operation that already finished with an `error` is a failure, with
+    /// the class its `google.rpc.Status` code maps to, never a renewal.
     async fn renew(&self, name: &str, reactivate: bool) -> Result<Value, GwsError> {
+        let op = self.send_renew(name, reactivate).await?;
+        match op.get("error") {
+            Some(err) => Err(failed_operation(name, reactivate, err)),
+            None => Ok(op),
+        }
+    }
+
+    async fn send_renew(&self, name: &str, reactivate: bool) -> Result<Value, GwsError> {
         let url = format!("{}/{name}", self.base);
         if reactivate {
             self.rest
@@ -483,6 +512,80 @@ mod tests {
         };
         let out = run(&api(&server), &config, 0).await.unwrap();
         assert_eq!(out["renewed"][0]["name"], "subscriptions/S1");
+    }
+
+    /// A renewal whose operation comes back finished with an `error` did not
+    /// renew anything: it fails with the class of the operation's status
+    /// code, alone or under `--all`, instead of being listed as renewed.
+    #[tokio::test]
+    async fn a_failed_renew_operation_is_not_a_renewal() {
+        let server = MockServer::start().await;
+        let failed = |code: u64, message: &str| {
+            ResponseTemplate::new(200).set_body_json(json!({
+                "name": "operations/x",
+                "done": true,
+                "error": {"code": code, "message": message}
+            }))
+        };
+        Mock::given(method("PATCH"))
+            .and(path("/v1/subscriptions/denied"))
+            .respond_with(failed(7, "caller lacks permission"))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/v1/subscriptions/busy:reactivate"))
+            .respond_with(failed(14, "try again"))
+            .mount(&server)
+            .await;
+        for (id, reactivate, exit, text) in [
+            (
+                "denied",
+                false,
+                GwsError::EXIT_CODE_API,
+                "caller lacks permission",
+            ),
+            ("busy", true, GwsError::EXIT_CODE_API_RETRYABLE, "try again"),
+        ] {
+            let config = RenewConfig {
+                subscription: Some(format!("subscriptions/{id}")),
+                all: false,
+                event_types: vec![],
+                within_secs: 3600,
+                reactivate,
+            };
+            let err = run(&api(&server), &config, 0).await.unwrap_err();
+            assert_eq!(err.exit_code(), exit, "{id}: {err:?}");
+            let msg = err.to_string();
+            assert!(msg.contains(id) && msg.contains(text), "{msg}");
+        }
+
+        Mock::given(method("GET"))
+            .and(path("/v1/subscriptions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "subscriptions": [
+                    {"name": "subscriptions/ok", "expireTime": "1970-01-01T00:10:00Z"},
+                    {"name": "subscriptions/denied", "expireTime": "1970-01-01T00:10:00Z"}
+                ]
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("PATCH"))
+            .and(path("/v1/subscriptions/ok"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"name": "operations/1"})))
+            .mount(&server)
+            .await;
+        let config = RenewConfig {
+            subscription: None,
+            all: true,
+            event_types: vec!["google.workspace.chat.message.v1.created".into()],
+            within_secs: 3600,
+            reactivate: false,
+        };
+        let err = run(&api(&server), &config, 0).await.unwrap_err();
+        assert_eq!(err.exit_code(), GwsError::EXIT_CODE_API, "{err:?}");
+        let msg = err.to_string();
+        assert!(msg.contains("1 of 2"), "{msg}");
+        assert!(msg.contains("caller lacks permission"), "{msg}");
     }
 
     /// A failed renewal is an API outcome, not an internal error (exit 5):

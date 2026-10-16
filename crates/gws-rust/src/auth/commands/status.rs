@@ -144,7 +144,11 @@ pub(super) async fn build_report(env: &AuthEnv, offline: bool) -> Value {
     match &credential {
         Credential::AuthorizedUser(user) => {
             let login = crate::auth::login_command(env);
-            match crate::auth::token::refresh_user(user, None, &env.endpoints, &login).await {
+            let remedy = crate::auth::rejected_grant_remedy(env, &source);
+            match crate::auth::token::refresh_user(user, None, &env.endpoints, &login)
+                .await
+                .map_err(|e| e.with_grant_remedy(&remedy))
+            {
                 Ok(t) => {
                     out["authenticated"] = json!(true);
                     out["verified"] = json!(true);
@@ -334,6 +338,37 @@ mod tests {
     /// A rejected refresh token tells the user how to sign in again. For a
     /// profile chosen with `--profile`, plain `gwsr auth login` would sign in
     /// to a different profile, so the hint must name the active one.
+    /// `gwsr auth login` cannot fix a rejected GWSR_CREDENTIALS_FILE (it
+    /// takes precedence over every profile): the report names the file.
+    #[tokio::test]
+    async fn invalid_grant_from_credentials_file_names_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/token"))
+            .respond_with(ResponseTemplate::new(400).set_body_json(serde_json::json!({
+                "error": "invalid_grant", "error_description": "Token has been expired or revoked."
+            })))
+            .mount(&server)
+            .await;
+        let file = dir.path().join("user.json");
+        crate::fs_util::atomic_write(
+            &file,
+            br#"{"type":"authorized_user","client_id":"cid-1234567890.apps","client_secret":"cs","refresh_token":"rt"}"#,
+        )
+        .unwrap();
+        let mut e = env(dir.path());
+        e.credentials_file = Some(file.clone());
+        e.endpoints = crate::auth::token::tests::endpoints(&server);
+
+        let r = build_report(&e, false).await;
+        assert_eq!(r["authenticated"], false, "{r}");
+        let err = r["token_error"].as_str().unwrap_or_default();
+        assert!(err.contains("GWSR_CREDENTIALS_FILE"), "{r}");
+        assert!(err.contains(&file.display().to_string()), "{r}");
+        assert!(!err.contains("to sign in again"), "{r}");
+    }
+
     #[tokio::test]
     async fn invalid_grant_hint_names_the_active_profile() {
         let dir = tempfile::tempdir().unwrap();

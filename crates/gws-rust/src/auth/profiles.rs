@@ -98,7 +98,8 @@ pub fn try_config_dir() -> anyhow::Result<PathBuf> {
 }
 
 /// Validate a profile name: 1-64 characters of `[a-z0-9_.-]`, not starting
-/// with `.` (so it can never be `.`/`..` or a hidden file).
+/// with `.` (so it can never be `.`/`..` or a hidden file), not ending with
+/// `.` and not a Windows device name (`con`, `nul.x`, `com1`, ...).
 ///
 /// Uppercase is refused because the name is a directory name: on
 /// case-insensitive file systems (macOS and Windows by default) `Work` and
@@ -114,7 +115,8 @@ pub fn validate_profile_name(name: &str) -> anyhow::Result<()> {
     }
     let rule = format!(
         "invalid profile name '{name}': use 1-{MAX_PROFILE_NAME_LEN} lowercase letters, digits, \
-         '-', '_' or '.', not starting with '.'"
+         '-', '_' or '.', not starting or ending with '.' and not a Windows device name \
+         (con, prn, aux, nul, com1-com9, lpt1-lpt9)"
     );
     match lowercase_suggestion(name) {
         // An older gwsr accepted uppercase names, so a directory with this
@@ -132,7 +134,15 @@ fn is_valid_profile_name(name: &str) -> bool {
     let valid_chars = name
         .chars()
         .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '-' | '_' | '.'));
-    !name.is_empty() && name.len() <= MAX_PROFILE_NAME_LEN && valid_chars && !name.starts_with('.')
+    !name.is_empty()
+        && name.len() <= MAX_PROFILE_NAME_LEN
+        && valid_chars
+        && !name.starts_with('.')
+        // Windows drops trailing dots from file names, so `work.` would be
+        // the directory of `work`, and a device name such as `con` or
+        // `nul.x` opens the device instead of a directory.
+        && !name.ends_with('.')
+        && !crate::helpers::http::is_windows_device_name(name)
 }
 
 /// The valid lowercase spelling of a name that is invalid only because of
@@ -394,6 +404,27 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         assert!(set_active_profile(dir.path(), "Work").is_err());
         assert!(resolve_active_profile(dir.path(), Some("Work".into()), None).is_err());
+    }
+
+    /// Windows ignores trailing dots in file names, so `profiles/work.` is
+    /// `profiles/work` there: a login to `work.` would replace the
+    /// credentials of `work`. Device names (`con`, `nul.x`, `com1`) open a
+    /// device instead of a directory.
+    #[test]
+    fn profile_names_that_alias_on_windows_are_rejected() {
+        for bad in [
+            "work.", "a..", "con", "nul", "aux", "prn", "com1", "lpt9", "nul.x", "con.work",
+        ] {
+            assert!(validate_profile_name(bad).is_err(), "{bad} was accepted");
+        }
+        for ok in ["work.2", "a.b", "console", "com10", "lpt", "nully"] {
+            validate_profile_name(ok).unwrap();
+        }
+        let err = format!("{:#}", validate_profile_name("work.").unwrap_err());
+        assert!(err.contains("ending with '.'"), "{err}");
+        let dir = tempfile::tempdir().unwrap();
+        assert!(set_active_profile(dir.path(), "work.").is_err());
+        assert!(resolve_active_profile(dir.path(), Some("con".into()), None).is_err());
     }
 
     /// `--profile Work` names a directory an older gwsr may have created; the
