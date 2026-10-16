@@ -56,11 +56,17 @@ pub(crate) fn next_token(page: &Value) -> Option<&str> {
         .filter(|t| !t.is_empty())
 }
 
+/// Array fields that report on the request rather than hold its items, which
+/// `--page-items` never picks on its own: Admin Reports' `warnings`
+/// (`UsageReports`). They are not in [`crate::formatter::LIST_ENVELOPE_KEYS`],
+/// so table/CSV output of a whole page still shows them.
+const ITEM_FIELD_EXCLUDED: &[&str] = &["warnings"];
+
 /// An array field that describes the list rather than holding its items,
 /// such as Calendar's `defaultReminders` (the keys table/CSV output also
-/// treats as list metadata).
+/// treats as list metadata) or Admin Reports' `warnings`.
 fn is_list_metadata(field: &str) -> bool {
-    crate::formatter::LIST_ENVELOPE_KEYS.contains(&field)
+    crate::formatter::LIST_ENVELOPE_KEYS.contains(&field) || ITEM_FIELD_EXCLUDED.contains(&field)
 }
 
 /// Which array field of a page holds the items for `--page-items`.
@@ -298,6 +304,42 @@ mod tests {
         assert_eq!(
             item_field(&doc, &bare, &json!({}), Some("anything")).unwrap(),
             "anything"
+        );
+    }
+
+    #[test]
+    fn item_field_ignores_admin_reports_warnings() {
+        // Admin Reports `UsageReports`: `warnings` reports on the request
+        // (data not yet available, partial data), not the page's items.
+        let mut schemas = HashMap::new();
+        schemas.insert(
+            "UsageReports".to_string(),
+            schema(&[
+                ("usageReports", "array"),
+                ("warnings", "array"),
+                ("nextPageToken", "string"),
+            ]),
+        );
+        let doc = RestDescription {
+            schemas,
+            ..Default::default()
+        };
+        let get = RestMethod {
+            response: sref("UsageReports"),
+            ..Default::default()
+        };
+        let page = json!({"usageReports": [{"date": "2026-01-01"}],
+                          "warnings": [{"code": "PARTIAL_DATA_AVAILABLE"}]});
+        assert_eq!(item_field(&doc, &get, &page, None).unwrap(), "usageReports");
+        let bare = RestMethod::default();
+        assert_eq!(
+            item_field(&doc, &bare, &page, None).unwrap(),
+            "usageReports"
+        );
+        // Asking for the warnings explicitly still works.
+        assert_eq!(
+            item_field(&doc, &get, &page, Some("warnings")).unwrap(),
+            "warnings"
         );
     }
 }
