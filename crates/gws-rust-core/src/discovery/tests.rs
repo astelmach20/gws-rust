@@ -244,13 +244,24 @@ async fn stale_cache_is_refreshed_when_online() {
     let server = MockServer::start().await;
     mount(&server, PRIMARY, 200, DRIVE, 1).await;
     let tmp = tempfile::tempdir().unwrap();
+    // The stale entry differs from the network copy, so a refresh shows.
+    let old = DRIVE.replace(r#""name""#, r#""title":"Old Drive","name""#);
     DiscoveryCache::new(tmp.path())
-        .store("drive", "v3", DRIVE.as_bytes())
+        .store("drive", "v3", old.as_bytes())
         .unwrap();
-    let loader =
+    let stale_loader =
         loader(&server, None).with_cache(DiscoveryCache::new(tmp.path()).with_ttl(Duration::ZERO));
-    let got = loader.load("drive", "v3").await.unwrap();
+    let got = stale_loader.load("drive", "v3").await.unwrap();
     assert_eq!(got.origin, DocumentOrigin::Network);
+    assert_eq!(got.doc.title, None);
+
+    // The fetched copy replaced the stale entry: a loader that accepts the
+    // entry as fresh serves the new document without fetching again (the
+    // mock expects one request).
+    let fresh_loader = loader(&server, Some(tmp.path()));
+    let got = fresh_loader.load("drive", "v3").await.unwrap();
+    assert_eq!(got.origin, DocumentOrigin::Cache);
+    assert_eq!(got.doc.title, None, "the stale entry was not refreshed");
 }
 
 #[tokio::test]
