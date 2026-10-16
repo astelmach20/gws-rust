@@ -530,8 +530,10 @@ impl Audit {
         }
         if application == "gmail" {
             // Gmail requires both ends of the range: default the end to now,
-            // as the API does for every other application.
-            let until = *end.get_or_insert(now_s);
+            // as the API does for every other application. That is `now_s`,
+            // where a look-back counted from, unless an RFC 3339 --since
+            // falls within the current second.
+            let until = *end.get_or_insert(if start < now_s { now_s } else { now });
             if until - start > chrono::TimeDelta::days(GMAIL_MAX_RANGE_DAYS) {
                 return Err(GwsError::Validation(format!(
                     "Gmail audit queries cover at most {GMAIL_MAX_RANGE_DAYS} days; \
@@ -958,6 +960,18 @@ mod tests {
         .unwrap();
         assert_eq!(a.start, "2026-01-02T00:00:00Z");
         assert_eq!(a.end.as_deref(), Some("2026-02-01T00:00:00Z"));
+        // A --since within the current second still gets an end after it.
+        let a = parse_audit(
+            &[
+                "--application",
+                "gmail",
+                "--since",
+                "2026-02-01T00:00:00.5Z",
+            ],
+            "2026-02-01T00:00:00.750Z",
+        )
+        .unwrap();
+        assert_eq!(a.end.as_deref(), Some("2026-02-01T00:00:00.750Z"));
         let err = parse_audit(&["--application", "gmail", "--since", "31d"], now).unwrap_err();
         assert!(matches!(err, GwsError::Validation(_)), "{err:?}");
         let err = parse_audit(
