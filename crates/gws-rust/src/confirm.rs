@@ -19,8 +19,8 @@
 //!
 //! - [`Impact::Destructive`]: irreversible actions — any `DELETE` method, the
 //!   non-DELETE methods in [`PERMANENT_DELETE_METHODS`], the device commands
-//!   in [`BODY_DESTRUCTIVE_METHODS`] when their request body asks for a wipe,
-//!   and helper actions such as clearing a range or deleting a filter. Always
+//!   in [`BODY_DESTRUCTIVE_METHODS`] when their request body asks for a wipe
+//!   or a deprovision, and helper actions such as clearing a range or deleting a filter. Always
 //!   gated.
 //! - [`Impact::Outbound`]: actions that notify or grant access to other people
 //!   or run code (sending mail or chat messages, sharing, RSVPs, running
@@ -57,9 +57,10 @@ pub(crate) const PERMANENT_DELETE_METHODS: &[&str] = &[
     "cloudidentity.devices.deviceUsers.wipe",
 ];
 
-/// Methods that erase data only for some request bodies: `(method id, body
-/// field, values that wipe)`. Other values of the field (approving or
-/// blocking a phone, rebooting a Chromebook) are not gated.
+/// Methods that erase data, or release a device from management, only for
+/// some request bodies: `(method id, body field, values that do so)`. Other
+/// values of the field (approving or blocking a phone, rebooting, disabling
+/// or re-enabling a Chromebook) are not gated.
 pub(crate) const BODY_DESTRUCTIVE_METHODS: &[(&str, &str, &[&str])] = &[
     // Admin SDK Directory: wipe a mobile device, or the work account on it.
     (
@@ -74,9 +75,23 @@ pub(crate) const BODY_DESTRUCTIVE_METHODS: &[(&str, &str, &[&str])] = &[
         "commandType",
         &["WIPE_USERS", "REMOTE_POWERWASH"],
     ),
+    // Admin SDK Directory: deprovision ChromeOS devices. Their policies,
+    // device-level printers and kiosk use are removed, and a deprovisioned
+    // device must be wiped before it can be enrolled again.
+    (
+        "directory.chromeosdevices.action",
+        "action",
+        &["deprovision"],
+    ),
+    (
+        "admin.customer.devices.chromeos.batchChangeStatus",
+        "changeChromeOsDeviceStatusAction",
+        &["CHANGE_CHROME_OS_DEVICE_STATUS_ACTION_DEPROVISION"],
+    ),
 ];
 
-/// Whether `body` asks a [`BODY_DESTRUCTIVE_METHODS`] method `id` to wipe.
+/// Whether `body` asks a [`BODY_DESTRUCTIVE_METHODS`] method `id` to wipe
+/// or deprovision.
 /// Values match case-insensitively, so a differently cased wipe is gated
 /// rather than let through.
 fn body_requests_wipe(id: &str, body: Option<&serde_json::Value>) -> bool {
@@ -612,6 +627,71 @@ mod tests {
             ),
             None
         );
+    }
+
+    #[test]
+    fn chromeos_deprovisions_are_destructive_only_when_the_body_asks() {
+        use serde_json::json;
+        let m = |id: &str| RestMethod {
+            http_method: "POST".to_string(),
+            id: Some(id.to_string()),
+            ..Default::default()
+        };
+        let none = serde_json::Map::new();
+        let action = m("directory.chromeosdevices.action");
+        let batch = m("admin.customer.devices.chromeos.batchChangeStatus");
+        for (method, body) in [
+            (
+                &action,
+                json!({"action": "deprovision", "deprovisionReason": "retiring_device"}),
+            ),
+            (&action, json!({"action": "DEPROVISION"})),
+            (
+                &batch,
+                json!({"deviceIds": ["d1", "d2"],
+                    "changeChromeOsDeviceStatusAction": "CHANGE_CHROME_OS_DEVICE_STATUS_ACTION_DEPROVISION",
+                    "deprovisionReason": "DEPROVISION_REASON_RETIRING_DEVICE"}),
+            ),
+            (
+                &batch,
+                json!({"changeChromeOsDeviceStatusAction": "change_chrome_os_device_status_action_deprovision"}),
+            ),
+        ] {
+            assert_eq!(
+                method_impact(method, &none, Some(&body)),
+                Some(Impact::Destructive),
+                "{body}"
+            );
+        }
+        for (method, body) in [
+            (&action, Some(json!({"action": "disable"}))),
+            (&action, Some(json!({"action": "reenable"}))),
+            (&action, None),
+            (
+                &batch,
+                Some(
+                    json!({"changeChromeOsDeviceStatusAction": "CHANGE_CHROME_OS_DEVICE_STATUS_ACTION_DISABLE"}),
+                ),
+            ),
+            (
+                &batch,
+                Some(
+                    json!({"changeChromeOsDeviceStatusAction": "CHANGE_CHROME_OS_DEVICE_STATUS_ACTION_REENABLE"}),
+                ),
+            ),
+            // The field belongs to the other method.
+            (&batch, Some(json!({"action": "deprovision"}))),
+        ] {
+            assert_eq!(
+                method_impact(method, &none, body.as_ref()),
+                None,
+                "{body:?}"
+            );
+        }
+        for method in [&action, &batch] {
+            assert!(may_be_gated(method));
+            assert!(!is_destructive_method(method));
+        }
     }
 
     #[test]
