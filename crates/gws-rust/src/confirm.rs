@@ -55,6 +55,13 @@ pub(crate) const PERMANENT_DELETE_METHODS: &[&str] = &[
     "people.people.batchDeleteContacts",
     "tasks.tasks.clear",
     "drive.files.emptyTrash",
+    // Sheets: erase every value in one or more ranges (as `sheets +clear`).
+    "sheets.spreadsheets.values.clear",
+    "sheets.spreadsheets.values.batchClear",
+    "sheets.spreadsheets.values.batchClearByDataFilter",
+    // Apps Script: replace a project's whole content; files left out of the
+    // request are deleted (as `script +push`).
+    "script.projects.updateContent",
     // Admin SDK Directory: delete Chrome printers / print servers in bulk.
     "admin.customers.chrome.printers.batchDeletePrinters",
     "admin.customers.chrome.printServers.batchDeletePrintServers",
@@ -641,6 +648,25 @@ mod tests {
                 "{id}"
             );
         }
+        // Clearing Sheets ranges and replacing a script's whole content erase
+        // data just like the gated `sheets +clear` and `script +push` helpers.
+        for (http, id) in [
+            ("POST", "sheets.spreadsheets.values.clear"),
+            ("POST", "sheets.spreadsheets.values.batchClear"),
+            ("POST", "sheets.spreadsheets.values.batchClearByDataFilter"),
+            ("PUT", "script.projects.updateContent"),
+        ] {
+            assert!(is_destructive_method(&m(http, id)), "{id}");
+            assert_eq!(
+                method_impact(&m(http, id), &serde_json::Map::new(), None),
+                Some(Impact::Destructive),
+                "{id}"
+            );
+        }
+        assert!(!is_destructive_method(&m(
+            "PUT",
+            "sheets.spreadsheets.values.update"
+        )));
         assert!(!is_destructive_method(&m(
             "POST",
             "cloudidentity.devices.cancelWipe"
