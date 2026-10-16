@@ -66,11 +66,19 @@ pub(crate) fn stderr_is_terminal() -> bool {
 /// Returns true when stderr is connected to an interactive terminal that
 /// renders ANSI color codes and `NO_COLOR` is not set.
 pub(crate) fn stderr_supports_color() -> bool {
-    color_enabled(
-        stderr_is_terminal(),
-        std::env::var_os("NO_COLOR").is_some(),
-        console_renders_ansi,
-    )
+    color_enabled(stderr_is_terminal(), no_color(), console_renders_ansi)
+}
+
+/// Whether `NO_COLOR` asks for no color.
+pub(crate) fn no_color() -> bool {
+    no_color_requested(std::env::var_os("NO_COLOR").as_deref())
+}
+
+/// <https://no-color.org>: `NO_COLOR` disables color when it is present
+/// and not an empty string, whatever its value. An empty `NO_COLOR=` is
+/// treated as unset.
+fn no_color_requested(value: Option<&std::ffi::OsStr>) -> bool {
+    value.is_some_and(|v| !v.is_empty())
 }
 
 /// Whether to color: a terminal, no `NO_COLOR`, and a console that turns
@@ -264,6 +272,18 @@ mod tests {
         // off anyway.
         assert!(!color_enabled(false, false, || unreachable!()));
         assert!(!color_enabled(true, true, || unreachable!()));
+    }
+
+    /// `NO_COLOR=` (empty) is unset, per no-color.org; any other value,
+    /// `0` and `false` included, disables color.
+    #[test]
+    fn empty_no_color_is_unset() {
+        use std::ffi::OsStr;
+        assert!(!no_color_requested(None));
+        assert!(!no_color_requested(Some(OsStr::new(""))));
+        for value in ["1", "0", "false", " "] {
+            assert!(no_color_requested(Some(OsStr::new(value))), "{value:?}");
+        }
     }
 
     struct ClosedPipe;

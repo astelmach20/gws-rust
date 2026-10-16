@@ -212,7 +212,7 @@ fn is_display_request(e: &clap::Error) -> bool {
 /// Print help/version text to stdout (exit status 0).
 fn print_display(e: &clap::Error) -> Result<(), CliError> {
     let styled = e.render();
-    let text = if output::stdout_is_terminal() && std::env::var_os("NO_COLOR").is_none() {
+    let text = if output::stdout_is_terminal() && !output::no_color() {
         styled.ansi().to_string()
     } else {
         styled.to_string()
