@@ -185,7 +185,9 @@ fn static_commands() -> Vec<Value> {
 /// alias, `<alias>:<version>` or any Discovery API as `<api>:<version>`.
 /// `api_version` (`--api-version`) wins over a `:version` suffix. It picks
 /// one version, so it needs the services named: applied to every registered
-/// service it would ask for a version most of them do not have.
+/// service it would ask for a version most of them do not have. A service
+/// named twice, or by two of its aliases (`reports admin-reports`), is
+/// listed once.
 fn select_services(
     names: &[String],
     api_version: Option<&str>,
@@ -206,10 +208,17 @@ fn select_services(
             })
             .collect());
     }
-    names
-        .iter()
-        .map(|n| crate::services::resolve_service_spec(n, api_version))
-        .collect()
+    let mut selected: Vec<ResolvedService> = Vec::new();
+    for n in names {
+        let r = crate::services::resolve_service_spec(n, api_version)?;
+        if !selected
+            .iter()
+            .any(|s| s.api_name == r.api_name && s.version == r.version)
+        {
+            selected.push(r);
+        }
+    }
+    Ok(selected)
 }
 
 /// Build the full inventory (fetches Discovery documents as needed).
@@ -437,6 +446,27 @@ mod tests {
         assert_eq!(inv["aliases"], json!([]));
         assert_eq!(inv["version"], "v3");
         assert!(!inv["commands"].as_array().unwrap().is_empty(), "{inv}");
+    }
+
+    /// Naming a service twice, or by two aliases, listed (and fetched) it
+    /// twice, so `services` held duplicate entries.
+    #[test]
+    fn a_service_named_twice_is_listed_once() {
+        let listed: Vec<(String, String)> = selected(
+            &["drive", "reports", "drive", "admin-reports", "gmail"],
+            None,
+        )
+        .into_iter()
+        .map(|(api, version, _)| (api, version))
+        .collect();
+        assert_eq!(
+            listed,
+            [
+                ("drive".into(), "v3".into()),
+                ("admin".into(), "reports_v1".into()),
+                ("gmail".into(), "v1".into()),
+            ]
+        );
     }
 
     #[test]
