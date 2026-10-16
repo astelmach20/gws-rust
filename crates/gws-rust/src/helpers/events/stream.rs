@@ -193,11 +193,14 @@ pub(crate) async fn run_stream<S: StreamStep>(
     let mut budget = FailureBudget::new(opts.max_failures, opts.backoff_base, opts.backoff_cap);
     loop {
         let result = tokio::select! {
-            r = step.step() => r,
+            // A signal latched before the stream started (during setup) stops
+            // it before the first pull.
+            biased;
             _ = crate::helpers::shutdown_signal() => {
                 emit_diagnostic("info", "shutdown", json!({}));
                 return Ok(());
             }
+            r = step.step() => r,
         };
         match result {
             Ok(()) => {

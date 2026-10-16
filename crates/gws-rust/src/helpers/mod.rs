@@ -155,24 +155,24 @@ impl Shutdown {
     }
 }
 
-/// Returns a future that completes with the signal once a shutdown signal
-/// has been received.
+static SHUTDOWN: Shutdown = Shutdown::new();
+
+/// Install the SIGINT/SIGTERM (Ctrl+C elsewhere) handlers that feed
+/// [`shutdown_signal`], if they are not installed yet. Must run inside the
+/// Tokio runtime.
 ///
-/// On Unix this listens for both SIGINT (Ctrl+C) and SIGTERM; on other
-/// platforms only Ctrl+C is handled. Used by long-running pull loops
-/// (`gmail::watch`, `events::subscribe`) to exit cleanly under container
-/// orchestrators (Kubernetes, Docker, systemd) that send SIGTERM, and by
-/// `drive +sync` to save its state before exiting.
+/// A command that creates resources before it first waits for a signal
+/// (`events +subscribe` and `gmail +watch` set up Pub/Sub resources, then
+/// stream) calls this before that setup: until the handlers exist a signal
+/// meets the default disposition and kills the process, so `--cleanup`
+/// never runs and the resources are left behind. A signal received during
+/// setup is latched and stops the stream as soon as it starts.
 ///
-/// On Unix the handlers are installed synchronously on the first poll, so a
-/// signal sent once the caller is waiting never meets the default
-/// disposition (which would kill the process). They stay active for the
-/// lifetime of the process, and the signal is latched: one received while
-/// no loop is waiting (between iterations) still completes the next call.
-pub(crate) async fn shutdown_signal() -> ShutdownSignal {
+/// On Unix the handlers are installed synchronously, and they stay active
+/// for the lifetime of the process.
+pub(crate) fn listen_for_shutdown() {
     use std::sync::Once;
 
-    static SHUTDOWN: Shutdown = Shutdown::new();
     static LISTEN: Once = Once::new();
 
     LISTEN.call_once(|| {
@@ -217,7 +217,24 @@ pub(crate) async fn shutdown_signal() -> ShutdownSignal {
             });
         }
     });
+}
 
+/// Returns a future that completes with the signal once a shutdown signal
+/// has been received.
+///
+/// On Unix this listens for both SIGINT (Ctrl+C) and SIGTERM; on other
+/// platforms only Ctrl+C is handled. Used by long-running pull loops
+/// (`gmail::watch`, `events::subscribe`) to exit cleanly under container
+/// orchestrators (Kubernetes, Docker, systemd) that send SIGTERM, and by
+/// `drive +sync` to save its state before exiting.
+///
+/// The handlers are installed ([`listen_for_shutdown`]) on the first poll at
+/// the latest, so a signal sent once the caller is waiting never meets the
+/// default disposition (which would kill the process). The signal is
+/// latched: one received while no loop is waiting (between iterations, or
+/// during setup after [`listen_for_shutdown`]) still completes the next call.
+pub(crate) async fn shutdown_signal() -> ShutdownSignal {
+    listen_for_shutdown();
     SHUTDOWN.requested().await
 }
 

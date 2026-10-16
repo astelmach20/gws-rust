@@ -2226,6 +2226,160 @@ async fn drive_sync_interrupted_by_a_signal_saves_its_state() {
     }
 }
 
+// --- stream helpers interrupted during setup ---
+
+/// Pub/Sub, Workspace Events and Gmail mocks for a `+subscribe`/`+watch`
+/// setup whose subscription create answers only after two seconds.
+#[cfg(unix)]
+async fn slow_stream_setup_server() -> wiremock::MockServer {
+    use wiremock::matchers::{method, path, path_regex};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let ok = || ResponseTemplate::new(200).set_body_json(json!({}));
+    let server = MockServer::start().await;
+    Mock::given(method("PUT"))
+        .and(path_regex(r"^/v1/projects/p/topics/gwsr-"))
+        .respond_with(ok())
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path_regex(r":setIamPolicy$"))
+        .respond_with(ok())
+        .mount(&server)
+        .await;
+    Mock::given(method("PUT"))
+        .and(path_regex(r"^/v1/projects/p/subscriptions/gwsr-"))
+        .respond_with(ok().set_delay(std::time::Duration::from_secs(2)))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/subscriptions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "done": true, "response": { "name": "subscriptions/ws-1" }
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/gmail/v1/users/me/watch"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"historyId": "1"})))
+        .mount(&server)
+        .await;
+    Mock::given(method("DELETE"))
+        .respond_with(ok())
+        .mount(&server)
+        .await;
+    server
+}
+
+/// A Ctrl+C or SIGTERM that arrives while `events +subscribe` or `gmail
+/// +watch` is still creating its Pub/Sub resources does not kill the
+/// process: setup finishes, the stream stops before its first pull, and
+/// `--cleanup` deletes the subscription and topic it created. The signal is
+/// sent once the subscription create has reached the server, which answers
+/// it only after a delay.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn stream_helpers_interrupted_during_setup_still_clean_up() {
+    let events: &[&str] = &[
+        "events",
+        "+subscribe",
+        "--project",
+        "p",
+        "--target",
+        "//chat.googleapis.com/spaces/S",
+        "--event-types",
+        "google.workspace.chat.message.v1.created",
+        "--cleanup",
+    ];
+    let gmail: &[&str] = &["gmail", "+watch", "--project", "p", "--cleanup"];
+    for args in [events, gmail] {
+        for signal in ["INT", "TERM"] {
+            let server = slow_stream_setup_server().await;
+            let dir = tempfile::tempdir().unwrap();
+            seed(dir.path(), "workspaceevents", "v1", "");
+            seed(dir.path(), "gmail", "v1", "");
+            let mut child = std::process::Command::new(assert_cmd::cargo::cargo_bin("gwsr"));
+            child
+                .env_clear()
+                .env("GWSR_CONFIG_DIR", dir.path())
+                .env("GWSR_CACHE_DIR", dir.path().join("cache"))
+                .env("HOME", dir.path())
+                .env("GWSR_TOKEN", "test-token")
+                .env("GWSR_API_BASE_URL", format!("{}/", server.uri()))
+                .env("HTTPS_PROXY", "http://127.0.0.1:9")
+                .current_dir(dir.path());
+            for key in ["SSL_CERT_FILE", "NIX_SSL_CERT_FILE"] {
+                if let Some(value) = std::env::var_os(key) {
+                    child.env(key, value);
+                }
+            }
+            let mut child = child
+                .args(args)
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+                .unwrap();
+
+            let sub_requested = |reqs: &[wiremock::Request]| {
+                reqs.iter().any(|r| {
+                    r.method == wiremock::http::Method::PUT
+                        && r.url.path().starts_with("/v1/projects/p/subscriptions/")
+                })
+            };
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+            while !sub_requested(&server.received_requests().await.unwrap()) {
+                if let Some(status) = child.try_wait().unwrap() {
+                    let out = child.wait_with_output().unwrap();
+                    panic!(
+                        "{args:?} exited ({status}) before creating the subscription: {}",
+                        String::from_utf8_lossy(&out.stderr)
+                    );
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "{args:?} never created the subscription"
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+
+            let kill = std::process::Command::new("kill")
+                .arg(format!("-{signal}"))
+                .arg(child.id().to_string())
+                .status()
+                .unwrap();
+            assert!(kill.success());
+            let out = child.wait_with_output().unwrap();
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            assert!(out.status.success(), "{args:?} SIG{signal}: {out:?}");
+            assert!(
+                stderr.contains(r#""event":"shutdown""#),
+                "{args:?} SIG{signal}: {stderr}"
+            );
+            assert!(out.stdout.is_empty(), "{args:?} SIG{signal}: {out:?}");
+
+            let reqs = server.received_requests().await.unwrap();
+            assert!(
+                !reqs.iter().any(|r| r.url.path().ends_with(":pull")),
+                "{args:?} SIG{signal}: pulled after the signal"
+            );
+            let deleted: Vec<&str> = reqs
+                .iter()
+                .filter(|r| r.method == wiremock::http::Method::DELETE)
+                .map(|r| r.url.path())
+                .collect();
+            assert_eq!(deleted.len(), 2, "{args:?} SIG{signal}: {deleted:?}");
+            assert!(
+                deleted[0].starts_with("/v1/projects/p/subscriptions/gwsr-"),
+                "{args:?} SIG{signal}: {deleted:?}"
+            );
+            assert!(
+                deleted[1].starts_with("/v1/projects/p/topics/gwsr-"),
+                "{args:?} SIG{signal}: {deleted:?}"
+            );
+        }
+    }
+}
+
 /// A helper that writes straight to stdout (`--output -` payloads, `gmail
 /// +read`) ends quietly with status 0 when the reader has gone away
 /// (`gwsr ... | head`), like every other command, instead of reporting an
