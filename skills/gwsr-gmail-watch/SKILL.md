@@ -31,9 +31,9 @@ gwsr gmail +watch
 | Flag | Required | Default | Description |
 |------|----------|---------|-------------|
 | `--project` | — | — | GCP project ID for Pub/Sub resources (or set GWSR_PROJECT_ID) |
-| `--subscription` | — | — | Existing Pub/Sub subscription name (skip setup; conflicts with the setup flags --project, --topic, --label-ids and --cleanup) |
+| `--subscription` | — | — | Existing Pub/Sub subscription name (skip setup; conflicts with the setup flags --project, --topic and --cleanup) |
 | `--topic` | — | — | Existing Pub/Sub topic with Gmail publish permission already granted |
-| `--label-ids` | — | — | Comma-separated Gmail label IDs to watch (e.g., INBOX,UNREAD) |
+| `--label-ids` | — | — | Comma-separated Gmail label IDs to watch (e.g., INBOX,UNREAD); only messages with one of them are emitted, also with --subscription |
 | `--max-messages` | — | 10 | Maximum Pub/Sub messages per pull |
 | `--poll-interval` | — | 5 | Seconds between pulls |
 | `--max-failures` | — | 10 | Consecutive transient failures (429/5xx/network) tolerated before exiting |

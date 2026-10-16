@@ -2464,13 +2464,15 @@ async fn helper_scope_error_hint_names_the_scopes_the_helper_needs() {
 /// With `--subscription`, `gmail +watch` and `events +subscribe` create
 /// nothing, so the setup flags (`--cleanup` and what the created resources
 /// would use) would be ignored. They are rejected instead of being dropped.
+/// `gmail +watch --label-ids` is not only setup: it filters what is emitted,
+/// so it stays allowed with `--subscription`.
 #[test]
 fn existing_subscription_rejects_setup_flags() {
     let dir = tempfile::tempdir().unwrap();
     seed(dir.path(), "gmail", "v1", "");
     seed(dir.path(), "workspaceevents", "v1", "");
     let sub = "projects/p/subscriptions/s";
-    let rejected: [&[&str]; 8] = [
+    let rejected: [&[&str]; 7] = [
         &["gmail", "+watch", "--subscription", sub, "--cleanup"],
         &["gmail", "+watch", "--subscription", sub, "--project", "p"],
         &[
@@ -2480,14 +2482,6 @@ fn existing_subscription_rejects_setup_flags() {
             sub,
             "--topic",
             "projects/p/topics/t",
-        ],
-        &[
-            "gmail",
-            "+watch",
-            "--subscription",
-            sub,
-            "--label-ids",
-            "INBOX",
         ],
         &["events", "+subscribe", "--subscription", sub, "--cleanup"],
         &[
@@ -2525,8 +2519,8 @@ fn existing_subscription_rejects_setup_flags() {
         assert!(out.stdout.is_empty(), "{args:?}: {out:?}");
     }
     for args in [
-        ["gmail", "+watch", "--subscription", sub],
-        ["events", "+subscribe", "--subscription", sub],
+        &["gmail", "+watch", "--subscription", sub][..],
+        &["events", "+subscribe", "--subscription", sub][..],
     ] {
         let out = gwsr(dir.path())
             .args(args)
@@ -2536,4 +2530,20 @@ fn existing_subscription_rejects_setup_flags() {
         assert!(out.status.success(), "{args:?}: {out:?}");
         assert_eq!(stdout_json(&out)["subscription"], sub);
     }
+    let out = gwsr(dir.path())
+        .args([
+            "gmail",
+            "+watch",
+            "--subscription",
+            sub,
+            "--label-ids",
+            "INBOX",
+            "--dry-run",
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{out:?}");
+    let plan = stdout_json(&out);
+    assert_eq!(plan["subscription"], sub, "{plan}");
+    assert_eq!(plan["labelIds"], json!(["INBOX"]), "{plan}");
 }

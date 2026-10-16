@@ -427,6 +427,18 @@ async fn create_and_watch(
     ))
 }
 
+/// The command that listens to `subscription` again. `--label-ids` filters
+/// what is emitted, so it is repeated: without it the reattached stream
+/// would emit every added message (sent mail, drafts, other labels).
+fn reconnect_command(subscription: &str, label_ids: &[String]) -> String {
+    let mut command = format!("gwsr gmail +watch --subscription {subscription}");
+    if !label_ids.is_empty() {
+        command.push_str(" --label-ids ");
+        command.push_str(&label_ids.join(","));
+    }
+    command
+}
+
 fn dry_run_plan(matches: &ArgMatches, config: &WatchConfig) -> Result<(), GwsError> {
     let plan = json!({
         "dry_run": true,
@@ -501,7 +513,7 @@ pub(super) async fn handle_watch(
         json!({
             "subscription": created.subscription,
             "topic": created.topic,
-            "command": format!("gwsr gmail +watch --subscription {}", created.subscription),
+            "command": reconnect_command(&created.subscription, &config.label_ids),
             "note": "Gmail watch expires after 7 days; re-run +watch to renew",
         }),
     );
@@ -1156,6 +1168,21 @@ mod tests {
                 assert!(err.to_string().contains("twice"), "{err}");
             }
         }
+    }
+
+    /// The reconnect hint keeps `--label-ids`: the labels filter what the
+    /// reattached stream emits.
+    #[test]
+    fn reconnect_command_repeats_the_label_filter() {
+        let sub = "projects/p/subscriptions/s";
+        assert_eq!(
+            reconnect_command(sub, &[]),
+            "gwsr gmail +watch --subscription projects/p/subscriptions/s"
+        );
+        assert_eq!(
+            reconnect_command(sub, &["INBOX".to_string(), "UNREAD".to_string()]),
+            "gwsr gmail +watch --subscription projects/p/subscriptions/s --label-ids INBOX,UNREAD"
+        );
     }
 
     /// `--label-ids` must filter what is emitted, not only which changes
