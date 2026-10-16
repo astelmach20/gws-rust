@@ -282,14 +282,30 @@ impl Sent {
     }
 }
 
+/// The longest `Retry-After` a retry note states as a number of seconds.
+/// Anything longer, including an overflowing header saturated to
+/// [`Duration::MAX`] by [`parse_retry_after`], is no schedule worth printing.
+const RETRY_AFTER_NOTE_LIMIT: Duration = Duration::from_secs(24 * 60 * 60);
+
+fn retry_after_note(retry_after: Duration) -> String {
+    if retry_after > RETRY_AFTER_NOTE_LIMIT {
+        format!(
+            "server asked to retry after an unreasonably long wait (over {}s)",
+            RETRY_AFTER_NOTE_LIMIT.as_secs()
+        )
+    } else {
+        format!("server asked to retry after {}s", retry_after.as_secs())
+    }
+}
+
 fn retry_note(attempts: u32, retry_after: Option<Duration>) -> Option<String> {
     match (attempts > 1, retry_after) {
         (false, None) => None,
         (true, None) => Some(format!("gave up after {attempts} attempts")),
-        (false, Some(ra)) => Some(format!("server asked to retry after {}s", ra.as_secs())),
+        (false, Some(ra)) => Some(retry_after_note(ra)),
         (true, Some(ra)) => Some(format!(
-            "gave up after {attempts} attempts; server asked to retry after {}s",
-            ra.as_secs()
+            "gave up after {attempts} attempts; {}",
+            retry_after_note(ra)
         )),
     }
 }
@@ -766,6 +782,38 @@ mod tests {
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         assert_eq!(sent.response.status(), 503);
         assert!(sent.gave_up);
+        // The saturated wait is no schedule to print as a number.
+        let note = sent.retry_note().unwrap();
+        assert_eq!(
+            note,
+            "server asked to retry after an unreasonably long wait (over 86400s)"
+        );
+        assert!(!note.contains(&u64::MAX.to_string()), "{note}");
+    }
+
+    /// The retry note prints a plausible `Retry-After` in seconds, and one
+    /// beyond a day (including a saturated, overflowing header) as "an
+    /// unreasonably long wait" rather than a meaningless huge number.
+    #[test]
+    fn retry_note_caps_an_unreasonable_retry_after() {
+        let day = Duration::from_secs(86_400);
+        assert_eq!(
+            retry_note(1, Some(day)).as_deref(),
+            Some("server asked to retry after 86400s")
+        );
+        for huge in [day + Duration::from_secs(1), Duration::MAX] {
+            assert_eq!(
+                retry_note(1, Some(huge)).as_deref(),
+                Some("server asked to retry after an unreasonably long wait (over 86400s)")
+            );
+            assert_eq!(
+                retry_note(3, Some(huge)).as_deref(),
+                Some(
+                    "gave up after 3 attempts; server asked to retry after an unreasonably \
+                     long wait (over 86400s)"
+                )
+            );
+        }
     }
 
     #[test]
