@@ -2114,6 +2114,29 @@ async fn json_content_type_is_matched_case_insensitively() {
 }
 
 #[tokio::test]
+async fn json_protobuf_content_type_is_parsed_as_json() {
+    // Google APIs answer `alt=json+protobuf` with `application/json+protobuf`
+    // (JSON arrays). It is a JSON document and was parsed before the
+    // content-type check became exact; it must not be refused as binary.
+    for ct in [
+        "application/json+protobuf",
+        "Application/JSON+Protobuf; charset=UTF-8",
+    ] {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(r#"["1",null,2]"#, ct))
+            .mount(&server)
+            .await;
+        let d = doc(&server.uri());
+        let mut call = Call::new(&d, "get", &server);
+        call.params = json!({"fileId": "1"});
+        let em = Emitter::capturing();
+        call.run(&em).await.unwrap_or_else(|e| panic!("{ct}: {e}"));
+        assert_eq!(lines(&em), vec![json!(["1", null, 2])], "{ct}");
+    }
+}
+
+#[tokio::test]
 async fn text_response_is_wrapped_in_json() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
