@@ -46,6 +46,7 @@ use gws_rust_core::validate::EndpointPolicy;
 
 pub use crate::transport::Credentials;
 pub use download::OutputTarget;
+pub(crate) use input::strip_utf8_bom;
 pub use operation::WaitConfig;
 pub use upload::UploadMode;
 

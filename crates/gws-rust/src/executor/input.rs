@@ -89,16 +89,20 @@ async fn resolve(arg: JsonArg<'_>, flag: &str) -> Result<String, GwsError> {
     }
 }
 
-/// Drop a leading UTF-8 byte order mark from JSON read from a file or stdin.
+/// Drop a leading UTF-8 byte order mark from text (JSON, Markdown, CSV)
+/// read from a file or stdin.
 ///
 /// Windows editors and Windows PowerShell (`Set-Content -Encoding UTF8`)
 /// write one; RFC 8259 lets a parser ignore it, but `serde_json` rejects it
 /// as an unexpected character at line 1 column 1.
-pub(crate) fn strip_utf8_bom(text: String) -> String {
-    match text.strip_prefix('\u{feff}') {
-        Some(rest) => rest.to_string(),
-        None => text,
+///
+/// The mark is removed in place, without copying the text: a helper reads a
+/// password file through this, and its buffer is zeroized when dropped.
+pub(crate) fn strip_utf8_bom(mut text: String) -> String {
+    if text.starts_with('\u{feff}') {
+        text.drain(..'\u{feff}'.len_utf8());
     }
+    text
 }
 
 /// Walks a JSON document and fails on the first object that repeats a key.

@@ -815,16 +815,21 @@ pub(crate) fn limit(matches: &ArgMatches, name: &str) -> Result<Option<usize>, G
 }
 
 /// Read text from a file path, or stdin when the path is `-`.
+///
+/// A leading UTF-8 byte order mark (written by Windows editors and
+/// PowerShell) is an encoding signature, not text: it is dropped, so it does
+/// not end up in a document, hide a Markdown heading or join a password.
 pub(crate) fn read_text_input(path: &str, flag_name: &str) -> Result<String, GwsError> {
     if path == "-" {
         let mut s = String::new();
         std::io::Read::read_to_string(&mut std::io::stdin(), &mut s).map_err(|e| {
             GwsError::Validation(format!("Failed to read {flag_name} from stdin: {e}"))
         })?;
-        return Ok(s);
+        return Ok(crate::executor::strip_utf8_bom(s));
     }
     let safe = crate::validate::validate_safe_file_path(path, flag_name)?;
     std::fs::read_to_string(&safe)
+        .map(crate::executor::strip_utf8_bom)
         .map_err(|e| GwsError::Validation(format!("Failed to read {flag_name} '{path}': {e}")))
 }
 
