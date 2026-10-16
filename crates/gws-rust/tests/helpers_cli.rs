@@ -1200,6 +1200,99 @@ async fn gmail_read_honors_jq_and_format() {
     assert_eq!(stdout_json(&out)["subject"], "Hello");
 }
 
+/// `gmail +read` prints the Gmail API `id` and `threadId` (the names
+/// `+search` and `+triage` use), so `.id` feeds `+reply --message-id`; the
+/// RFC 5322 Message-ID header is `message_id_header`, never `message_id`.
+#[tokio::test(flavor = "multi_thread")]
+async fn gmail_read_id_feeds_reply_message_id() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/gmail/v1/users/me/messages/18f1a2b3c4d"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "18f1a2b3c4d",
+            "threadId": "18f1a2b3c00",
+            "payload": {
+                "mimeType": "text/plain",
+                "headers": [
+                    {"name": "From", "value": "alice@example.com"},
+                    {"name": "To", "value": "me@example.com"},
+                    {"name": "Subject", "value": "Plan"},
+                    {"name": "Message-ID", "value": "<m1@example.com>"}
+                ],
+                "body": {"data": "aGk"}
+            }
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/gmail/v1/users/me/profile"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({"emailAddress": "me@example.com"})),
+        )
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/gmail/v1/users/me/settings/sendAs"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"sendAs": [
+            {"sendAsEmail": "me@example.com", "isPrimary": true, "isDefault": true}
+        ]})))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/upload/gmail/v1/users/me/drafts"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id": "D1"})))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let dir = setup();
+    seed(dir.path(), "gmail", "v1", "");
+    let run = |args: &[&str]| {
+        gwsr(dir.path())
+            .env("GWSR_TOKEN", "test-token")
+            .env("GWSR_API_BASE_URL", server.uri())
+            .env("HTTPS_PROXY", "http://127.0.0.1:9")
+            .args(args)
+            .output()
+            .unwrap()
+    };
+
+    let out = run(&["gmail", "+read", "--message-id", "18f1a2b3c4d"]);
+    assert!(out.status.success(), "{out:?}");
+    let read = stdout_json(&out);
+    assert_eq!(read["id"], "18f1a2b3c4d", "{read}");
+    assert_eq!(read["threadId"], "18f1a2b3c00", "{read}");
+    assert_eq!(read["message_id_header"], "m1@example.com", "{read}");
+    assert!(read.get("message_id").is_none(), "{read}");
+    assert!(read.get("thread_id").is_none(), "{read}");
+
+    let id = read["id"].as_str().unwrap();
+    let out = run(&[
+        "gmail",
+        "+reply",
+        "--message-id",
+        id,
+        "--body",
+        "Thanks",
+        "--draft",
+    ]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let requests = server.received_requests().await.unwrap();
+    let upload = requests
+        .iter()
+        .find(|r| r.url.path().ends_with("/drafts"))
+        .unwrap();
+    let body = String::from_utf8_lossy(&upload.body);
+    assert!(body.contains(r#""threadId":"18f1a2b3c00""#), "{body}");
+    assert!(body.contains("In-Reply-To: <m1@example.com>"), "{body}");
+}
+
 /// `GWSR_API_BASE_URL` routes workflow requests to the configured endpoint,
 /// exactly like generated methods and the app helpers.
 #[test]

@@ -97,7 +97,7 @@ pub(super) fn required_message_id(matches: &ArgMatches) -> Result<String, GwsErr
     {
         return Err(GwsError::Validation(format!(
             "--message-id {:?} is not a Gmail API message ID: expected letters, digits, '-' or '_' \
-             (the `id` field from `gwsr gmail +triage` or `users messages list`), \
+             (the `id` field from `gwsr gmail +search`, `+triage`, `+read` or `users messages list`), \
              not a Message-ID header value",
             sanitize_for_terminal(id)
         )));
@@ -424,9 +424,13 @@ fn read_cmd() -> Command {
 EXAMPLES:
   gwsr gmail +read --message-id 18f1a2b3c4d | jq -r '.body_text'
   gwsr gmail +read --message-id 18f1a2b3c4d --body-format text --headers
+  gwsr gmail +read --message-id 18f1a2b3c4d --jq '{id, threadId, message_id_header}'
 
 TIPS:
   Prints the parsed message as JSON by default; --body-format text prints the body.
+  JSON fields: id, threadId (Gmail API IDs, as in +search and +triage), message_id_header
+    (the RFC 5322 Message-ID header), references, from, reply_to, to, cc, subject, date,
+    body_text, body_html. Pass id, not message_id_header, to --message-id.
   HTML-only messages are rendered to plain text automatically.",
         )
 }
