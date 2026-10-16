@@ -377,6 +377,32 @@ pub(crate) async fn handle(m: &clap::ArgMatches) -> Result<(), GwsError> {
 mod tests {
     use super::*;
 
+    /// `--scopes email,profile` asks for the identity scopes Google reports
+    /// as `userinfo.email` / `userinfo.profile`: the request must use those
+    /// names, so it holds no duplicates and every requested scope can match
+    /// the grant (no false "not granted" warning).
+    #[test]
+    fn openid_aliases_match_the_scopes_google_grants() {
+        let requested = finalize_scopes(
+            ["email", "profile"]
+                .into_iter()
+                .map(scopes::normalize_scope)
+                .collect(),
+        );
+        let granted: Vec<String> = [
+            "openid",
+            "https://www.googleapis.com/auth/userinfo.email",
+            "https://www.googleapis.com/auth/userinfo.profile",
+        ]
+        .map(String::from)
+        .to_vec();
+        assert_eq!(requested.len(), 3, "{requested:?}");
+        assert!(
+            requested.iter().all(|s| granted.contains(s)),
+            "{requested:?}"
+        );
+    }
+
     /// A login to the implicit default profile must not pin it in
     /// `config.toml`: that would turn it into an explicitly chosen profile,
     /// which never falls back to Application Default Credentials (so after
