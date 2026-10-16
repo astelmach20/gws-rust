@@ -94,6 +94,10 @@ pub struct RestMethod {
     pub flat_path: Option<String>,
     #[serde(default)]
     pub supports_media_download: bool,
+    /// Discovery's `useMediaDownloadService`: an `alt=media` request goes to
+    /// the download service URL (`rootUrl` + `download/` + `servicePath`).
+    #[serde(default)]
+    pub use_media_download_service: bool,
     #[serde(default)]
     pub supports_media_upload: bool,
     pub media_upload: Option<MediaUpload>,

@@ -88,6 +88,15 @@ fn json_needs_alt(doc: &RestDescription) -> bool {
     })
 }
 
+/// Whether this request is a media download that Discovery routes through
+/// the download service (`useMediaDownloadService`), as Google's generated
+/// clients do: `rootUrl` + `download/` + `servicePath` + path.
+fn uses_download_service(method: &RestMethod, params: &Map<String, Value>) -> bool {
+    method.supports_media_download
+        && method.use_media_download_service
+        && params.get("alt").and_then(Value::as_str) == Some("media")
+}
+
 /// Build the URL and query parameters for `method`. When the document's
 /// default response format is not JSON, `alt=json` is added unless the
 /// caller chose an `alt`.
@@ -130,7 +139,16 @@ pub(crate) fn build_url(
         match target {
             UrlTarget::Method => {
                 let path = render_path_template(template, params)?;
-                format!("{}{}", doc.service_base(endpoints.override_base())?, path)
+                if uses_download_service(method, params) {
+                    format!(
+                        "{}download/{}{}",
+                        doc.api_root(endpoints.override_base())?,
+                        doc.service_path.trim_start_matches('/'),
+                        path
+                    )
+                } else {
+                    format!("{}{}", doc.service_base(endpoints.override_base())?, path)
+                }
             }
             UrlTarget::SimpleUpload | UrlTarget::ResumableUpload => {
                 let upload_template = match target {
@@ -281,6 +299,59 @@ mod tests {
         let u = build_url(&doc, &m, &params, UrlTarget::Method, &google()).unwrap();
         assert_eq!(u.url, "https://api.googleapis.com/files/123");
         assert_eq!(u.query, vec![("q".to_string(), "search term".to_string())]);
+    }
+
+    /// `useMediaDownloadService` sends an `alt=media` request to the download
+    /// service URL, as Google's generated clients do; every other request,
+    /// and every method without the flag, keeps the regular service URL.
+    #[test]
+    fn media_download_service_url_for_alt_media() {
+        let mut doc = RestDescription {
+            root_url: "https://artifactregistry.googleapis.com/".to_string(),
+            service_path: "v1/".to_string(),
+            ..Default::default()
+        };
+        let mut m = method("files/{fileId}:download", path_params(&["fileId"]));
+        m.supports_media_download = true;
+        m.use_media_download_service = true;
+        let mut params = Map::new();
+        params.insert("fileId".into(), json!("f1"));
+        params.insert("alt".into(), json!("media"));
+        let url = |doc: &RestDescription, m: &RestMethod, params: &Map<String, Value>| {
+            build_url(doc, m, params, UrlTarget::Method, &google())
+                .unwrap()
+                .url
+        };
+        assert_eq!(
+            url(&doc, &m, &params),
+            "https://artifactregistry.googleapis.com/download/v1/files/f1:download"
+        );
+
+        // A configured base URL keeps the `download/` prefix after it.
+        let local = EndpointPolicy::with_override("http://127.0.0.1:9/").unwrap();
+        assert_eq!(
+            build_url(&doc, &m, &params, UrlTarget::Method, &local)
+                .unwrap()
+                .url,
+            "http://127.0.0.1:9/download/v1/files/f1:download"
+        );
+
+        // `baseUrl` is the regular service URL, not the download one.
+        doc.base_url = Some("https://artifactregistry.googleapis.com/v1/".to_string());
+        assert_eq!(
+            url(&doc, &m, &params),
+            "https://artifactregistry.googleapis.com/download/v1/files/f1:download"
+        );
+
+        let regular = "https://artifactregistry.googleapis.com/v1/files/f1:download";
+        let mut json_params = params.clone();
+        json_params.insert("alt".into(), json!("json"));
+        assert_eq!(url(&doc, &m, &json_params), regular);
+        json_params.remove("alt");
+        assert_eq!(url(&doc, &m, &json_params), regular);
+
+        m.use_media_download_service = false;
+        assert_eq!(url(&doc, &m, &params), regular);
     }
 
     /// The Groups Settings API answers in Atom XML unless asked for JSON.
