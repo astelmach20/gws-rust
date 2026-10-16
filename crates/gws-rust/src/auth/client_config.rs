@@ -165,9 +165,13 @@ fn check_field(path: &Path, field: &str, value: &str) -> anyhow::Result<()> {
 ///
 /// # Errors
 ///
-/// The file is not private, unreadable or malformed.
+/// The file cannot be inspected (only "not found" means absent), is not
+/// private, unreadable or malformed.
 pub fn load_from(path: &Path) -> anyhow::Result<Option<ClientConfig>> {
-    if !path.exists() {
+    if !path
+        .try_exists()
+        .with_context(|| format!("cannot inspect '{}'", path.display()))?
+    {
         return Ok(None);
     }
     crate::fs_util::check_private_file(path)?;
@@ -414,6 +418,25 @@ mod tests {
     }
 
     #[cfg(unix)]
+    /// A client file that cannot be inspected is an error, not "no saved
+    /// client" (which would fall back to another client).
+    #[cfg(unix)]
+    #[test]
+    fn uninspectable_client_file_is_an_error_not_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = dir.path().join("cfg");
+        let path = cfg.join("client_secret.json");
+        save_client_config(&path, "id", &secret("secret"), None).unwrap();
+        let Some(guard) = crate::fs_util::testing::unsearchable_dir(&cfg) else {
+            return;
+        };
+        let result = load_from(&path);
+        drop(guard);
+        let err = format!("{:#}", result.unwrap_err());
+        assert!(err.contains("cannot inspect"), "{err}");
+        assert!(err.contains("client_secret.json"), "{err}");
+    }
+
     #[test]
     fn world_readable_client_file_is_refused() {
         use std::os::unix::fs::PermissionsExt;

@@ -293,6 +293,40 @@ impl Drop for FileLock {
     }
 }
 
+/// Helpers for tests that need a path whose metadata cannot be read.
+#[cfg(test)]
+#[cfg(unix)]
+pub(crate) mod testing {
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::{Path, PathBuf};
+
+    /// Make `dir` unsearchable (mode 000) until the guard drops, so stat
+    /// calls on paths inside it fail with "permission denied". `None` when
+    /// permissions are not enforced (running as root): callers skip the test.
+    pub(crate) fn unsearchable_dir(dir: &Path) -> Option<UnsearchableDir> {
+        let mode = std::fs::metadata(dir).unwrap().permissions().mode();
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let guard = UnsearchableDir {
+            dir: dir.to_path_buf(),
+            mode,
+        };
+        dir.join("probe").try_exists().is_err().then_some(guard)
+    }
+
+    /// Restores the directory's mode on drop (see [`unsearchable_dir`]).
+    pub(crate) struct UnsearchableDir {
+        dir: PathBuf,
+        mode: u32,
+    }
+
+    impl Drop for UnsearchableDir {
+        fn drop(&mut self) {
+            std::fs::set_permissions(&self.dir, std::fs::Permissions::from_mode(self.mode))
+                .unwrap();
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

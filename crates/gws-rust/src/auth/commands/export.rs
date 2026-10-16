@@ -72,7 +72,7 @@ pub(super) async fn handle(m: &clap::ArgMatches) -> Result<(), GwsError> {
 
 fn read_profile_plaintext(env: &AuthEnv) -> Result<Zeroizing<String>, GwsError> {
     let path = &env.paths.credentials;
-    if !path.exists() {
+    if !super::stored_file_exists(path)? {
         return Err(GwsError::Auth(format!(
             "profile '{}' has no stored credentials to export (run `{}`)",
             env.profile.name,
@@ -209,6 +209,35 @@ mod tests {
         let err = masked("refresh_token=1//secret").unwrap_err().to_string();
         assert!(!err.contains("secret"), "{err}");
         assert!(masked("[1,2]").is_err());
+    }
+
+    /// Credentials that cannot be inspected are a credential-store error,
+    /// not "no stored credentials" (which says to log in).
+    #[cfg(unix)]
+    #[test]
+    fn uninspectable_credentials_are_not_reported_missing() {
+        use crate::auth::profiles::{ActiveProfile, ProfilePaths, ProfileSource};
+        let dir = tempfile::tempdir().unwrap();
+        let paths = ProfilePaths::new(dir.path(), "default");
+        paths.ensure_dir().unwrap();
+        std::fs::write(&paths.credentials, b"sealed").unwrap();
+        let profile_dir = paths.dir.clone();
+        let env = AuthEnv::new(
+            dir.path().to_path_buf(),
+            ActiveProfile {
+                name: "default".into(),
+                source: ProfileSource::Default,
+            },
+            paths,
+        );
+        let Some(guard) = crate::fs_util::testing::unsearchable_dir(&profile_dir) else {
+            return;
+        };
+        let result = read_profile_plaintext(&env);
+        drop(guard);
+        let err = result.unwrap_err();
+        assert!(matches!(err, GwsError::CredentialStore(_)), "{err:?}");
+        assert!(err.to_string().contains("cannot inspect"), "{err}");
     }
 
     #[test]

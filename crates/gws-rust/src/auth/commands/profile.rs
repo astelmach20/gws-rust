@@ -37,12 +37,12 @@ pub(super) fn list_report(base: &Path, active: &ActiveProfile) -> Result<Value, 
         rows.push(json!({
             "name": name,
             "active": *name == active.name,
-            "logged_in": paths.credentials.exists(),
+            "logged_in": super::stored_file_exists(&paths.credentials)?,
             "account": meta.as_ref().and_then(|m| m.account.clone()),
             "granted_scope_count": meta.as_ref().map(|m| m.granted_scopes.len()),
         }));
     }
-    let (invalid, warning) = invalid_profiles_report(&dirs);
+    let (invalid, warning) = invalid_profiles_report(&dirs)?;
     let mut out = json!({
         "active_profile": active.name,
         "active_profile_source": active.source,
@@ -57,7 +57,13 @@ pub(super) fn list_report(base: &Path, active: &ActiveProfile) -> Result<Value, 
 
 /// Describe the profile directories whose names are not valid profile
 /// names, and a warning saying how to fix them (`None` when there are none).
-pub(super) fn invalid_profiles_report(dirs: &ProfileDirs) -> (Value, Option<String>) {
+///
+/// # Errors
+///
+/// A directory whose `credentials.enc` cannot be inspected.
+pub(super) fn invalid_profiles_report(
+    dirs: &ProfileDirs,
+) -> Result<(Value, Option<String>), GwsError> {
     let mut entries = Vec::new();
     let mut fixes = Vec::new();
     for path in &dirs.invalid {
@@ -74,7 +80,7 @@ pub(super) fn invalid_profiles_report(dirs: &ProfileDirs) -> (Value, Option<Stri
         entries.push(json!({
             "name": name,
             "path": path.display().to_string(),
-            "logged_in": path.join("credentials.enc").exists(),
+            "logged_in": super::stored_file_exists(&path.join("credentials.enc"))?,
             "suggested_name": suggestion,
         }));
     }
@@ -88,7 +94,7 @@ pub(super) fn invalid_profiles_report(dirs: &ProfileDirs) -> (Value, Option<Stri
             fixes.join(", ")
         )
     });
-    (Value::Array(entries), warning)
+    Ok((Value::Array(entries), warning))
 }
 
 pub(super) fn handle_use(m: &clap::ArgMatches) -> Result<(), GwsError> {
@@ -107,7 +113,7 @@ pub(super) fn handle_use(m: &clap::ArgMatches) -> Result<(), GwsError> {
 pub(super) fn use_profile(base: &Path, name: &str) -> Result<Value, GwsError> {
     profiles::validate_profile_name(name).map_err(|e| GwsError::Validation(format!("{e:#}")))?;
     let paths = ProfilePaths::new(base, name);
-    if !paths.credentials.exists() {
+    if !super::stored_file_exists(&paths.credentials)? {
         return Err(GwsError::Validation(format!(
             "profile '{name}' has no credentials; create it with `gwsr auth login --profile {name}`"
         )));
@@ -120,6 +126,41 @@ pub(super) fn use_profile(base: &Path, name: &str) -> Result<Value, GwsError> {
 mod tests {
     use super::*;
     use crate::auth::profiles::{ProfileMetadata, ProfileSource};
+
+    /// A profile whose credentials cannot be inspected is an error for `auth
+    /// use` and `auth list`, not a profile that is not logged in.
+    #[cfg(unix)]
+    #[test]
+    fn uninspectable_credentials_are_an_error_not_logged_out() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path();
+        for name in ["work", "Other"] {
+            let paths = ProfilePaths::new(base, name);
+            paths.ensure_dir().unwrap();
+            std::fs::write(&paths.credentials, b"GWSR").unwrap();
+        }
+        let work = ProfilePaths::new(base, "work").dir;
+        let invalid = ProfilePaths::new(base, "Other").dir;
+        let Some(guard) = crate::fs_util::testing::unsearchable_dir(&work) else {
+            return;
+        };
+        let used = use_profile(base, "work");
+        drop(guard);
+        let Some(guard) = crate::fs_util::testing::unsearchable_dir(&invalid) else {
+            return;
+        };
+        let dirs = profiles::list_profiles(base).unwrap();
+        let listed = invalid_profiles_report(&dirs);
+        drop(guard);
+        for err in [used.unwrap_err(), listed.unwrap_err()] {
+            assert!(matches!(err, GwsError::CredentialStore(_)), "{err:?}");
+            assert!(err.to_string().contains("credentials.enc"), "{err}");
+        }
+        assert!(
+            !base.join("active_profile").exists(),
+            "an uninspectable profile is not made active"
+        );
+    }
 
     #[test]
     fn use_and_list() {
