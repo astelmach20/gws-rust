@@ -25,7 +25,7 @@
 pub mod batch;
 mod body_schema;
 pub(crate) mod download;
-pub(crate) mod input;
+mod input;
 pub(crate) mod operation;
 pub mod options;
 mod output;
