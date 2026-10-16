@@ -607,9 +607,16 @@ metadata:
 
     out.push_str(SHARED_PREREQUISITE);
 
-    out.push_str(&format!(
-        "```bash\ngwsr {alias} <resource> <method> [flags]\n```\n\n",
-    ));
+    // A helper-only service (`workflow`, `modelarmor`) has no resource
+    // commands: every command it runs is a `+helper`.
+    let helper_only = resources.is_empty() && !helpers.is_empty();
+    if helper_only {
+        out.push_str(&format!("```bash\ngwsr {alias} +<helper> [flags]\n```\n\n"));
+    } else {
+        out.push_str(&format!(
+            "```bash\ngwsr {alias} <resource> <method> [flags]\n```\n\n",
+        ));
+    }
 
     // Helper commands
     if !helpers.is_empty() {
@@ -681,6 +688,13 @@ metadata:
 
     // Discovering commands section
     out.push_str("## Discovering Commands\n\n");
+    if helper_only {
+        // No `<resource> <method>` commands, and `gwsr schema` describes
+        // none of these helpers: point at their own help instead.
+        out.push_str("Before calling a helper, inspect it:\n\n");
+        out.push_str(&format!("```bash\n# List the helpers\ngwsr {alias} --help\n\n# A helper's flags, examples and tips\ngwsr {alias} +<helper> --help\n```\n\n"));
+        return out;
+    }
     out.push_str("Before calling any API method, inspect it:\n\n");
     out.push_str(&format!("```bash\n# Browse resources and methods\ngwsr {alias} --help\n\n# Inspect a method's required params, types, and defaults\ngwsr schema {alias}.<resource>.<method>\n```\n\n"));
     out.push_str("Use `gwsr schema` output to build your `--params` and `--json` flags.\n\n");
@@ -1918,6 +1932,71 @@ mod tests {
             let md = render_gmail_helper(read_only);
             assert!(!md.contains(CAUTION), "{read_only} has a caution:\n{md}");
         }
+    }
+
+    /// A helper-only service (`workflow`) has no `<resource> <method>`
+    /// commands and nothing `gwsr schema` can show: its skill must not tell
+    /// the agent to run either. A Discovery service keeps both.
+    #[test]
+    fn helper_only_service_skill_points_at_its_helpers() {
+        let render = |api: &str, doc: crate::discovery::RestDescription| {
+            let entry = services::SERVICES
+                .iter()
+                .find(|s| s.api_name == api)
+                .unwrap();
+            let cli = crate::commands::build_cli(&doc);
+            let (helpers, resources): (Vec<&Command>, Vec<&Command>) = cli
+                .get_subcommands()
+                .partition(|sub| sub.get_name().starts_with('+'));
+            render_service_skill(
+                entry.aliases[0],
+                entry,
+                &helpers,
+                &resources,
+                "Product",
+                &doc,
+            )
+        };
+        let workflow = render(
+            "workflow",
+            crate::discovery::RestDescription {
+                name: "workflow".to_string(),
+                ..Default::default()
+            },
+        );
+        assert!(
+            workflow.contains("```bash\ngwsr workflow +<helper> [flags]\n```"),
+            "{workflow}"
+        );
+        assert!(
+            workflow.contains("gwsr workflow +<helper> --help"),
+            "{workflow}"
+        );
+        for wrong in ["<resource>", "gwsr schema", "--params"] {
+            assert!(!workflow.contains(wrong), "{wrong}:\n{workflow}");
+        }
+
+        let tasks = render(
+            "tasks",
+            serde_json::from_value(serde_json::json!({
+                "name": "tasks",
+                "version": "v1",
+                "rootUrl": "https://tasks.googleapis.com/",
+                "servicePath": "",
+                "resources": {"tasklists": {"methods": {
+                    "list": {"httpMethod": "GET", "path": "lists"}
+                }}}
+            }))
+            .unwrap(),
+        );
+        assert!(
+            tasks.contains("gwsr tasks <resource> <method> [flags]"),
+            "{tasks}"
+        );
+        assert!(
+            tasks.contains("gwsr schema tasks.<resource>.<method>"),
+            "{tasks}"
+        );
     }
 
     const SHARED_INSTALL: &str =

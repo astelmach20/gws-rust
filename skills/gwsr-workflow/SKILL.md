@@ -19,7 +19,7 @@ metadata:
 > **PREREQUISITE:** Read `../gwsr-shared/SKILL.md` for auth, global flags, and security rules. If it is missing, install it with `npx skills add https://github.com/astelmach20/gws-rust/tree/main/skills/gwsr-shared`.
 
 ```bash
-gwsr workflow <resource> <method> [flags]
+gwsr workflow +<helper> [flags]
 ```
 
 ## Helper Commands
@@ -34,15 +34,13 @@ gwsr workflow <resource> <method> [flags]
 
 ## Discovering Commands
 
-Before calling any API method, inspect it:
+Before calling a helper, inspect it:
 
 ```bash
-# Browse resources and methods
+# List the helpers
 gwsr workflow --help
 
-# Inspect a method's required params, types, and defaults
-gwsr schema workflow.<resource>.<method>
+# A helper's flags, examples and tips
+gwsr workflow +<helper> --help
 ```
-
-Use `gwsr schema` output to build your `--params` and `--json` flags.
 
