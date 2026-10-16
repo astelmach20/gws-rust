@@ -517,6 +517,75 @@ fn top_level_discovery_methods_are_commands() {
         .stdout(predicate::str::contains("Tokeninfo"));
 }
 
+/// A method flagged `useMediaDownloadService` sends `alt=media` to the
+/// download service URL (`rootUrl` + `download/` + `servicePath`), as
+/// Google's generated clients do; without `alt=media` it keeps the regular
+/// URL.
+#[test]
+fn media_download_service_dry_run_url() {
+    let env = Env::new();
+    env.seed_doc(&json!({
+        "name": "artifactregistry",
+        "version": "v1",
+        "rootUrl": "https://artifactregistry.googleapis.com/",
+        "servicePath": "",
+        "parameters": {"alt": {
+            "type": "string",
+            "location": "query",
+            "default": "json",
+            "enum": ["json", "media", "proto"]
+        }},
+        "resources": {"projects": {"resources": {"locations": {"resources": {
+            "repositories": {"resources": {"files": {"methods": {"download": {
+                "id": "artifactregistry.projects.locations.repositories.files.download",
+                "httpMethod": "GET",
+                "path": "v1/{+name}:download",
+                "flatPath": "v1/projects/{projectsId}/locations/{locationsId}/repositories/{repositoriesId}/files/{filesId}:download",
+                "parameters": {"name": {
+                    "type": "string",
+                    "location": "path",
+                    "required": true,
+                    "pattern": "^projects/[^/]+/locations/[^/]+/repositories/[^/]+/files/[^/]+$"
+                }},
+                "parameterOrder": ["name"],
+                "supportsMediaDownload": true,
+                "useMediaDownloadService": true,
+                "scopes": ["https://www.googleapis.com/auth/cloud-platform"]
+            }}}}}
+        }}}}}
+    }));
+    let dry_run_url = |params: &str| {
+        let out = env
+            .cmd()
+            .args([
+                "artifactregistry:v1",
+                "projects",
+                "locations",
+                "repositories",
+                "files",
+                "download",
+                "--dry-run",
+                "--params",
+                params,
+            ])
+            .assert()
+            .success()
+            .get_output()
+            .clone();
+        let v: Value = serde_json::from_str(&stdout_of(&out)).unwrap();
+        v["url"].as_str().unwrap().to_string()
+    };
+    let name = "projects/p/locations/us/repositories/r/files/f";
+    assert_eq!(
+        dry_run_url(&json!({"name": name, "alt": "media"}).to_string()),
+        format!("https://artifactregistry.googleapis.com/download/v1/{name}:download")
+    );
+    assert_eq!(
+        dry_run_url(&json!({"name": name}).to_string()),
+        format!("https://artifactregistry.googleapis.com/v1/{name}:download")
+    );
+}
+
 /// A Discovery document whose names collide as subcommands: a top-level
 /// method named like a resource, a method and a sub-resource of the same
 /// name under one resource, and a method and a resource named `help`
