@@ -31,7 +31,7 @@ use reqwest::Url;
 
 use super::error::DiscoveryError;
 use super::model::RestDescription;
-use super::parse_and_validate;
+use super::{other_casing, parse_and_validate};
 
 /// Default time a cached document is considered fresh.
 pub const DEFAULT_TTL: Duration = Duration::from_secs(24 * 60 * 60);
@@ -151,7 +151,7 @@ impl DiscoveryCache {
             // On a case-insensitive file system (the macOS and Windows
             // defaults) `Drive+v3.json` is the file of `drive`: another API's
             // entry, which must be neither used nor deleted as corrupt.
-            Err(_) if names_other_casing(&body, service, version) => return Ok(None),
+            Err(_) if other_casing(&body, service, version).is_some() => return Ok(None),
             Err(e) => return Err(e),
         };
         Ok(Some(CachedDocument { doc, age, is_fresh }))
@@ -300,21 +300,6 @@ impl DiscoveryCache {
         // The directory may pre-date us with looser permissions; we own it.
         set_mode(&self.dir, 0o700)
     }
-}
-
-/// Whether `body` is the document of an API whose name and version equal
-/// `service` and `version` ignoring ASCII case, but not exactly.
-fn names_other_casing(body: &[u8], service: &str, version: &str) -> bool {
-    #[derive(serde::Deserialize)]
-    struct Id {
-        name: String,
-        version: String,
-    }
-    serde_json::from_slice::<Id>(body).is_ok_and(|id| {
-        (id.name != service || id.version != version)
-            && id.name.eq_ignore_ascii_case(service)
-            && id.version.eq_ignore_ascii_case(version)
-    })
 }
 
 #[cfg(unix)]
