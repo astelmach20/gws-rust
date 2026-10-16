@@ -122,11 +122,17 @@ pub(super) async fn handle_label(
         ));
     }
     if crate::args::dry_run(matches)? {
-        // Label names are resolved to IDs at run time; the plan shows them as given.
-        return crate::helpers::http::print_dry_run(
-            matches,
-            plan(&offline_api()?, &targets, &change.add, &change.remove),
-        );
+        // A real run first lists the labels to resolve names to IDs; the
+        // plan lists that read and shows the names as given.
+        let api = offline_api()?;
+        let mut requests = vec![crate::helpers::http::dry_run_request(
+            "GET",
+            &api.labels_url(),
+            &[],
+            None,
+        )];
+        requests.extend(plan(&api, &targets, &change.add, &change.remove));
+        return crate::helpers::http::print_dry_run(matches, requests);
     }
     let api = super::api::authenticated(&[GMAIL_SCOPE]).await?;
     let labels = api.list_labels().await?;

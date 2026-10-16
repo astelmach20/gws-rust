@@ -299,10 +299,15 @@ impl GmailApi {
             .await
     }
 
+    /// `users.labels.list`, read to resolve label names to IDs.
+    pub(super) fn labels_url(&self) -> String {
+        self.url("labels")
+    }
+
     pub(super) async fn list_labels(&self) -> Result<Vec<Label>, GwsError> {
         let body = self
             .rest
-            .get_json(&self.url("labels"), &[], "Failed to list labels")
+            .get_json(&self.labels_url(), &[], "Failed to list labels")
             .await?;
         parse_labels(&body)
     }
