@@ -140,7 +140,9 @@ pub fn service_inventory(entry: &ServiceEntry, doc: &RestDescription) -> Value {
 }
 
 fn static_commands() -> Vec<Value> {
-    let root = crate::cli_args::command();
+    // `auth` parses its own arguments: list its real subcommands and flags,
+    // not the passthrough argument of the static tree.
+    let root = crate::completions::with_auth_tree(crate::cli_args::command());
     let mut out = Vec::new();
     fn visit(cmd: &Command, path: &mut Vec<String>, out: &mut Vec<Value>) {
         for sub in cmd.get_subcommands() {
@@ -386,6 +388,48 @@ mod tests {
         ] {
             assert!(paths.contains(&p.to_string()), "missing {p}: {paths:?}");
         }
+    }
+
+    /// `auth` parses its own arguments, so the static tree only has a
+    /// passthrough for it; the inventory must list the real `auth`
+    /// subcommands and their flags instead.
+    #[test]
+    fn static_commands_list_auth_subcommands_with_their_flags() {
+        let commands = static_commands();
+        let paths: Vec<&str> = commands
+            .iter()
+            .map(|c| c["path"].as_str().unwrap())
+            .collect();
+        for p in [
+            "auth login",
+            "auth status",
+            "auth logout",
+            "auth export",
+            "auth setup",
+        ] {
+            assert!(paths.contains(&p), "missing {p}: {paths:?}");
+        }
+        assert!(
+            !paths.contains(&"auth"),
+            "auth is a group, not a command taking raw args: {paths:?}"
+        );
+        let login = commands.iter().find(|c| c["path"] == "auth login").unwrap();
+        let flags: Vec<&str> = login["flags"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|f| f["name"].as_str().unwrap())
+            .collect();
+        assert!(flags.contains(&"--scopes"), "{flags:?}");
+        let setup = commands.iter().find(|c| c["path"] == "auth setup").unwrap();
+        assert!(
+            setup["flags"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|f| f["name"] != "args"),
+            "auth setup lists its real flags: {setup}"
+        );
     }
 
     #[test]
