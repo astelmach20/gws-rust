@@ -19,11 +19,92 @@ use gws_rust_core::discovery::RestDescription;
 use gws_rust_core::services::resolve_service_spec;
 use gws_rust_core::validate::{
     ModelArmorTemplate, PathPolicy, encode_path_preserving_slashes, encode_path_segment,
-    is_dangerous_unicode, parse_api_base_override, reject_dangerous_chars, resolve_file_path,
-    validate_api_base_with, validate_api_identifier, validate_resource_name,
+    parse_api_base_override, reject_dangerous_chars, resolve_file_path, validate_api_base_with,
+    validate_api_identifier, validate_resource_name,
 };
 use percent_encoding::percent_decode_str;
 use proptest::prelude::*;
+
+/// Code points `reject_dangerous_chars` must refuse besides C0, DEL and C1,
+/// written out here rather than taken from `is_dangerous_unicode`, so the
+/// property below checks the definition instead of restating it.
+const DANGEROUS: &[u32] = &[
+    0x061C, 0x180E, 0x200B, 0x200C, 0x200D, 0x200E, 0x200F, 0x2028, 0x2029, 0x202A, 0x202B, 0x202C,
+    0x202D, 0x202E, 0x2060, 0x2061, 0x2062, 0x2063, 0x2064, 0x2066, 0x2067, 0x2068, 0x2069, 0xFEFF,
+];
+
+fn must_refuse(c: char) -> bool {
+    let cp = u32::from(c);
+    cp < 0x20 || (0x7F..=0x9F).contains(&cp) || DANGEROUS.contains(&cp)
+}
+
+/// Strings mixing arbitrary characters with the refused ones and their
+/// neighbours, which `any::<String>()` almost never produces.
+fn mixed_string() -> impl Strategy<Value = String> {
+    let near: Vec<char> = DANGEROUS
+        .iter()
+        .flat_map(|&cp| [cp - 1, cp, cp + 1])
+        .chain([0x1F, 0x20, 0x7E, 0x7F, 0x9F, 0xA0])
+        .filter_map(char::from_u32)
+        .collect();
+    prop::collection::vec(
+        prop_oneof![any::<char>(), prop::sample::select(near), Just('a')],
+        0..6,
+    )
+    .prop_map(|cs| cs.into_iter().collect())
+}
+
+/// URLs assembled from parts that cover every accept and reject branch of the
+/// API base checks, so the properties below see accepted URLs too.
+fn base_url() -> impl Strategy<Value = (String, BaseParts)> {
+    (
+        prop::sample::select(vec!["https", "HTTPS", "http", "ftp"]),
+        prop::sample::select(vec!["", "user@", "user:pw@"]),
+        prop::sample::select(vec![
+            "googleapis.com",
+            "www.googleapis.com",
+            "x.googleapis.com.",
+            "googleapis.com.evil.com",
+            "evilgoogleapis.com",
+            "localhost",
+            "LOCALHOST",
+            "localhost.evil.com",
+            "127.0.0.1",
+            "127.8.9.10",
+            "[::1]",
+            "10.0.0.1",
+            "example.com",
+        ]),
+        prop::sample::select(vec!["", ":443", ":8080"]),
+        prop::sample::select(vec!["", "/", "/v1", "/a/b/"]),
+        prop::sample::select(vec!["", "?q=1", "#f"]),
+    )
+        .prop_map(|(scheme, user, host, port, path, tail)| {
+            let url = format!("{scheme}://{user}{host}{port}{path}{tail}");
+            let parts = BaseParts {
+                scheme: scheme.to_ascii_lowercase(),
+                clean: user.is_empty() && tail.is_empty(),
+                google: host.trim_end_matches('.') == "googleapis.com"
+                    || host.trim_end_matches('.').ends_with(".googleapis.com"),
+                loopback: matches!(
+                    host,
+                    "localhost" | "LOCALHOST" | "127.0.0.1" | "127.8.9.10" | "[::1]"
+                ),
+                default_port: port.is_empty()
+                    || (port == ":443" && scheme.eq_ignore_ascii_case("https")),
+            };
+            (url, parts)
+        })
+}
+
+#[derive(Debug, Clone)]
+struct BaseParts {
+    scheme: String,
+    clean: bool,
+    google: bool,
+    loopback: bool,
+    default_port: bool,
+}
 
 fn config() -> ProptestConfig {
     ProptestConfig {
@@ -82,9 +163,9 @@ proptest! {
     }
 
     #[test]
-    fn reject_dangerous_chars_matches_definition(s in any::<String>()) {
-        let expected_ok = !s.chars().any(|c| c.is_control() || is_dangerous_unicode(c));
-        prop_assert_eq!(reject_dangerous_chars(&s, "--x").is_ok(), expected_ok);
+    fn reject_dangerous_chars_matches_definition(s in mixed_string()) {
+        let expected_ok = !s.chars().any(must_refuse);
+        prop_assert_eq!(reject_dangerous_chars(&s, "--x").is_ok(), expected_ok, "{:?}", s);
     }
 
     #[test]
@@ -96,13 +177,25 @@ proptest! {
     }
 
     #[test]
-    fn trusted_api_bases_are_https_googleapis(s in any::<String>()) {
-        if let Ok(url) = validate_api_base_with(&s, None) {
+    fn trusted_api_bases_are_https_googleapis((s, p) in base_url()) {
+        let expected_ok = p.scheme == "https" && p.clean && p.google && p.default_port;
+        let result = validate_api_base_with(&s, None);
+        prop_assert_eq!(result.is_ok(), expected_ok, "{} {:?}", s, result);
+        if let Ok(url) = result {
             prop_assert_eq!(url.scheme(), "https");
             let host = url.host_str().unwrap().trim_end_matches('.').to_string();
             prop_assert!(host == "googleapis.com" || host.ends_with(".googleapis.com"), "{}", host);
             prop_assert!(url.username().is_empty() && url.password().is_none());
             prop_assert!(url.port().is_none() && url.query().is_none() && url.fragment().is_none());
+        }
+    }
+
+    #[test]
+    fn arbitrary_api_bases_are_refused_or_https_googleapis(s in any::<String>()) {
+        if let Ok(url) = validate_api_base_with(&s, None) {
+            prop_assert_eq!(url.scheme(), "https");
+            let host = url.host_str().unwrap().trim_end_matches('.').to_string();
+            prop_assert!(host == "googleapis.com" || host.ends_with(".googleapis.com"), "{}", host);
         }
     }
 
@@ -116,9 +209,12 @@ proptest! {
     }
 
     #[test]
-    fn api_base_override_is_https_or_loopback(s in any::<String>()) {
-        if let Ok(Some(url)) = parse_api_base_override(Some(&s)) {
-            prop_assert!(url.scheme() == "https" || url.scheme() == "http");
+    fn api_base_override_is_https_or_loopback((s, p) in base_url()) {
+        let expected_ok = p.clean && (p.scheme == "https" || (p.scheme == "http" && p.loopback));
+        let result = parse_api_base_override(Some(&s));
+        prop_assert_eq!(result.is_ok(), expected_ok, "{} {:?}", s, result);
+        if let Ok(url) = result {
+            let url = url.unwrap();
             prop_assert!(url.path().ends_with('/'));
             prop_assert!(url.username().is_empty() && url.query().is_none());
         }
