@@ -44,6 +44,23 @@ fn int64_number(format: Option<&str>, n: &serde_json::Number) -> bool {
     }
 }
 
+/// Whether `s` is a valid proto3 JSON string form of an integer property of
+/// Discovery `format` `int32`, `uint32` (or no format: any 64-bit integer).
+fn integer_string(format: Option<&str>, s: &str) -> bool {
+    match format {
+        Some("int32") => s.parse::<i32>().is_ok(),
+        Some("uint32") => s.parse::<u32>().is_ok(),
+        _ => s.parse::<i64>().is_ok() || s.parse::<u64>().is_ok(),
+    }
+}
+
+/// Whether `s` is a valid proto3 JSON string form of a `double` or `float`:
+/// a finite decimal number, `"NaN"`, `"Infinity"` or `"-Infinity"`.
+fn number_string(s: &str) -> bool {
+    matches!(s, "NaN" | "Infinity" | "-Infinity")
+        || (s.trim() == s && s.parse::<f64>().is_ok_and(f64::is_finite))
+}
+
 struct Checker<'a> {
     doc: &'a RestDescription,
     allow_unknown_fields: bool,
@@ -177,7 +194,11 @@ impl Checker<'_> {
                 // parser takes them as numbers too (proto3 JSON mapping).
                 ("string", Value::Number(n)) => int64_number(prop.format.as_deref(), n),
                 ("integer", Value::Number(n)) => n.is_i64() || n.is_u64(),
+                // Proto3 JSON also takes integers and floating-point numbers
+                // as strings ("5", "1.5", "NaN", "Infinity").
+                ("integer", Value::String(s)) => integer_string(prop.format.as_deref(), s),
                 ("number", Value::Number(_)) => true,
+                ("number", Value::String(s)) => number_string(s),
                 ("boolean", Value::Bool(_)) => true,
                 ("array", Value::Array(_)) => true,
                 ("object", Value::Object(_)) => true,
@@ -331,7 +352,7 @@ mod tests {
                 "not a valid enum member",
             ),
             (
-                json!({"name": "f", "count": "1"}),
+                json!({"name": "f", "count": "one"}),
                 "Expected type 'integer', found string",
             ),
             (
@@ -443,6 +464,52 @@ mod tests {
                 "size: Expected type 'string'",
             ),
             (json!({"name": 7}), "name: Expected type 'string'"),
+        ] {
+            let msg = check(body.clone()).unwrap_err().to_string();
+            assert!(msg.contains(needle), "{body}: {msg}");
+        }
+    }
+
+    /// The proto3 JSON mapping that Google APIs parse accepts 32-bit integers
+    /// and floating-point numbers as strings too, including the special
+    /// values `"NaN"`, `"Infinity"` and `"-Infinity"`.
+    #[test]
+    fn integer_and_number_fields_accept_proto3_json_strings() {
+        let doc: RestDescription = serde_json::from_value(json!({
+            "name": "x", "version": "v1", "rootUrl": "https://x.googleapis.com/",
+            "schemas": { "Req": { "id": "Req", "type": "object", "properties": {
+                "count": { "type": "integer", "format": "int32" },
+                "size": { "type": "integer", "format": "uint32" },
+                "plain": { "type": "integer" },
+                "ratio": { "type": "number", "format": "double" },
+                "scale": { "type": "number", "format": "float" },
+                "scores": { "type": "array",
+                            "items": { "type": "number", "format": "double" } }
+            } } }
+        }))
+        .unwrap();
+        let check = |body: Value| validate_body(&body, "Req", &doc, false);
+        check(json!({"count": "-5", "size": "4294967295", "plain": "9007199254740993"})).unwrap();
+        check(json!({"ratio": "1.5", "scale": "-2e3", "scores": ["NaN", "Infinity", "-Infinity", 0.5]}))
+            .unwrap();
+        for (body, needle) in [
+            (json!({"count": "abc"}), "count: Expected type 'integer'"),
+            (json!({"count": ""}), "count: Expected type 'integer'"),
+            (json!({"count": "1.5"}), "count: Expected type 'integer'"),
+            (
+                json!({"count": "2147483648"}),
+                "count: Expected type 'integer'",
+            ),
+            (json!({"size": "-1"}), "size: Expected type 'integer'"),
+            (
+                json!({"size": "4294967296"}),
+                "size: Expected type 'integer'",
+            ),
+            (json!({"ratio": "nan"}), "ratio: Expected type 'number'"),
+            (json!({"ratio": "inf"}), "ratio: Expected type 'number'"),
+            (json!({"ratio": "1e400"}), "ratio: Expected type 'number'"),
+            (json!({"ratio": " 1.5"}), "ratio: Expected type 'number'"),
+            (json!({"ratio": "x"}), "ratio: Expected type 'number'"),
         ] {
             let msg = check(body.clone()).unwrap_err().to_string();
             assert!(msg.contains(needle), "{body}: {msg}");
