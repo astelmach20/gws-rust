@@ -483,7 +483,7 @@ pub fn parse_service_and_version(
 }
 
 /// The static command `token` is plausibly a typo of (`gwsr completion` for
-/// `gwsr completions`), when it names no service and resembles none.
+/// `gwsr completions`), when it names no service.
 ///
 /// Every first word that is not a static command is taken as a service, so
 /// without this a mistyped command is reported as an unknown service with
@@ -495,11 +495,7 @@ pub fn parse_service_and_version(
 /// Anything further is more likely an unregistered API named without its
 /// version (`dlp`, `oauth2`) and gets the unknown-service error and hint.
 fn mistyped_command(token: &str, api_version_given: bool) -> Option<&'static str> {
-    if api_version_given
-        || token.contains(':')
-        || services::find_service(token).is_some()
-        || services::suggest_service(token).is_some()
-    {
+    if api_version_given || token.contains(':') || services::find_service(token).is_some() {
         return None;
     }
     let lower = token.to_ascii_lowercase();
@@ -509,6 +505,19 @@ fn mistyped_command(token: &str, api_version_given: bool) -> Option<&'static str
         .filter(|&(command, distance)| distance <= (command.len().max(lower.len()) / 4).max(1))
         .min_by_key(|&(_, distance)| distance)
         .map(|(command, _)| command)
+}
+
+/// The static command to suggest for an unknown first word, when it is a
+/// strictly closer [`services::typo_distance`] match than the closest
+/// service alias (`gwsr auht` is `auth`, not `vault`). On a tie the service
+/// wins, and its suggestion comes from the unknown-service error.
+fn command_suggestion(token: &str, api_version_given: bool) -> Option<&'static str> {
+    let command = mistyped_command(token, api_version_given)?;
+    let command_distance = services::typo_distance(token, command);
+    match services::suggest_service_with_distance(token) {
+        Some((_, service_distance)) if service_distance <= command_distance => None,
+        _ => Some(command),
+    }
 }
 
 /// argv for the dynamic service command: the top-level global flags that
@@ -532,7 +541,7 @@ async fn run_service(
         .first()
         .and_then(|s| s.to_str())
         .ok_or_else(|| GwsError::Validation("the service name must be valid UTF-8".into()))?;
-    if let Some(command) = mistyped_command(service_token, prescan.api_version.is_some()) {
+    if let Some(command) = command_suggestion(service_token, prescan.api_version.is_some()) {
         return Err(GwsError::Validation(format!(
             "Unknown command or service '{service_token}'. Did you mean `gwsr {command}`? \
              Run `gwsr --help` to list commands and services."
@@ -847,5 +856,24 @@ mod tests {
             }
             other => panic!("unexpected {other:?}"),
         }
+    }
+
+    /// The closest name wins across services and commands, by one metric.
+    #[test]
+    fn closest_of_commands_and_services_is_suggested() {
+        // A transposed command beats a service two edits away.
+        assert_eq!(command_suggestion("auht", false), Some("auth"));
+        assert_eq!(command_suggestion("hlep", false), Some("help"));
+        // A transposed service beats every command.
+        assert_eq!(command_suggestion("drvie", false), None);
+        assert_eq!(services::suggest_service("drvie"), Some("drive"));
+        assert_eq!(command_suggestion("gmial", false), None);
+        assert_eq!(services::suggest_service("gmial"), Some("gmail"));
+        // Nothing close: no command, and no service either.
+        assert_eq!(command_suggestion("xyzzyqq", false), None);
+        assert_eq!(services::suggest_service("xyzzyqq"), None);
+        // Discovery API specs are never commands.
+        assert_eq!(command_suggestion("auht:v1", false), None);
+        assert_eq!(command_suggestion("auht", true), None);
     }
 }

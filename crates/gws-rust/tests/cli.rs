@@ -4521,3 +4521,47 @@ async fn static_token_rejected_with_401_is_not_resent() {
     assert!(message.contains("GWSR_TOKEN"), "{err}");
     assert!(message.contains("expired or was revoked"), "{err}");
 }
+
+/// An unknown first word gets the single closest suggestion across built-in
+/// commands and services: `auht` is `auth` (one transposition), not `vault`.
+#[test]
+fn unknown_first_word_suggests_the_closest_command_or_service() {
+    let env = Env::new();
+    for (word, hint) in [
+        ("auht", "Did you mean `gwsr auth`?"),
+        ("hlep", "Did you mean `gwsr help`?"),
+        ("drvie", "Did you mean 'drive'?"),
+        ("gmial", "Did you mean 'gmail'?"),
+    ] {
+        let out = env
+            .cmd()
+            .args(["--dry-run", word])
+            .assert()
+            .code(3)
+            .get_output()
+            .clone();
+        assert!(stdout_of(&out).is_empty());
+        let message = stderr_error(&out)["error"]["message"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert!(message.contains(hint), "{word}: {message}");
+        assert_eq!(message.matches("Did you mean").count(), 1, "{message}");
+    }
+    let out = env
+        .cmd()
+        .args(["--dry-run", "xyzzyqq"])
+        .assert()
+        .code(3)
+        .get_output()
+        .clone();
+    let message = stderr_error(&out)["error"]["message"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(
+        message.starts_with("Unknown service 'xyzzyqq'."),
+        "{message}"
+    );
+    assert!(!message.contains("Did you mean"), "{message}");
+}
