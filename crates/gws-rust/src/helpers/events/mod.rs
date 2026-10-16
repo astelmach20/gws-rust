@@ -267,6 +267,7 @@ impl Helper for EventsHelper {
 pub(super) fn events_matches(args: &[&str]) -> ArgMatches {
     let doc = crate::discovery::RestDescription {
         name: "workspaceevents".to_string(),
+        version: "v1".to_string(),
         ..Default::default()
     };
     let mut argv = vec!["gwsr"];

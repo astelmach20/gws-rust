@@ -553,7 +553,7 @@ async fn run_service(
     let sanitize_config = sanitize_config(&global, settings)?;
 
     // Check if a helper wants to handle this command
-    if let Some(helper) = helpers::get_helper(&doc.name)
+    if let Some(helper) = helpers::helper_for(&doc)
         && helper.handle(&doc, &matches, &sanitize_config).await?
     {
         return Ok(());

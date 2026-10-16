@@ -1702,6 +1702,7 @@ mod tests {
         let entry = &services::SERVICES[0]; // first service
         let doc = crate::discovery::RestDescription {
             name: entry.api_name.to_string(),
+            version: entry.version.to_string(),
             title: Some("Test API".to_string()),
             description: Some(entry.description.to_string()),
             ..Default::default()
@@ -1831,6 +1832,7 @@ mod tests {
 
         let doc = crate::discovery::RestDescription {
             name: entry.api_name.to_string(),
+            version: entry.version.to_string(),
             title: Some("Test API".to_string()),
             description: Some(entry.description.to_string()),
             ..Default::default()
@@ -1873,6 +1875,7 @@ mod tests {
             .unwrap();
         let doc = crate::discovery::RestDescription {
             name: entry.api_name.to_string(),
+            version: entry.version.to_string(),
             title: Some("Gmail API".to_string()),
             ..Default::default()
         };
@@ -1933,6 +1936,7 @@ mod tests {
             .unwrap();
         let doc = crate::discovery::RestDescription {
             name: entry.api_name.to_string(),
+            version: entry.version.to_string(),
             title: Some("Test API".to_string()),
             ..Default::default()
         };
