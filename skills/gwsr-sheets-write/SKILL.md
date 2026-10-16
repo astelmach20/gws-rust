@@ -23,8 +23,10 @@ Overwrite values in a range (values.update)
 ## Usage
 
 ```bash
-gwsr sheets +write --spreadsheet-id <ID> --range <RANGE>
+gwsr sheets +write --spreadsheet-id <ID> --range <RANGE> --values <CSV_ROW>
 ```
+
+Requires one of: `--values <CSV_ROW>`, `--json-values <JSON>`, `--csv-file <PATH>`.
 
 ## Flags
 
@@ -32,9 +34,9 @@ gwsr sheets +write --spreadsheet-id <ID> --range <RANGE>
 |------|----------|---------|-------------|
 | `--spreadsheet-id` | ✓ | — | Spreadsheet ID |
 | `--range` | ✓ | — | Top-left cell or range to write, e.g. 'Sheet1!B2' |
-| `--values` | — | — | One row as CSV (quote cells containing commas: 'a,"b,c",d') |
-| `--json-values` | — | — | JSON array of rows, e.g. '[["a",1],["b",2]]' (a flat array is one row) |
-| `--csv-file` | — | — | Import rows from a CSV file, or '-' for stdin |
+| `--values` | one | — | One row as CSV (quote cells containing commas: 'a,"b,c",d') |
+| `--json-values` | one | — | JSON array of rows, e.g. '[["a",1],["b",2]]' (a flat array is one row) |
+| `--csv-file` | one | — | Import rows from a CSV file, or '-' for stdin |
 | `--raw` | — | — | Store input as-is (RAW) instead of parsing it like typed input (USER_ENTERED: formulas, numbers, dates) |
 
 ## Examples

@@ -23,17 +23,21 @@ Add or remove labels on messages or threads
 ## Usage
 
 ```bash
-gwsr gmail +label
+gwsr gmail +label --add <LABEL> --message-id <ID>
 ```
+
+Requires at least one of: `--add <LABEL>`, `--remove <LABEL>`.
+
+Requires at least one of: `--message-id <ID>`, `--thread-id <ID|URL>`.
 
 ## Flags
 
 | Flag | Required | Default | Description |
 |------|----------|---------|-------------|
-| `--add` | — | — | Label names or IDs to add (repeatable or comma-separated) |
-| `--remove` | — | — | Label names or IDs to remove (repeatable or comma-separated) |
-| `--message-id` | — | — | Message ID to act on (repeatable or comma-separated) |
-| `--thread-id` | — | — | Thread ID or Gmail web URL to act on (repeatable or comma-separated) |
+| `--add` | at least one | — | Label names or IDs to add (repeatable or comma-separated) |
+| `--remove` | at least one | — | Label names or IDs to remove (repeatable or comma-separated) |
+| `--message-id` | at least one | — | Message ID to act on (repeatable or comma-separated) |
+| `--thread-id` | at least one | — | Thread ID or Gmail web URL to act on (repeatable or comma-separated) |
 
 ## Examples
 

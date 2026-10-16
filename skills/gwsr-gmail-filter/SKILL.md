@@ -39,30 +39,34 @@ gwsr gmail +filter list
 Create a filter
 
 ```bash
-gwsr gmail +filter create
+gwsr gmail +filter create --from <TEXT> --add-label <LABEL>
 ```
+
+Requires at least one of: `--from <TEXT>`, `--to <TEXT>`, `--subject <TEXT>`, `--query <QUERY>`, `--exclude <QUERY>`, `--has-attachment`.
+
+Requires at least one of: `--add-label <LABEL>`, `--remove-label <LABEL>`, `--archive`, `--mark-read`, `--star`, `--important`, `--never-important`, `--trash`, `--never-spam`, `--forward <EMAIL>`.
 
 #### Flags
 
 | Flag | Required | Default | Description |
 |------|----------|---------|-------------|
 | `--yes` | — | — | Confirm this action without prompting (required when not on a terminal) |
-| `--from` | — | — | Match sender |
-| `--to` | — | — | Match recipient |
-| `--subject` | — | — | Match subject |
-| `--query` | — | — | Match a Gmail search query |
-| `--exclude` | — | — | Exclude messages matching this query |
-| `--has-attachment` | — | — | Match only messages with attachments |
-| `--add-label` | — | — | Label names or IDs to apply (repeatable or comma-separated) |
-| `--remove-label` | — | — | Label names or IDs to remove (repeatable or comma-separated) |
-| `--archive` | — | — | Skip the Inbox |
-| `--mark-read` | — | — | Mark as read |
-| `--star` | — | — | Star the message |
-| `--important` | — | — | Mark as important |
-| `--never-important` | — | — | Never mark as important |
-| `--trash` | — | — | Move to Trash |
-| `--never-spam` | — | — | Never send to Spam |
-| `--forward` | — | — | Forward to this verified forwarding address (needs --yes when GWSR_REQUIRE_CONFIRM=1) |
+| `--from` | at least one | — | Match sender |
+| `--to` | at least one | — | Match recipient |
+| `--subject` | at least one | — | Match subject |
+| `--query` | at least one | — | Match a Gmail search query |
+| `--exclude` | at least one | — | Exclude messages matching this query |
+| `--has-attachment` | at least one | — | Match only messages with attachments |
+| `--add-label` | at least one | — | Label names or IDs to apply (repeatable or comma-separated) |
+| `--remove-label` | at least one | — | Label names or IDs to remove (repeatable or comma-separated) |
+| `--archive` | at least one | — | Skip the Inbox |
+| `--mark-read` | at least one | — | Mark as read |
+| `--star` | at least one | — | Star the message |
+| `--important` | at least one | — | Mark as important |
+| `--never-important` | at least one | — | Never mark as important |
+| `--trash` | at least one | — | Move to Trash |
+| `--never-spam` | at least one | — | Never send to Spam |
+| `--forward` | at least one | — | Forward to this verified forwarding address (needs --yes when GWSR_REQUIRE_CONFIRM=1) |
 
 ### delete
 
