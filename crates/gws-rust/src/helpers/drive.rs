@@ -682,10 +682,7 @@ const SHORTCUT: &str = "application/vnd.google-apps.shortcut";
 fn native_download_error(meta: &Value, file_id: &str, mime: &str) -> Result<GwsError, GwsError> {
     let name = str_field(meta, "name")?;
     if mime == SHORTCUT {
-        let target = shortcut_target(meta, file_id)?;
-        return Ok(GwsError::Validation(format!(
-            "'{name}' is a shortcut; download its target with `gwsr drive +download --file-id {target}`"
-        )));
+        return shortcut_error(meta, file_id, None);
     }
     let formats: Vec<&str> = EXPORT_FORMATS
         .iter()
@@ -697,6 +694,56 @@ fn native_download_error(meta: &Value, file_id: &str, mime: &str) -> Result<GwsE
     } else {
         format!(
             "'{name}' is a Google-native file ({mime}) with no binary content; use `gwsr drive +export --file-id {file_id} --to <format>` (formats: {})",
+            formats.join(", ")
+        )
+    }))
+}
+
+/// The error for `+download` or `+export` (with `requested` format) of a
+/// shortcut. Like [`native_download_error`] it names only a command that can
+/// work on the target, chosen by `shortcutDetails.targetMimeType`: a regular
+/// file is downloaded, a Google-native one exported (in `requested` when that
+/// format fits it), and one with no export format is neither.
+fn shortcut_error(
+    meta: &Value,
+    file_id: &str,
+    requested: Option<&ExportFormat>,
+) -> Result<GwsError, GwsError> {
+    let name = str_field(meta, "name")?;
+    let target = shortcut_target(meta, file_id)?;
+    let target_mime = meta
+        .get("shortcutDetails")
+        .and_then(|d| d.get("targetMimeType"))
+        .and_then(Value::as_str);
+    let Some(target_mime) = target_mime else {
+        // Drive did not say what the target is; name both commands.
+        return Ok(GwsError::Validation(format!(
+            "'{name}' is a shortcut to {target}; use `gwsr drive +download --file-id {target}` for a regular file or `gwsr drive +export --file-id {target} --to <format>` for a Google-native one"
+        )));
+    };
+    if !target_mime.starts_with("application/vnd.google-apps.") {
+        return Ok(GwsError::Validation(format!(
+            "'{name}' is a shortcut; download its target with `gwsr drive +download --file-id {target}`"
+        )));
+    }
+    if let Some(format) = requested.filter(|f| f.sources.contains(&target_mime)) {
+        return Ok(GwsError::Validation(format!(
+            "'{name}' is a shortcut; export its target with `gwsr drive +export --file-id {target} --to {}`",
+            format.name
+        )));
+    }
+    let formats: Vec<&str> = EXPORT_FORMATS
+        .iter()
+        .filter(|f| f.sources.contains(&target_mime))
+        .map(|f| f.name)
+        .collect();
+    Ok(GwsError::Validation(if formats.is_empty() {
+        format!(
+            "'{name}' is a shortcut to {target}, a Google-native file ({target_mime}) that cannot be downloaded or exported"
+        )
+    } else {
+        format!(
+            "'{name}' is a shortcut to a Google-native file ({target_mime}); use `gwsr drive +export --file-id {target} --to <format>` (formats: {})",
             formats.join(", ")
         )
     }))
@@ -895,12 +942,7 @@ async fn export(
     } else {
         let mime = str_field(&meta, "mimeType")?;
         if mime == SHORTCUT {
-            let target = shortcut_target(&meta, file_id)?;
-            return Err(GwsError::Validation(format!(
-                "'{}' is a shortcut; export its target with `gwsr drive +export --file-id {target} --to {}`",
-                str_field(&meta, "name")?,
-                format.name
-            )));
+            return Err(shortcut_error(&meta, file_id, Some(format))?);
         }
         check_export(format, mime)?;
         str_field(&meta, "name")?.to_string()
@@ -2263,6 +2305,75 @@ mod tests {
         assert!(matches!(err, GwsError::Validation(_)), "{err:?}");
         assert!(!msg.contains("+export"), "{msg}");
         assert!(msg.contains("cannot be downloaded or exported"), "{msg}");
+    }
+
+    /// The command suggested for a shortcut follows its target's type, not
+    /// the command that was run: a Google Doc behind a shortcut cannot be
+    /// `+download`ed and a PDF cannot be `+export`ed.
+    #[tokio::test]
+    async fn shortcut_hint_names_the_command_its_target_type_needs() {
+        let server = MockServer::start().await;
+        for (id, target_mime) in [
+            ("SCDOC", DOC),
+            ("SCPDF", "application/pdf"),
+            ("SCFORM", "application/vnd.google-apps.form"),
+        ] {
+            Mock::given(method("GET"))
+                .and(path(format!("/drive/v3/files/{id}")))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                    "id": id, "name": "Link", "mimeType": SHORTCUT,
+                    "shortcutDetails": {"targetId": "TARGET1", "targetMimeType": target_mime}
+                })))
+                .mount(&server)
+                .await;
+        }
+        let api = api(&server.uri(), "drive/v3/");
+
+        // +download of a shortcut to a Doc: export the target.
+        let msg = download(&api, "SCDOC", Some("-"), false)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            msg.contains("+export --file-id TARGET1 --to <format>"),
+            "{msg}"
+        );
+        assert!(msg.contains("docx"), "{msg}");
+        assert!(!msg.contains("+download"), "{msg}");
+
+        // +export of a shortcut to a PDF: download the target.
+        let msg = export(&api, "SCPDF", "pdf", Some("-"), false)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(msg.contains("+download --file-id TARGET1"), "{msg}");
+        assert!(!msg.contains("+export"), "{msg}");
+
+        // +export --to csv of a shortcut to a Doc: csv does not fit a Doc.
+        let msg = export(&api, "SCDOC", "csv", Some("-"), false)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(!msg.contains("--to csv"), "{msg}");
+        assert!(
+            msg.contains("+export --file-id TARGET1 --to <format>"),
+            "{msg}"
+        );
+
+        // A shortcut to a form: neither command works on the target.
+        for msg in [
+            download(&api, "SCFORM", Some("-"), false)
+                .await
+                .unwrap_err()
+                .to_string(),
+            export(&api, "SCFORM", "pdf", Some("-"), false)
+                .await
+                .unwrap_err()
+                .to_string(),
+        ] {
+            assert!(msg.contains("cannot be downloaded or exported"), "{msg}");
+            assert!(!msg.contains("gwsr drive"), "{msg}");
+        }
     }
 
     /// `+export` of a shortcut points at the shortcut's target, and a

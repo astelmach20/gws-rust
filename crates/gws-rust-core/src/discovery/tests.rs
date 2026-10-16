@@ -309,6 +309,110 @@ fn non_dns_label_services_skip_the_per_service_endpoint() {
         alt.as_str(),
         "https://forms.googleapis.com/$discovery/rest?version=v1"
     );
+    // Host names ignore case: a mixed-case API is served by its lowercase host.
+    let alt = &loader.discovery_urls("siteVerification", "v1").unwrap()[1];
+    assert_eq!(
+        alt.as_str(),
+        "https://siteverification.googleapis.com/$discovery/rest?version=v1"
+    );
+}
+
+const SITE_VERIFICATION: &str = r#"{"name":"siteVerification","version":"v1","rootUrl":"https://www.googleapis.com/","servicePath":"siteVerification/v1/"}"#;
+const SITE_VERIFICATION_ALT: &str = "/siteverification/$discovery/rest";
+
+/// A request whose API name differs from the served document's only in case
+/// is a not-found (exit 4) naming the real API, not an internal error.
+#[tokio::test]
+async fn case_only_name_mismatch_is_not_found_with_a_hint() {
+    for requested in ["siteverification", "SITEVERIFICATION"] {
+        let server = MockServer::start().await;
+        mount(
+            &server,
+            &format!("/discovery/v1/apis/{requested}/v1/rest"),
+            404,
+            "",
+            1,
+        )
+        .await;
+        mount(&server, SITE_VERIFICATION_ALT, 200, SITE_VERIFICATION, 1).await;
+        let tmp = tempfile::tempdir().unwrap();
+        let err = loader(&server, Some(tmp.path()))
+            .load(requested, "v1")
+            .await
+            .unwrap_err();
+        match &err {
+            DiscoveryError::NotFound { suggestion, .. } => {
+                assert_eq!(suggestion.as_deref(), Some("siteVerification:v1"), "{err}");
+            }
+            other => panic!("{requested}: expected NotFound, got {other:?}"),
+        }
+        let msg = err.to_string();
+        assert!(
+            msg.contains("did you mean `siteVerification:v1`?"),
+            "{requested}: {msg}"
+        );
+        let gws: crate::error::GwsError = err.into();
+        assert_eq!(gws.exit_code(), crate::error::GwsError::EXIT_CODE_DISCOVERY);
+        // The other API's document is not cached under the mistyped name.
+        assert!(
+            std::fs::read_dir(tmp.path())
+                .map(|d| d.count() == 0)
+                .unwrap_or(true)
+        );
+    }
+}
+
+/// Lookup stays case-sensitive: the exact name loads from the lowercase host.
+#[tokio::test]
+async fn exact_mixed_case_name_loads_from_the_per_service_endpoint() {
+    let server = MockServer::start().await;
+    mount(
+        &server,
+        "/discovery/v1/apis/siteVerification/v1/rest",
+        404,
+        "",
+        1,
+    )
+    .await;
+    mount(&server, SITE_VERIFICATION_ALT, 200, SITE_VERIFICATION, 1).await;
+    let got = loader(&server, None)
+        .load("siteVerification", "v1")
+        .await
+        .unwrap();
+    assert_eq!(got.doc.name, "siteVerification");
+}
+
+/// With no document at all, a registered API differing only in case is
+/// suggested from the offline registry.
+#[tokio::test]
+async fn not_found_suggests_a_registered_api_differing_in_case() {
+    let server = MockServer::start().await;
+    mount(&server, "/discovery/v1/apis/DRIVE/v3/rest", 404, "", 1).await;
+    mount(&server, ALT, 404, "", 1).await;
+    let err = loader(&server, None).load("DRIVE", "v3").await.unwrap_err();
+    assert!(
+        matches!(&err, DiscoveryError::NotFound { suggestion: Some(s), .. } if s == "drive:v3"),
+        "{err:?}"
+    );
+    assert!(
+        err.to_string().contains("did you mean `drive:v3`?"),
+        "{err}"
+    );
+
+    let server = MockServer::start().await;
+    mount(&server, "/discovery/v1/apis/nope/v1/rest", 404, "", 1).await;
+    mount(&server, "/nope/$discovery/rest", 404, "", 1).await;
+    let err = loader(&server, None).load("nope", "v1").await.unwrap_err();
+    assert!(
+        matches!(
+            err,
+            DiscoveryError::NotFound {
+                suggestion: None,
+                ..
+            }
+        ),
+        "{err:?}"
+    );
 }
 
 #[test]

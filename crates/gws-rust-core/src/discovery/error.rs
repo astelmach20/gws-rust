@@ -27,11 +27,14 @@ pub enum DiscoveryError {
     InvalidInput(String),
 
     /// No Discovery Document exists for this API name and version.
-    #[error(
-        "No Discovery Document found for API '{service}' version '{version}' (HTTP 404). \
-         List available APIs at https://www.googleapis.com/discovery/v1/apis"
-    )]
-    NotFound { service: String, version: String },
+    #[error("{}", not_found_message(service, version, suggestion.as_deref()))]
+    NotFound {
+        service: String,
+        version: String,
+        /// `<api>:<version>` of an API whose name differs only in case
+        /// (Discovery names are case-sensitive), when one is known.
+        suggestion: Option<String>,
+    },
 
     /// The document could not be fetched.
     #[error(
@@ -64,6 +67,19 @@ pub enum DiscoveryError {
         path.display()
     )]
     InsecurePermissions { path: PathBuf, mode: u32 },
+}
+
+fn not_found_message(service: &str, version: &str, suggestion: Option<&str>) -> String {
+    match suggestion {
+        Some(s) => format!(
+            "No Discovery Document found for API '{service}' version '{version}': \
+             did you mean `{s}`? API names are case-sensitive"
+        ),
+        None => format!(
+            "No Discovery Document found for API '{service}' version '{version}' (HTTP 404). \
+             List available APIs at https://www.googleapis.com/discovery/v1/apis"
+        ),
+    }
 }
 
 impl DiscoveryError {
@@ -116,6 +132,7 @@ mod tests {
         let err: GwsError = DiscoveryError::NotFound {
             service: "nope".into(),
             version: "v1".into(),
+            suggestion: None,
         }
         .into();
         match err {

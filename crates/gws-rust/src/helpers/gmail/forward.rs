@@ -105,11 +105,15 @@ pub(super) async fn handle_forward(
 /// - Regular attachments are included unless `--no-original-attachments` is set.
 /// - Inline images are included only in HTML mode (matching Gmail web, which
 ///   strips them from plain-text forwards).
+///
+/// An inline part that is not an image (Apple Mail sends PDFs that way) is a
+/// regular attachment (see [`OriginalPart::is_inline_image`]).
 fn include_original_part(part: &OriginalPart, html: bool, no_original_attachments: bool) -> bool {
-    if no_original_attachments && !part.is_inline() {
+    let inline_image = part.is_inline_image();
+    if no_original_attachments && !inline_image {
         return false; // skip regular attachments when flag is set
     }
-    if !html && part.is_inline() {
+    if !html && inline_image {
         return false; // skip inline images in plain-text mode
     }
     true
@@ -1120,5 +1124,18 @@ mod tests {
         let inline = make_part(true);
         assert!(!include_original_part(&regular, false, true));
         assert!(!include_original_part(&inline, false, true));
+    }
+
+    /// Apple Mail sends ordinary files as `Content-Disposition: inline` with a
+    /// Content-ID. Such a PDF is an attachment: a plain-text forward keeps
+    /// it, and `--no-original-attachments` drops it.
+    #[test]
+    fn test_include_original_part_inline_non_image_is_an_attachment() {
+        let mut pdf = make_part(true);
+        pdf.content_type = "application/pdf".to_string();
+        assert!(include_original_part(&pdf, false, false));
+        assert!(include_original_part(&pdf, true, false));
+        assert!(!include_original_part(&pdf, false, true));
+        assert!(!include_original_part(&pdf, true, true));
     }
 }

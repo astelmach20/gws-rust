@@ -32,7 +32,7 @@
 //!   attendees, the Gmail vacation responder in [`AUTO_REPLY_METHODS`] when
 //!   it turns auto-replies on, and the Groups Settings writes in
 //!   [`GROUP_SETTINGS_METHODS`] when they open a group to outsiders. Gated
-//!   only when `GWSR_REQUIRE_CONFIRM` is `1`/`true`.
+//!   only when `GWSR_REQUIRE_CONFIRM` is on (`1`/`true`/`yes`/`on`).
 //!
 //! | gated action           | `--yes` or `--dry-run` | terminal | no terminal |
 //! |------------------------|------------------------|----------|-------------|
@@ -157,7 +157,8 @@ fn transfers_ownership_or_broad_edit(
 pub(crate) enum Impact {
     /// Irreversible changes. Always gated.
     Destructive,
-    /// Visible to other people. Gated when `GWSR_REQUIRE_CONFIRM=1`.
+    /// Visible to other people. Gated when `GWSR_REQUIRE_CONFIRM` is on
+    /// (`1`/`true`/`yes`/`on`).
     Outbound,
 }
 

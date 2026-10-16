@@ -30,17 +30,30 @@ use crate::formatter::{OutputFormat, PageStream};
 pub(crate) struct Emitter {
     /// When set, output is captured here instead of written to stdout.
     captured: Option<Mutex<Vec<u8>>>,
+    /// Tests: every write fails, as a full disk or a failing device would.
+    #[cfg(test)]
+    fail_writes: bool,
 }
 
 impl Emitter {
     pub(crate) fn stdout() -> Self {
-        Self { captured: None }
+        Self::default()
     }
 
     #[cfg(test)]
     pub(crate) fn capturing() -> Self {
         Self {
             captured: Some(Mutex::new(Vec::new())),
+            ..Self::default()
+        }
+    }
+
+    /// A capturing emitter whose every write fails with a non-EPIPE error.
+    #[cfg(test)]
+    pub(crate) fn failing() -> Self {
+        Self {
+            fail_writes: true,
+            ..Self::capturing()
         }
     }
 
@@ -58,6 +71,12 @@ impl Emitter {
     }
 
     fn write_captured(&self, bytes: &[u8]) -> Result<bool, GwsError> {
+        #[cfg(test)]
+        if self.fail_writes {
+            return Err(crate::output::stdout_error(std::io::Error::other(
+                "No space left on device",
+            )));
+        }
         match &self.captured {
             Some(buf) => {
                 buf.lock()

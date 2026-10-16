@@ -65,6 +65,20 @@ impl OriginalPart {
     pub fn is_inline(&self) -> bool {
         self.content_id.is_some()
     }
+
+    /// Whether this part is an image embedded in the HTML body: inline (see
+    /// [`Self::is_inline`]) and `image/*`.
+    ///
+    /// Only images count: some clients (Apple Mail) send ordinary files such
+    /// as PDFs with `Content-Disposition: inline` and a Content-ID, and those
+    /// are attachments the reader expects to get.
+    pub fn is_inline_image(&self) -> bool {
+        self.is_inline()
+            && self
+                .content_type
+                .get(..6)
+                .is_some_and(|t| t.eq_ignore_ascii_case("image/"))
+    }
 }
 
 /// A parsed Gmail message fetched via the API, used as context for reply/forward.
@@ -324,21 +338,28 @@ fn decode_text_body(
             encoding_rs::UTF_8
         }
         Some(label) => match encoding_rs::Encoding::for_label(label.as_bytes()) {
-            Some(encoding) => encoding,
-            None => {
+            // encoding_rs maps the labels it cannot decode (ISO-2022-KR,
+            // HZ-GB-2312, ISO-2022-CN) to the replacement encoding, which
+            // turns the whole body into a single U+FFFD. UTF-8 at least
+            // keeps its ASCII text.
+            Some(encoding) if encoding != encoding_rs::REPLACEMENT => encoding,
+            _ => {
                 tracing::warn!(
-                    "{mime_label} body has unknown charset {:?}; decoding it as UTF-8",
+                    "{mime_label} body has unknown or unsupported charset {:?}; decoding it as UTF-8",
                     sanitize_for_terminal(label)
                 );
                 encoding_rs::UTF_8
             }
         },
     };
-    let (text, had_errors) = encoding.decode_without_bom_handling(&decoded);
+    // A byte-order mark is not text: it is removed, and a UTF-8 or UTF-16
+    // BOM names the encoding (the endianness of a `charset=utf-16` body is
+    // only known from its BOM).
+    let (text, used, had_errors) = encoding.decode(&decoded);
     if had_errors {
         tracing::warn!(
             "{mime_label} body is not valid {}; invalid bytes were replaced with U+FFFD",
-            encoding.name()
+            used.name()
         );
     }
     Ok(text.into_owned())
@@ -462,6 +483,17 @@ pub(super) fn get_part_header<'a>(part: &'a Value, name: &str) -> Option<&'a str
         })
 }
 
+/// Whether `part`'s `Content-Disposition` is `attachment` (in any case, after
+/// any leading whitespace). The body walk and the file listing must agree on
+/// this, or a part is fetched as the body and listed as a file at once.
+fn disposition_is_attachment(part: &Value) -> bool {
+    get_part_header(part, "Content-Disposition").is_some_and(|d| {
+        d.trim_start()
+            .get(.."attachment".len())
+            .is_some_and(|word| word.eq_ignore_ascii_case("attachment"))
+    })
+}
+
 /// The attachment ID of a body text part whose bytes Gmail returns by
 /// reference instead of inline, which it does for large bodies.
 ///
@@ -480,11 +512,9 @@ fn referenced_body_attachment_id(part: &Value) -> Option<&str> {
         return None;
     }
     let filename = part.get("filename").and_then(Value::as_str).unwrap_or("");
-    let explicitly_attachment = get_part_header(part, "Content-Disposition")
-        .is_some_and(|d| d.to_ascii_lowercase().starts_with("attachment"));
     if !filename.is_empty()
         || get_part_header(part, "Content-ID").is_some()
-        || explicitly_attachment
+        || disposition_is_attachment(part)
     {
         return None;
     }
@@ -639,14 +669,7 @@ fn extract_payload_recursive(
     // the disposition decides between inline and attachment below. An
     // `attachment` disposition also makes an unnamed text part a file, not
     // the body.
-    let disposition_header = get_part_header(part, "Content-Disposition");
-    let explicitly_attachment = disposition_header
-        .map(|d| {
-            d.trim_start()
-                .to_ascii_lowercase()
-                .starts_with("attachment")
-        })
-        .unwrap_or(false);
+    let explicitly_attachment = disposition_is_attachment(part);
 
     // Primary signal: does this part have fetchable binary data?
     // A part is a file (attachment or inline image) when its bytes are fetchable
@@ -1094,6 +1117,38 @@ mod tests {
         assert_eq!(extract_plain_text_body(&sjis).unwrap(), "\u{65e5}\u{672c}");
     }
 
+    /// A byte-order mark is removed from the body, and a UTF-16 BOM decides
+    /// the byte order of a `charset=utf-16` body (RFC 2781 §3.3).
+    #[test]
+    fn test_body_byte_order_mark_is_honored_and_removed() {
+        for (ct, bytes) in [
+            (
+                "text/plain; charset=utf-8",
+                b"\xEF\xBB\xBFHi caf\xC3\xA9".to_vec(),
+            ),
+            ("text/plain", b"\xEF\xBB\xBFHi caf\xC3\xA9".to_vec()),
+            (
+                "text/plain; charset=utf-16",
+                b"\xFE\xFF\x00H\x00i\x00 \x00c\x00a\x00f\x00\xE9".to_vec(),
+            ),
+            (
+                "text/plain; charset=utf-16",
+                b"\xFF\xFEH\x00i\x00 \x00c\x00a\x00f\x00\xE9\x00".to_vec(),
+            ),
+        ] {
+            let payload = json!({
+                "mimeType": "text/plain",
+                "headers": [{ "name": "Content-Type", "value": ct }],
+                "body": { "data": URL_SAFE.encode(&bytes) }
+            });
+            assert_eq!(
+                extract_plain_text_body(&payload).unwrap(),
+                "Hi caf\u{e9}",
+                "{ct}: {bytes:02X?}"
+            );
+        }
+    }
+
     #[test]
     fn test_ascii_or_unknown_charset_body_is_decoded_as_utf8() {
         for ct in [
@@ -1110,6 +1165,36 @@ mod tests {
                 extract_plain_text_body(&payload).unwrap(),
                 "caf\u{e9}",
                 "{ct}"
+            );
+        }
+    }
+
+    /// Charsets encoding_rs cannot decode map to its replacement encoding,
+    /// which would turn the whole body into one U+FFFD. They are decoded as
+    /// UTF-8 instead, so the ASCII text survives.
+    #[test]
+    fn test_unsupported_charset_body_keeps_its_ascii_text() {
+        for (ct, bytes) in [
+            (
+                "text/plain; charset=ISO-2022-KR",
+                b"\x1b$)C\x0e\x30\x21\x0f Meeting at 10:00, see https://example.com/agenda"
+                    .as_slice(),
+            ),
+            (
+                "text/plain; charset=hz-gb-2312",
+                b"~{<:Ky2;S{#,NpJ)l6HK!#~} Meeting at 10:00, see https://example.com/agenda"
+                    .as_slice(),
+            ),
+        ] {
+            let payload = json!({
+                "mimeType": "text/plain",
+                "headers": [{ "name": "Content-Type", "value": ct }],
+                "body": { "data": URL_SAFE.encode(bytes) }
+            });
+            let text = extract_plain_text_body(&payload).unwrap();
+            assert!(
+                text.contains("Meeting at 10:00, see https://example.com/agenda"),
+                "{ct}: {text:?}"
             );
         }
     }
@@ -1387,6 +1472,47 @@ mod tests {
         // The embedded message's text is not fetched as this message's body;
         // it stays a downloadable part, like the embedded message's other files.
         assert_eq!(ids, vec![Some("LOG"), Some("INNER"), Some("FILE")]);
+    }
+
+    /// A text part marked as an attachment is a file, not a body Gmail
+    /// returned by reference, however the disposition is spaced or cased:
+    /// the body walk must agree with the file listing, or the attachment's
+    /// bytes are fetched and read as the message body.
+    #[test]
+    fn test_spaced_attachment_disposition_is_not_fetched_as_the_body() {
+        for value in [
+            " attachment",
+            "\tATTACHMENT; filename=\"log.txt\"",
+            "Attachment",
+        ] {
+            let mut payload = json!({
+                "mimeType": "multipart/mixed",
+                "parts": [
+                    { "mimeType": "text/plain", "body": { "data": "SGk", "size": 2 } },
+                    {
+                        "mimeType": "text/plain",
+                        "headers": [{ "name": "Content-Disposition", "value": value }],
+                        "body": { "attachmentId": "LOG", "size": 10 }
+                    }
+                ]
+            });
+            assert!(
+                referenced_body_attachment_ids(&payload).is_empty(),
+                "{value:?}"
+            );
+            inline_referenced_bodies(&mut payload, &Default::default()).unwrap();
+            let contents = extract_payload_contents(&payload).unwrap();
+            assert_eq!(contents.body_text.as_deref(), Some("Hi"), "{value:?}");
+            let ids: Vec<_> = contents.parts.iter().map(|p| p.attachment_id()).collect();
+            assert_eq!(ids, vec![Some("LOG")], "{value:?}");
+        }
+        // Another disposition is still a body returned by reference.
+        let part = json!({
+            "mimeType": "text/plain",
+            "headers": [{ "name": "Content-Disposition", "value": " inline" }],
+            "body": { "attachmentId": "BODY", "size": 10 }
+        });
+        assert_eq!(referenced_body_attachment_ids(&part), vec!["BODY"]);
     }
 
     #[test]

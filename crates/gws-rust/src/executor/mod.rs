@@ -738,11 +738,11 @@ pub(crate) async fn execute_to(
         pages += 1;
 
         // Long-running operations. `-o` waits on its own only for a method
-        // declared to return one: other resources can look like an operation
-        // (a People ContactGroup has a string `name` and a `metadata` object).
-        let auto_wait = output.is_some()
-            && crate::commands::returns_operation(method)
-            && operation::is_operation(&value);
+        // that returns one `--wait` can poll: other resources can look like
+        // an operation (a People ContactGroup has a string `name` and a
+        // `metadata` object; Compute Engine has no `operations.get`).
+        let auto_wait =
+            output.is_some() && operation::can_wait(doc, method) && operation::is_operation(&value);
         if operation::is_operation(&value) && (options.wait.is_some() || auto_wait) {
             let cfg = options.wait.clone().unwrap_or_default();
             let done = operation::wait(&transport, doc, &params, value, &cfg).await?;
@@ -834,8 +834,8 @@ pub(crate) async fn execute_to(
                     download::decoded_payload(doc, method, &value, options.decode_field.as_deref())
                         .map_err(applied)?
                 {
-                    emitter.bytes(&bytes).await?;
-                    emitter.flush().await?;
+                    emitter.bytes(&bytes).await.map_err(applied)?;
+                    emitter.flush().await.map_err(applied)?;
                     break;
                 }
             }

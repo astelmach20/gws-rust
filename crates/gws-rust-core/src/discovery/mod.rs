@@ -286,11 +286,15 @@ impl DiscoveryLoader {
         let mut urls = vec![parse(format!(
             "{base}discovery/v1/apis/{service}/{version}/rest"
         ))?];
-        if is_dns_label(service) {
+        // Host names ignore case, so `siteverification.googleapis.com` serves
+        // `siteVerification`. The document's name is still checked exactly
+        // against `service`.
+        let host = service.to_ascii_lowercase();
+        if is_dns_label(&host) {
             let mut alt = match &self.discovery_base {
                 // Tests route the per-service endpoint through the mock server.
-                Some(b) => parse(format!("{b}{service}/$discovery/rest"))?,
-                None => parse(format!("https://{service}.googleapis.com/$discovery/rest"))?,
+                Some(b) => parse(format!("{b}{host}/$discovery/rest"))?,
+                None => parse(format!("https://{host}.googleapis.com/$discovery/rest"))?,
             };
             alt.query_pairs_mut().append_pair("version", version);
             urls.push(alt);
@@ -316,6 +320,9 @@ impl DiscoveryLoader {
             .unwrap_or_else(crate::client::RetryPolicy::configured);
         let mut attempts = Vec::new();
         let mut all_not_found = true;
+        // `<api>:<version>` of a served document whose name differs from the
+        // requested one only in case: the user's typo, not a failure.
+        let mut other_case = None;
 
         for url in self.discovery_urls(service, version)? {
             tracing::debug!(%url, "Fetching Discovery Document");
@@ -357,19 +364,51 @@ impl DiscoveryLoader {
                 url.as_str(),
             ) {
                 Ok(doc) => return Ok((doc, body)),
-                Err(e) => attempts.push(e.to_string()),
+                Err(e) => {
+                    if let Some((name, ver)) = other_casing(&body, service, version) {
+                        other_case = Some(format!("{name}:{ver}"));
+                    }
+                    attempts.push(e.to_string());
+                }
             }
         }
 
-        if all_not_found {
+        if all_not_found || other_case.is_some() {
             Err(DiscoveryError::NotFound {
                 service: service.to_string(),
                 version: version.to_string(),
+                suggestion: other_case.or_else(|| registered_other_casing(service, version)),
             })
         } else {
             Err(fetch_error(attempts))
         }
     }
+}
+
+/// The name and version of the API `body` describes, when they equal
+/// `service` and `version` ignoring ASCII case but not exactly. They are then
+/// the same characters as the validated identifiers, so safe to display.
+pub(crate) fn other_casing(body: &[u8], service: &str, version: &str) -> Option<(String, String)> {
+    #[derive(serde::Deserialize)]
+    struct Id {
+        name: String,
+        version: String,
+    }
+    let id = serde_json::from_slice::<Id>(body).ok()?;
+    ((id.name != service || id.version != version)
+        && id.name.eq_ignore_ascii_case(service)
+        && id.version.eq_ignore_ascii_case(version))
+    .then_some((id.name, id.version))
+}
+
+/// `<api>:<version>` for a registered API whose name equals `service`
+/// ignoring ASCII case but not exactly. Offline: reads only the registry.
+fn registered_other_casing(service: &str, version: &str) -> Option<String> {
+    crate::services::SERVICES
+        .iter()
+        .map(|e| e.api_name)
+        .find(|name| *name != service && name.eq_ignore_ascii_case(service))
+        .map(|name| format!("{name}:{version}"))
 }
 
 fn validate_ids<'a>(

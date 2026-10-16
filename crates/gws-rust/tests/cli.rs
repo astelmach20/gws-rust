@@ -517,6 +517,75 @@ fn top_level_discovery_methods_are_commands() {
         .stdout(predicate::str::contains("Tokeninfo"));
 }
 
+/// A method flagged `useMediaDownloadService` sends `alt=media` to the
+/// download service URL (`rootUrl` + `download/` + `servicePath`), as
+/// Google's generated clients do; without `alt=media` it keeps the regular
+/// URL.
+#[test]
+fn media_download_service_dry_run_url() {
+    let env = Env::new();
+    env.seed_doc(&json!({
+        "name": "artifactregistry",
+        "version": "v1",
+        "rootUrl": "https://artifactregistry.googleapis.com/",
+        "servicePath": "",
+        "parameters": {"alt": {
+            "type": "string",
+            "location": "query",
+            "default": "json",
+            "enum": ["json", "media", "proto"]
+        }},
+        "resources": {"projects": {"resources": {"locations": {"resources": {
+            "repositories": {"resources": {"files": {"methods": {"download": {
+                "id": "artifactregistry.projects.locations.repositories.files.download",
+                "httpMethod": "GET",
+                "path": "v1/{+name}:download",
+                "flatPath": "v1/projects/{projectsId}/locations/{locationsId}/repositories/{repositoriesId}/files/{filesId}:download",
+                "parameters": {"name": {
+                    "type": "string",
+                    "location": "path",
+                    "required": true,
+                    "pattern": "^projects/[^/]+/locations/[^/]+/repositories/[^/]+/files/[^/]+$"
+                }},
+                "parameterOrder": ["name"],
+                "supportsMediaDownload": true,
+                "useMediaDownloadService": true,
+                "scopes": ["https://www.googleapis.com/auth/cloud-platform"]
+            }}}}}
+        }}}}}
+    }));
+    let dry_run_url = |params: &str| {
+        let out = env
+            .cmd()
+            .args([
+                "artifactregistry:v1",
+                "projects",
+                "locations",
+                "repositories",
+                "files",
+                "download",
+                "--dry-run",
+                "--params",
+                params,
+            ])
+            .assert()
+            .success()
+            .get_output()
+            .clone();
+        let v: Value = serde_json::from_str(&stdout_of(&out)).unwrap();
+        v["url"].as_str().unwrap().to_string()
+    };
+    let name = "projects/p/locations/us/repositories/r/files/f";
+    assert_eq!(
+        dry_run_url(&json!({"name": name, "alt": "media"}).to_string()),
+        format!("https://artifactregistry.googleapis.com/download/v1/{name}:download")
+    );
+    assert_eq!(
+        dry_run_url(&json!({"name": name}).to_string()),
+        format!("https://artifactregistry.googleapis.com/v1/{name}:download")
+    );
+}
+
 /// A Discovery document whose names collide as subcommands: a top-level
 /// method named like a resource, a method and a sub-resource of the same
 /// name under one resource, and a method and a resource named `help`
@@ -3753,6 +3822,161 @@ async fn output_saves_a_resource_that_only_looks_like_an_operation() {
     let saved: Value =
         serde_json::from_slice(&std::fs::read(env.work_dir().join("group.json")).unwrap()).unwrap();
     assert_eq!(saved, group);
+}
+
+/// A Compute Engine style document: methods return an `Operation`, but
+/// operations are polled through `zoneOperations.get`, not an
+/// `operations.get`. A Cloud DNS style `managedZones.patch` returns an
+/// `Operation` that the API's `operations.get` (which returns a
+/// `GoogleLongrunningOperation`) cannot poll.
+fn seed_unpollable_operation_docs(env: &Env) {
+    env.seed_doc(&json!({
+        "name": "compute", "version": "v1",
+        "rootUrl": "https://compute.googleapis.com/", "servicePath": "compute/v1/",
+        "schemas": {"Operation": {"id": "Operation", "type": "object", "properties": {
+            "kind": {"type": "string"}, "name": {"type": "string"},
+            "status": {"type": "string"}
+        }}},
+        "resources": {
+            "instances": {"methods": {"insert": {
+                "id": "compute.instances.insert", "httpMethod": "POST",
+                "path": "projects/{project}/zones/{zone}/instances",
+                "parameters": {
+                    "project": {"type": "string", "location": "path", "required": true},
+                    "zone": {"type": "string", "location": "path", "required": true}
+                },
+                "parameterOrder": ["project", "zone"],
+                "response": {"$ref": "Operation"},
+                "scopes": ["https://www.googleapis.com/auth/compute"]
+            }}},
+            "zoneOperations": {"methods": {"get": {
+                "id": "compute.zoneOperations.get", "httpMethod": "GET",
+                "path": "projects/{project}/zones/{zone}/operations/{operation}",
+                "parameters": {
+                    "project": {"type": "string", "location": "path", "required": true},
+                    "zone": {"type": "string", "location": "path", "required": true},
+                    "operation": {"type": "string", "location": "path", "required": true}
+                },
+                "parameterOrder": ["project", "zone", "operation"],
+                "response": {"$ref": "Operation"},
+                "scopes": ["https://www.googleapis.com/auth/compute"]
+            }}}
+        }
+    }));
+    env.seed_doc(&json!({
+        "name": "dns", "version": "v1",
+        "rootUrl": "https://dns.googleapis.com/", "servicePath": "",
+        "schemas": {
+            "Operation": {"id": "Operation", "type": "object", "properties": {
+                "id": {"type": "string"}, "status": {"type": "string"}
+            }},
+            "GoogleLongrunningOperation": {"id": "GoogleLongrunningOperation", "type": "object"}
+        },
+        "resources": {
+            "managedZones": {"methods": {"patch": {
+                "id": "dns.managedZones.patch", "httpMethod": "PATCH",
+                "path": "dns/v1/projects/{project}/managedZones/{managedZone}",
+                "parameters": {
+                    "project": {"type": "string", "location": "path", "required": true},
+                    "managedZone": {"type": "string", "location": "path", "required": true}
+                },
+                "parameterOrder": ["project", "managedZone"],
+                "response": {"$ref": "Operation"},
+                "scopes": ["https://www.googleapis.com/auth/ndev.clouddns.readwrite"]
+            }}},
+            "operations": {"methods": {"get": {
+                "id": "dns.operations.get", "httpMethod": "GET",
+                "path": "dns/v1/{+name}",
+                "parameters": {"name": {
+                    "type": "string", "location": "path", "required": true,
+                    "pattern": "^operations/[^/]+$"
+                }},
+                "parameterOrder": ["name"],
+                "response": {"$ref": "GoogleLongrunningOperation"},
+                "scopes": ["https://www.googleapis.com/auth/ndev.clouddns.readwrite"]
+            }}}
+        }
+    }));
+}
+
+/// `--wait` is offered only where it can poll the returned operation. It
+/// used to be offered on every method whose response schema name ends in
+/// `Operation`: on Compute Engine it always failed, and on Cloud DNS it was
+/// silently ignored.
+#[test]
+fn wait_is_not_offered_where_the_operation_cannot_be_polled() {
+    let env = Env::new();
+    seed_unpollable_operation_docs(&env);
+    for (args, params) in [
+        (
+            ["compute:v1", "instances", "insert"],
+            r#"{"project":"p","zone":"z"}"#,
+        ),
+        (
+            ["dns:v1", "managedZones", "patch"],
+            r#"{"project":"p","managedZone":"m"}"#,
+        ),
+    ] {
+        let out = env.cmd().args(args).arg("--help").output().unwrap();
+        assert!(out.status.success(), "{}", stderr_of(&out));
+        let help = stdout_of(&out);
+        assert!(!help.contains("--wait"), "{args:?} offers --wait:\n{help}");
+
+        let out = env
+            .cmd()
+            .args(args)
+            .args(["--params", params, "--wait", "--dry-run"])
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(3), "{args:?}: {}", stderr_of(&out));
+        assert!(
+            stderr_of(&out).contains("unexpected argument '--wait'"),
+            "{args:?}: {}",
+            stderr_of(&out)
+        );
+    }
+}
+
+/// `-o` saves a Compute Engine operation instead of trying to poll an
+/// `operations.get` the API does not have after the request was sent.
+#[tokio::test(flavor = "multi_thread")]
+async fn output_saves_an_operation_that_cannot_be_polled() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let op = json!({
+        "kind": "compute#operation",
+        "name": "operation-1",
+        "status": "RUNNING"
+    });
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/compute/v1/projects/p/zones/z/instances"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(op.clone()))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let env = Env::new();
+    seed_unpollable_operation_docs(&env);
+    let out = env
+        .cmd()
+        .env("GWSR_TOKEN", "test-token")
+        .env("GWSR_API_BASE_URL", server.uri())
+        .args([
+            "compute:v1",
+            "instances",
+            "insert",
+            "--params",
+            r#"{"project":"p","zone":"z"}"#,
+            "-o",
+            "op.json",
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    let saved: Value =
+        serde_json::from_slice(&std::fs::read(env.work_dir().join("op.json")).unwrap()).unwrap();
+    assert_eq!(saved, op);
 }
 
 // ── Drive permission grants through the generated method ────────────────

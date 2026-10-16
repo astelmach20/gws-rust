@@ -26,8 +26,8 @@
 //! `{"id": ..., "status": 200, "body": ...}`. Calls are grouped into batches
 //! of at most 100 (Google's limit; 50 for Classroom, see [`batch_limit`]). The
 //! command fails when any call failed, after printing every result: exit 6
-//! (retry later) when every failure is retryable (429, 5xx, a 403 rate
-//! limit), exit 1 otherwise. With `--sanitize`, every result body
+//! (retry later) when every failure is retryable (HTTP 408, 429, 500, 502,
+//! 503, 504 or a 403 rate limit), exit 1 otherwise. With `--sanitize`, every result body
 //! is screened by Model Armor before it is printed, as for a single call.
 
 use std::io::IsTerminal;
@@ -734,7 +734,7 @@ pub(crate) async fn run_batch(
     let auth = credentials.auth_method();
     let mut failures = 0usize;
     // `Some(code)` while every failed call so far may succeed if sent again
-    // (a 429, a 5xx the client retries, a 403 rate limit): the status the
+    // (408, 429, 500, 502, 503, 504, a 403 rate limit): the status the
     // aggregate error carries so that it is retryable (exit 6) too.
     let mut retry_code: Option<u16> = None;
     let mut permanent = false;

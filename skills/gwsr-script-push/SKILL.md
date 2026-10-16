@@ -46,7 +46,8 @@ gwsr script +push --script-id SCRIPT_ID --dir ./src --yes
 - Uploads .gs/.js (server code), .html and appsscript.json (required).
 - Extensions match in any case (Code.GS is pushed as Code).
 - Files in sub-directories keep their path (e.g. lib/util.gs -> lib/util).
-- Hidden files/directories, node_modules and symlinks are skipped.
+- Hidden files/directories and node_modules are skipped.
+- A symlink to a pushed file or a directory is refused: copy its target in.
 - Destructive: this REPLACES ALL files in the project, so it requires --yes
 - (or a confirmation prompt on a terminal).
 
