@@ -1566,6 +1566,29 @@ async fn run_sync(
     .await
 }
 
+/// Fail unless `folder_id` is a folder the user can read. Listing its
+/// children cannot tell: `'ID' in parents` matches nothing, without an error,
+/// for an ID that does not exist or is no longer shared, and for a file.
+async fn check_sync_folder(api: &Api, folder_id: &str) -> Result<(), GwsError> {
+    let meta = api
+        .send(
+            ApiRequest::get(api.url(&format!("files/{}", encode_path_segment(folder_id))))
+                .query("fields", "id,mimeType")
+                .query("supportsAllDrives", "true"),
+        )
+        .await?;
+    if api.is_dry_run() {
+        return Ok(());
+    }
+    let mime = str_field(&meta, "mimeType")?;
+    if mime != FOLDER_MIME {
+        return Err(GwsError::Validation(format!(
+            "--folder-id '{folder_id}' is not a folder (its type is {mime}); +sync mirrors a Drive folder"
+        )));
+    }
+    Ok(())
+}
+
 /// Mirror `folder_id` into `dir` until `interrupt` completes, then save the
 /// sync state, also when the walk was aborted part-way or interrupted, so
 /// files already mirrored stay tracked.
@@ -1580,6 +1603,7 @@ async fn run_sync_until(
     overwrite: bool,
     interrupt: impl Future<Output = crate::helpers::ShutdownSignal>,
 ) -> Result<SyncEnd, GwsError> {
+    check_sync_folder(api, folder_id).await?;
     if api.is_dry_run() {
         list_children(api, folder_id).await?;
         api.plan_note(json!({
@@ -2156,6 +2180,7 @@ mod tests {
     #[tokio::test]
     async fn sync_downloads_and_exports_recursively() {
         let server = MockServer::start().await;
+        mount_root(&server).await;
         Mock::given(method("GET"))
             .and(path("/drive/v3/files"))
             .and(query_param("q", "'ROOT' in parents and trashed = false"))
@@ -2236,6 +2261,7 @@ mod tests {
             .respond_with(ResponseTemplate::new(200).set_body_bytes(b"OK".to_vec()))
             .mount(&server)
             .await;
+        mount_root(&server).await;
         Mock::given(method("GET"))
             .and(path("/drive/v3/files"))
             .and(query_param("q", "'ROOT' in parents and trashed = false"))
@@ -2287,6 +2313,7 @@ mod tests {
     #[tokio::test]
     async fn sync_aborts_on_errors_that_are_not_per_file() {
         let server = MockServer::start().await;
+        mount_root(&server).await;
         Mock::given(method("GET"))
             .and(path("/drive/v3/files"))
             .and(query_param("q", "'ROOT' in parents and trashed = false"))
@@ -2330,6 +2357,7 @@ mod tests {
         ];
         for (status, body) in bodies {
             let server = MockServer::start().await;
+            mount_root(&server).await;
             Mock::given(method("GET"))
                 .and(path("/drive/v3/files"))
                 .and(query_param("q", "'ROOT' in parents and trashed = false"))
@@ -2357,9 +2385,91 @@ mod tests {
         }
     }
 
+    /// `files.list` with `'ID' in parents` answers an empty list, not an
+    /// error, for a folder ID that does not exist or is no longer shared with
+    /// the user, and for a file ID. That must not pass for "nothing to sync".
+    #[tokio::test]
+    async fn sync_fails_loudly_for_a_missing_folder_or_a_file() {
+        let empty = json!({"files": []});
+        // Gone or no longer accessible.
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/drive/v3/files"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&empty))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/drive/v3/files/GONE"))
+            .respond_with(ResponseTemplate::new(404).set_body_json(json!({"error": {
+                "code": 404, "message": "File not found: GONE.",
+                "errors": [{"reason": "notFound"}]}})))
+            .mount(&server)
+            .await;
+        let gone = api(&server.uri(), "drive/v3/");
+        let dir = tempfile::tempdir().unwrap();
+        let err = sync(&gone, "GONE", dir.path()).await.unwrap_err();
+        assert_eq!(err.to_json()["error"]["code"], 404, "{err:?}");
+        assert!(!dir.path().join(SYNC_STATE_FILE).exists());
+
+        // A file, not a folder.
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/drive/v3/files"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&empty))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/drive/v3/files/F"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({"id": "F", "mimeType": "application/pdf"})),
+            )
+            .mount(&server)
+            .await;
+        let file = api(&server.uri(), "drive/v3/");
+        let err = sync(&file, "F", dir.path()).await.unwrap_err();
+        assert!(matches!(err, GwsError::Validation(_)), "{err:?}");
+        assert!(err.to_string().contains("not a folder"), "{err}");
+    }
+
+    /// The dry-run plan shows the folder lookup before the listing.
+    #[tokio::test]
+    async fn sync_dry_run_plans_the_folder_lookup() {
+        let api = dry_api("drive/v3/");
+        let dir = tempfile::tempdir().unwrap();
+        sync(&api, "ROOT", dir.path()).await.unwrap();
+        let plan = api.planned();
+        assert!(
+            plan[0]["url"].as_str().unwrap().ends_with("/files/ROOT"),
+            "{plan:?}"
+        );
+        assert_eq!(plan[0]["query_params"]["fields"], "id,mimeType");
+        assert!(
+            plan[1]["url"].as_str().unwrap().ends_with("/files"),
+            "{plan:?}"
+        );
+    }
+
+    /// Mounts the metadata of the synced folder `ROOT`, which `+sync` reads
+    /// before it lists anything.
+    async fn mount_root(server: &MockServer) {
+        Mock::given(method("GET"))
+            .and(path("/drive/v3/files/ROOT"))
+            .and(query_param("fields", "id,mimeType"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({"id": "ROOT", "mimeType": FOLDER_MIME})),
+            )
+            .mount(server)
+            .await;
+    }
+
     /// Mounts a `files.list` response for `parent` and an `alt=media`
     /// download returning `id` as the body for each plain file listed.
     async fn mount_listing(server: &MockServer, parent: &str, files: Value) {
+        if parent == "ROOT" {
+            mount_root(server).await;
+        }
         for f in files.as_array().unwrap() {
             if f["mimeType"] != FOLDER_MIME {
                 let id = f["id"].as_str().unwrap().to_string();
@@ -2511,6 +2621,7 @@ mod tests {
         // (ext4 limit 255).
         let long_name = "\u{1F4C4}".repeat(150);
         let server = MockServer::start().await;
+        mount_root(&server).await;
         Mock::given(method("GET"))
             .and(path("/drive/v3/files"))
             .and(query_param("q", "'ROOT' in parents and trashed = false"))
@@ -2608,6 +2719,7 @@ mod tests {
     #[tokio::test]
     async fn sync_disambiguates_names_differing_only_by_case() {
         let server = MockServer::start().await;
+        mount_root(&server).await;
         Mock::given(method("GET"))
             .and(path("/drive/v3/files"))
             .and(query_param("q", "'ROOT' in parents and trashed = false"))
@@ -2654,6 +2766,7 @@ mod tests {
     #[tokio::test]
     async fn sync_disambiguates_names_differing_only_by_unicode_normalization() {
         let server = MockServer::start().await;
+        mount_root(&server).await;
         Mock::given(method("GET"))
             .and(path("/drive/v3/files"))
             .and(query_param("q", "'ROOT' in parents and trashed = false"))
@@ -2721,6 +2834,7 @@ mod tests {
         for (k, v) in extra.as_object().unwrap() {
             item[k] = v.clone();
         }
+        mount_root(server).await;
         Mock::given(method("GET"))
             .and(path("/drive/v3/files"))
             .and(query_param("q", "'ROOT' in parents and trashed = false"))
