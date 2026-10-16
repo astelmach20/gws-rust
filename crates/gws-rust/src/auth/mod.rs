@@ -550,11 +550,15 @@ pub fn scopes_for_method(
         required_any_of, ..
     } = &choice
     {
+        let login = login_command(&env);
+        let fix = match scopes::login_hint_scope(required_any_of) {
+            Some(scope) => scopes::login_command_hint(&login, std::slice::from_ref(scope)),
+            None => login,
+        };
         tracing::warn!(
             "this method needs one of [{}], but the active profile was granted none of \
-             them. Add one with `{}`",
+             them. Add one with `{fix}`",
             required_any_of.join(", "),
-            scopes::login_command_hint(&login_command(&env), &required_any_of[..1])
         );
     }
     Ok(choice.scopes().into_iter().map(str::to_string).collect())
