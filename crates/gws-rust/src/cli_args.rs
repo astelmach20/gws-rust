@@ -226,6 +226,19 @@ pub enum TopCommand {
     Service(Vec<OsString>),
 }
 
+/// Names of the visible static commands in [`TopCommand`] (kept in sync by
+/// a test), for "did you mean" hints on a first word that is no service.
+pub const STATIC_COMMANDS: &[&str] = &[
+    "auth",
+    "schema",
+    "commands",
+    "completions",
+    "batch",
+    "cache",
+    "help",
+    "dev",
+];
+
 /// `gwsr cache ...`
 #[derive(Debug, Subcommand)]
 pub enum CacheCommand {
@@ -353,6 +366,18 @@ mod tests {
     #[test]
     fn cli_definition_is_valid() {
         Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn static_command_names_match_the_command_tree() {
+        let mut names: Vec<String> = Cli::command()
+            .get_subcommands()
+            .map(|c| c.get_name().to_string())
+            .collect();
+        names.sort();
+        let mut listed: Vec<String> = STATIC_COMMANDS.iter().map(|s| s.to_string()).collect();
+        listed.sort();
+        assert_eq!(names, listed);
     }
 
     #[test]
