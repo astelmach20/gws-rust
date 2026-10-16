@@ -93,6 +93,10 @@ struct Builder {
     in_code_block: bool,
     /// The open code block belongs to a list item and continues its paragraph.
     code_in_item: bool,
+    /// The next code text in a list item starts a new code line. pulldown-cmark
+    /// can split one line over several `Text` events (it does for CRLF input),
+    /// so a line break is added only where a line really starts.
+    code_line_start: bool,
     /// Where the current list item's content starts, after its nesting tabs.
     item_body: u64,
 }
@@ -221,6 +225,7 @@ pub(super) fn render(md: &str) -> Result<Rendered, GwsError> {
         in_quote: 0,
         in_code_block: false,
         code_in_item: false,
+        code_line_start: false,
         item_body: 0,
     };
     for event in Parser::new_ext(md, options) {
@@ -245,6 +250,7 @@ pub(super) fn render(md: &str) -> Result<Rendered, GwsError> {
                 }
                 Tag::CodeBlock(_) => {
                     b.code_in_item = b.in_list_item();
+                    b.code_line_start = true;
                     if !b.code_in_item {
                         b.end_para();
                     }
@@ -316,7 +322,10 @@ pub(super) fn render(md: &str) -> Result<Rendered, GwsError> {
                 if b.code_in_item {
                     // Code lines continue the list item's paragraph.
                     for line in t.split_inclusive('\n') {
-                        b.continue_item();
+                        if b.code_line_start {
+                            b.continue_item();
+                            b.code_line_start = false;
+                        }
                         let content = line.strip_suffix('\n').unwrap_or(line);
                         let start = b.len;
                         b.push(content);
@@ -327,6 +336,7 @@ pub(super) fn render(md: &str) -> Result<Rendered, GwsError> {
                                 style: SpanStyle::Code,
                             });
                         }
+                        b.code_line_start = line.ends_with('\n');
                     }
                 } else if b.in_code_block {
                     // One Docs paragraph per code line.
@@ -710,6 +720,29 @@ mod tests {
             .map(|s| (s.start, s.end))
             .collect();
         assert_eq!(code, vec![(2, 3), (4, 5)]);
+    }
+
+    #[test]
+    fn list_item_code_block_with_crlf_line_endings_has_no_blank_lines() {
+        // pulldown-cmark splits CRLF code lines over several text events
+        // ("x", "\ny", "\n"); each event must not start a new line.
+        for md in [
+            "1. a\r\n\r\n   ```\r\n   x\r\n   y\r\n   ```\r\n2. b\r\n",
+            "1. a\r\n\r\n       x\r\n       y\r\n2. b\r\n",
+        ] {
+            let r = render(md).unwrap();
+            assert_eq!(r.text, "a\u{b}x\u{b}y\nb\n", "{md:?}");
+            let code: Vec<_> = r
+                .spans
+                .iter()
+                .filter(|s| s.style == SpanStyle::Code)
+                .map(|s| (s.start, s.end))
+                .collect();
+            assert_eq!(code, vec![(2, 3), (4, 5)], "{md:?}");
+        }
+        // A blank code line is still kept.
+        let r = render("- a\r\n\r\n  ```\r\n  x\r\n\r\n  y\r\n  ```\r\n").unwrap();
+        assert_eq!(r.text, "a\u{b}x\u{b}\u{b}y\n");
     }
 
     #[test]
