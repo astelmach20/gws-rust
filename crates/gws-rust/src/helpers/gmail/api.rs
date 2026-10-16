@@ -516,8 +516,9 @@ pub(super) fn parse_labels(body: &Value) -> Result<Vec<Label>, GwsError> {
 
 /// Resolve user-supplied label names or IDs to label IDs.
 ///
-/// Matches an exact ID first, then a case-insensitive name. Unknown labels
-/// are an error listing every unresolved value.
+/// Matches an exact ID first, then a case-insensitive name (Unicode case,
+/// not just ASCII: label names are free text). Unknown labels are an error
+/// listing every unresolved value.
 pub(super) fn resolve_label_ids(
     wanted: &[String],
     labels: &[Label],
@@ -525,9 +526,10 @@ pub(super) fn resolve_label_ids(
     let mut ids = Vec::with_capacity(wanted.len());
     let mut missing = Vec::new();
     for w in wanted {
+        let lower = w.to_lowercase();
         if let Some(l) = labels.iter().find(|l| l.id == *w) {
             ids.push(l.id.clone());
-        } else if let Some(l) = labels.iter().find(|l| l.name.eq_ignore_ascii_case(w)) {
+        } else if let Some(l) = labels.iter().find(|l| l.name.to_lowercase() == lower) {
             ids.push(l.id.clone());
         } else {
             missing.push(w.clone());
@@ -598,6 +600,25 @@ mod tests {
         assert_eq!(ids, vec!["Label_1", "INBOX"]);
         let err = resolve_label_ids(&["Nope".into(), "Other".into()], &labels).unwrap_err();
         assert!(err.to_string().contains("Nope, Other"));
+    }
+
+    /// Gmail label names are Unicode, and "case-insensitive" must hold for
+    /// non-ASCII letters too: `follow-up/ünï` names `Follow-up/Ünï`.
+    #[test]
+    fn resolve_label_ids_matches_non_ascii_names_case_insensitively() {
+        let labels = vec![
+            Label {
+                id: "Label_12".into(),
+                name: "Follow-up/Ünïcode".into(),
+            },
+            Label {
+                id: "Label_13".into(),
+                name: "ÉQUIPE Σ".into(),
+            },
+        ];
+        let ids =
+            resolve_label_ids(&["follow-up/ünïcode".into(), "équipe σ".into()], &labels).unwrap();
+        assert_eq!(ids, vec!["Label_12", "Label_13"]);
     }
 
     #[test]
