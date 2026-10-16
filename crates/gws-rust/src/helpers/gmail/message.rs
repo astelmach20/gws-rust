@@ -1190,47 +1190,6 @@ mod tests {
         }
     }
 
-    /// Common charset aliases that are not WHATWG labels (Windows code page
-    /// names and the like) decode in the charset they name, not as UTF-8.
-    #[test]
-    fn test_charset_aliases_unknown_to_whatwg_are_decoded() {
-        for (charset, bytes, text) in [
-            ("cp932", b"\x93\xfa\x96\x7b".as_slice(), "\u{65e5}\u{672c}"),
-            ("CP936", b"\xc4\xe3\xba\xc3", "\u{4f60}\u{597d}"),
-            ("cp949", b"\xc7\xd1\xb1\xdb", "\u{d55c}\u{ae00}"),
-            ("cp950", b"\xa4\xa4\xa4\xe5", "\u{4e2d}\u{6587}"),
-            ("cp874", b"\xa1", "\u{e01}"),
-            ("latin-1", b"caf\xe9", "caf\u{e9}"),
-            ("latin9", b"\xa4", "\u{20ac}"),
-            ("cp28605", b"\xa4", "\u{20ac}"),
-            ("cp65001", b"caf\xc3\xa9", "caf\u{e9}"),
-            ("cp20127", b"plain", "plain"),
-            ("koi8r", b"\xf0\xd2\xc9", "\u{41f}\u{440}\u{438}"),
-        ] {
-            let payload = json!({
-                "mimeType": "text/plain",
-                "headers": [{ "name": "Content-Type", "value": format!("text/plain; charset={charset}") }],
-                "body": { "data": URL_SAFE.encode(bytes) }
-            });
-            assert_eq!(
-                extract_plain_text_body(&payload).unwrap(),
-                text,
-                "{charset}"
-            );
-        }
-        // Every alias resolves to a label encoding_rs knows.
-        for (alias, canonical) in CHARSET_ALIASES {
-            assert!(
-                encoding_rs::Encoding::for_label(alias.as_bytes()).is_none(),
-                "{alias} is already a WHATWG label"
-            );
-            assert!(
-                encoding_rs::Encoding::for_label(canonical.as_bytes()).is_some(),
-                "{alias} -> {canonical}"
-            );
-        }
-    }
-
     #[test]
     fn test_ascii_or_unknown_charset_body_is_decoded_as_utf8() {
         for ct in [
@@ -1277,6 +1236,47 @@ mod tests {
             assert!(
                 text.contains("Meeting at 10:00, see https://example.com/agenda"),
                 "{ct}: {text:?}"
+            );
+        }
+    }
+
+    /// Common charset aliases that are not WHATWG labels (Windows code page
+    /// names and the like) decode in the charset they name, not as UTF-8.
+    #[test]
+    fn test_charset_aliases_unknown_to_whatwg_are_decoded() {
+        for (charset, bytes, text) in [
+            ("cp932", b"\x93\xfa\x96\x7b".as_slice(), "\u{65e5}\u{672c}"),
+            ("CP936", b"\xc4\xe3\xba\xc3", "\u{4f60}\u{597d}"),
+            ("cp949", b"\xc7\xd1\xb1\xdb", "\u{d55c}\u{ae00}"),
+            ("cp950", b"\xa4\xa4\xa4\xe5", "\u{4e2d}\u{6587}"),
+            ("cp874", b"\xa1", "\u{e01}"),
+            ("latin-1", b"caf\xe9", "caf\u{e9}"),
+            ("latin9", b"\xa4", "\u{20ac}"),
+            ("cp28605", b"\xa4", "\u{20ac}"),
+            ("cp65001", b"caf\xc3\xa9", "caf\u{e9}"),
+            ("cp20127", b"plain", "plain"),
+            ("koi8r", b"\xf0\xd2\xc9", "\u{41f}\u{440}\u{438}"),
+        ] {
+            let payload = json!({
+                "mimeType": "text/plain",
+                "headers": [{ "name": "Content-Type", "value": format!("text/plain; charset={charset}") }],
+                "body": { "data": URL_SAFE.encode(bytes) }
+            });
+            assert_eq!(
+                extract_plain_text_body(&payload).unwrap(),
+                text,
+                "{charset}"
+            );
+        }
+        // Every alias resolves to a label encoding_rs knows.
+        for (alias, canonical) in CHARSET_ALIASES {
+            assert!(
+                encoding_rs::Encoding::for_label(alias.as_bytes()).is_none(),
+                "{alias} is already a WHATWG label"
+            );
+            assert!(
+                encoding_rs::Encoding::for_label(canonical.as_bytes()).is_some(),
+                "{alias} -> {canonical}"
             );
         }
     }
