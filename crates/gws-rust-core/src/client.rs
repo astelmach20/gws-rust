@@ -1083,10 +1083,7 @@ mod tests {
     /// error message or a debug log through it.
     #[tokio::test]
     async fn transport_error_does_not_echo_the_query_string() {
-        let port = {
-            let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-            l.local_addr().unwrap().port()
-        };
+        let (_reserved, port) = refused_port();
         let client = shared_client().unwrap();
         let url = format!("http://127.0.0.1:{port}/r?key=FAKE-api-key&q=private-term");
         let err = send(&fast_policy(), Idempotency::FromMethod, || client.get(&url))
