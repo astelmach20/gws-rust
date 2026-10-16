@@ -313,18 +313,47 @@ fn destructive_helper_without_yes_fails_before_any_request() {
     // refuse first with "confirmation required" (exit 7) naming --yes, and
     // report it as one JSON error on stderr with stdout empty.
     let dir = setup();
-    let out = gwsr(dir.path())
-        .args(["calendar", "+delete", "--event-id", "E1"])
-        .output()
-        .unwrap();
-    assert_eq!(out.status.code(), Some(7));
-    assert!(out.stdout.is_empty());
-    let err: serde_json::Value = serde_json::from_slice(&out.stderr).unwrap();
-    assert_eq!(err["error"]["reason"], "confirmationRequired");
-    assert!(
-        err["error"]["message"].as_str().unwrap().contains("--yes"),
-        "{err}"
-    );
+    seed(dir.path(), "gmail", "v1", "");
+    seed(dir.path(), "admin", "directory_v1", "");
+    // `script +push` reads its directory before confirming.
+    std::fs::write(dir.path().join("Code.gs"), "function f() {}").unwrap();
+    std::fs::write(dir.path().join("appsscript.json"), r#"{"timeZone": "UTC"}"#).unwrap();
+    let cases: [&[&str]; 6] = [
+        &["calendar", "+delete", "--event-id", "E1"],
+        &[
+            "sheets",
+            "+clear",
+            "--spreadsheet-id",
+            "S",
+            "--range",
+            "A1:B2",
+        ],
+        &["script", "+push", "--script-id", "1-ab_CD", "--dir", "."],
+        &["admin", "+user-suspend", "--user", "ann@example.com"],
+        &["gmail", "+filter", "delete", "--filter-id", "f1"],
+        &[
+            "drive",
+            "+share",
+            "--file-id",
+            "F1",
+            "--email",
+            "a@example.com",
+            "--role",
+            "owner",
+        ],
+    ];
+    for args in cases {
+        let out = gwsr(dir.path()).args(args).output().unwrap();
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(7), "{args:?}: {stderr}");
+        assert!(out.stdout.is_empty(), "{args:?}: {out:?}");
+        let err: serde_json::Value = serde_json::from_slice(&out.stderr).unwrap();
+        assert_eq!(err["error"]["reason"], "confirmationRequired", "{args:?}");
+        assert!(
+            err["error"]["message"].as_str().unwrap().contains("--yes"),
+            "{args:?}: {err}"
+        );
+    }
 }
 
 #[test]
