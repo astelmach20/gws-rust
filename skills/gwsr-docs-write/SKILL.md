@@ -23,16 +23,18 @@ Append text or Markdown to the end of a document
 ## Usage
 
 ```bash
-gwsr docs +write --document-id <ID>
+gwsr docs +write --document-id <ID> --text <TEXT>
 ```
+
+Requires one of: `--text <TEXT>`, `--text-file <PATH>`.
 
 ## Flags
 
 | Flag | Required | Default | Description |
 |------|----------|---------|-------------|
 | `--document-id` | ✓ | — | Document ID |
-| `--text` | — | — | Content to add |
-| `--text-file` | — | — | Read the content from a file, or '-' for stdin |
+| `--text` | one | — | Content to add |
+| `--text-file` | one | — | Read the content from a file, or '-' for stdin |
 | `--markdown` | — | — | Interpret the content as Markdown and convert it to native Docs formatting |
 
 ## Examples
