@@ -592,7 +592,7 @@ mod tests {
             ..Default::default()
         };
         let err = gws_rust_core::client::send(&policy, Idempotency::Idempotent, || {
-            client.get("http://pubsub.invalid/v1/x")
+            client.get("https://pubsub.invalid/v1/x")
         })
         .await
         .unwrap_err();
