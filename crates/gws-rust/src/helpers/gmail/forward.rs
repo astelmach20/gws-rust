@@ -1138,4 +1138,58 @@ mod tests {
         assert!(!include_original_part(&pdf, false, true));
         assert!(!include_original_part(&pdf, true, true));
     }
+
+    /// An unnamed `text/calendar` part (a meeting invitation sent as an
+    /// alternative of the body) is neither the body nor a named attachment.
+    /// `+forward` passes it on as `invite.ics`, in plain-text and HTML
+    /// forwards, unless `--no-original-attachments` is set.
+    #[tokio::test]
+    async fn forward_keeps_an_unnamed_calendar_part_as_invite_ics() {
+        let ics = "BEGIN:VCALENDAR\r\nMETHOD:REQUEST\r\nEND:VCALENDAR\r\n";
+        let msg = json!({
+            "id": "m1",
+            "payload": {
+                "mimeType": "multipart/alternative",
+                "headers": [
+                    { "name": "From", "value": "alice@example.com" },
+                    { "name": "Subject", "value": "Invitation: Sync" },
+                    { "name": "Message-ID", "value": "<m1@example.com>" }
+                ],
+                "parts": [
+                    { "mimeType": "text/plain", "body": { "data": crate::helpers::gmail::test_support::base64url("You are invited.") } },
+                    { "mimeType": "text/html", "body": { "data": crate::helpers::gmail::test_support::base64url("<p>You are invited.</p>") } },
+                    {
+                        "mimeType": "text/calendar",
+                        "headers": [
+                            { "name": "Content-Type", "value": "text/calendar; charset=\"UTF-8\"; method=REQUEST" }
+                        ],
+                        "body": { "data": crate::helpers::gmail::test_support::base64url(ics), "size": ics.len() }
+                    }
+                ]
+            }
+        });
+        let original = parse_original_message(&msg).unwrap();
+        assert_eq!(original.body_text, "You are invited.");
+        let parts: Vec<&str> = original.parts.iter().map(|p| p.filename.as_str()).collect();
+        assert_eq!(parts, ["invite.ics"]);
+        for html in [false, true] {
+            assert!(include_original_part(&original.parts[0], html, false));
+        }
+        assert!(!include_original_part(&original.parts[0], false, true));
+
+        let server = wiremock::MockServer::start().await;
+        let api = crate::helpers::gmail::test_support::mock_api(&server);
+        let attachments = fetch_original_parts(&api, "m1", &original.parts, 0)
+            .await
+            .unwrap();
+        assert_eq!(attachments.len(), 1);
+        assert_eq!(attachments[0].data, ics.as_bytes());
+
+        let mb = mail_builder::MessageBuilder::new()
+            .to(MbAddress::new_address(None::<&str>, "bob@example.com"))
+            .subject("Fwd: Invitation: Sync");
+        let raw = finalize_message(mb, "body", false, &attachments).unwrap();
+        assert!(raw.contains("Content-Type: text/calendar"), "{raw}");
+        assert!(raw.contains("filename=\"invite.ics\""), "{raw}");
+    }
 }
