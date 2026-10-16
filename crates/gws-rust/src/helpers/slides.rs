@@ -127,6 +127,11 @@ TIPS:
     }
 }
 
+/// The text of a shape or table cell.
+///
+/// Slides writes a line break inside a paragraph (Shift+Enter) as a vertical
+/// tab (U+000B). It becomes a newline: kept as a control character it is
+/// dropped from terminal output, which glues the two lines' words together.
 fn shape_text(shape: &Value) -> String {
     shape
         .pointer("/text/textElements")
@@ -135,6 +140,7 @@ fn shape_text(shape: &Value) -> String {
             els.iter()
                 .filter_map(|e| e.pointer("/textRun/content").and_then(Value::as_str))
                 .collect::<String>()
+                .replace('\u{000b}', "\n")
         })
         .unwrap_or_default()
 }
@@ -247,5 +253,28 @@ mod tests {
         assert_eq!(v["slides"][0]["text"], "Title\nGrouped\nA\tB");
         assert_eq!(v["slides"][0]["notes"], "Say hi");
         assert_eq!(v["slides"][0]["index"], 1);
+    }
+
+    #[test]
+    fn line_breaks_inside_a_paragraph_become_newlines() {
+        // Shift+Enter in Slides is a vertical tab; terminal output drops
+        // control characters, which would print "Q3 resultsAll regions".
+        let run = |t: &str| json!({"text": {"textElements": [{"textRun": {"content": t}}]}});
+        let pres = json!({
+            "slides": [{
+                "objectId": "s1",
+                "pageElements": [
+                    {"shape": run("Q3 results\u{000b}All regions\n")},
+                    {"table": {"tableRows": [{"tableCells": [run("a\u{000b}b"), run("c")]}]}}
+                ],
+                "slideProperties": {"notesPage": {
+                    "notesProperties": {"speakerNotesObjectId": "n1"},
+                    "pageElements": [{"objectId": "n1", "shape": run("One\u{000b}Two\n")}]
+                }}
+            }]
+        });
+        let v = extract(&pres);
+        assert_eq!(v["slides"][0]["text"], "Q3 results\nAll regions\na\nb\tc");
+        assert_eq!(v["slides"][0]["notes"], "One\nTwo");
     }
 }
