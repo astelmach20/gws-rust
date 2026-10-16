@@ -444,7 +444,7 @@ mod tests {
         ] {
             assert!(is_destructive_method(&m("POST", id)), "{id}");
             assert_eq!(
-                method_impact(&m("POST", id), &serde_json::Map::new()),
+                method_impact(&m("POST", id), &serde_json::Map::new(), None),
                 Some(Impact::Destructive),
                 "{id}"
             );
