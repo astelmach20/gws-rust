@@ -798,7 +798,8 @@ fn parse_sanitize_args(matches: &ArgMatches, data_field: &str) -> Result<Value, 
         Some(text) => text.clone(),
         None => {
             let stdin_text = std::io::read_to_string(std::io::stdin())
-                .map_err(|e| GwsError::other(format!("Failed to read stdin: {e}")))?;
+                // Bad input, like every other flag that reads stdin.
+                .map_err(|e| GwsError::Validation(format!("Failed to read stdin: {e}")))?;
             let trimmed = stdin_text.trim();
             if trimmed.is_empty() {
                 return Err(GwsError::Validation(
