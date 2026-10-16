@@ -26,8 +26,5 @@ Save a Gmail message body into a Google Doc for archival or reference.
 1. Find the message: `gwsr gmail users messages list --params '{"userId": "me", "q": "subject:important from:boss@company.com"}' --format table`
 2. Get message content: `gwsr gmail users messages get --params '{"userId": "me", "id": "MSG_ID"}'`
 3. Create a doc with the content: `gwsr docs documents create --json '{"title": "Saved Email - Important Update"}'`
-4. Write the email body: `gwsr docs +write --document-id DOC_ID --text 'From: boss@company.com
-Subject: Important Update
-
-[EMAIL BODY]'`
+4. Write the email body: `printf 'From: boss@company.com\nSubject: Important Update\n\n[EMAIL BODY]\n' | gwsr docs +write --document-id DOC_ID --text-file -`
 

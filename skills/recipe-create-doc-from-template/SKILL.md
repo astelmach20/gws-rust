@@ -25,9 +25,6 @@ Copy a Google Docs template, fill in content, and share with collaborators.
 
 1. Copy the template: `gwsr drive files copy --params '{"fileId": "TEMPLATE_DOC_ID"}' --json '{"name": "Project Brief - Q2 Launch"}'`
 2. Get the new doc ID from the response
-3. Add content: `gwsr docs +write --document-id NEW_DOC_ID --text '## Project: Q2 Launch
-
-### Objective
-Launch the new feature by end of Q2.'`
+3. Add content: `printf '## Project: Q2 Launch\n### Objective\nLaunch the new feature by end of Q2.\n' | gwsr docs +write --document-id NEW_DOC_ID --markdown --text-file -`
 4. Share with team: `gwsr drive permissions create --params '{"fileId": "NEW_DOC_ID"}' --json '{"role": "writer", "type": "user", "emailAddress": "team@company.com"}'`
 
