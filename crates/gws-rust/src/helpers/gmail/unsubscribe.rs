@@ -172,7 +172,10 @@ async fn post_one_click(url: &reqwest::Url) -> Result<u16, GwsError> {
         .body(ONE_CLICK_BODY)
         .send()
         .await
-        .map_err(|e| GwsError::other(format!("One-click unsubscribe request failed: {e}")))?;
+        // No response (refused, DNS, TLS, timeout) is a network error.
+        .map_err(|e| {
+            GwsError::Network(format!("One-click unsubscribe request failed: {e}").into())
+        })?;
     let status = resp.status();
     if status.is_success() {
         Ok(status.as_u16())
@@ -372,6 +375,18 @@ mod tests {
             .await;
         let url = reqwest::Url::parse(&format!("{}/u", server.uri())).unwrap();
         assert_eq!(post_one_click(&url).await.unwrap(), 202);
+    }
+
+    /// No response from the sender's server is a network error (exit 10),
+    /// not an internal one (5).
+    #[tokio::test]
+    async fn post_without_a_response_is_a_network_error() {
+        // Nothing listens on the discard port: the connection is refused.
+        let url = reqwest::Url::parse("http://127.0.0.1:9/u").unwrap();
+        let err = post_one_click(&url).await.unwrap_err();
+        assert!(matches!(err, GwsError::Network(_)), "{err:?}");
+        assert_eq!(err.exit_code(), GwsError::EXIT_CODE_NETWORK, "{err:?}");
+        assert!(err.to_string().contains("One-click unsubscribe"), "{err}");
     }
 
     #[tokio::test]
