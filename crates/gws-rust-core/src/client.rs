@@ -167,7 +167,8 @@ pub enum Idempotency {
 }
 
 impl Idempotency {
-    fn resolve(self, method: &Method) -> bool {
+    /// Whether a `method` request with this idempotency may be re-sent.
+    pub fn resolve(self, method: &Method) -> bool {
         match self {
             Idempotency::Idempotent => true,
             Idempotency::NonIdempotent => false,

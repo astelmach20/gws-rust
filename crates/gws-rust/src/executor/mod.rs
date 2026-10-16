@@ -355,7 +355,7 @@ fn selects_top_level(mask: &str, field: &str) -> bool {
 
 /// POST/PATCH are retried only when they carry a `requestId` that the API
 /// de-duplicates on (Calendar, Chat, Meet, Pub/Sub, ...).
-fn idempotency(params: &Map<String, Value>, body: &Option<Value>) -> Idempotency {
+pub(crate) fn idempotency(params: &Map<String, Value>, body: &Option<Value>) -> Idempotency {
     let has_request_id = params.contains_key("requestId")
         || body
             .as_ref()

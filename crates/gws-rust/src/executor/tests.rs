@@ -2602,6 +2602,56 @@ async fn batch_round_trip_reports_partial_failure() {
     assert!(body.contains("GET /drive/v3/files/1 HTTP/1.1"));
 }
 
+/// A batch request is re-sent as a whole, so after a 503 it is retried only
+/// when every call in it is safe to repeat. A POST whose body carries a
+/// `requestId` the API de-duplicates on is, as it is for a single call; a
+/// POST without one is not, because the 503 may have come after the server
+/// applied it.
+#[tokio::test]
+async fn batch_retries_a_post_only_when_it_carries_a_request_id() {
+    for (body, expected_requests) in [
+        (json!({"name": "x", "requestId": "r-1"}), 2),
+        (json!({"name": "x"}), 1),
+    ] {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/batch/drive/v3"))
+            .respond_with(ResponseTemplate::new(503))
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/batch/drive/v3"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_raw(batch_parts(1, 1), "multipart/mixed; boundary=b"),
+            )
+            .mount(&server)
+            .await;
+        let d = doc(&server.uri());
+        let mut opts = options(&server);
+        opts.allow_unknown_fields = true;
+        let line = json!({"method": "files.create", "json": body}).to_string();
+        let calls = batch::parse_calls(&d, &line, &opts).unwrap();
+        let result = batch::run_batch(
+            &d,
+            &calls,
+            Some(Credentials::Static("tok".into())),
+            &opts,
+            &SanitizeConfig::default(),
+            &Emitter::capturing(),
+        )
+        .await;
+        let sent = server.received_requests().await.unwrap();
+        assert_eq!(sent.len(), expected_requests, "body {body}: {result:?}");
+        assert_eq!(
+            result.is_ok(),
+            expected_requests == 2,
+            "body {body}: {result:?}"
+        );
+    }
+}
+
 /// A multipart batch response of 200 OK parts for calls `first..first+n` (ids are
 /// the generated line positions).
 fn batch_parts(first: usize, n: usize) -> String {
