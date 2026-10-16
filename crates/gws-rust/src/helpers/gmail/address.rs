@@ -44,10 +44,8 @@ impl Mailbox {
     /// syntactic email validation is left to the Gmail API.
     pub fn parse(raw: &str) -> Self {
         let raw = raw.trim();
-        if let Some(start) = raw.rfind('<')
-            && let Some(end) = raw[start..].find('>')
-        {
-            let email = sanitize_control_chars(raw[start + 1..start + end].trim());
+        if let Some((start, end)) = angle_addr_span(raw) {
+            let email = sanitize_control_chars(raw[start + 1..end].trim());
             let name_part = raw[..start].trim();
             let name = if name_part.is_empty() {
                 None
@@ -129,6 +127,58 @@ fn unquote_display_name(name: &str) -> String {
         }
     }
     name.to_string()
+}
+
+/// Byte offsets of the `<` and `>` around a mailbox's angle-addr.
+///
+/// The angle-addr is the last `<...>` outside comments and quoted strings: a
+/// `<` in a trailing comment (`a@example.com (Support <team>)`,
+/// `Alice <a@example.com> (via <relay>)`) or in a quoted display name is not
+/// the address. When parentheses or quotes are unbalanced they are not
+/// comments or quoted strings (as in `strip_comments`), so every `<` counts.
+fn angle_addr_span(raw: &str) -> Option<(usize, usize)> {
+    let bytes = raw.as_bytes();
+    // `true` for each byte that is inside a comment or a quoted string.
+    let mut hidden = vec![false; bytes.len()];
+    let mut depth = 0usize;
+    let mut in_quotes = false;
+    let mut escaped = false;
+    for (i, &b) in bytes.iter().enumerate() {
+        if depth > 0 || in_quotes {
+            hidden[i] = true;
+            if escaped {
+                escaped = false;
+                continue;
+            }
+            match b {
+                b'\\' => escaped = true,
+                b'(' if depth > 0 => depth += 1,
+                b')' if depth > 0 => depth -= 1,
+                b'"' if in_quotes => in_quotes = false,
+                _ => {}
+            }
+            continue;
+        }
+        match b {
+            b'(' => {
+                depth = 1;
+                hidden[i] = true;
+            }
+            b'"' => {
+                in_quotes = true;
+                hidden[i] = true;
+            }
+            _ => {}
+        }
+    }
+    if depth > 0 || in_quotes {
+        hidden.fill(false);
+    }
+    let start = (0..bytes.len())
+        .rev()
+        .find(|&i| bytes[i] == b'<' && !hidden[i])?;
+    let end = (start..bytes.len()).find(|&i| bytes[i] == b'>' && !hidden[i])?;
+    Some((start, end))
 }
 
 /// Convert a single `Mailbox` to a `mail_builder::Address`.
@@ -644,6 +694,32 @@ mod tests {
         assert_eq!(list[0].name.as_deref(), Some("Frown :-("));
         let m = Mailbox::parse("Malo (Work) <malo@example.com>");
         assert_eq!(m.name.as_deref(), Some("Malo (Work)"));
+    }
+
+    /// A `<` inside a comment or a quoted display name is not the
+    /// angle-addr: the address is never taken from it.
+    #[test]
+    fn test_mailbox_parse_ignores_angle_brackets_in_comments_and_quotes() {
+        let m = Mailbox::parse("a@example.com (Support <team>)");
+        assert_eq!(m.email, "a@example.com");
+        assert_eq!(m.name.as_deref(), Some("Support <team>"));
+
+        let m = Mailbox::parse("Alice <alice@example.com> (via <relay@example.net>)");
+        assert_eq!(m.email, "alice@example.com");
+        assert_eq!(m.name.as_deref(), Some("Alice"));
+
+        let m = Mailbox::parse(r#""Ops <oncall>" <ops@example.com>"#);
+        assert_eq!(m.email, "ops@example.com");
+        assert_eq!(m.name.as_deref(), Some("Ops <oncall>"));
+
+        let m = Mailbox::parse(r#"ops@example.com ("<oncall>")"#);
+        assert_eq!(m.email, "ops@example.com");
+
+        let list = Mailbox::parse_header_list(
+            "a@example.com (Support <team>), Bob <b@example.com> (x <y>)",
+        );
+        let emails: Vec<&str> = list.iter().map(|m| m.email.as_str()).collect();
+        assert_eq!(emails, vec!["a@example.com", "b@example.com"]);
     }
 
     /// Every combination of mailbox forms keeps every recipient's address.
