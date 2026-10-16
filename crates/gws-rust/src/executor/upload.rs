@@ -60,6 +60,9 @@ impl UploadData {
         self.size
     }
 
+    /// Read `len` bytes at `start`. Fails when the file no longer has the
+    /// size the upload was started with: the last chunk would otherwise
+    /// finish the upload with only a prefix of a file that grew.
     async fn read_range(&self, start: u64, len: usize) -> Result<bytes::Bytes, GwsError> {
         let path = &self.path;
         {
@@ -67,6 +70,14 @@ impl UploadData {
                 let mut file = tokio::fs::File::open(path).await.map_err(|e| {
                     GwsError::Validation(format!("failed to open upload file '{path}': {e}"))
                 })?;
+                let now = file
+                    .metadata()
+                    .await
+                    .map_err(|e| GwsError::other(anyhow::anyhow!("failed to stat '{path}': {e}")))?
+                    .len();
+                if now != self.size {
+                    return Err(GwsError::Validation(size_changed(path, self.size, now)));
+                }
                 file.seek(std::io::SeekFrom::Start(start))
                     .await
                     .map_err(|e| {
@@ -718,6 +729,33 @@ mod tests {
         assert!(
             file.read_range(8, 4).await.is_err(),
             "short read must fail loudly"
+        );
+    }
+
+    #[tokio::test]
+    async fn read_range_fails_when_the_file_changed_size() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("f.bin");
+        std::fs::write(&path, b"0123456789").unwrap();
+        let file = UploadData {
+            path: path.to_str().unwrap().to_string(),
+            size: 10,
+        };
+        // Grown: the final chunk (bytes 6..10) would read fine and finish
+        // the upload with a truncated copy of the file.
+        std::fs::write(&path, b"0123456789-appended").unwrap();
+        let err = file.read_range(6, 4).await.unwrap_err();
+        assert!(matches!(err, GwsError::Validation(_)), "{err:?}");
+        assert!(
+            err.to_string().contains("changed size during upload"),
+            "{err}"
+        );
+        // Shrunk.
+        std::fs::write(&path, b"01234").unwrap();
+        let err = file.read_range(0, 4).await.unwrap_err();
+        assert!(
+            err.to_string().contains("changed size during upload"),
+            "{err}"
         );
     }
 
