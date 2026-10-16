@@ -38,34 +38,19 @@ const SCOPE_AUDIT: &str = "https://www.googleapis.com/auth/admin.reports.audit.r
 const DIRECTORY: &str = "directory_v1";
 const REPORTS: &str = "reports_v1";
 
-/// Applications accepted by `activities.list`.
-const AUDIT_APPS: &[&str] = &[
-    "access_transparency",
-    "admin",
-    "calendar",
-    "chat",
-    "chrome",
-    "classroom",
-    "context_aware_access",
-    "data_studio",
-    "drive",
-    "gcp",
-    "gemini_in_workspace_apps",
-    "gmail",
-    "groups",
-    "groups_enterprise",
-    "jamboard",
-    "keep",
-    "login",
-    "meet",
-    "mobile",
-    "rules",
-    "saml",
-    "tasks",
-    "token",
-    "user_accounts",
-    "vault",
-];
+/// The applications `activities.list` accepts, as the Discovery document
+/// lists them. Hard-coding them would refuse every application Google adds
+/// after a release (`contacts`, `takeout`, `voice`, ...).
+fn audit_apps(doc: &crate::discovery::RestDescription) -> Option<Vec<String>> {
+    doc.resources
+        .get("activities")?
+        .methods
+        .get("list")?
+        .parameters
+        .get("applicationName")?
+        .enum_values
+        .clone()
+}
 
 pub struct AdminHelper;
 
@@ -73,7 +58,7 @@ impl Helper for AdminHelper {
     fn inject_commands(&self, cmd: Command, doc: &crate::discovery::RestDescription) -> Command {
         match doc.version.as_str() {
             DIRECTORY => directory_commands(cmd),
-            REPORTS => reports_commands(cmd),
+            REPORTS => reports_commands(cmd, doc),
             _ => cmd,
         }
     }
@@ -234,18 +219,21 @@ TIPS:
     ))
 }
 
-fn reports_commands(cmd: Command) -> Command {
+fn reports_commands(cmd: Command, doc: &crate::discovery::RestDescription) -> Command {
+    let mut application = Arg::new("application")
+        .long("application")
+        .help("Application whose audit log to read")
+        .required(true)
+        .value_name("APP");
+    // Without an enum in the document the API validates the name; the path
+    // segment is encoded either way.
+    if let Some(apps) = audit_apps(doc) {
+        application = application.value_parser(clap::builder::PossibleValuesParser::new(apps));
+    }
     cmd.subcommand(
         Command::new("+audit")
             .about("[Helper] Query audit activity (Reports API)")
-            .arg(
-                Arg::new("application")
-                    .long("application")
-                    .help("Application whose audit log to read")
-                    .required(true)
-                    .value_parser(AUDIT_APPS.to_vec())
-                    .value_name("APP"),
-            )
+            .arg(application)
             .arg(
                 Arg::new("user")
                     .long("user")
@@ -538,6 +526,54 @@ mod tests {
         );
         assert_eq!(names(REPORTS), vec!["+audit"]);
         assert!(names("datatransfer_v1").is_empty());
+    }
+
+    /// A Reports document whose `activities.list` accepts `apps`.
+    fn reports_doc(apps: &[&str]) -> crate::discovery::RestDescription {
+        serde_json::from_value(json!({
+            "name": "admin",
+            "version": REPORTS,
+            "rootUrl": "https://admin.googleapis.com/",
+            "servicePath": "",
+            "resources": {"activities": {"methods": {"list": {
+                "id": "reports.activities.list",
+                "httpMethod": "GET",
+                "path": "admin/reports/v1/activity/users/{userKey}/applications/{applicationName}",
+                "parameters": {"applicationName": {
+                    "type": "string", "location": "path", "required": true, "enum": apps
+                }}
+            }}}}
+        }))
+        .unwrap()
+    }
+
+    fn audit_app(
+        doc: &crate::discovery::RestDescription,
+        app: &str,
+    ) -> Result<String, clap::Error> {
+        AdminHelper
+            .inject_commands(Command::new("gwsr"), doc)
+            .try_get_matches_from(["gwsr", "+audit", "--application", app])
+            .map(|m| {
+                m.subcommand_matches("+audit")
+                    .unwrap()
+                    .get_one::<String>("application")
+                    .unwrap()
+                    .clone()
+            })
+    }
+
+    #[test]
+    fn audit_applications_come_from_discovery() {
+        // Applications the API added after the helper was written.
+        let reports = reports_doc(&["login", "contacts", "takeout", "voice"]);
+        for app in ["login", "contacts", "takeout", "voice"] {
+            assert_eq!(audit_app(&reports, app).unwrap(), app);
+        }
+        let err = audit_app(&reports, "drive").unwrap_err();
+        assert_eq!(err.kind(), clap::error::ErrorKind::InvalidValue);
+        // No enum published: the API validates the name.
+        assert_eq!(audit_app(&doc(REPORTS), "contacts").unwrap(), "contacts");
     }
 
     #[test]
