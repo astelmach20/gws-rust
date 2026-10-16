@@ -293,6 +293,7 @@ impl Api {
         // A dry run must refuse what the real send would refuse.
         if let Some(url) = value.get("url").and_then(Value::as_str) {
             crate::validate::reject_dot_segments(url)?;
+            crate::validate::reject_empty_path_segments(url)?;
         }
         self.planned
             .lock()
@@ -800,6 +801,14 @@ pub(crate) fn dry_run_request(
 /// Print a dry-run plan (`{"dry_run": true, "requests": [...]}`) in the
 /// requested output format.
 pub(crate) fn print_dry_run(matches: &ArgMatches, requests: Vec<Value>) -> Result<(), GwsError> {
+    // A dry run must refuse what the real send would refuse.
+    for url in requests
+        .iter()
+        .filter_map(|r| r.get("url").and_then(Value::as_str))
+    {
+        crate::validate::reject_dot_segments(url)?;
+        crate::validate::reject_empty_path_segments(url)?;
+    }
     print_value(matches, &json!({ "dry_run": true, "requests": requests }))
 }
 
