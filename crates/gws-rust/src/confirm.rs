@@ -211,6 +211,9 @@ pub(crate) const OUTBOUND_METHODS: &[&str] = &[
     "classroom.courses.announcements.create",
     // Commenting on a Drive approval notifies its initiator and reviewers.
     "drive.approvals.comment",
+    // Sharing a Keep note gives the grantees edit access to it, like a Drive
+    // permission.
+    "keep.notes.permissions.batchCreate",
     "directory.members.insert",
     // The same group membership through Cloud Identity, and admin roles.
     "cloudidentity.groups.memberships.create",
@@ -1139,6 +1142,27 @@ mod tests {
             ("POST", "classroom.courses.create"),
             ("PATCH", "classroom.courses.announcements.patch"),
         ] {
+            let method = m(http, id);
+            assert!(!may_be_gated(&method), "{id}");
+            assert_eq!(method_impact(&method, &none, None), None, "{id}");
+        }
+    }
+
+    /// Sharing a Keep note grants other people access to it, like a Drive
+    /// permission; creating or reading notes is not gated.
+    #[test]
+    fn keep_note_sharing_is_outbound() {
+        let m = |http: &str, id: &str| RestMethod {
+            http_method: http.to_string(),
+            id: Some(id.to_string()),
+            ..Default::default()
+        };
+        let none = serde_json::Map::new();
+        let share = m("POST", "keep.notes.permissions.batchCreate");
+        assert!(may_be_gated(&share));
+        assert!(!is_destructive_method(&share));
+        assert_eq!(method_impact(&share, &none, None), Some(Impact::Outbound));
+        for (http, id) in [("POST", "keep.notes.create"), ("GET", "keep.notes.list")] {
             let method = m(http, id);
             assert!(!may_be_gated(&method), "{id}");
             assert_eq!(method_impact(&method, &none, None), None, "{id}");
