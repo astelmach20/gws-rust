@@ -541,7 +541,9 @@ pub(crate) async fn resumable_upload(
                     );
                     return Err(transport.error_for(sent, &context).await);
                 }
-                s if gws_rust_core::client::is_retryable_status(s) => ChunkFailure::Status(sent),
+                // `gave_up` marks a failure the client would have retried:
+                // a retryable status or a Google rate-limit 403.
+                _ if sent.gave_up => ChunkFailure::Status(sent),
                 _ => {
                     progress.finish();
                     return Ok(sent);

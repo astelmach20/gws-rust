@@ -1480,6 +1480,26 @@ async fn resumable_upload_exhausted_on_503_is_retryable_not_internal() {
     assert!(err.to_string().contains("backend unavailable"), "{err}");
 }
 
+/// A Google rate-limit 403 on a chunk is transient like a 429: the chunk is
+/// retried, and when retries run out the error stays retryable (exit 6).
+#[tokio::test]
+async fn resumable_chunk_rate_limit_403_is_retried() {
+    let (result, puts) = resumable_against(
+        1000,
+        ResponseTemplate::new(403).set_body_json(json!({
+            "error": {"code": 403, "message": "slow down",
+                      "errors": [{"reason": "userRateLimitExceeded"}]}
+        })),
+    )
+    .await;
+    let err = result.expect("must finish").unwrap_err();
+    assert!(matches!(err, GwsError::Api { code: 403, .. }), "{err:?}");
+    assert_eq!(err.exit_code(), 6, "{err}");
+    let msg = err.to_string();
+    assert!(msg.contains("consecutive retries"), "{msg}");
+    assert!(puts > 1, "a rate-limited chunk was not retried: {msg}");
+}
+
 /// A chunk answered with a `Retry-After` longer than the policy allows
 /// stops the upload at once, as any other request does, instead of
 /// re-sending the chunk on gwsr's own short backoff while the server asked
