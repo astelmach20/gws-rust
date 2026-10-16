@@ -34,6 +34,16 @@ pub(crate) fn value_type(val: &Value) -> &'static str {
     }
 }
 
+/// Whether `n` is a valid JSON number for a string property of Discovery
+/// `format` `int64` or `uint64`: an integer in that format's range.
+fn int64_number(format: Option<&str>, n: &serde_json::Number) -> bool {
+    match format {
+        Some("int64") => n.is_i64(),
+        Some("uint64") => n.is_u64(),
+        _ => false,
+    }
+}
+
 struct Checker<'a> {
     doc: &'a RestDescription,
     allow_unknown_fields: bool,
@@ -163,6 +173,9 @@ impl Checker<'_> {
         if let Some(expected) = &prop.prop_type {
             let type_matches = match (expected.as_str(), value) {
                 ("string", Value::String(_)) => true,
+                // Discovery types 64-bit integers as strings; the API's JSON
+                // parser takes them as numbers too (proto3 JSON mapping).
+                ("string", Value::Number(n)) => int64_number(prop.format.as_deref(), n),
                 ("integer", Value::Number(n)) => n.is_i64() || n.is_u64(),
                 ("number", Value::Number(_)) => true,
                 ("boolean", Value::Bool(_)) => true,
@@ -399,6 +412,41 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(msg.contains("a: Expected type 'integer'"), "{msg}");
+    }
+
+    /// Discovery declares 64-bit integers `{"type": "string", "format":
+    /// "int64"}`; the API accepts them as JSON numbers as well as strings.
+    #[test]
+    fn int64_string_fields_accept_integer_numbers() {
+        let doc: RestDescription = serde_json::from_value(json!({
+            "name": "x", "version": "v1", "rootUrl": "https://x.googleapis.com/",
+            "schemas": { "Req": { "id": "Req", "type": "object", "properties": {
+                "size": { "type": "string", "format": "int64" },
+                "historyId": { "type": "string", "format": "uint64" },
+                "ids": { "type": "array",
+                         "items": { "type": "string", "format": "int64" } },
+                "name": { "type": "string" }
+            } } }
+        }))
+        .unwrap();
+        let check = |body: Value| validate_body(&body, "Req", &doc, false);
+        check(json!({"size": "123", "historyId": "9"})).unwrap();
+        check(json!({"size": -5, "historyId": 18446744073709551615u64, "ids": [1, "2"]})).unwrap();
+        for (body, needle) in [
+            (json!({"size": 1.5}), "size: Expected type 'string'"),
+            (
+                json!({"historyId": -1}),
+                "historyId: Expected type 'string'",
+            ),
+            (
+                json!({"size": 18446744073709551615u64}),
+                "size: Expected type 'string'",
+            ),
+            (json!({"name": 7}), "name: Expected type 'string'"),
+        ] {
+            let msg = check(body.clone()).unwrap_err().to_string();
+            assert!(msg.contains(needle), "{body}: {msg}");
+        }
     }
 
     #[test]
