@@ -362,7 +362,7 @@ impl AuthEnv {
                     "{selection} conflicts with GWSR_CREDENTIALS_FILE; unset one of them"
                 )));
             }
-            if !path.exists() {
+            if !path_exists(path, "GWSR_CREDENTIALS_FILE", AuthError::Config)? {
                 return Err(AuthError::Config(format!(
                     "GWSR_CREDENTIALS_FILE points to '{}', which does not exist",
                     path.display()
@@ -371,7 +371,11 @@ impl AuthEnv {
             return Ok(CredentialSource::CredentialsFile(path.clone()));
         }
 
-        if self.paths.credentials.exists() {
+        // An unreadable profile directory is an error, never "not logged
+        // in": the default profile would otherwise fall through to
+        // Application Default Credentials, another identity.
+        let profile_what = format!("the credentials of profile '{}'", self.profile.name);
+        if path_exists(&self.paths.credentials, &profile_what, AuthError::Storage)? {
             return Ok(CredentialSource::Profile {
                 name: self.profile.name.clone(),
                 path: self.paths.credentials.clone(),
@@ -384,7 +388,7 @@ impl AuthEnv {
         }
 
         if let Some(path) = &self.adc_env {
-            if !path.exists() {
+            if !path_exists(path, "GOOGLE_APPLICATION_CREDENTIALS", AuthError::Config)? {
                 return Err(AuthError::Config(format!(
                     "GOOGLE_APPLICATION_CREDENTIALS points to '{}', which does not exist",
                     path.display()
@@ -393,7 +397,11 @@ impl AuthEnv {
             return Ok(CredentialSource::AdcEnv(path.clone()));
         }
         if let Some(path) = &self.adc_well_known
-            && path.exists()
+            && path_exists(
+                path,
+                "gcloud's Application Default Credentials",
+                AuthError::Config,
+            )?
         {
             return Ok(CredentialSource::AdcWellKnown(path.clone()));
         }
@@ -454,6 +462,15 @@ impl AuthEnv {
             .map_err(|_| AuthError::Storage(format!("{what} decrypted to invalid UTF-8")))?;
         Credential::from_json(json, &what).map_err(|e| AuthError::Storage(format!("{e:#}")))
     }
+}
+
+/// Whether `path` exists. Unlike [`Path::exists`], a failure to check
+/// (permission denied on a parent directory, ...) is an error built with
+/// `kind`, not "absent": treating it as absent would silently pick the next
+/// credential source, another identity.
+fn path_exists(path: &Path, what: &str, kind: fn(String) -> AuthError) -> Result<bool, AuthError> {
+    path.try_exists()
+        .map_err(|e| kind(format!("cannot check {what} at '{}': {e}", path.display())))
 }
 
 fn read_token_file(path: &Path) -> Result<SecretString, AuthError> {
@@ -818,6 +835,45 @@ mod tests {
             "{err}"
         );
         assert_eq!(std::fs::read(&env.paths.credentials).unwrap(), ct);
+    }
+
+    /// A profile directory that cannot be searched (left owned by root by a
+    /// `sudo gwsr auth login`, say) hides whether credentials exist. That is
+    /// a storage error, not "not logged in": the implicit default profile
+    /// must not fall through to Application Default Credentials, another
+    /// identity, and an explicit profile must not claim it has none.
+    #[cfg(unix)]
+    #[test]
+    fn unreadable_profile_dir_is_an_error_not_an_adc_fallback() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let (ks, _) = memory_keystore(dir.path());
+        let env = env_in(dir.path(), ProfileSource::Default);
+        write_profile_creds(&env, &ks);
+        let adc = dir.path().join("adc.json");
+        write_private(&adc, SA_JSON);
+        let profile_dir = env.paths.dir.clone();
+        std::fs::set_permissions(&profile_dir, std::fs::Permissions::from_mode(0o000)).unwrap();
+        // Root ignores directory permissions; nothing to test then.
+        let enforced = std::fs::metadata(&env.paths.credentials).is_err();
+
+        let mut implicit = env.clone();
+        implicit.adc_well_known = Some(adc.clone());
+        let implicit_result = implicit.source();
+        let mut via_env = env.clone();
+        via_env.adc_env = Some(adc);
+        let via_env_result = via_env.source();
+        let explicit_result = env_in(dir.path(), ProfileSource::EnvVar).source();
+        std::fs::set_permissions(&profile_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        if !enforced {
+            return;
+        }
+
+        for result in [implicit_result, via_env_result, explicit_result] {
+            let err = result.unwrap_err();
+            assert!(matches!(err, AuthError::Storage(_)), "{err:?}");
+            assert!(err.to_string().contains("profile 'default'"), "{err}");
+        }
     }
 
     #[test]
