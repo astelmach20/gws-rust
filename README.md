@@ -482,6 +482,7 @@ gwsr gmail users messages get --params '{"userId":"me","id":"MSG"}' \
 
 - **`warn`:** output is printed. A match or a sanitization failure adds a `_sanitization` annotation and a warning on stderr.
 - **`block`:** fails closed. A match prints nothing on stdout and exits `11` (`sanitizationBlocked`). If Model Armor can't be reached, the output is still withheld and the exit code is the cause's own (auth `2`, network `10`, API `1` or `6`).
+- Only `MATCH_FOUND`, or `NO_MATCH_FOUND` with every filter run (`invocationResult: SUCCESS`), is a verdict. A result whose filters were skipped or failed (`PARTIAL`, `FAILURE`) or whose match state is unspecified is a sanitization failure: withheld in `block` mode, annotated in `warn` mode.
 - The template name is parsed strictly, and the request always goes to `modelarmor.<location>.rep.googleapis.com`.
 
 `--sanitize` applies to generated methods and to the helpers that return user content (for example `gmail +read`, `+search`, `+triage`, `+watch`, `events +subscribe`, the `workflow` helpers, and the app helpers). Every `gmail` helper screens its printed result, except `+attachments`, which rejects `--sanitize` because binary files cannot be scanned, and the helpers that send or create something:
