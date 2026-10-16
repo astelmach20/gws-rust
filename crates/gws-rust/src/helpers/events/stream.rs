@@ -319,11 +319,13 @@ impl PubSubClient {
         url: String,
         body: Option<&Value>,
         context: &str,
-    ) -> Result<Value, StepError> {
+    ) -> Result<Value, GwsError> {
+        // The error keeps its class: one-shot setup and cleanup calls exit
+        // with it (a 403 rate limit is 6, a network failure 10, a refused
+        // token 2); only stream steps map it to a `StepError`.
         self.transport
             .json(method, &url, &[], body, Idempotency::FromMethod, context)
             .await
-            .map_err(StepError::from)
     }
 
     /// Create a topic (PUT).
@@ -336,7 +338,6 @@ impl PubSubClient {
         )
         .await
         .map(|_| ())
-        .map_err(into_gws)
     }
 
     /// Create a pull subscription on `topic`.
@@ -350,7 +351,6 @@ impl PubSubClient {
         )
         .await
         .map(|_| ())
-        .map_err(into_gws)
     }
 
     /// Grant `role` on `topic` to `member` (replaces the topic policy).
@@ -370,7 +370,6 @@ impl PubSubClient {
         )
         .await
         .map(|_| ())
-        .map_err(into_gws)
     }
 
     /// Pull up to `max` messages. No response within `timeout` means "no
@@ -422,6 +421,7 @@ impl PubSubClient {
         )
         .await
         .map(|_| ())
+        .map_err(StepError::from)
     }
 
     /// Delete a topic or subscription.
@@ -434,27 +434,6 @@ impl PubSubClient {
         )
         .await
         .map(|_| ())
-        .map_err(into_gws)
-    }
-}
-
-/// Collapse a `StepError` into a `GwsError` for one-shot setup calls.
-pub(crate) fn into_gws(e: StepError) -> GwsError {
-    match e {
-        StepError::Fatal(e) => e,
-        StepError::Transient {
-            status: Some(code),
-            message,
-        } => GwsError::Api {
-            code,
-            message,
-            reason: "transientError".to_string(),
-            enable_url: None,
-        },
-        StepError::Transient {
-            status: None,
-            message,
-        } => GwsError::other(message),
     }
 }
 
@@ -704,6 +683,55 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    /// Setup calls run once, outside the stream's failure budget, so their
+    /// errors must keep their class: a 403 rate limit still exits 6 (not 1
+    /// with its reason replaced) and a network failure exits 10 (not 5).
+    #[tokio::test]
+    async fn setup_calls_keep_the_error_class() {
+        let server = MockServer::start().await;
+        Mock::given(method("PUT"))
+            .and(path("/v1/projects/p/topics/t"))
+            .respond_with(ResponseTemplate::new(403).set_body_json(json!({
+                "error": {
+                    "code": 403,
+                    "message": "Quota exceeded",
+                    "errors": [{"reason": "rateLimitExceeded"}]
+                }
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let client = PubSubClient::with_base(
+            &Transport::for_test(&server.uri()),
+            &format!("{}/v1", server.uri()),
+        );
+        let err = client
+            .create_topic("projects/p/topics/t")
+            .await
+            .unwrap_err();
+        assert_eq!(
+            err.exit_code(),
+            GwsError::EXIT_CODE_API_RETRYABLE,
+            "{err:?}"
+        );
+        assert!(matches!(&err, GwsError::Api { reason, .. } if reason == "rateLimitExceeded"));
+
+        // Nothing listens on the discard port: the connection is refused.
+        let offline = PubSubClient::with_base(
+            &Transport::for_test("http://127.0.0.1:9/"),
+            "http://127.0.0.1:9/v1",
+        );
+        for err in [
+            offline
+                .create_subscription("projects/p/subscriptions/s", "projects/p/topics/t")
+                .await
+                .unwrap_err(),
+            offline.delete("projects/p/topics/t").await.unwrap_err(),
+        ] {
+            assert_eq!(err.exit_code(), GwsError::EXIT_CODE_NETWORK, "{err:?}");
+        }
     }
 
     #[test]
