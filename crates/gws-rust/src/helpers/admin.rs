@@ -292,7 +292,8 @@ EXAMPLES:
   gwsr admin-reports +audit --application admin --format table
 
 TIPS:
-  Read-only. Newest first. The output says when --limit cut results short.",
+  Read-only. Newest first. The output says when --limit cut results short.
+  Gmail queries cover at most 30 days; --until defaults to now.",
             ),
     )
 }
@@ -417,6 +418,7 @@ async fn group_add_member(
 
 // ── +audit ───────────────────────────────────────────────────────────
 
+#[derive(Debug)]
 struct Audit {
     application: String,
     user: String,
@@ -430,23 +432,37 @@ struct Audit {
 /// An RFC 3339 time in UTC, keeping its fractional seconds: truncating them
 /// would move `--since` earlier (returning events before it) and `--until`
 /// earlier (dropping events in the range's last second).
-fn utc_rfc3339(t: chrono::DateTime<chrono::FixedOffset>) -> String {
-    t.with_timezone(&chrono::Utc)
-        .to_rfc3339_opts(chrono::SecondsFormat::AutoSi, true)
+fn utc_rfc3339(t: chrono::DateTime<chrono::Utc>) -> String {
+    t.to_rfc3339_opts(chrono::SecondsFormat::AutoSi, true)
 }
 
 /// `--until`: an RFC 3339 time.
-fn parse_until(s: &str) -> Result<String, GwsError> {
+fn until_time(s: &str) -> Result<chrono::DateTime<chrono::Utc>, GwsError> {
     chrono::DateTime::parse_from_rfc3339(s)
-        .map(utc_rfc3339)
+        .map(|t| t.with_timezone(&chrono::Utc))
         .map_err(|_| GwsError::Validation(format!("--until '{s}' is not an RFC 3339 time")))
 }
 
-/// `--since`: RFC 3339, or a look-back like `24h`/`7d`/`30m` relative to `now`.
+#[cfg(test)]
+fn parse_until(s: &str) -> Result<String, GwsError> {
+    until_time(s).map(utc_rfc3339)
+}
+
+#[cfg(test)]
 fn parse_since(s: &str, now: chrono::DateTime<chrono::Utc>) -> Result<String, GwsError> {
+    since_time(s, now).map(utc_rfc3339)
+}
+
+/// `--since`: RFC 3339, or a look-back like `24h`/`7d`/`30m` relative to `now`
+/// (whole seconds).
+fn since_time(
+    s: &str,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<chrono::DateTime<chrono::Utc>, GwsError> {
+    use chrono::SubsecRound;
     // Not RFC 3339 is not an error yet: it may be a look-back, parsed next.
     if let Ok(t) = chrono::DateTime::parse_from_rfc3339(s) {
-        return Ok(utc_rfc3339(t));
+        return Ok(t.with_timezone(&chrono::Utc));
     }
     let invalid = || {
         GwsError::Validation(format!(
@@ -472,18 +488,39 @@ fn parse_since(s: &str, now: chrono::DateTime<chrono::Utc>) -> Result<String, Gw
     let start = d.and_then(|d| now.checked_sub_signed(d)).ok_or_else(|| {
         GwsError::Validation(format!("--since '{s}' reaches too far into the past"))
     })?;
-    Ok(start.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
+    Ok(start.trunc_subsecs(0))
 }
+
+/// The Reports API refuses Gmail queries without an `endTime`, and Gmail
+/// ranges longer than this.
+const GMAIL_MAX_RANGE_DAYS: i64 = 30;
 
 impl Audit {
     fn parse(m: &ArgMatches) -> Result<Self, GwsError> {
-        let end = optional(m, "until")?.map(parse_until).transpose()?;
+        Self::parse_at(m, chrono::Utc::now())
+    }
+
+    fn parse_at(m: &ArgMatches, now: chrono::DateTime<chrono::Utc>) -> Result<Self, GwsError> {
+        let application = required(m, "application")?;
+        let start = since_time(required(m, "since")?, now)?;
+        let mut end = optional(m, "until")?.map(until_time).transpose()?;
+        if application == "gmail" {
+            // Gmail requires both ends of the range: default the end to now,
+            // as the API does for every other application.
+            let until = *end.get_or_insert(now);
+            if until - start > chrono::TimeDelta::days(GMAIL_MAX_RANGE_DAYS) {
+                return Err(GwsError::Validation(format!(
+                    "Gmail audit queries cover at most {GMAIL_MAX_RANGE_DAYS} days; \
+                     narrow --since/--until"
+                )));
+            }
+        }
         Ok(Self {
-            application: required(m, "application")?.to_string(),
+            application: application.to_string(),
             user: optional(m, "user")?.unwrap_or("all").to_string(),
             event: optional(m, "event")?.map(str::to_string),
-            start: parse_since(required(m, "since")?, chrono::Utc::now())?,
-            end,
+            start: utc_rfc3339(start),
+            end: end.map(utc_rfc3339),
             filter: optional(m, "filter")?.map(str::to_string),
             limit: http::limit(m, "limit")?,
         })
@@ -728,6 +765,62 @@ mod tests {
             let err = parse_since(bad, now).unwrap_err();
             assert!(matches!(err, GwsError::Validation(_)), "{bad}: {err:?}");
         }
+    }
+
+    fn parse_audit(args: &[&str], now: &str) -> Result<Audit, GwsError> {
+        let now = chrono::DateTime::parse_from_rfc3339(now)
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let m = AdminHelper
+            .inject_commands(Command::new("gwsr"), &doc(REPORTS))
+            .try_get_matches_from(["gwsr", "+audit"].iter().chain(args))
+            .unwrap();
+        Audit::parse_at(m.subcommand_matches("+audit").unwrap(), now)
+    }
+
+    #[test]
+    fn gmail_audit_always_sends_an_end_time() {
+        // The Reports API rejects Gmail queries without endTime.
+        let a = parse_audit(&["--application", "gmail"], "2026-01-10T08:00:00Z").unwrap();
+        assert_eq!(a.start, "2026-01-09T08:00:00Z");
+        assert_eq!(a.end.as_deref(), Some("2026-01-10T08:00:00Z"));
+        let a = parse_audit(
+            &[
+                "--application",
+                "gmail",
+                "--until",
+                "2026-01-10T01:00:00+01:00",
+            ],
+            "2026-01-10T08:00:00Z",
+        )
+        .unwrap();
+        assert_eq!(a.end.as_deref(), Some("2026-01-10T00:00:00Z"));
+        // Other applications keep the API's own default (now).
+        let a = parse_audit(&["--application", "drive"], "2026-01-10T08:00:00Z").unwrap();
+        assert_eq!(a.end, None);
+    }
+
+    #[test]
+    fn gmail_audit_range_is_at_most_30_days() {
+        let now = "2026-02-01T00:00:00Z";
+        assert!(parse_audit(&["--application", "gmail", "--since", "30d"], now).is_ok());
+        let err = parse_audit(&["--application", "gmail", "--since", "31d"], now).unwrap_err();
+        assert!(matches!(err, GwsError::Validation(_)), "{err:?}");
+        let err = parse_audit(
+            &[
+                "--application",
+                "gmail",
+                "--since",
+                "2025-12-01T00:00:00Z",
+                "--until",
+                "2026-01-01T00:00:01Z",
+            ],
+            now,
+        )
+        .unwrap_err();
+        assert!(matches!(err, GwsError::Validation(_)), "{err:?}");
+        // The limit is Gmail's alone.
+        assert!(parse_audit(&["--application", "drive", "--since", "90d"], now).is_ok());
     }
 
     #[tokio::test]
