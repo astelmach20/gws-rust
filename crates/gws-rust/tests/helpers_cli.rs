@@ -2649,3 +2649,58 @@ fn existing_subscription_rejects_setup_flags() {
     assert_eq!(plan["subscription"], sub, "{plan}");
     assert_eq!(plan["labelIds"], json!(["INBOX"]), "{plan}");
 }
+
+/// `admin +user-create --org-unit` takes a full path from the root. A bare
+/// unit name (`Sales`) is refused as a validation error (exit 3) before any
+/// request; `/Sales` is sent as given.
+#[tokio::test(flavor = "multi_thread")]
+async fn user_create_refuses_an_org_unit_without_a_leading_slash() {
+    use wiremock::matchers::{body_partial_json, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/admin/directory/v1/users"))
+        .and(body_partial_json(json!({"orgUnitPath": "/Sales"})))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "1", "primaryEmail": "ann@example.com", "orgUnitPath": "/Sales"
+        })))
+        .mount(&server)
+        .await;
+    let dir = setup();
+    seed(dir.path(), "admin", "directory_v1", "");
+    let run = |org_unit: &str| {
+        gwsr(dir.path())
+            .env("GWSR_TOKEN", "test-token")
+            .env("GWSR_API_BASE_URL", server.uri())
+            .args([
+                "admin",
+                "+user-create",
+                "--email",
+                "ann@example.com",
+                "--given-name",
+                "Ann",
+                "--family-name",
+                "Lee",
+                "--org-unit",
+                org_unit,
+            ])
+            .output()
+            .unwrap()
+    };
+    for bad in ["Sales", "Sales/EMEA", ""] {
+        let out = run(bad);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(3), "{bad:?}: {stderr}");
+        assert!(out.stdout.is_empty(), "{bad:?}");
+        let err: Value = serde_json::from_slice(&out.stderr).unwrap();
+        let message = err["error"]["message"].as_str().unwrap();
+        assert!(message.contains("--org-unit"), "{message}");
+        assert!(message.contains("starting with '/'"), "{message}");
+    }
+    assert!(server.received_requests().await.unwrap().is_empty());
+    let out = run("/Sales");
+    assert!(out.status.success(), "{out:?}");
+    assert_eq!(stdout_json(&out)["orgUnitPath"], "/Sales");
+    assert_eq!(server.received_requests().await.unwrap().len(), 1);
+}
