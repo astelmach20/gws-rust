@@ -639,13 +639,15 @@ async fn download(
     output: Option<&str>,
     overwrite: bool,
 ) -> Result<Value, GwsError> {
+    // A dry run plans the metadata read too, so the plan lists every request
+    // a real run sends; the file's name and type are unknown.
+    let meta = get_metadata(api, file_id).await?;
     let (name, target) = if api.is_dry_run() {
         (
             "<file name>".to_string(),
             resolve_target(output, "download", None, overwrite)?,
         )
     } else {
-        let meta = get_metadata(api, file_id).await?;
         let mime = str_field(&meta, "mimeType")?;
         if mime.starts_with("application/vnd.google-apps.") {
             return Err(native_download_error(&meta, file_id, mime)?);
@@ -881,10 +883,11 @@ async fn export(
     overwrite: bool,
 ) -> Result<Value, GwsError> {
     let format = export_format(to)?;
+    // A dry run plans the metadata read too; the file's name is unknown.
+    let meta = get_metadata(api, file_id).await?;
     let name = if api.is_dry_run() {
         "export".to_string()
     } else {
-        let meta = get_metadata(api, file_id).await?;
         let mime = str_field(&meta, "mimeType")?;
         if mime == SHORTCUT {
             let target = shortcut_target(&meta, file_id)?;
@@ -914,10 +917,13 @@ async fn export(
 // ── +move ────────────────────────────────────────────────────────────
 
 async fn move_file(api: &Api, file_id: &str, folder_id: &str) -> Result<Value, GwsError> {
+    let meta = get_metadata(api, file_id).await?;
     let (dest, current_parents) = if api.is_dry_run() {
+        // Plan the destination lookup too, so the plan lists every request
+        // a real run sends; the file's parents and the real ID are unknown.
+        folder_lookup(api, folder_id).await?;
         (folder_id.to_string(), "<current parents>".to_string())
     } else {
-        let meta = get_metadata(api, file_id).await?;
         let parents: Vec<&str> = meta
             .get("parents")
             .and_then(Value::as_array)
@@ -953,14 +959,19 @@ async fn move_file(api: &Api, file_id: &str, folder_id: &str) -> Result<Value, G
 /// The real ID of the folder `folder_id` names, which may be an alias
 /// (`root`, the user's My Drive).
 async fn folder_real_id(api: &Api, folder_id: &str) -> Result<String, GwsError> {
-    let meta = api
-        .send(
-            ApiRequest::get(api.url(&format!("files/{}", encode_path_segment(folder_id))))
-                .query("supportsAllDrives", "true")
-                .query("fields", "id"),
-        )
-        .await?;
+    let meta = folder_lookup(api, folder_id).await?;
     Ok(str_field(&meta, "id")?.to_string())
+}
+
+/// `files.get` of the folder `folder_id` names, for its real ID (`Null` in
+/// a dry run, which only plans the request).
+async fn folder_lookup(api: &Api, folder_id: &str) -> Result<Value, GwsError> {
+    api.send(
+        ApiRequest::get(api.url(&format!("files/{}", encode_path_segment(folder_id))))
+            .query("supportsAllDrives", "true")
+            .query("fields", "id"),
+    )
+    .await
 }
 
 // ── +share ───────────────────────────────────────────────────────────
@@ -1258,6 +1269,8 @@ struct SyncStateFile {
 
 /// The loaded sync state, with a path index.
 struct SyncState {
+    /// The `--dir` the recorded paths are relative to.
+    dir: PathBuf,
     file: PathBuf,
     folder_id: String,
     records: std::collections::BTreeMap<String, SyncRecord>,
@@ -1276,6 +1289,7 @@ impl SyncState {
     /// `--overwrite`. A file that exists but cannot be read is an error.
     fn load(dir: &Path, folder_id: &str) -> Result<Self, GwsError> {
         let mut state = Self {
+            dir: dir.to_path_buf(),
             file: dir.join(SYNC_STATE_FILE),
             folder_id: folder_id.to_string(),
             records: std::collections::BTreeMap::new(),
@@ -1356,6 +1370,46 @@ impl SyncState {
             Some(id) => self.records.get(id).map(|r| (id.as_str(), r)),
             None => self.moved_from.get(path).map(|(id, r)| (id.as_str(), r)),
         }
+    }
+
+    /// The ID and record that last wrote the local file `local` (at `rel`)
+    /// under a recorded path spelled differently, only in case or Unicode
+    /// normalization. On a case-insensitive file system both spellings are
+    /// one file, so the record describes it; on a case-sensitive one they
+    /// are two files and nothing is returned. Only consulted when `rel`
+    /// itself has no record, so the scan over the records is rare.
+    fn at_path_spelled_differently(
+        &self,
+        rel: &str,
+        local: &Path,
+    ) -> Result<Option<(&str, &SyncRecord)>, GwsError> {
+        let key = case_insensitive_key(rel);
+        let recorded = self
+            .by_path
+            .iter()
+            .filter_map(|(p, id)| self.records.get(id).map(|r| (p, id.as_str(), r)))
+            .chain(
+                self.moved_from
+                    .iter()
+                    .map(|(p, (id, r))| (p, id.as_str(), r)),
+            );
+        for (p, id, rec) in recorded {
+            if p == rel || case_insensitive_key(p) != key {
+                continue;
+            }
+            let other = p.split('/').fold(self.dir.clone(), |acc, c| acc.join(c));
+            let same = crate::fs_util::same_file(&other, local).map_err(|e| {
+                GwsError::other(anyhow::anyhow!(
+                    "cannot inspect '{}' and '{}': {e}",
+                    other.display(),
+                    local.display()
+                ))
+            })?;
+            if same {
+                return Ok(Some((id, rec)));
+            }
+        }
+        Ok(None)
     }
 
     /// Record `id` at `rec.path`, superseding whatever was recorded for that
@@ -1514,7 +1568,14 @@ fn plan_sync(
     };
     // A directory can never be replaced by a download.
     crate::validate::reject_directory(path, "sync target")?;
-    match state.at_path(rel) {
+    // On a case-insensitive file system a new item whose name differs from
+    // a synced file's only in case lands on that same file: judge it by
+    // that file's record, as for a same-name replacement.
+    let recorded = match state.at_path(rel) {
+        Some(found) => Some(found),
+        None => state.at_path_spelled_differently(rel, path)?,
+    };
+    match recorded {
         Some((owner, rec)) => {
             // Same item with the same content in Drive: nothing to fetch.
             // Otherwise Drive changed, or another item (a replacement with
@@ -2306,14 +2367,41 @@ mod tests {
         let api = dry_api("drive/v3/");
         export(&api, "DOC1", "pdf", Some("-"), false).await.unwrap();
         let plan = api.planned();
-        assert_eq!(plan.len(), 1);
+        assert_eq!(plan.len(), 2, "{plan:?}");
         assert!(
-            plan[0]["url"]
+            plan[1]["url"]
                 .as_str()
                 .unwrap()
                 .ends_with("/files/DOC1/export")
         );
-        assert_eq!(plan[0]["query_params"]["mimeType"], "application/pdf");
+        assert_eq!(plan[1]["query_params"]["mimeType"], "application/pdf");
+    }
+
+    /// A real `+download` / `+export` reads the file's metadata before the
+    /// content request; the dry-run plan lists that GET first.
+    #[tokio::test]
+    async fn download_and_export_dry_runs_plan_the_metadata_read() {
+        let dl = dry_api("drive/v3/");
+        download(&dl, "F1", Some("-"), false).await.unwrap();
+        let ex = dry_api("drive/v3/");
+        export(&ex, "F1", "pdf", Some("-"), false).await.unwrap();
+        for (plan, content_suffix) in [
+            (dl.planned(), "/files/F1"),
+            (ex.planned(), "/files/F1/export"),
+        ] {
+            assert_eq!(plan.len(), 2, "{plan:?}");
+            assert_eq!(plan[0]["method"], "GET", "{plan:?}");
+            assert!(
+                plan[0]["url"].as_str().unwrap().ends_with("/files/F1"),
+                "{plan:?}"
+            );
+            assert_eq!(plan[0]["query_params"]["fields"], FILE_FIELDS, "{plan:?}");
+            assert!(
+                plan[1]["url"].as_str().unwrap().ends_with(content_suffix),
+                "{plan:?}"
+            );
+        }
+        assert_eq!(dl.planned()[1]["query_params"]["alt"], "media");
     }
 
     #[tokio::test]
@@ -2391,6 +2479,28 @@ mod tests {
             .await;
         let api = super::super::http::test_support::api(&server.uri(), "drive/v3/");
         move_file(&api, "F1", "root").await.unwrap();
+    }
+
+    /// A real `+move` reads the file's parents and the destination's real ID
+    /// before the PATCH; the dry-run plan lists both GETs first.
+    #[tokio::test]
+    async fn move_dry_run_plans_the_parent_and_destination_reads() {
+        let api = dry_api("drive/v3/");
+        move_file(&api, "F1", "root").await.unwrap();
+        let plan = api.planned();
+        let methods: Vec<&str> = plan.iter().filter_map(|p| p["method"].as_str()).collect();
+        assert_eq!(methods, ["GET", "GET", "PATCH"], "{plan:?}");
+        assert!(
+            plan[0]["url"].as_str().unwrap().ends_with("/files/F1"),
+            "{plan:?}"
+        );
+        assert_eq!(plan[0]["query_params"]["fields"], FILE_FIELDS, "{plan:?}");
+        assert!(
+            plan[1]["url"].as_str().unwrap().ends_with("/files/root"),
+            "{plan:?}"
+        );
+        assert_eq!(plan[1]["query_params"]["fields"], "id", "{plan:?}");
+        assert_eq!(plan[2]["query_params"]["addParents"], "root", "{plan:?}");
     }
 
     #[test]
@@ -3534,6 +3644,75 @@ mod tests {
         assert_eq!(ids(&v, "conflicts"), ["B"], "{v}");
         assert_eq!(v["conflicts"][0]["remoteChanged"], true);
         assert_eq!(std::fs::read(&p).unwrap(), b"my numbers");
+    }
+
+    /// A different item whose name differs from a synced file's only in case
+    /// (`Report.txt` replaced by `report.txt`). On a case-insensitive file
+    /// system both names are one file: the pristine copy is replaced, not
+    /// reported as an untracked conflict, and an edited copy is kept. On a
+    /// case-sensitive one the new name is a new file and the old one is left
+    /// alone.
+    #[tokio::test]
+    async fn sync_replaces_a_pristine_file_taken_over_by_a_case_only_name() {
+        let server = MockServer::start().await;
+        let api = api(&server.uri(), "drive/v3/");
+        let older = json!({"modifiedTime": "2023-06-01T00:00:00Z", "version": "7", "size": "12"});
+        let case_insensitive = {
+            let probe = tempfile::tempdir().unwrap();
+            std::fs::write(probe.path().join("Probe"), b"").unwrap();
+            probe.path().join("probe").exists()
+        };
+
+        let dir = tempfile::tempdir().unwrap();
+        mount_one(&server, "A", "Report.txt", v1(), b"old-A").await;
+        sync(&api, "ROOT", dir.path()).await.unwrap();
+        mount_one(&server, "B", "report.txt", older.clone(), b"new-B-12byte").await;
+        let v = sync(&api, "ROOT", dir.path()).await.unwrap();
+        assert!(ids(&v, "conflicts").is_empty(), "{v}");
+        assert_eq!(ids(&v, "downloaded"), ["B"], "{v}");
+        assert_eq!(
+            std::fs::read(dir.path().join("report.txt")).unwrap(),
+            b"new-B-12byte"
+        );
+        if !case_insensitive {
+            assert_eq!(
+                std::fs::read(dir.path().join("Report.txt")).unwrap(),
+                b"old-A"
+            );
+        }
+        assert!(sync_failure(&v).is_none());
+
+        // Same takeover over a locally edited copy: never overwritten.
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("Report.txt");
+        mount_one(&server, "A", "Report.txt", v1(), b"old-A").await;
+        sync(&api, "ROOT", dir.path()).await.unwrap();
+        edit_locally(&p, b"my numbers");
+        mount_one(&server, "B", "report.txt", older, b"new-B-12byte").await;
+        let v = sync(&api, "ROOT", dir.path()).await.unwrap();
+        assert_eq!(std::fs::read(&p).unwrap(), b"my numbers");
+        if case_insensitive {
+            assert_eq!(ids(&v, "conflicts"), ["B"], "{v}");
+            assert_eq!(v["conflicts"][0]["reason"], "modifiedLocally", "{v}");
+            assert_eq!(v["conflicts"][0]["remoteChanged"], true, "{v}");
+            assert!(ids(&v, "downloaded").is_empty(), "{v}");
+        } else {
+            assert_eq!(ids(&v, "downloaded"), ["B"], "{v}");
+        }
+    }
+
+    /// Two spellings of a path are the same file only where the file system
+    /// says so; a missing path is never the same file.
+    #[test]
+    fn same_file_follows_the_file_system() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = dir.path().join("Same.txt");
+        std::fs::write(&a, b"x").unwrap();
+        let other = dir.path().join("same.txt");
+        let insensitive = other.exists();
+        assert!(crate::fs_util::same_file(&a, &a).unwrap());
+        assert_eq!(crate::fs_util::same_file(&a, &other).unwrap(), insensitive);
+        assert!(!crate::fs_util::same_file(&a, &dir.path().join("missing")).unwrap());
     }
 
     /// A renamed in Drive (x.txt -> y.txt) and B moved in as x.txt: B

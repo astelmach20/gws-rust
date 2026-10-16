@@ -24,8 +24,9 @@
 //! `method` is the resource path plus method name (the service prefix is
 //! optional). Output is NDJSON, one line per call, in input order:
 //! `{"id": ..., "status": 200, "body": ...}`. Calls are grouped into batches
-//! of at most 100 (Google's limit). The command fails (exit 1) when any call
-//! failed, after printing every result. With `--sanitize`, every result body
+//! of at most 100 (Google's limit). The command fails when any call failed,
+//! after printing every result: exit 6 (retry later) when every failure is
+//! retryable (429, 5xx, a 403 rate limit), exit 1 otherwise. With `--sanitize`, every result body
 //! is screened by Model Armor before it is printed, as for a single call.
 
 use std::io::IsTerminal;
@@ -267,6 +268,19 @@ pub(crate) fn parse_calls<'a>(
             Some(Value::Object(m)) => m.clone(),
             Some(_) => return Err(at("\"params\" must be an object".to_string())),
         };
+        // Each part's body is decoded as JSON text: a media download
+        // (`alt=media`) or a binary format (`alt=proto`) would come back
+        // mangled, and Google does not serve media downloads in batches.
+        match params.get("alt") {
+            None | Some(Value::Null) => {}
+            Some(Value::String(alt)) if alt == "json" => {}
+            Some(alt) => {
+                return Err(at(format!(
+                    "\"alt\": {alt} is not supported in batch requests, whose results are JSON; \
+                     run {name} as a separate command instead"
+                )));
+            }
+        }
         super::apply_shared_drive_default(method, &mut params);
         let body = obj.get("json").filter(|v| !v.is_null()).cloned();
         if body.is_some() && method.request.is_none() {
@@ -566,6 +580,19 @@ async fn send_group(
     in_call_order(chunk, parts)
 }
 
+/// For a failed part that may succeed when sent again, the HTTP status the
+/// aggregate error carries: its own (408, 429, 500, 502, 503, 504), or 429
+/// for a rate limit reported by reason (a 403 `userRateLimitExceeded`).
+fn part_retry_code(part: &PartResponse) -> Option<u16> {
+    if crate::error::is_retryable_status_code(part.status) {
+        return Some(part.status);
+    }
+    part.body
+        .get("error")
+        .and_then(gws_rust_core::error::rate_limit_reason)
+        .map(|_| 429)
+}
+
 /// The error for a batch that stopped early: `err`, prefixed with the ids
 /// of the calls that got no result (and `why`) and of those never sent, so
 /// the caller knows what happened to every call. Results already printed
@@ -681,6 +708,11 @@ pub(crate) async fn run_batch(
     )?;
     let auth = credentials.auth_method();
     let mut failures = 0usize;
+    // `Some(code)` while every failed call so far may succeed if sent again
+    // (a 429, a 5xx the client retries, a 403 rate limit): the status the
+    // aggregate error carries so that it is retryable (exit 6) too.
+    let mut retry_code: Option<u16> = None;
+    let mut permanent = false;
     for (group, chunk) in calls.chunks(MAX_BATCH).enumerate() {
         let not_sent = &calls[(group * MAX_BATCH + chunk.len()).min(calls.len())..];
         let parts = match send_group(&transport, &batch_url, chunk, options, &auth).await {
@@ -701,6 +733,12 @@ pub(crate) async fn run_batch(
         for (index, (call, part)) in chunk.iter().zip(parts).enumerate() {
             if !(200..300).contains(&part.status) {
                 failures += 1;
+                match part_retry_code(&part) {
+                    Some(code) => {
+                        retry_code.get_or_insert(code);
+                    }
+                    None => permanent = true,
+                }
             }
             let body = match crate::helpers::modelarmor::sanitize_value(sanitize, part.body).await {
                 Ok(crate::helpers::modelarmor::Sanitized::Pass(body)) => body,
@@ -734,8 +772,14 @@ pub(crate) async fn run_batch(
         }
     }
     if failures > 0 {
+        // Retryable only when every failure is: a permanent one (a 404, a
+        // refused permission) is not fixed by running the batch again.
+        let code = match retry_code {
+            Some(code) if !permanent => code,
+            _ => 207,
+        };
         return Err(GwsError::Api {
-            code: 207,
+            code,
             message: format!(
                 "{failures} of {} batch call(s) failed; see the per-call results on stdout",
                 calls.len()
@@ -1042,6 +1086,37 @@ mod tests {
         assert!(accepted.is_empty(), "accepted ids: {accepted:?}");
         let ok = json!({"id": "row-1_a.b", "method": "files.get", "params": {"fileId": "1"}});
         assert!(parse_calls(&doc, &ok.to_string(), &opts()).is_ok());
+    }
+
+    /// A batch result is JSON text, and Google serves no media downloads in
+    /// a batch: `alt=media` (or another non-JSON `alt`) is refused before
+    /// anything is sent, instead of printing the file as a mangled string.
+    #[test]
+    #[serial_test::serial]
+    fn rejects_non_json_alt() {
+        let mut doc = drive_doc("https://www.googleapis.com/");
+        doc.parameters.insert(
+            "alt".into(),
+            MethodParameter {
+                location: Some("query".into()),
+                param_type: Some("string".into()),
+                enum_values: Some(vec!["json".into(), "media".into(), "proto".into()]),
+                ..Default::default()
+            },
+        );
+        for alt in ["media", "proto"] {
+            let line = json!({"method": "files.get", "params": {"fileId": "1", "alt": alt}});
+            let err = parse_calls(&doc, &line.to_string(), &opts())
+                .map(|c| format!("accepted: {}", c[0].path_and_query))
+                .unwrap_or_else(|e| e.to_string());
+            assert!(
+                err.contains("batch input line 1") && err.contains("not supported in batch"),
+                "{alt}: {err}"
+            );
+        }
+        let line = json!({"method": "files.get", "params": {"fileId": "1", "alt": "json"}});
+        let calls = parse_calls(&doc, &line.to_string(), &opts()).unwrap();
+        assert_eq!(calls[0].path_and_query, "/drive/v3/files/1?alt=json");
     }
 
     #[test]

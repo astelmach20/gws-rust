@@ -112,14 +112,17 @@ pub fn short_name(scope: &str) -> &str {
 }
 
 /// Expand a user-supplied scope: `drive.readonly` becomes
-/// `https://www.googleapis.com/auth/drive.readonly`; full URLs and the OpenID
-/// scopes (`openid`, `email`, `profile`) are kept as-is.
+/// `https://www.googleapis.com/auth/drive.readonly`; full URLs and `openid`
+/// are kept as-is. The OpenID aliases `email` and `profile` become the
+/// `userinfo.email` / `userinfo.profile` URLs, the names Google reports them
+/// under as granted.
 pub fn normalize_scope(input: &str) -> String {
     let s = input.trim();
-    if s.contains("://") || matches!(s, "openid" | "email" | "profile") {
-        s.to_string()
-    } else {
-        format!("{SCOPE_PREFIX}{s}")
+    match s {
+        "email" => format!("{SCOPE_PREFIX}userinfo.email"),
+        "profile" => format!("{SCOPE_PREFIX}userinfo.profile"),
+        _ if s.contains("://") || s == "openid" => s.to_string(),
+        _ => format!("{SCOPE_PREFIX}{s}"),
     }
 }
 
@@ -622,6 +625,10 @@ mod tests {
         assert_eq!(normalize_scope(" drive.readonly "), a("drive.readonly"));
         assert_eq!(normalize_scope(GMAIL_FULL_SCOPE), GMAIL_FULL_SCOPE);
         assert_eq!(normalize_scope("openid"), "openid");
+        // Google reports the OpenID aliases as granted under their URLs; kept
+        // short, they would never match the grant ("not granted" warnings).
+        assert_eq!(normalize_scope("email"), IDENTITY_SCOPES[1]);
+        assert_eq!(normalize_scope("profile"), IDENTITY_SCOPES[2]);
         assert_eq!(
             login_command_hint(
                 "gwsr auth login",

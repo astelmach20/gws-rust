@@ -1191,6 +1191,27 @@ fn explicit_profile_is_never_silently_replaced_by_gwsr_token() {
     );
 }
 
+/// `GWSR_PROFILE` means the same as `--profile`, so a `GWSR_TOKEN` for
+/// another identity conflicts with it too instead of silently winning.
+#[test]
+fn gwsr_profile_is_never_silently_replaced_by_gwsr_token() {
+    let env = Env::new();
+    let out = env
+        .cmd()
+        .args(["auth", "status", "--offline"])
+        .env("GWSR_PROFILE", "work")
+        .env("GWSR_TOKEN", "ya29.another-identity")
+        .output()
+        .unwrap();
+    let status: Value = serde_json::from_str(&stdout_of(&out)).unwrap();
+    assert_eq!(status["authenticated"], false, "{status}");
+    let err = status["credential_error"].as_str().unwrap_or_default();
+    assert!(
+        err.contains("GWSR_PROFILE=work conflicts with GWSR_TOKEN"),
+        "{status}"
+    );
+}
+
 /// The hint's `gwsr auth login` command must sign in to the profile the
 /// failed command used. Plain `gwsr auth login --scopes ...` would sign in to
 /// the config/default profile instead, leaving `--profile work` broken and
@@ -3482,4 +3503,200 @@ async fn output_saves_a_resource_that_only_looks_like_an_operation() {
     let saved: Value =
         serde_json::from_slice(&std::fs::read(env.work_dir().join("group.json")).unwrap()).unwrap();
     assert_eq!(saved, group);
+}
+
+// ── Drive permission grants through the generated method ────────────────
+
+/// `drive permissions create` with an ownership transfer, or edit access for
+/// anyone with the link, is gated as destructive like `drive +share`: it is
+/// refused without `--yes` even when `GWSR_REQUIRE_CONFIRM` is off, directly
+/// and in `gwsr batch`. It used to be outbound, so it went through.
+#[tokio::test(flavor = "multi_thread")]
+async fn drive_ownership_transfer_through_the_generated_method_is_destructive() {
+    use wiremock::matchers::any;
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    Mock::given(any())
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id": "p1"})))
+        .mount(&server)
+        .await;
+    let env = Env::new();
+    let doc = json!({
+        "name": "drive",
+        "version": "v3",
+        "rootUrl": "https://www.googleapis.com/",
+        "servicePath": "drive/v3/",
+        "batchPath": "batch/drive/v3",
+        "schemas": {"Permission": {"id": "Permission", "type": "object", "properties": {
+            "role": {"type": "string"},
+            "type": {"type": "string"},
+            "emailAddress": {"type": "string"}
+        }}},
+        "resources": {"permissions": {"methods": {"create": {
+            "id": "drive.permissions.create",
+            "httpMethod": "POST",
+            "path": "files/{fileId}/permissions",
+            "parameters": {
+                "fileId": {"type": "string", "location": "path", "required": true},
+                "transferOwnership": {"type": "boolean", "location": "query"}
+            },
+            "parameterOrder": ["fileId"],
+            "request": {"$ref": "Permission"},
+            "response": {"$ref": "Permission"},
+            "scopes": ["https://www.googleapis.com/auth/drive"]
+        }}}}
+    });
+    std::fs::write(
+        env.seeded_drive_path(),
+        serde_json::to_string(&doc).unwrap(),
+    )
+    .unwrap();
+    let run = |args: &[&str], stdin: Option<&str>| {
+        let mut c = env.cmd();
+        c.env("GWSR_TOKEN", "test-token")
+            .env("GWSR_API_BASE_URL", server.uri())
+            .env("GWSR_REQUIRE_CONFIRM", "0")
+            .args(args);
+        if let Some(s) = stdin {
+            c.write_stdin(s);
+        }
+        c.output().unwrap()
+    };
+    let owner = r#"{"role":"owner","type":"user","emailAddress":"new-owner@example.com"}"#;
+    let anyone_writer = r#"{"role":"writer","type":"anyone"}"#;
+    let transfer = r#"{"fileId":"f1","transferOwnership":true}"#;
+    let create = |params: &'static str, body: &'static str| {
+        vec![
+            "drive",
+            "permissions",
+            "create",
+            "--params",
+            params,
+            "--json",
+            body,
+        ]
+    };
+    for (args, what) in [
+        (create(transfer, owner), "owner transfer"),
+        (create(r#"{"fileId":"f1"}"#, anyone_writer), "anyone writer"),
+    ] {
+        let out = run(&args, None);
+        assert_eq!(out.status.code(), Some(7), "{what}: {}", stderr_of(&out));
+        assert_eq!(
+            stderr_error(&out)["error"]["reason"],
+            "confirmationRequired"
+        );
+    }
+    let line = format!(r#"{{"method":"permissions.create","params":{transfer},"json":{owner}}}"#);
+    let out = run(&["batch", "drive"], Some(&line));
+    assert_eq!(out.status.code(), Some(7), "batch: {}", stderr_of(&out));
+    assert!(
+        server.received_requests().await.unwrap().is_empty(),
+        "nothing may be sent before confirmation"
+    );
+
+    // --yes confirms it, and an ordinary grant is not gated.
+    let mut confirmed = create(transfer, owner);
+    confirmed.push("--yes");
+    let out = run(&confirmed, None);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    let reader = r#"{"role":"reader","type":"user","emailAddress":"a@example.com"}"#;
+    let out = run(&create(r#"{"fileId":"f1"}"#, reader), None);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert_eq!(server.received_requests().await.unwrap().len(), 2);
+}
+
+// ── Outbound confirmation for membership grants ─────────────────────────
+
+/// Adding someone to a Chat space notifies them and opens the space's
+/// messages to them, like `admin +group-add-member`: under
+/// `GWSR_REQUIRE_CONFIRM=1` it is refused without `--yes`, directly and in
+/// `gwsr batch`. The generated command used to send it, and had no `--yes`.
+#[tokio::test(flavor = "multi_thread")]
+async fn require_confirm_gates_chat_space_member_adds() {
+    use wiremock::matchers::any;
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    Mock::given(any())
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({"name": "spaces/s/members/m"})),
+        )
+        .mount(&server)
+        .await;
+    let env = Env::new();
+    let doc = json!({
+        "name": "chat",
+        "version": "v1",
+        "rootUrl": "https://chat.googleapis.com/",
+        "servicePath": "",
+        "batchPath": "batch",
+        "schemas": {"Membership": {"id": "Membership", "type": "object", "properties": {
+            "name": {"type": "string"},
+            "member": {"type": "object", "properties": {
+                "name": {"type": "string"},
+                "type": {"type": "string"}
+            }}
+        }}},
+        "resources": {"spaces": {"resources": {"members": {"methods": {"create": {
+            "id": "chat.spaces.members.create",
+            "httpMethod": "POST",
+            "path": "v1/{+parent}/members",
+            "parameters": {
+                "parent": {"type": "string", "location": "path", "required": true, "pattern": "^spaces/[^/]+$"}
+            },
+            "parameterOrder": ["parent"],
+            "request": {"$ref": "Membership"},
+            "response": {"$ref": "Membership"},
+            "scopes": ["https://www.googleapis.com/auth/chat.memberships"]
+        }}}}}}
+    });
+    std::fs::write(
+        env.cache_dir().join("discovery/chat+v1.json"),
+        serde_json::to_string(&doc).unwrap(),
+    )
+    .unwrap();
+    let cmd = |require: &str| {
+        let mut c = env.cmd();
+        c.env("GWSR_TOKEN", "test-token")
+            .env("GWSR_API_BASE_URL", server.uri())
+            .env("GWSR_REQUIRE_CONFIRM", require);
+        c
+    };
+    let add = [
+        "chat",
+        "spaces",
+        "members",
+        "create",
+        "--params",
+        r#"{"parent":"spaces/s"}"#,
+        "--json",
+        r#"{"member":{"name":"users/someone@example.com","type":"HUMAN"}}"#,
+    ];
+    let out = cmd("1").args(add).output().unwrap();
+    assert_eq!(out.status.code(), Some(7), "{}", stderr_of(&out));
+    assert_eq!(
+        stderr_error(&out)["error"]["reason"],
+        "confirmationRequired"
+    );
+    let out = cmd("1")
+        .args(["batch", "chat"])
+        .write_stdin(
+            r#"{"method":"spaces.members.create","params":{"parent":"spaces/s"},"json":{"member":{"name":"users/someone@example.com","type":"HUMAN"}}}"#,
+        )
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(7), "batch: {}", stderr_of(&out));
+    assert!(
+        server.received_requests().await.unwrap().is_empty(),
+        "nothing may be sent before confirmation"
+    );
+
+    // --yes confirms; without the policy the add is not gated.
+    let mut with_yes = add.to_vec();
+    with_yes.push("--yes");
+    cmd("1").args(&with_yes).assert().success();
+    cmd("0").args(add).assert().success();
+    assert_eq!(server.received_requests().await.unwrap().len(), 2);
 }
