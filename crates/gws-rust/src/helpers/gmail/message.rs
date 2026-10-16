@@ -237,6 +237,7 @@ pub(super) fn parse_original_message(msg: &Value) -> Result<OriginalMessage, Gws
         body_text: extracted_text,
         body_html,
         parts: original_parts,
+        ..
     } = match msg.get("payload") {
         Some(payload) => extract_payload_contents(payload)?,
         None => PayloadContents::default(),
@@ -295,6 +296,8 @@ struct PayloadContents {
     body_text: Option<String>,
     body_html: Option<String>,
     parts: Vec<OriginalPart>,
+    /// Indexes into `parts` of calendar parts that had no filename.
+    unnamed_calendar_parts: Vec<usize>,
 }
 
 /// Base64url engine that accepts both padded and unpadded input, since the
@@ -440,6 +443,11 @@ fn part_charset(content_type: Option<&str>) -> Option<String> {
 /// Synthesize a filename from the part index and MIME type when no filename is present.
 /// e.g., `"image/png"` at index 1 → `"part-1.png"`.
 fn synthesize_filename(part_index: usize, mime_type: &str) -> String {
+    // Calendar clients look for the `.ics` extension, and `invite.ics` is
+    // what Gmail and Google Calendar call an invitation.
+    if is_calendar_type(mime_type) {
+        return "invite.ics".to_string();
+    }
     let ext = mime_type
         .split('/')
         .nth(1)
@@ -452,6 +460,13 @@ fn synthesize_filename(part_index: usize, mime_type: &str) -> String {
         })
         .unwrap_or("bin");
     format!("part-{part_index}.{ext}")
+}
+
+/// Whether `mime_type` is an iCalendar object (`text/calendar`, or the
+/// `application/ics` some clients use).
+fn is_calendar_type(mime_type: &str) -> bool {
+    mime_type.eq_ignore_ascii_case("text/calendar")
+        || mime_type.eq_ignore_ascii_case("application/ics")
 }
 
 /// Sanitize a remote filename: strip ASCII control characters and fall back to
@@ -588,6 +603,23 @@ fn extract_payload_contents(payload: &Value) -> Result<PayloadContents, GwsError
     let bodies = extract_payload_recursive(payload, &mut contents, &mut 0, false)?;
     contents.body_text = bodies.text;
     contents.body_html = bodies.html;
+    // An invitation often carries the same iCalendar object twice: an
+    // unnamed `text/calendar` alternative of the body, and a named
+    // `invite.ics` attachment. Keep only the named one then.
+    let unnamed = std::mem::take(&mut contents.unnamed_calendar_parts);
+    let has_named_calendar = contents.parts.iter().enumerate().any(|(i, p)| {
+        !unnamed.contains(&i)
+            && (is_calendar_type(&p.content_type)
+                || p.filename.to_ascii_lowercase().ends_with(".ics"))
+    });
+    if has_named_calendar {
+        let mut index = 0;
+        contents.parts.retain(|_| {
+            let keep = !unnamed.contains(&index);
+            index += 1;
+            keep
+        });
+    }
     Ok(contents)
 }
 
@@ -671,13 +703,22 @@ fn extract_payload_recursive(
     // the body.
     let explicitly_attachment = disposition_is_attachment(part);
 
+    // An iCalendar part (a meeting invitation) is never the body, even
+    // unnamed inside `multipart/alternative`: it is kept as a file so that
+    // `+forward` passes the invitation on.
+    let calendar = is_calendar_type(mime_type);
+
     // Primary signal: does this part have fetchable binary data?
     // A part is a file (attachment or inline image) when its bytes are fetchable
-    // by attachment ID, or when it is named, has a Content-ID or is marked as
-    // an attachment, and carries its data inline.
+    // by attachment ID, or when it is named, has a Content-ID, is marked as
+    // an attachment or is a calendar object, and carries its data inline.
     let part_data = if !attachment_id.is_empty() {
         Some(PartData::AttachmentId(attachment_id.to_string()))
-    } else if !filename.is_empty() || content_id_header.is_some() || explicitly_attachment {
+    } else if !filename.is_empty()
+        || content_id_header.is_some()
+        || explicitly_attachment
+        || calendar
+    {
         body_data.map(|d| PartData::Inline(d.to_string()))
     } else {
         None
@@ -727,6 +768,9 @@ fn extract_payload_recursive(
         let resolved_filename = if !filename.is_empty() {
             sanitize_remote_filename(filename, index, mime_type)
         } else {
+            if calendar {
+                contents.unnamed_calendar_parts.push(contents.parts.len());
+            }
             synthesize_filename(index, mime_type)
         };
 
@@ -1931,6 +1975,49 @@ mod tests {
             Some("img1@example.com")
         );
         assert_eq!(contents.parts[0].filename, "photo.png");
+    }
+
+    /// An unnamed calendar part is a file named `invite.ics`, never dropped
+    /// and never the body. When the invitation also carries a named `.ics`
+    /// attachment (as Google Calendar sends it), only that one is kept.
+    #[test]
+    fn test_unnamed_calendar_part_is_kept_as_invite_ics() {
+        let alternative = json!({
+            "mimeType": "multipart/alternative",
+            "parts": [
+                { "mimeType": "text/plain", "body": { "data": base64url("hi"), "size": 2 } },
+                { "mimeType": "TEXT/CALENDAR", "body": { "data": base64url("BEGIN:VCALENDAR"), "size": 15 } }
+            ]
+        });
+        let contents = extract_payload_contents(&alternative).unwrap();
+        assert_eq!(contents.body_text.as_deref(), Some("hi"));
+        assert_eq!(contents.parts.len(), 1);
+        assert_eq!(contents.parts[0].filename, "invite.ics");
+        assert_eq!(contents.parts[0].content_type, "TEXT/CALENDAR");
+        assert!(matches!(contents.parts[0].data, PartData::Inline(_)));
+
+        let by_reference = json!({
+            "mimeType": "text/calendar",
+            "body": { "attachmentId": "CAL", "size": 900 }
+        });
+        let contents = extract_payload_contents(&by_reference).unwrap();
+        assert_eq!(contents.parts[0].filename, "invite.ics");
+
+        let with_named = json!({
+            "mimeType": "multipart/mixed",
+            "parts": [
+                alternative,
+                {
+                    "mimeType": "application/ics",
+                    "filename": "invite.ics",
+                    "headers": [{ "name": "Content-Disposition", "value": "attachment; filename=\"invite.ics\"" }],
+                    "body": { "attachmentId": "ICS", "size": 15 }
+                }
+            ]
+        });
+        let contents = extract_payload_contents(&with_named).unwrap();
+        assert_eq!(contents.parts.len(), 1, "{:?}", contents.parts);
+        assert!(matches!(&contents.parts[0].data, PartData::AttachmentId(id) if id == "ICS"));
     }
 
     #[test]
