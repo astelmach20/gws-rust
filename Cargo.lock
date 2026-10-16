@@ -1542,6 +1542,7 @@ dependencies = [
  "crossterm",
  "csv",
  "dirs",
+ "encoding_rs",
  "futures-util",
  "gws-rust-core",
  "html2text",
