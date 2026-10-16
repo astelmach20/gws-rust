@@ -24,8 +24,10 @@
 //! `method` is the resource path plus method name (the service prefix is
 //! optional). Output is NDJSON, one line per call, in input order:
 //! `{"id": ..., "status": 200, "body": ...}`. Calls are grouped into batches
-//! of at most 100 (Google's limit). The command fails (exit 1) when any call
-//! failed, after printing every result. With `--sanitize`, every result body
+//! of at most 100 (Google's limit; 50 for Classroom, see [`batch_limit`]). The
+//! command fails when any call failed, after printing every result: exit 6
+//! (retry later) when every failure is retryable (429, 5xx, a 403 rate
+//! limit), exit 1 otherwise. With `--sanitize`, every result body
 //! is screened by Model Armor before it is printed, as for a single call.
 
 use std::io::IsTerminal;
@@ -48,6 +50,19 @@ use crate::transport::{Credentials, Transport, read_body};
 
 /// Google's maximum number of calls per batch request.
 pub(crate) const MAX_BATCH: usize = 100;
+
+/// APIs that accept fewer than [`MAX_BATCH`] calls per batch request, and
+/// their limit. Classroom: "You're limited to 50 calls in a single batch
+/// request." A larger request is rejected as a whole.
+const SMALLER_BATCH_LIMITS: &[(&str, usize)] = &[("classroom", 50)];
+
+/// The most calls one batch request to `doc`'s API may carry.
+pub(crate) fn batch_limit(doc: &RestDescription) -> usize {
+    SMALLER_BATCH_LIMITS
+        .iter()
+        .find(|(api, _)| *api == doc.name)
+        .map_or(MAX_BATCH, |(_, limit)| *limit)
+}
 
 /// The keys an input line may carry.
 const LINE_KEYS: &[&str] = &["id", "method", "params", "json"];
@@ -579,6 +594,19 @@ async fn send_group(
     in_call_order(chunk, parts)
 }
 
+/// For a failed part that may succeed when sent again, the HTTP status the
+/// aggregate error carries: its own (408, 429, 500, 502, 503, 504), or 429
+/// for a rate limit reported by reason (a 403 `userRateLimitExceeded`).
+fn part_retry_code(part: &PartResponse) -> Option<u16> {
+    if crate::error::is_retryable_status_code(part.status) {
+        return Some(part.status);
+    }
+    part.body
+        .get("error")
+        .and_then(gws_rust_core::error::rate_limit_reason)
+        .map(|_| 429)
+}
+
 /// The error for a batch that stopped early: `err`, prefixed with the ids
 /// of the calls that got no result (and `why`) and of those never sent, so
 /// the caller knows what happened to every call. Results already printed
@@ -646,8 +674,9 @@ pub(crate) async fn run_batch(
     // stream: NDJSON, or one CSV/table header followed by one row per line.
     let format = crate::formatter::default_format();
     let mut pages = crate::formatter::PageStream::items();
+    let limit = batch_limit(doc);
     if options.dry_run {
-        for chunk in calls.chunks(MAX_BATCH) {
+        for chunk in calls.chunks(limit) {
             let (content_type, body) = build_batch_body(chunk, "batch_dry_run")?;
             emitter.page(
                 &json!({"dry_run": true, "url": batch_url, "contentType": content_type, "body": body}),
@@ -694,8 +723,13 @@ pub(crate) async fn run_batch(
     )?;
     let auth = credentials.auth_method();
     let mut failures = 0usize;
-    for (group, chunk) in calls.chunks(MAX_BATCH).enumerate() {
-        let not_sent = &calls[(group * MAX_BATCH + chunk.len()).min(calls.len())..];
+    // `Some(code)` while every failed call so far may succeed if sent again
+    // (a 429, a 5xx the client retries, a 403 rate limit): the status the
+    // aggregate error carries so that it is retryable (exit 6) too.
+    let mut retry_code: Option<u16> = None;
+    let mut permanent = false;
+    for (group, chunk) in calls.chunks(limit).enumerate() {
+        let not_sent = &calls[(group * limit + chunk.len()).min(calls.len())..];
         let parts = match send_group(&transport, &batch_url, chunk, options, &auth).await {
             Ok(parts) => parts,
             Err(e) => {
@@ -714,6 +748,12 @@ pub(crate) async fn run_batch(
         for (index, (call, part)) in chunk.iter().zip(parts).enumerate() {
             if !(200..300).contains(&part.status) {
                 failures += 1;
+                match part_retry_code(&part) {
+                    Some(code) => {
+                        retry_code.get_or_insert(code);
+                    }
+                    None => permanent = true,
+                }
             }
             let body = match crate::helpers::modelarmor::sanitize_value(sanitize, part.body).await {
                 Ok(crate::helpers::modelarmor::Sanitized::Pass(body)) => body,
@@ -747,8 +787,14 @@ pub(crate) async fn run_batch(
         }
     }
     if failures > 0 {
+        // Retryable only when every failure is: a permanent one (a 404, a
+        // refused permission) is not fixed by running the batch again.
+        let code = match retry_code {
+            Some(code) if !permanent => code,
+            _ => 207,
+        };
         return Err(GwsError::Api {
-            code: 207,
+            code,
             message: format!(
                 "{failures} of {} batch call(s) failed; see the per-call results on stdout",
                 calls.len()

@@ -36,6 +36,12 @@ use super::http::{self, Endpoints};
 /// Lifetime requested for service-account assertions (Google's maximum).
 const JWT_LIFETIME_SECS: i64 = 3600;
 
+/// How far a service-account assertion's `iat` is backdated, so a local clock
+/// slightly ahead of Google's does not produce an assertion issued "in the
+/// future", which the token endpoint rejects (`invalid_grant: Invalid JWT`).
+/// The same 10 seconds as Go's `golang.org/x/oauth2/jwt`.
+const JWT_CLOCK_SKEW_SECS: i64 = 10;
+
 /// A freshly obtained access token.
 #[derive(Debug, Clone)]
 pub struct AccessToken {
@@ -127,8 +133,11 @@ pub(crate) fn map_token_error(
             | http::HttpError::NotOAuthResponse { status, detail },
         ) => server_failure(status, detail),
         RequestTokenError::Request(e) => AuthError::Network(format!("{e}")),
+        // `http::execute` already turned every body that does not parse into
+        // `NotOAuthResponse` (with its status), so this is a disagreement
+        // between that check and `oauth2`: never a verdict on the credential.
         RequestTokenError::Parse(e, _) => {
-            AuthError::TokenEndpoint(format!("unparseable token response: {e}"))
+            AuthError::Internal(format!("unparseable token response: {e}"))
         }
         RequestTokenError::Other(e) => AuthError::TokenEndpoint(e),
     }
@@ -233,12 +242,15 @@ pub(crate) fn sign_assertion(
     if let Some(kid) = &sa.private_key_id {
         header["kid"] = serde_json::json!(kid);
     }
+    // Backdated for clock skew; `exp` is measured from the backdated `iat`
+    // so the assertion never exceeds Google's one-hour maximum.
+    let iat = now.saturating_sub(JWT_CLOCK_SKEW_SECS);
     let mut claims = serde_json::json!({
         "iss": sa.client_email,
         "scope": scopes.join(" "),
         "aud": audience,
-        "iat": now,
-        "exp": now + JWT_LIFETIME_SECS,
+        "iat": iat,
+        "exp": iat.saturating_add(JWT_LIFETIME_SECS),
     });
     if let Some(sub) = subject {
         claims["sub"] = serde_json::json!(sub);
@@ -335,8 +347,10 @@ pub async fn service_account_token(
         };
         return Err(AuthError::TokenEndpoint(detail));
     }
+    // A success body that is no usable token response (no `access_token`)
+    // is no verdict on the key either.
     let parsed: JwtTokenResponse = serde_json::from_slice(&body)
-        .map_err(|e| AuthError::TokenEndpoint(format!("unparseable token response: {e}")))?;
+        .map_err(|_| server_failure(status.as_u16(), http::body_excerpt(&body)))?;
     Ok(AccessToken {
         token: SecretString::from(parsed.access_token),
         expires_at: parsed.expires_in.map(expiry_after),
@@ -413,7 +427,11 @@ pub(crate) mod tests {
         assert_eq!(claims["iss"], "sa@p.iam.gserviceaccount.com");
         assert_eq!(claims["sub"], "admin@example.com");
         assert_eq!(claims["aud"], "https://oauth2.googleapis.com/token");
-        assert_eq!(claims["exp"], 1_000 + JWT_LIFETIME_SECS);
+        assert_eq!(claims["iat"], 1_000 - JWT_CLOCK_SKEW_SECS);
+        assert_eq!(
+            claims["exp"],
+            1_000 - JWT_CLOCK_SKEW_SECS + JWT_LIFETIME_SECS
+        );
 
         // Verify with the public key.
         let key = parse_private_key(sa.private_key.expose_secret()).unwrap();
@@ -426,6 +444,20 @@ pub(crate) mod tests {
         public
             .verify(format!("{}.{}", parts[0], parts[1]).as_bytes(), &sig)
             .unwrap();
+    }
+
+    /// The assertion's `iat` is backdated (like Go's `golang.org/x/oauth2`),
+    /// so a local clock a few seconds ahead of Google's does not make the
+    /// token endpoint reject it as issued in the future, and `exp` stays
+    /// within Google's one-hour maximum from `iat`.
+    #[test]
+    fn assertion_iat_is_backdated_for_clock_skew() {
+        let jwt = sign_assertion(&test_sa_key(), &["s".into()], None, "aud", 1_000).unwrap();
+        let claims = decode_part(jwt.split('.').nth(1).unwrap());
+        let iat = claims["iat"].as_i64().unwrap();
+        let exp = claims["exp"].as_i64().unwrap();
+        assert_eq!(iat, 990, "{claims}");
+        assert_eq!(exp - iat, 3600, "{claims}");
     }
 
     #[test]
@@ -757,6 +789,44 @@ pub(crate) mod tests {
                 let text = gws.to_string();
                 assert_eq!(gws.exit_code(), GwsError::EXIT_CODE_API, "{text}");
                 assert!(text.contains(&format!("HTTP {status}")), "{text}");
+                assert!(text.contains("not rejected"), "{text}");
+            }
+        }
+    }
+
+    /// A JSON object that is not a usable token response (no
+    /// `access_token`, or one of the wrong type) is no verdict on the
+    /// credential either: Google did not reject it, so it must not exit 2
+    /// ("sign in again"). It is a token-endpoint failure like a 200 HTML page.
+    #[tokio::test]
+    async fn token_endpoint_unparseable_token_responses_are_not_auth_errors() {
+        use crate::error::GwsError;
+        let bodies = [
+            serde_json::json!({"token_type": "Bearer", "expires_in": 3599}),
+            serde_json::json!({"access_token": 5, "token_type": "Bearer"}),
+        ];
+        for body in bodies {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/token"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(body.clone()))
+                .mount(&server)
+                .await;
+            let refresh = refresh_user(&user(), None, &endpoints(&server), "gwsr auth login")
+                .await
+                .unwrap_err();
+            let sa =
+                service_account_token(&test_sa_key(), &["s".into()], None, &endpoints(&server))
+                    .await
+                    .unwrap_err();
+            for err in [refresh, sa] {
+                assert!(
+                    matches!(err, AuthError::TokenEndpointFailed { status: 200, .. }),
+                    "{body}: {err:?}"
+                );
+                let gws = GwsError::from(err);
+                let text = gws.to_string();
+                assert_eq!(gws.exit_code(), GwsError::EXIT_CODE_API, "{text}");
                 assert!(text.contains("not rejected"), "{text}");
             }
         }

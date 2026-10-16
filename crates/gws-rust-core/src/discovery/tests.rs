@@ -405,3 +405,35 @@ async fn a_stalled_body_is_bounded_by_the_policy_timeout() {
     let err = result.unwrap_err();
     assert!(err.to_string().contains("no data received"), "{err}");
 }
+
+/// On a case-insensitive file system (the macOS and Windows defaults)
+/// `Drive+v3.json` is the cache file of `drive`. Loading `Drive:v3` must
+/// treat it as a miss, not as a corrupt entry: deleting it threw away the
+/// valid cached document of `drive` and warned about an invalid cache entry.
+/// The other API's file is simulated by writing `drive`'s document under the
+/// `Drive` name, which is the same file where the collision happens.
+#[tokio::test]
+async fn cache_entry_of_an_api_differing_only_in_case_is_a_miss() {
+    let server = MockServer::start().await;
+    mount(&server, "/discovery/v1/apis/Drive/v3/rest", 404, "", 1).await;
+    let tmp = tempfile::tempdir().unwrap();
+    let cache = DiscoveryCache::new(tmp.path());
+    cache.store("Drive", "v3", DRIVE.as_bytes()).unwrap();
+    let loader = loader(&server, Some(tmp.path()));
+
+    assert!(loader.load_cached("Drive", "v3").unwrap().is_none());
+    let err = loader.load("Drive", "v3").await.unwrap_err();
+    assert!(matches!(err, DiscoveryError::NotFound { .. }), "{err}");
+    assert!(
+        cache.entry_path("Drive", "v3").exists(),
+        "the other API's cached document was deleted"
+    );
+
+    // A document whose name differs in more than case is still corrupt.
+    let other = DRIVE.replace("\"drive\"", "\"drivex\"");
+    cache.store("Drive", "v3", other.as_bytes()).unwrap();
+    assert!(matches!(
+        loader.load_cached("Drive", "v3"),
+        Err(DiscoveryError::InvalidDocument { .. })
+    ));
+}

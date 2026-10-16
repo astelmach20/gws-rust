@@ -161,20 +161,24 @@ fn static_commands() -> Vec<Value> {
     out
 }
 
-/// Select service entries by alias; all when `names` is empty.
+/// Select service entries by alias, in the order first named; all when
+/// `names` is empty. A service named twice, or by two of its aliases
+/// (`reports admin-reports`), is listed once.
 fn select_services(names: &[String]) -> Result<Vec<&'static ServiceEntry>, GwsError> {
     if names.is_empty() {
         return Ok(SERVICES.iter().collect());
     }
-    names
-        .iter()
-        .map(|n| {
-            SERVICES
-                .iter()
-                .find(|e| e.aliases.contains(&n.as_str()))
-                .ok_or_else(|| GwsError::Validation(format!("unknown service '{n}'")))
-        })
-        .collect()
+    let mut selected: Vec<&'static ServiceEntry> = Vec::new();
+    for n in names {
+        let entry = SERVICES
+            .iter()
+            .find(|e| e.aliases.contains(&n.as_str()))
+            .ok_or_else(|| GwsError::Validation(format!("unknown service '{n}'")))?;
+        if !selected.iter().any(|e| std::ptr::eq(*e, entry)) {
+            selected.push(entry);
+        }
+    }
+    Ok(selected)
 }
 
 /// The API version to list for each of `entries`: `api_version`
@@ -388,6 +392,22 @@ mod tests {
     fn unknown_service_is_rejected() {
         assert!(select_services(&["nope".into()]).is_err());
         assert_eq!(select_services(&["drive".into()]).unwrap().len(), 1);
+    }
+
+    /// Naming a service twice, or by two aliases, listed (and fetched) it
+    /// twice, so `services` held duplicate entries.
+    #[test]
+    fn a_service_named_twice_is_listed_once() {
+        let names: Vec<String> = ["drive", "reports", "drive", "admin-reports", "gmail"]
+            .iter()
+            .map(|s| (*s).to_string())
+            .collect();
+        let selected: Vec<&str> = select_services(&names)
+            .unwrap()
+            .iter()
+            .map(|e| e.aliases[0])
+            .collect();
+        assert_eq!(selected, ["drive", "admin-reports", "gmail"]);
     }
 
     #[test]
