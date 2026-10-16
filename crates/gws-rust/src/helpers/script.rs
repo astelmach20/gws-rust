@@ -69,7 +69,8 @@ TIPS:
   Uploads .gs/.js (server code), .html and appsscript.json (required).
   Extensions match in any case (Code.GS is pushed as Code).
   Files in sub-directories keep their path (e.g. lib/util.gs -> lib/util).
-  Hidden files/directories, node_modules and symlinks are skipped.
+  Hidden files/directories and node_modules are skipped.
+  A symlink to a pushed file or a directory is refused: copy its target in.
   Destructive: this REPLACES ALL files in the project, so it requires --yes
   (or a confirmation prompt on a terminal).",
                 ),
@@ -252,8 +253,15 @@ fn skip_name(name: &str) -> bool {
 }
 
 /// Collect pushable files under `root`, keyed by Apps Script file name.
+///
+/// A push replaces every file in the project, so a local file left out is
+/// deleted remotely. A symlink that would be pushed, or that points to a
+/// directory (which may hold pushable files), is therefore refused rather
+/// than skipped: following it could read outside `root`, and skipping it
+/// would delete the remote copy of what it stands for.
 fn collect_files(root: &Path) -> Result<Vec<Value>, GwsError> {
     let mut files: BTreeMap<String, Value> = BTreeMap::new();
+    let mut symlinks: Vec<String> = Vec::new();
     let mut stack = vec![root.to_path_buf()];
     while let Some(dir) = stack.pop() {
         let entries = fs::read_dir(&dir).map_err(|e| {
@@ -272,7 +280,11 @@ fn collect_files(root: &Path) -> Result<Vec<Value>, GwsError> {
                 GwsError::Validation(format!("Failed to stat '{}': {e}", path.display()))
             })?;
             if ft.is_symlink() {
-                tracing::warn!("skipping symlink '{}'", path.display());
+                if symlink_may_be_pushed(root, &path)? {
+                    symlinks.push(path.display().to_string());
+                } else {
+                    tracing::debug!("skipping symlink '{}'", path.display());
+                }
                 continue;
             }
             if ft.is_dir() {
@@ -290,6 +302,15 @@ fn collect_files(root: &Path) -> Result<Vec<Value>, GwsError> {
                 files.insert(script_name, file);
             }
         }
+    }
+    if !symlinks.is_empty() {
+        symlinks.sort();
+        return Err(GwsError::Validation(format!(
+            "Refusing to push: symlinks are not followed, and +push replaces every file in \
+             the project, so skipping them would delete the matching remote files: {}; \
+             replace each with a copy of its target",
+            symlinks.join(", ")
+        )));
     }
     if files.is_empty() {
         return Err(GwsError::Validation(format!(
@@ -328,8 +349,26 @@ fn collect_files(root: &Path) -> Result<Vec<Value>, GwsError> {
         .collect())
 }
 
-/// Map one local file to an Apps Script file object, or `None` to skip it.
-fn process_file(root: &Path, path: &Path) -> Result<Option<(String, Value)>, GwsError> {
+/// Whether the symlink at `path` stands for content a push would upload:
+/// its own name maps to an Apps Script file, or it points to a directory.
+fn symlink_may_be_pushed(root: &Path, path: &Path) -> Result<bool, GwsError> {
+    if script_file_for(root, path)?.is_some() {
+        return Ok(true);
+    }
+    match fs::metadata(path) {
+        Ok(target) => Ok(target.is_dir()),
+        // A dangling link to a name that is not pushed stands for nothing.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(GwsError::Validation(format!(
+            "Failed to stat the target of symlink '{}': {e}",
+            path.display()
+        ))),
+    }
+}
+
+/// The Apps Script `(type, name)` a local file at `path` is pushed as, or
+/// `None` when it is not pushed.
+fn script_file_for(root: &Path, path: &Path) -> Result<Option<(&'static str, String)>, GwsError> {
     let rel = path.strip_prefix(root).map_err(http::other_err)?;
     let rel_str = rel.to_string_lossy().replace('\\', "/");
     // Match the extension case-insensitively: push replaces every file in
@@ -343,11 +382,18 @@ fn process_file(root: &Path, path: &Path) -> Result<Option<(String, Value)>, Gws
         .rsplit_once('.')
         .map(|(s, _)| s.to_string())
         .unwrap_or_else(|| rel_str.clone());
-    let (type_val, name) = match extension.as_str() {
-        "gs" | "js" => ("SERVER_JS", stem),
-        "html" => ("HTML", stem),
-        "json" if stem == "appsscript" => ("JSON", stem),
-        _ => return Ok(None),
+    Ok(match extension.as_str() {
+        "gs" | "js" => Some(("SERVER_JS", stem)),
+        "html" => Some(("HTML", stem)),
+        "json" if stem == "appsscript" => Some(("JSON", stem)),
+        _ => None,
+    })
+}
+
+/// Map one local file to an Apps Script file object, or `None` to skip it.
+fn process_file(root: &Path, path: &Path) -> Result<Option<(String, Value)>, GwsError> {
+    let Some((type_val, name)) = script_file_for(root, path)? else {
+        return Ok(None);
     };
     // A leading UTF-8 byte order mark is an encoding signature, not source.
     let source = fs::read_to_string(path)
@@ -755,6 +801,54 @@ mod tests {
                 ("lib/Util".into(), "SERVER_JS".into()),
             ]
         );
+    }
+
+    /// Push replaces every file in the project, so a symlink that is
+    /// skipped deletes the remote file it stands for. A symlink whose name
+    /// would be pushed, or that points to a directory, is refused and named;
+    /// one that would not be pushed anyway is still ignored.
+    #[cfg(unix)]
+    #[test]
+    fn collect_files_refuses_symlinks_that_would_be_pushed() {
+        use std::os::unix::fs::symlink;
+        let shared = tempdir().unwrap();
+        write(&shared.path().join("Shared.gs"), "function s(){}");
+        write(&shared.path().join("lib/util.gs"), "function u(){}");
+        write(&shared.path().join("NOTES.md"), "x");
+
+        let dir = tempdir().unwrap();
+        write(&dir.path().join("appsscript.json"), "{}");
+        write(&dir.path().join("Code.gs"), "function a(){}");
+        // Not pushed either way: ignored, as a regular README.md would be.
+        symlink(shared.path().join("NOTES.md"), dir.path().join("README.md")).unwrap();
+        symlink(
+            shared.path().join("missing"),
+            dir.path().join("dangling.txt"),
+        )
+        .unwrap();
+        assert_eq!(collect_files(dir.path()).unwrap().len(), 2);
+
+        symlink(
+            shared.path().join("Shared.gs"),
+            dir.path().join("Shared.gs"),
+        )
+        .unwrap();
+        symlink(shared.path().join("lib"), dir.path().join("lib")).unwrap();
+        let err = collect_files(dir.path()).unwrap_err().to_string();
+        assert!(err.contains("Refusing to push"), "{err}");
+        assert!(err.contains("Shared.gs"), "{err}");
+        assert!(
+            err.contains(&dir.path().join("lib").display().to_string()),
+            "{err}"
+        );
+        assert!(!err.contains("README.md"), "{err}");
+
+        // A dangling link with a pushable name is refused too.
+        fs::remove_file(dir.path().join("Shared.gs")).unwrap();
+        fs::remove_file(dir.path().join("lib")).unwrap();
+        symlink(shared.path().join("gone.gs"), dir.path().join("Gone.gs")).unwrap();
+        let err = collect_files(dir.path()).unwrap_err().to_string();
+        assert!(err.contains("Gone.gs"), "{err}");
     }
 
     #[test]
