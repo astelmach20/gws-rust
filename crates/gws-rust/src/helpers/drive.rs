@@ -50,7 +50,8 @@ fn output_args(cmd: Command) -> Command {
             .long("output")
             .short('o')
             .help("Local path to write, or '-' for stdout. Defaults to the Drive file name")
-            .value_name("PATH"),
+            .value_name("PATH")
+            .value_hint(clap::ValueHint::AnyPath),
     )
     .arg(
         Arg::new("overwrite")
@@ -70,7 +71,7 @@ impl Helper for DriveHelper {
                         .long("file")
                         .help("Local file to upload")
                         .required(true)
-                        .value_name("PATH"),
+                        .value_name("PATH").value_hint(clap::ValueHint::FilePath),
                 )
                 .arg(
                     Arg::new("folder-id")
@@ -266,7 +267,7 @@ TIPS:
                         .long("dir")
                         .help("Local directory to mirror into (created if missing)")
                         .required(true)
-                        .value_name("DIR"),
+                        .value_name("DIR").value_hint(clap::ValueHint::DirPath),
                 )
                 .arg(
                     Arg::new("overwrite")

@@ -152,7 +152,7 @@ fn directory_commands(cmd: Command) -> Command {
                 Arg::new("password-file")
                     .long("password-file")
                     .help("Read the initial password from a file, or '-' for stdin (default: generate one)")
-                    .value_name("PATH"),
+                    .value_name("PATH").value_hint(clap::ValueHint::FilePath),
             )
             .arg(
                 Arg::new("no-password-change")

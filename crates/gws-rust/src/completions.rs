@@ -432,6 +432,130 @@ mod tests {
         assert!(wf.get_subcommands().any(|s| s.get_name().starts_with('+')));
     }
 
+    /// The Discovery fixture for `alias`, or an empty document of the right
+    /// name (helper-only and fixture-less services still get their helpers).
+    fn fixture_or_empty(alias: &str) -> RestDescription {
+        let (api, version) = crate::services::resolve_service(alias).unwrap();
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join(format!("tests/fixtures/discovery/{api}_{version}.json"));
+        match std::fs::read_to_string(&path) {
+            Ok(text) => serde_json::from_str(&text).unwrap(),
+            Err(_) => RestDescription {
+                name: api,
+                version,
+                ..Default::default()
+            },
+        }
+    }
+
+    /// Every command completion can reach: the static tree, the `auth` tree,
+    /// and each service with its helpers and generated methods.
+    fn full_completion_tree() -> Command {
+        let mut root = with_auth_tree(crate::cli_args::command());
+        for entry in SERVICES {
+            let alias = entry.aliases[0];
+            root = root.subcommand(crate::service::build_command(
+                alias,
+                &fixture_or_empty(alias),
+            ));
+        }
+        root
+    }
+
+    /// Ids of arguments named PATH that hold something other than a local path.
+    const NOT_LOCAL_PATHS: &[&str] = &[
+        // `gwsr schema drive.files.list`: a Discovery method or type path.
+        "path",
+        // `admin +user-create --org-unit /Sales`: an organizational unit path.
+        "org-unit",
+    ];
+
+    fn assert_path_hints(cmd: &Command, at: &str, checked: &mut usize) {
+        for arg in cmd.get_arguments() {
+            let names = arg.get_value_names().unwrap_or_default();
+            let names_a_path = names
+                .iter()
+                .any(|n| matches!(n.as_str(), "PATH" | "FILE" | "DIR"));
+            if !names_a_path || NOT_LOCAL_PATHS.contains(&arg.get_id().as_str()) {
+                continue;
+            }
+            *checked += 1;
+            assert!(
+                matches!(
+                    arg.get_value_hint(),
+                    clap::ValueHint::AnyPath | clap::ValueHint::FilePath | clap::ValueHint::DirPath
+                ),
+                "{at} --{} takes a local {:?} but completes no paths",
+                arg.get_id(),
+                names
+            );
+        }
+        for sub in cmd.get_subcommands() {
+            assert_path_hints(sub, &format!("{at} {}", sub.get_name()), checked);
+        }
+    }
+
+    #[test]
+    fn every_local_path_flag_completes_paths() {
+        let mut checked = 0;
+        assert_path_hints(&full_completion_tree(), "gwsr", &mut checked);
+        // --upload/--output on generated methods, helper files and
+        // directories, batch --input, auth export, dev commands.
+        assert!(checked > 20, "only {checked} path flags were found");
+    }
+
+    fn complete_values(ws: &[&str], cwd: &Path) -> Vec<String> {
+        let words = words(ws);
+        let mut cmd = with_auth_tree(completion_tree(&words, &|api, version| {
+            let doc = fixture_or_empty(api);
+            (doc.version == version).then_some(doc)
+        }));
+        clap_complete::engine::complete(&mut cmd, words.clone(), words.len() - 1, Some(cwd))
+            .unwrap()
+            .iter()
+            .map(|c| c.get_value().to_string_lossy().into_owned())
+            .collect()
+    }
+
+    #[test]
+    fn path_flags_complete_files_and_directories() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("report.pdf"), "x").unwrap();
+        std::fs::create_dir(tmp.path().join("reports")).unwrap();
+        let sep = std::path::MAIN_SEPARATOR;
+        let both = vec!["report.pdf".to_string(), format!("reports{sep}")];
+
+        // A helper's input file, and a generated method's --upload/--output.
+        assert_eq!(
+            complete_values(&["gwsr", "drive", "+upload", "--file", "rep"], tmp.path()),
+            both
+        );
+        assert_eq!(
+            complete_values(
+                &["gwsr", "drive", "files", "create", "--upload", "rep"],
+                tmp.path()
+            ),
+            both
+        );
+        assert_eq!(
+            complete_values(&["gwsr", "drive", "files", "get", "-o", "rep"], tmp.path()),
+            both
+        );
+        // A directory flag offers only directories.
+        assert_eq!(
+            complete_values(&["gwsr", "drive", "+sync", "--dir", "rep"], tmp.path()),
+            vec![format!("reports{sep}")]
+        );
+        // An org-unit path is not a local path.
+        assert!(
+            complete_values(
+                &["gwsr", "admin", "+user-create", "--org-unit", "rep"],
+                tmp.path()
+            )
+            .is_empty()
+        );
+    }
+
     #[test]
     fn registration_scripts_reference_the_env_var() {
         for shell in [
