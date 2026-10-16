@@ -60,6 +60,9 @@ impl UploadData {
         self.size
     }
 
+    /// Read `len` bytes at `start`. Fails when the file no longer has the
+    /// size the upload was started with: the last chunk would otherwise
+    /// finish the upload with only a prefix of a file that grew.
     async fn read_range(&self, start: u64, len: usize) -> Result<bytes::Bytes, GwsError> {
         let path = &self.path;
         {
@@ -67,6 +70,14 @@ impl UploadData {
                 let mut file = tokio::fs::File::open(path).await.map_err(|e| {
                     GwsError::Validation(format!("failed to open upload file '{path}': {e}"))
                 })?;
+                let now = file
+                    .metadata()
+                    .await
+                    .map_err(|e| GwsError::other(anyhow::anyhow!("failed to stat '{path}': {e}")))?
+                    .len();
+                if now != self.size {
+                    return Err(GwsError::Validation(size_changed(path, self.size, now)));
+                }
                 file.seek(std::io::SeekFrom::Start(start))
                     .await
                     .map_err(|e| {
@@ -542,11 +553,25 @@ pub(crate) async fn resumable_upload(
         };
 
         failures += 1;
-        if failures > MAX_CHUNK_FAILURES {
+        // A retryable status may carry `Retry-After`: wait that long, or stop
+        // at once when it asks for longer than the policy allows, as
+        // `client::send` does for every other request.
+        let retry_after = match &failed_reason {
+            ChunkFailure::Status(sent) => sent.retry_after,
+            ChunkFailure::Error(_) | ChunkFailure::Stalled(_) => None,
+        };
+        let wait_too_long = retry_after.is_some_and(|ra| ra > transport.retry.max_retry_after);
+        if failures > MAX_CHUNK_FAILURES || wait_too_long {
             progress.finish();
-            let context = format!(
-                "resumable upload failed after {MAX_CHUNK_FAILURES} consecutive retries at byte {offset} of {total}"
-            );
+            let context = if wait_too_long {
+                format!(
+                    "resumable upload stopped at byte {offset} of {total}: the server asked to wait longer than gwsr retries for"
+                )
+            } else {
+                format!(
+                    "resumable upload failed after {MAX_CHUNK_FAILURES} consecutive retries at byte {offset} of {total}"
+                )
+            };
             // Keep the class of the last failure: a retryable status stays
             // a retryable API error (exit 6), a lost connection a network
             // error (exit 10).
@@ -558,7 +583,8 @@ pub(crate) async fn resumable_upload(
         }
         let failed_reason = failed_reason.describe();
         tracing::debug!(offset, failures, reason = %failed_reason, "upload chunk failed; querying session status");
-        tokio::time::sleep(transport.retry.backoff(failures - 1)).await;
+        let delay = retry_after.unwrap_or_else(|| transport.retry.backoff(failures - 1));
+        tokio::time::sleep(delay).await;
 
         // Ask the server how much it has.
         let status_range = format!("bytes */{total}");
@@ -720,6 +746,33 @@ mod tests {
         assert!(
             file.read_range(8, 4).await.is_err(),
             "short read must fail loudly"
+        );
+    }
+
+    #[tokio::test]
+    async fn read_range_fails_when_the_file_changed_size() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("f.bin");
+        std::fs::write(&path, b"0123456789").unwrap();
+        let file = UploadData {
+            path: path.to_str().unwrap().to_string(),
+            size: 10,
+        };
+        // Grown: the final chunk (bytes 6..10) would read fine and finish
+        // the upload with a truncated copy of the file.
+        std::fs::write(&path, b"0123456789-appended").unwrap();
+        let err = file.read_range(6, 4).await.unwrap_err();
+        assert!(matches!(err, GwsError::Validation(_)), "{err:?}");
+        assert!(
+            err.to_string().contains("changed size during upload"),
+            "{err}"
+        );
+        // Shrunk.
+        std::fs::write(&path, b"01234").unwrap();
+        let err = file.read_range(0, 4).await.unwrap_err();
+        assert!(
+            err.to_string().contains("changed size during upload"),
+            "{err}"
         );
     }
 

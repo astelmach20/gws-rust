@@ -1500,6 +1500,29 @@ async fn resumable_chunk_rate_limit_403_is_retried() {
     assert!(puts > 1, "a rate-limited chunk was not retried: {msg}");
 }
 
+/// A chunk answered with a `Retry-After` longer than the policy allows
+/// stops the upload at once, as any other request does, instead of
+/// re-sending the chunk on gwsr's own short backoff while the server asked
+/// to wait.
+#[tokio::test]
+async fn resumable_chunk_retry_after_beyond_the_cap_stops_at_once() {
+    let (result, puts) = resumable_against(
+        1000,
+        ResponseTemplate::new(429)
+            .insert_header("retry-after", "3600")
+            .set_body_json(json!({
+                "error": {"code": 429, "message": "quota exhausted", "status": "RESOURCE_EXHAUSTED"}
+            })),
+    )
+    .await;
+    let err = result.expect("must finish").unwrap_err();
+    assert!(matches!(err, GwsError::Api { code: 429, .. }), "{err:?}");
+    assert_eq!(err.exit_code(), 6, "{err}");
+    let msg = err.to_string();
+    assert!(msg.contains("retry after 3600s"), "{msg}");
+    assert_eq!(puts, 1, "the chunk was re-sent despite Retry-After: {msg}");
+}
+
 /// An expired upload session (404 or 410 on a chunk) is Google refusing
 /// the session URL, not an internal failure: it exits as an API error
 /// (1, not retryable unchanged) and tells the user to rerun the command.

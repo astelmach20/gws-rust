@@ -311,6 +311,7 @@ The fields are `code`, `message`, `reason` and `retryable`, plus `hint` when the
 | `9` | Credential store error (`credentialStoreError`): the OS keyring, key file or stored credentials can't be read, written or decrypted |
 | `10` | Network error (`networkError`): no response (connection, DNS, TLS, timeout). Not marked retryable, because a non-idempotent call may already have been applied; check before retrying |
 | `11` | Blocked by Model Armor (`sanitizationBlocked`): `--sanitize` in `block` mode matched. Usually the output matched and was withheld after the API request succeeded; for `gmail` helpers that send or create something (`+send`, `+reply`, `+reply-all`, `+forward`, `+filter create`, `+unsubscribe`) the outgoing content matched and nothing was sent |
+| `130` / `143` | Interrupted: `drive +sync` stopped by SIGINT (Ctrl-C, also on Windows) or SIGTERM saved the sync state of the files it finished, then exited with the shell's 128 + signal number |
 
 Exit code 5 also covers internal programming errors, such as a command reading an argument it doesn't define.
 
@@ -443,7 +444,7 @@ Helpers are hand-written commands prefixed with `+`, so they never collide with 
 | `modelarmor` | `+sanitize-prompt`, `+sanitize-response`, `+create-template` |
 | `workflow` | `+standup-report`, `+meeting-prep`, `+email-to-task`, `+weekly-digest`, `+file-announce` |
 
-`drive +sync` records what it mirrored in `<dir>/.gwsr-sync.json`, keyed by Drive file ID (Drive version, checksums and modified time; local size, mtime and SHA-256). A file is downloaded again only when its Drive copy changed or another Drive item took its name. A local file edited since the last sync, or not written by it (including every existing file when the state file is missing or corrupt, unless its Drive SHA-256 matches), is not overwritten: it is listed under `conflicts` and the command exits `1` with reason `syncConflict` after printing the report. Pass `--overwrite` to replace such files with the Drive copy.
+`drive +sync` records what it mirrored in `<dir>/.gwsr-sync.json`, keyed by Drive file ID (Drive version, checksums and modified time; local size, mtime and SHA-256). A file is downloaded again only when its Drive copy changed or another Drive item took its name. A local file edited since the last sync, or not written by it (including every existing file when the state file is missing or corrupt, unless its Drive SHA-256 matches), is not overwritten: it is listed under `conflicts` and the command exits `1` with reason `syncConflict` after printing the report. Pass `--overwrite` to replace such files with the Drive copy. Stopped by Ctrl-C or SIGTERM, it starts no further downloads, saves the state of the files already written and exits `130` / `143`, so the next run picks up where it stopped.
 
 ```bash
 gwsr gmail +send --to alice@example.com --subject 'Hello' --body 'Hi Alice' --attach report.pdf

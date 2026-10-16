@@ -570,8 +570,12 @@ fn script_error(details: &Value) -> GwsError {
         msg.push('\n');
         msg.push_str(&stack.join("\n"));
     }
+    // The error is a `google.rpc.Status`: its code decides the class. A
+    // script exception is code 3 (INVALID_ARGUMENT, HTTP 400), permanent;
+    // a fixed 500 made every failed run look retryable (exit 6).
+    let (code, _) = crate::executor::operation::status_code(details);
     GwsError::Api {
-        code: 500,
+        code,
         message: msg,
         reason: "scriptError".into(),
         enable_url: None,
@@ -840,6 +844,32 @@ mod tests {
             msg.contains("TypeError: x is undefined") && msg.contains("main (line 4)"),
             "{msg}"
         );
+        // An exception the script threw is permanent: rerunning the same
+        // call fails the same way, so it must not exit 6 (retryable).
+        assert!(
+            matches!(&err, GwsError::Api { code: 400, reason, .. } if reason == "scriptError"),
+            "{err:?}"
+        );
+        assert_eq!(err.exit_code(), GwsError::EXIT_CODE_API, "{err:?}");
+    }
+
+    /// The `google.rpc.Code` of the operation error decides the class: a
+    /// script that ran out of time (DEADLINE_EXCEEDED) may succeed on a
+    /// retry.
+    #[test]
+    fn script_error_status_follows_the_rpc_code() {
+        for (code, http, exit) in [
+            (3, 400, GwsError::EXIT_CODE_API),
+            (4, 504, GwsError::EXIT_CODE_API_RETRYABLE),
+            (7, 403, GwsError::EXIT_CODE_API),
+        ] {
+            let err = script_error(&json!({"code": code, "message": "m"}));
+            assert!(
+                matches!(&err, GwsError::Api { code: c, .. } if *c == http),
+                "{code}: {err:?}"
+            );
+            assert_eq!(err.exit_code(), exit, "{code}: {err:?}");
+        }
     }
 
     #[tokio::test]
