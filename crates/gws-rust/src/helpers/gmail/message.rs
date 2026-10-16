@@ -393,6 +393,7 @@ fn synthesize_filename(part_index: usize, mime_type: &str) -> String {
         .nth(1)
         .map(|sub| match sub {
             "jpeg" => "jpg",
+            "plain" => "txt",
             "svg+xml" => "svg",
             "octet-stream" => "bin",
             other => other,
@@ -434,14 +435,17 @@ pub(super) fn get_part_header<'a>(part: &'a Value, name: &str) -> Option<&'a str
 /// and metadata for all attachment/inline parts.
 fn extract_payload_contents(payload: &Value) -> Result<PayloadContents, GwsError> {
     let mut contents = PayloadContents::default();
-    extract_payload_recursive(payload, &mut contents, &mut 0)?;
+    extract_payload_recursive(payload, &mut contents, &mut 0, false)?;
     Ok(contents)
 }
 
+/// `in_embedded_message` is true below a `message/rfc822` node: that subtree
+/// is another message, so its text parts are never this message's body.
 fn extract_payload_recursive(
     part: &Value,
     contents: &mut PayloadContents,
     part_counter: &mut usize,
+    in_embedded_message: bool,
 ) -> Result<(), GwsError> {
     let mime_type = part.get("mimeType").and_then(|v| v.as_str()).unwrap_or("");
 
@@ -463,12 +467,26 @@ fn extract_payload_recursive(
 
     let content_id_header = get_part_header(part, "Content-ID");
 
+    // Gmail gives Content-IDs to regular attachments too (e.g., PDFs), so
+    // the disposition decides between inline and attachment below. An
+    // `attachment` disposition also makes an unnamed text part a file, not
+    // the body.
+    let disposition_header = get_part_header(part, "Content-Disposition");
+    let explicitly_attachment = disposition_header
+        .map(|d| {
+            d.trim_start()
+                .to_ascii_lowercase()
+                .starts_with("attachment")
+        })
+        .unwrap_or(false);
+
     // Primary signal: does this part have fetchable binary data?
     // A part is a file (attachment or inline image) when its bytes are fetchable
-    // by attachment ID, or when it is named and carries its data inline.
+    // by attachment ID, or when it is named, has a Content-ID or is marked as
+    // an attachment, and carries its data inline.
     let part_data = if !attachment_id.is_empty() {
         Some(PartData::AttachmentId(attachment_id.to_string()))
-    } else if !filename.is_empty() || content_id_header.is_some() {
+    } else if !filename.is_empty() || content_id_header.is_some() || explicitly_attachment {
         body_data.map(|d| PartData::Inline(d.to_string()))
     } else {
         None
@@ -476,8 +494,9 @@ fn extract_payload_recursive(
     let is_hydratable = part_data.is_some();
 
     // A body text part has inline body.data, no attachmentId, no filename, and no Content-ID.
-    let body_text_data =
-        body_data.filter(|_| !is_hydratable && filename.is_empty() && content_id_header.is_none());
+    let body_text_data = body_data.filter(|_| {
+        !is_hydratable && !in_embedded_message && filename.is_empty() && content_id_header.is_none()
+    });
 
     if let Some(data) = body_text_data {
         let content_type = get_part_header(part, "Content-Type");
@@ -492,14 +511,7 @@ fn extract_payload_recursive(
         *part_counter += 1;
 
         // Classify as inline only when Content-ID is present AND
-        // Content-Disposition is not explicitly "attachment". Gmail gives
-        // Content-IDs to regular attachments too (e.g., PDFs), so Content-ID
-        // alone is not sufficient — we must check disposition.
-        let disposition_header = get_part_header(part, "Content-Disposition");
-        let explicitly_attachment = disposition_header
-            .map(|d| d.to_ascii_lowercase().starts_with("attachment"))
-            .unwrap_or(false);
-
+        // Content-Disposition is not explicitly "attachment".
         // Sanitize Content-ID: strip angle brackets and control characters.
         // Content-ID is sender-controlled; CR/LF could inject MIME headers via
         // mail-builder's MessageId, which writes the value raw inside <...>.
@@ -535,10 +547,13 @@ fn extract_payload_recursive(
         // incorrectly pull the attached message's body text and nested parts into
         // the top-level message.
     } else {
-        // Only recurse into non-hydratable container nodes (multipart/mixed, etc.)
+        // Only recurse into non-hydratable container nodes (multipart/mixed,
+        // etc.). An encapsulated message's files are still collected, but
+        // its text is not this message's body.
+        let embedded = in_embedded_message || mime_type.eq_ignore_ascii_case("message/rfc822");
         if let Some(child_parts) = part.get("parts").and_then(|p| p.as_array()) {
             for child in child_parts {
-                extract_payload_recursive(child, contents, part_counter)?;
+                extract_payload_recursive(child, contents, part_counter, embedded)?;
             }
         }
     }
@@ -1652,6 +1667,67 @@ mod tests {
             sanitize_remote_filename("   ", 0, "image/png"),
             "part-0.png"
         );
+    }
+
+    /// An unnamed text part marked `Content-Disposition: attachment` is a
+    /// file, not the body: it must not replace the HTML body nor vanish
+    /// from the attachment list.
+    #[test]
+    fn test_unnamed_attachment_disposition_text_part_is_an_attachment() {
+        let payload = json!({
+            "mimeType": "multipart/mixed",
+            "parts": [
+                { "mimeType": "text/html", "body": { "data": URL_SAFE.encode("<p>Real body</p>") } },
+                {
+                    "mimeType": "text/plain",
+                    "headers": [{ "name": "Content-Disposition", "value": "attachment" }],
+                    "body": { "data": URL_SAFE.encode("log line"), "size": 8 }
+                }
+            ]
+        });
+        let contents = extract_payload_contents(&payload).unwrap();
+        assert_eq!(contents.body_text, None);
+        assert_eq!(contents.body_html.as_deref(), Some("<p>Real body</p>"));
+        assert_eq!(contents.parts.len(), 1);
+        assert_eq!(contents.parts[0].filename, "part-0.txt");
+        assert_eq!(
+            contents.parts[0].data,
+            PartData::Inline(URL_SAFE.encode("log line"))
+        );
+    }
+
+    /// A message/rfc822 node Gmail does not expose as one file still holds
+    /// another message: its text must not become the outer message's body.
+    #[test]
+    fn test_embedded_message_text_is_not_the_body() {
+        let payload = json!({
+            "mimeType": "multipart/mixed",
+            "parts": [
+                { "mimeType": "text/html", "body": { "data": URL_SAFE.encode("<p>Outer</p>") } },
+                {
+                    "mimeType": "message/rfc822",
+                    "body": { "size": 0 },
+                    "parts": [{
+                        "mimeType": "multipart/mixed",
+                        "parts": [
+                            { "mimeType": "text/plain", "body": { "data": URL_SAFE.encode("Inner") } },
+                            { "mimeType": "text/html", "body": { "data": URL_SAFE.encode("<p>Inner</p>") } },
+                            {
+                                "mimeType": "application/pdf",
+                                "filename": "inner.pdf",
+                                "body": { "attachmentId": "INNER", "size": 10 }
+                            }
+                        ]
+                    }]
+                }
+            ]
+        });
+        let contents = extract_payload_contents(&payload).unwrap();
+        assert_eq!(contents.body_text, None);
+        assert_eq!(contents.body_html.as_deref(), Some("<p>Outer</p>"));
+        // The embedded message's file stays downloadable.
+        assert_eq!(contents.parts.len(), 1);
+        assert_eq!(contents.parts[0].attachment_id(), Some("INNER"));
     }
 
     #[test]
