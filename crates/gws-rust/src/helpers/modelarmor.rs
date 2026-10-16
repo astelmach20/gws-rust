@@ -790,8 +790,7 @@ fn parse_create_template_args(matches: &ArgMatches) -> Result<CreateTemplateConf
     ))?;
 
     let body = match crate::args::value::<String>(matches, "json")? {
-        Some(json_str) => serde_json::from_str(json_str)
-            .map_err(|e| GwsError::Validation(format!("--json is not valid JSON: {e}")))?,
+        Some(json_str) => crate::executor::input::parse_object_body(json_str)?,
         None => {
             let preset = crate::args::value::<String>(matches, "preset")?
                 .map(String::as_str)
@@ -844,8 +843,7 @@ fn load_preset_template(name: &str) -> Result<Value, GwsError> {
 
 fn parse_sanitize_args(matches: &ArgMatches, data_field: &str) -> Result<Value, GwsError> {
     if let Some(json_str) = crate::args::value::<String>(matches, "json")? {
-        return serde_json::from_str(json_str)
-            .map_err(|e| GwsError::Validation(format!("--json is not valid JSON: {e}")));
+        return crate::executor::input::parse_object_body(json_str);
     }
     let text = match crate::args::value::<String>(matches, "text")? {
         Some(text) => text.clone(),

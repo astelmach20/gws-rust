@@ -194,6 +194,21 @@ pub(crate) fn parse_body(text: Option<&str>) -> Result<Option<Value>, GwsError> 
     .transpose()
 }
 
+/// Parse a helper's `--json` request body, which must be a JSON object
+/// (repeated keys are rejected as in [`parse_strict_json`]).
+pub(crate) fn parse_object_body(text: &str) -> Result<Value, GwsError> {
+    match parse_strict_json(text) {
+        Ok(v @ Value::Object(_)) => Ok(v),
+        Ok(other) => Err(GwsError::Validation(format!(
+            "--json must be a JSON object, got {}",
+            super::body_schema::value_type(&other)
+        ))),
+        Err(e) => Err(GwsError::Validation(format!(
+            "--json is not valid JSON: {e}"
+        ))),
+    }
+}
+
 /// Closest candidate to `name` for "did you mean" hints.
 pub(crate) fn closest<'a>(
     name: &str,
@@ -412,6 +427,24 @@ mod tests {
     use super::*;
     use serde_json::json;
     use std::collections::HashMap;
+
+    #[test]
+    fn object_body_must_be_a_json_object() {
+        assert_eq!(parse_object_body("{\"a\":1}").unwrap(), json!({"a": 1}));
+        for (text, expected) in [
+            ("[]", "--json must be a JSON object, got array"),
+            ("\"x\"", "--json must be a JSON object, got string"),
+            ("1", "--json must be a JSON object, got integer"),
+            ("{\"a\":1,\"a\":2}", "duplicate key 'a'"),
+            ("{bad", "--json is not valid JSON"),
+        ] {
+            let err = parse_object_body(text).unwrap_err();
+            assert!(
+                matches!(&err, GwsError::Validation(m) if m.contains(expected)),
+                "{text}: {err:?}"
+            );
+        }
+    }
 
     fn param(ty: &str) -> MethodParameter {
         MethodParameter {
