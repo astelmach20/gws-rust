@@ -162,8 +162,32 @@ async fn batch_credentials(calls: &[BatchCall<'_>]) -> Result<Credentials, GwsEr
     Credentials::for_scopes(&scopes).await
 }
 
-/// Resolve `files.get`, `drive.files.get` or `permissions.list` style names.
+/// Resolve `files.get`, `drive.files.get` or `permissions.list` style names,
+/// or a Discovery method id whose prefix is not the API name (the `admin`
+/// API's `directory.users.get`).
 pub(crate) fn find_method<'a>(doc: &'a RestDescription, name: &str) -> Option<&'a RestMethod> {
+    find_method_by_path(doc, name).or_else(|| find_method_by_id(doc, name))
+}
+
+fn find_method_by_id<'a>(doc: &'a RestDescription, id: &str) -> Option<&'a RestMethod> {
+    fn search<'a>(
+        resources: &'a std::collections::HashMap<String, RestResource>,
+        id: &str,
+    ) -> Option<&'a RestMethod> {
+        resources.values().find_map(|r| {
+            r.methods
+                .values()
+                .find(|m| m.id.as_deref() == Some(id))
+                .or_else(|| search(&r.resources, id))
+        })
+    }
+    doc.methods
+        .values()
+        .find(|m| m.id.as_deref() == Some(id))
+        .or_else(|| search(&doc.resources, id))
+}
+
+fn find_method_by_path<'a>(doc: &'a RestDescription, name: &str) -> Option<&'a RestMethod> {
     let prefix = format!("{}.", doc.name);
     let path: Vec<&str> = name
         .strip_prefix(&prefix)
@@ -224,11 +248,12 @@ pub(crate) fn parse_calls<'a>(
             .ok_or_else(|| at("missing string field \"method\"".to_string()))?;
         let method = find_method(doc, name)
             .ok_or_else(|| at(format!("unknown method '{name}' in the {} API", doc.name)))?;
-        let params: Map<String, Value> = match obj.get("params") {
+        let mut params: Map<String, Value> = match obj.get("params") {
             None | Some(Value::Null) => Map::new(),
             Some(Value::Object(m)) => m.clone(),
             Some(_) => return Err(at("\"params\" must be an object".to_string())),
         };
+        super::apply_shared_drive_default(method, &mut params);
         let body = obj.get("json").filter(|v| !v.is_null()).cloned();
         if body.is_some() && method.request.is_none() {
             return Err(at(format!(
@@ -783,6 +808,35 @@ mod tests {
         assert!(find_method(&doc, "about.get").is_none());
     }
 
+    /// Discovery method ids do not always start with the API name: the
+    /// `admin` API's are `directory.users.get` and `reports.activities.list`,
+    /// `groupssettings`'s are `groupsSettings.groups.get`.
+    #[test]
+    fn method_lookup_accepts_discovery_method_ids() {
+        let mut users = RestResource::default();
+        users.methods.insert(
+            "get".into(),
+            RestMethod {
+                id: Some("directory.users.get".into()),
+                http_method: "GET".into(),
+                path: "admin/directory/v1/users/{userKey}".into(),
+                ..Default::default()
+            },
+        );
+        let mut doc = RestDescription {
+            name: "admin".into(),
+            version: "directory_v1".into(),
+            ..Default::default()
+        };
+        doc.resources.insert("users".into(), users);
+        for name in ["directory.users.get", "users.get", "admin.users.get"] {
+            let found = find_method(&doc, name).map(|m| m.id.as_deref());
+            assert_eq!(found, Some(Some("directory.users.get")), "{name}");
+        }
+        assert!(find_method(&doc, "directory.users.list").is_none());
+        assert!(find_method(&doc, "reports.users.get").is_none());
+    }
+
     #[test]
     #[serial_test::serial]
     fn parses_and_builds_body() {
@@ -805,6 +859,47 @@ mod tests {
         );
         assert!(body.contains("DELETE /drive/v3/files/2 HTTP/1.1"));
         assert!(body.ends_with("--B--\r\n"));
+    }
+
+    /// A batch call gets the same `supportsAllDrives=true` default as the
+    /// generated command, so a file in a shared drive is not a 404 there.
+    #[test]
+    #[serial_test::serial]
+    fn sends_supports_all_drives_like_a_normal_command() {
+        let mut doc = drive_doc("https://www.googleapis.com/");
+        let get = doc
+            .resources
+            .get_mut("files")
+            .and_then(|r| r.methods.get_mut("get"))
+            .unwrap();
+        get.parameters.insert(
+            "supportsAllDrives".to_string(),
+            MethodParameter {
+                location: Some("query".into()),
+                param_type: Some("boolean".into()),
+                ..Default::default()
+            },
+        );
+        let calls = parse_calls(
+            &doc,
+            concat!(
+                "{\"method\":\"files.get\",\"params\":{\"fileId\":\"1\"}}\n",
+                "{\"method\":\"files.get\",\"params\":{\"fileId\":\"2\",\"supportsAllDrives\":false}}\n",
+                "{\"method\":\"files.delete\",\"params\":{\"fileId\":\"3\"}}\n",
+            ),
+            &opts(),
+        )
+        .unwrap();
+        assert_eq!(
+            calls[0].path_and_query,
+            "/drive/v3/files/1?supportsAllDrives=true"
+        );
+        // An explicit value is kept; a method without the parameter gets none.
+        assert_eq!(
+            calls[1].path_and_query,
+            "/drive/v3/files/2?supportsAllDrives=false"
+        );
+        assert_eq!(calls[2].path_and_query, "/drive/v3/files/3");
     }
 
     #[test]

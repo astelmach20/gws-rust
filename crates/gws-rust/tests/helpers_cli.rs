@@ -1200,6 +1200,84 @@ fn modelarmor_sanitize_rejects_unreadable_stdin_as_validation() {
     );
 }
 
+// ── -q and stream diagnostics ───────────────────────────────────────────
+
+/// `-q` means "only print errors on stderr": the info/warning diagnostics of
+/// a stream helper are silenced, while the default run still shows them.
+#[tokio::test(flavor = "multi_thread")]
+async fn quiet_silences_non_error_stream_diagnostics() {
+    use base64::Engine as _;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let b64 = |s: &str| base64::engine::general_purpose::STANDARD.encode(s);
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/projects/p/subscriptions/gm:pull"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "receivedMessages": [{ "ackId": "a2", "message": {
+                "data": b64(r#"{"emailAddress":"me@example.com","historyId":"5"}"#)
+            }}]
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/projects/p/subscriptions/gm:acknowledge"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/gmail/v1/users/me/profile"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"historyId": "1"})))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/gmail/v1/users/me/history"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "history": [{ "messagesAdded": [{ "message": { "id": "M1" } }] }]
+        })))
+        .mount(&server)
+        .await;
+    // The message was deleted before it could be fetched: a warning.
+    Mock::given(method("GET"))
+        .and(path("/gmail/v1/users/me/messages/M1"))
+        .respond_with(ResponseTemplate::new(404).set_body_json(json!({
+            "error": {"code": 404, "message": "Not Found", "status": "NOT_FOUND"}
+        })))
+        .mount(&server)
+        .await;
+
+    let dir = tempfile::tempdir().unwrap();
+    seed(dir.path(), "gmail", "v1", "");
+    let run = |extra: &[&str]| {
+        let mut args = vec![
+            "gmail",
+            "+watch",
+            "--subscription",
+            "projects/p/subscriptions/gm",
+            "--once",
+        ];
+        args.extend_from_slice(extra);
+        gwsr(dir.path())
+            .env("GWSR_TOKEN", "ya29.FAKE-test-token")
+            .env("GWSR_API_BASE_URL", format!("{}/", server.uri()))
+            .env("HTTPS_PROXY", "http://127.0.0.1:9")
+            .args(&args)
+            .output()
+            .unwrap()
+    };
+
+    let out = run(&[]);
+    assert!(out.status.success(), "{out:?}");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("message_gone"), "{stderr}");
+
+    let out = run(&["-q"]);
+    assert!(out.status.success(), "{out:?}");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.trim().is_empty(), "-q printed: {stderr}");
+}
+
 // ── Dot-segment path parameters ─────────────────────────────────────────
 
 /// A path parameter of `.` or `..` must never reach the server: URL parsing

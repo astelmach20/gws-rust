@@ -40,7 +40,7 @@ use std::path::PathBuf;
 use std::sync::OnceLock;
 use std::time::Duration;
 
-use gws_rust_core::validate::{EndpointPolicy, PathPolicy};
+use gws_rust_core::validate::{EndpointPolicy, PathPolicy, hide_url_credentials};
 use reqwest::Url;
 use secrecy::SecretString;
 
@@ -272,7 +272,22 @@ impl Env {
     ///
     /// [`GwsError::Config`] listing every invalid value and unknown `GWSR_*`
     /// name, each with the accepted values or a suggestion.
+    ///
+    /// On Windows, where environment variable names are case-insensitive
+    /// (`gwsr_format` *is* `GWSR_FORMAT` to every other program), names are
+    /// matched ignoring ASCII case.
     pub fn from_vars<I, K, V>(vars: I) -> Result<Self, GwsError>
+    where
+        I: IntoIterator<Item = (K, V)>,
+        K: Into<OsString>,
+        V: Into<OsString>,
+    {
+        Self::from_vars_with(vars, cfg!(windows))
+    }
+
+    /// [`Env::from_vars`], matching names ignoring ASCII case when
+    /// `names_ignore_case` is set (the Windows rule).
+    fn from_vars_with<I, K, V>(vars: I, names_ignore_case: bool) -> Result<Self, GwsError>
     where
         I: IntoIterator<Item = (K, V)>,
         K: Into<OsString>,
@@ -283,7 +298,15 @@ impl Env {
         for (name, value) in vars {
             let (name, value): (OsString, OsString) = (name.into(), value.into());
             let Some(name) = name.to_str() else {
-                if name.as_encoded_bytes().starts_with(PREFIX.as_bytes()) {
+                let bytes = name.as_encoded_bytes();
+                let prefixed = bytes.get(..PREFIX.len()).is_some_and(|p| {
+                    if names_ignore_case {
+                        p.eq_ignore_ascii_case(PREFIX.as_bytes())
+                    } else {
+                        p == PREFIX.as_bytes()
+                    }
+                });
+                if prefixed {
                     problems.push(format!(
                         "environment variable name {} is not valid UTF-8 and is not one gwsr \
                          reads; unset it, then `gwsr --help` lists the supported variables",
@@ -291,6 +314,13 @@ impl Env {
                     ));
                 }
                 continue;
+            };
+            let upper;
+            let name = if names_ignore_case {
+                upper = name.to_ascii_uppercase();
+                upper.as_str()
+            } else {
+                name
             };
             let Some(entry) = lookup(name) else {
                 if name.starts_with(PREFIX) && !BUILD_TIME_VARS.contains(&name) {
@@ -316,7 +346,11 @@ impl Env {
             let shown = if entry.secret {
                 format!("{} (value hidden)", entry.name)
             } else {
-                format!("{}={:?}", entry.name, raw.to_string_lossy())
+                format!(
+                    "{}={:?}",
+                    entry.name,
+                    hide_url_credentials(&raw.to_string_lossy())
+                )
             };
             format!(
                 "invalid environment variable {shown}: {problem}; expected {}",
@@ -789,6 +823,32 @@ mod tests {
         }
     }
 
+    /// A rejected URL is echoed in the error, but never the password in it.
+    #[test]
+    fn rejected_url_value_does_not_echo_its_credentials() {
+        for value in [
+            "https://user:FAKE-pass@proxy.example/",
+            "https://user:FAKE-pass@proxy.example:notaport/",
+            "http://FAKE-pass@proxy.example/x?y=@z",
+        ] {
+            let message = err(&[("GWSR_API_BASE_URL", value)]);
+            assert!(message.contains("GWSR_API_BASE_URL"), "{message}");
+            assert!(!message.contains("FAKE-pass"), "{message}");
+            assert!(message.contains("***@proxy.example"), "{message}");
+        }
+        assert_eq!(
+            hide_url_credentials("https://proxy.example/a@b"),
+            "https://proxy.example/a@b"
+        );
+        assert_eq!(hide_url_credentials("bogus!!"), "bogus!!");
+        // The trust check's message for an unparseable URL hides them too.
+        let policy = EndpointPolicy::with_override("https://proxy.example/").unwrap();
+        let e = policy
+            .check("https://user:FAKE-pass@proxy.example:notaport/x")
+            .unwrap_err();
+        assert!(!e.to_string().contains("FAKE-pass"), "{e}");
+    }
+
     #[test]
     fn empty_values_are_unset() {
         let env = parse(&[
@@ -823,6 +883,42 @@ mod tests {
             }
             other => panic!("{other:?}"),
         }
+    }
+
+    /// Windows environment variable names are case-insensitive: a variable
+    /// set as `gwsr_restrict_paths` is `GWSR_RESTRICT_PATHS` to every other
+    /// program, so ignoring it would silently drop the setting (here, the
+    /// path sandbox) instead of applying or rejecting it.
+    #[test]
+    fn names_ignore_case_where_the_platform_does() {
+        let vars = [
+            ("gwsr_restrict_paths", "cwd"),
+            ("Gwsr_Format", "csv"),
+            ("rust_log", "debug"),
+        ];
+        let env = Env::from_vars_with(vars, true).unwrap();
+        assert_eq!(env.restrict_paths, PathPolicy::Cwd);
+        assert_eq!(env.format, Some(OutputFormat::Csv));
+        assert_eq!(env.rust_log.as_deref(), Some("debug"));
+        // An invalid value or an unknown name is reported, not skipped.
+        let err = |vars: [(&str, &str); 1]| match Env::from_vars_with(vars, true) {
+            Err(GwsError::Config(message)) => message,
+            other => panic!("{vars:?}: expected a config error, got {other:?}"),
+        };
+        assert!(err([("gwsr_timeout", "soon")]).contains("GWSR_TIMEOUT"));
+        assert!(err([("gwsr_tiemout", "5")]).contains("did you mean GWSR_TIMEOUT"));
+
+        // Where names are case-sensitive, `gwsr_format` is another variable.
+        let env = Env::from_vars_with([("gwsr_format", "csv")], false).unwrap();
+        assert_eq!(env.format, None);
+    }
+
+    /// The process rule on Windows CI: a lowercase name still applies.
+    #[cfg(windows)]
+    #[test]
+    fn lowercase_names_apply_on_windows() {
+        let env = parse(&[("gwsr_restrict_paths", "cwd")]).unwrap();
+        assert_eq!(env.restrict_paths, PathPolicy::Cwd);
     }
 
     #[test]

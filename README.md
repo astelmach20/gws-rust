@@ -222,7 +222,7 @@ Checked in this order:
 2. `GWSR_CREDENTIALS_FILE` (authorized-user or service-account JSON)
 3. The active profile's encrypted credentials (`gwsr auth login`)
 4. `GOOGLE_APPLICATION_CREDENTIALS`
-5. `~/.config/gcloud/application_default_credentials.json`
+5. gcloud's Application Default Credentials file: `~/.config/gcloud/application_default_credentials.json`, or `%APPDATA%\gcloud\application_default_credentials.json` on Windows
 
 Once a source exists, it is used or the command fails. A damaged or undecryptable credentials file is never deleted or silently skipped. A profile you selected explicitly never falls back to Application Default Credentials, and `--profile` together with `GWSR_TOKEN`, `GWSR_TOKEN_FILE` or `GWSR_CREDENTIALS_FILE` is a configuration error instead of silently using the other identity. `--dry-run` loads no credentials at all.
 
@@ -405,7 +405,7 @@ EOF
 # {"id":"b","status":404,"body":{"error":{...}}}
 ```
 
-Every call is validated like a normal command (`--allow-unknown-params` and `--allow-unknown-fields` apply). A line may only carry `id`, `method`, `params` and `json`; any other key, or `json` on a method that takes no request body, is rejected. Destructive calls need `--yes`. With `--sanitize`, each result body is screened by Model Armor before it is printed. `--jq`, `--format` and `--columns` apply to every result line, as they do to a `--page-all` stream. Failed calls are reported as result lines on stdout. When any call fails, the command exits `1` with reason `batchPartialFailure` after printing every result.
+`method` is the command path (`files.get`, optionally prefixed with the API name: `drive.files.get`) or the Discovery method id (`directory.users.get` in `gwsr batch admin`). Every call is validated like a normal command (`--allow-unknown-params` and `--allow-unknown-fields` apply). A line may only carry `id`, `method`, `params` and `json`; any other key, or `json` on a method that takes no request body, is rejected. Destructive calls need `--yes`. With `--sanitize`, each result body is screened by Model Armor before it is printed. `--jq`, `--format` and `--columns` apply to every result line, as they do to a `--page-all` stream. Failed calls are reported as result lines on stdout. When any call fails, the command exits `1` with reason `batchPartialFailure` after printing every result.
 
 ## Confirmations
 
@@ -444,7 +444,7 @@ Helpers are hand-written commands prefixed with `+`, so they never collide with 
 | `modelarmor` | `+sanitize-prompt`, `+sanitize-response`, `+create-template` |
 | `workflow` | `+standup-report`, `+meeting-prep`, `+email-to-task`, `+weekly-digest`, `+file-announce` |
 
-`drive +sync` first checks that `--folder-id` is a folder you can read (a missing, unshared or non-folder ID is an error, not an empty mirror), then records what it mirrored in `<dir>/.gwsr-sync.json`, keyed by Drive file ID (Drive version, checksums and modified time; local size, mtime and SHA-256). A file is downloaded again only when its Drive copy changed or another Drive item took its name. A local file edited since the last sync, or not written by it (including every existing file when the state file is missing or corrupt, unless its Drive SHA-256 matches), is not overwritten: it is listed under `conflicts` and the command exits `1` with reason `syncConflict` after printing the report. Pass `--overwrite` to replace such files with the Drive copy. Stopped by Ctrl-C or SIGTERM, it starts no further downloads, saves the state of the files already written and exits `130` / `143`, so the next run picks up where it stopped.
+`drive +sync` first checks that `--folder-id` is a folder you can read (a missing, unshared or non-folder ID is an error, not an empty mirror), then records what it mirrored in `<dir>/.gwsr-sync.json`, keyed by Drive file ID (Drive version, checksums and modified time; local size, mtime and SHA-256). A file is downloaded again only when its Drive copy changed or another Drive item took its name. A local file edited since the last sync, or not written by it (including every existing file when the state file is missing or corrupt, unless its Drive SHA-256 matches), is not overwritten: it is listed under `conflicts` and the command exits `1` with reason `syncConflict` after printing the report. Pass `--overwrite` to replace such files with the Drive copy. Stopped by Ctrl-C or SIGTERM, it starts no further downloads, saves the state of the files already written and exits `130` / `143`, so the next run picks up where it stopped. A run holds `<dir>/.gwsr-sync.lock` while it works; a second `+sync` into the same directory meanwhile is refused (exit `3`) before it touches anything.
 
 ```bash
 gwsr gmail +send --to alice@example.com --subject 'Hello' --body 'Hi Alice' --attach report.pdf
