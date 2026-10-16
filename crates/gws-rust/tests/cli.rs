@@ -984,6 +984,25 @@ fn invalid_config_is_a_loud_config_error() {
         .stderr(predicate::str::contains("\"configError\""));
 }
 
+/// An invalid `profile` key used to load whenever `GWSR_PROFILE` overrode
+/// it or the command needed no credentials; every other key fails at load.
+#[test]
+fn invalid_config_profile_fails_even_when_overridden_or_unused() {
+    let env = Env::new();
+    env.write_config("profile = \"Bad Name\"\n");
+    for extra in [&[][..], &[("GWSR_PROFILE", "work")]] {
+        let mut cmd = env.cmd();
+        cmd.envs(extra.iter().copied());
+        cmd.args(["cache", "clear", "--dry-run"])
+            .assert()
+            .code(8)
+            .stdout("")
+            .stderr(predicate::str::contains("invalid profile"))
+            .stderr(predicate::str::contains("config.toml"))
+            .stderr(predicate::str::contains("\"configError\""));
+    }
+}
+
 #[test]
 fn auth_configuration_errors_exit_with_the_config_code() {
     let env = Env::new();
