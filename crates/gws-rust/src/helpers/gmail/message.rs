@@ -367,13 +367,31 @@ fn decode_text_body(
 
 /// The value of parameter `name` (case-insensitive) in a MIME header such as
 /// `text/plain; charset="iso-8859-1"`, unquoted. Semicolons inside quoted
-/// strings do not split parameters.
+/// strings do not split parameters, and RFC 822 comments outside quoted
+/// strings (`charset=iso-8859-1 (latin)`, RFC 2045 §5.1) are removed.
 fn content_type_param(header: &str, name: &str) -> Option<String> {
     let mut segments = Vec::new();
     let mut current = String::new();
     let mut in_quotes = false;
     let mut escaped = false;
+    let mut comment_depth = 0usize;
     for c in header.chars() {
+        if comment_depth > 0 {
+            match c {
+                _ if escaped => escaped = false,
+                '\\' => escaped = true,
+                '(' => comment_depth += 1,
+                ')' => {
+                    comment_depth -= 1;
+                    if comment_depth == 0 {
+                        // A comment separates tokens like white space.
+                        current.push(' ');
+                    }
+                }
+                _ => {}
+            }
+            continue;
+        }
         if escaped {
             current.push(c);
             escaped = false;
@@ -388,6 +406,7 @@ fn content_type_param(header: &str, name: &str) -> Option<String> {
                 in_quotes = !in_quotes;
                 current.push(c);
             }
+            '(' if !in_quotes => comment_depth = 1,
             ';' if !in_quotes => segments.push(std::mem::take(&mut current)),
             _ => current.push(c),
         }
@@ -1209,6 +1228,41 @@ mod tests {
             content_type_param("text/plain;charset=koi8-r", "charset").as_deref(),
             Some("koi8-r")
         );
+    }
+
+    /// RFC 822 comments in a Content-Type (RFC 2045 §5.1) are not part of a
+    /// parameter value, and a `;` inside one does not split parameters.
+    #[test]
+    fn test_content_type_param_ignores_comments() {
+        for ct in [
+            "text/plain; charset=iso-8859-1 (latin)",
+            "text/plain; charset=iso-8859-1(latin)",
+            "text/plain; charset=(Western; European) iso-8859-1",
+            "text/plain (body; plain); charset=\"iso-8859-1\" (latin (1))",
+            "text/plain; charset = iso-8859-1 (a \\) b)",
+        ] {
+            assert_eq!(
+                content_type_param(ct, "charset").as_deref(),
+                Some("iso-8859-1"),
+                "{ct}"
+            );
+        }
+        // Parentheses inside a quoted string are not a comment.
+        assert_eq!(
+            content_type_param(r#"text/plain; name="a (1).txt""#, "name").as_deref(),
+            Some("a (1).txt")
+        );
+        assert_eq!(
+            content_type_param("text/plain; charset=(x)", "charset"),
+            None
+        );
+
+        let payload = json!({
+            "mimeType": "text/plain",
+            "headers": [{ "name": "Content-Type", "value": "text/plain; charset=iso-8859-1 (latin)" }],
+            "body": { "data": URL_SAFE.encode(b"caf\xe9") }
+        });
+        assert_eq!(extract_plain_text_body(&payload).unwrap(), "caf\u{e9}");
     }
 
     #[test]
