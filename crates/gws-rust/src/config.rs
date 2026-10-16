@@ -528,12 +528,10 @@ log_file = '{ABS_LOG_DIR}'
             load_config_file(&path).map(|_| ()),
             set_profile_in(&path, "work"),
         ] {
-            match result {
-                Err(GwsError::Config(msg)) => {
-                    assert!(msg.contains("writable by group or others"));
-                }
-                other => panic!("expected a config error, got {other:?}"),
-            }
+            assert!(
+                matches!(&result, Err(GwsError::Config(msg)) if msg.contains("writable by group or others")),
+                "expected a config error refusing the shared file"
+            );
         }
         assert_eq!(
             std::fs::read_to_string(&path).unwrap(),
