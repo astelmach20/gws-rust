@@ -40,7 +40,7 @@ use std::path::PathBuf;
 use std::sync::OnceLock;
 use std::time::Duration;
 
-use gws_rust_core::validate::{EndpointPolicy, PathPolicy};
+use gws_rust_core::validate::{EndpointPolicy, PathPolicy, hide_url_credentials};
 use reqwest::Url;
 use secrecy::SecretString;
 
@@ -316,7 +316,11 @@ impl Env {
             let shown = if entry.secret {
                 format!("{} (value hidden)", entry.name)
             } else {
-                format!("{}={:?}", entry.name, raw.to_string_lossy())
+                format!(
+                    "{}={:?}",
+                    entry.name,
+                    hide_url_credentials(&raw.to_string_lossy())
+                )
             };
             format!(
                 "invalid environment variable {shown}: {problem}; expected {}",
@@ -787,6 +791,32 @@ mod tests {
             let error = GwsError::Config(message);
             assert_eq!(error.exit_code(), 8);
         }
+    }
+
+    /// A rejected URL is echoed in the error, but never the password in it.
+    #[test]
+    fn rejected_url_value_does_not_echo_its_credentials() {
+        for value in [
+            "https://user:FAKE-pass@proxy.example/",
+            "https://user:FAKE-pass@proxy.example:notaport/",
+            "http://FAKE-pass@proxy.example/x?y=@z",
+        ] {
+            let message = err(&[("GWSR_API_BASE_URL", value)]);
+            assert!(message.contains("GWSR_API_BASE_URL"), "{message}");
+            assert!(!message.contains("FAKE-pass"), "{message}");
+            assert!(message.contains("***@proxy.example"), "{message}");
+        }
+        assert_eq!(
+            hide_url_credentials("https://proxy.example/a@b"),
+            "https://proxy.example/a@b"
+        );
+        assert_eq!(hide_url_credentials("bogus!!"), "bogus!!");
+        // The trust check's message for an unparseable URL hides them too.
+        let policy = EndpointPolicy::with_override("https://proxy.example/").unwrap();
+        let e = policy
+            .check("https://user:FAKE-pass@proxy.example:notaport/x")
+            .unwrap_err();
+        assert!(!e.to_string().contains("FAKE-pass"), "{e}");
     }
 
     #[test]
