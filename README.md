@@ -315,6 +315,8 @@ The fields are `code`, `message`, `reason` and `retryable`, plus `hint` when the
 
 Exit code 5 also covers internal programming errors, such as a command reading an argument it doesn't define.
 
+`events +renew --all` renews each subscription on its own and reports every failure. When any renewal fails (reason `renewPartialFailure`), it exits `6` if every failure was retryable, so running it again can succeed, and `1` as soon as one failure is permanent, because retrying won't fix that one.
+
 ### Logging
 
 stderr log lines are JSON objects, unless `-v` is given or the output format is human. The default level is warnings and errors. Precedence: `-v`/`-vv`/`-vvv` or `-q` > `GWSR_LOG` (a filter such as `gwsr=debug`) > `RUST_LOG` > `log` in `config.toml`. `GWSR_LOG_FILE` (or `log_file`) names a directory that receives daily `gwsr.log.YYYY-MM-DD` JSON files at debug level (directory `0700`, including an existing one, files `0600`). Progress messages appear only with `-v`.
@@ -413,7 +415,7 @@ One confirmation gate covers generated methods, `gwsr batch` and every helper.
 
 | Class | What | Gated |
 |---|---|---|
-| **Destructive** | Any `DELETE` method; `gmail.users.messages.batchDelete`, `calendar.calendars.clear`, `people.people.batchDeleteContacts`, `tasks.tasks.clear`, `drive.files.emptyTrash`; `calendar +delete`, `sheets +clear`, `script +push`, `gmail +filter delete`, `admin +user-suspend`; `drive +share` for owner transfer or writer-level access for a whole domain or anyone with the link | Always |
+| **Destructive** | Any `DELETE` method; `gmail.users.messages.batchDelete`, `calendar.calendars.clear`, `people.people.batchDeleteContacts`, `tasks.tasks.clear`, `drive.files.emptyTrash`, `admin.customers.chrome.printers.batchDeletePrinters`, `admin.customers.chrome.printServers.batchDeletePrintServers`, `cloudidentity.devices.wipe`, `cloudidentity.devices.deviceUsers.wipe`; `calendar +delete`, `sheets +clear`, `script +push`, `gmail +filter delete`, `admin +user-suspend`; `drive +share` for owner transfer or writer-level access for a whole domain or anyone with the link | Always |
 | **Outbound** | Actions that notify or grant access to other people, or run code: `gmail +send/+reply/+reply-all/+forward` (not `--draft`), `gmail +unsubscribe`, `gmail +filter create --forward`, `chat +send`, `drive +share`, `calendar +insert` with attendees, `+update`, `+rsvp`, `script +run`, `admin +group-add-member`, `admin +user-suspend --unsuspend`, `workflow +file-announce`; the methods `gmail.users.messages.send`, `gmail.users.drafts.send`, `chat.spaces.messages.create`, `drive.permissions.create`, `drive.permissions.update`, `script.scripts.run`, `directory.members.insert`, `calendar.acl.insert`/`update`/`patch`, `gmail.users.settings.delegates.create`, `gmail.users.settings.updateAutoForwarding`, `gmail.users.settings.forwardingAddresses.create`, `gmail.users.settings.sendAs.create`, `gmail.users.settings.filters.create`, and `calendar.events.insert`/`update`/`patch`/`move`/`quickAdd` when `sendUpdates` is `all`/`externalOnly` or `sendNotifications` is `true` (directly or in `gwsr batch`) | Only when `GWSR_REQUIRE_CONFIRM=1` |
 
 A gated action proceeds without a prompt when `--yes`/`-y` or `--dry-run` is given. On a terminal it asks. Without a terminal it is refused with exit code `7` (`"reason":"confirmationRequired"`) and nothing is sent. Agents should ask the user, then re-run with `--yes`. `GWSR_REQUIRE_CONFIRM` accepts `1`/`true`/`yes`/`on` or `0`/`false`/`no`/`off`; any other value fails every command at startup with a configuration error (exit `8`).
@@ -462,7 +464,7 @@ gwsr events +subscribe --target //chat.googleapis.com/spaces/SPACE_ID --event-ty
 
 Helper flag conventions: IDs are `--<noun>-id` (`--document-id`, `--spreadsheet-id`, `--calendar-id`, `--message-id`, `--space-id`, `--script-id`). People and groups are `--email`, `--user`, `--group`, `--member`. Local output is `--output PATH` (`-` for stdout) and never overwrites an existing file without `--overwrite`. Result counts use `--limit N`, except `gmail +search` and `gmail +triage`, which take `--max N`.
 
-Calendar helpers interpret times without a UTC offset in `--timezone`, falling back to your Google account's time zone. It is fetched from the Calendar settings API and cached for 24 hours in the cache directory, separately for each profile, credentials file and `--impersonate` user (never for `GWSR_TOKEN`/`GWSR_TOKEN_FILE`). A date-only `--start` creates an all-day event. `calendar +insert` emails attendees by default (`--send-updates all`).
+Calendar helpers interpret times without a UTC offset in `--timezone`, falling back to your Google account's time zone. It is fetched from the Calendar settings API and cached for 24 hours in the cache directory, separately for each profile, credentials file and `--impersonate` user (never for `GWSR_TOKEN`/`GWSR_TOKEN_FILE`). A date-only `--start` creates an all-day event. `calendar +insert` emails attendees by default (`--send-updates all`). `calendar +freebusy` fails when any requested calendar can't be queried, naming each one: it exits `6` (retry later) only when every failure is a transient Google error (`backendError`, `internalError`), and `3` as soon as one calendar is unavailable for another reason, such as `notFound`, because retrying won't fix that one.
 
 `gmail +watch` and `events +subscribe` stream NDJSON on stdout; `--jq` and `--format` apply to each record. Transient failures (the retryable API errors that exit `6`, such as 429, 503 or a 403 rate limit, and network errors) back off with jitter, up to `--max-failures N` consecutive failures (default 10). Pub/Sub messages are acknowledged only after they are written.
 
@@ -482,6 +484,7 @@ gwsr gmail users messages get --params '{"userId":"me","id":"MSG"}' \
 
 - **`warn`:** output is printed. A match or a sanitization failure adds a `_sanitization` annotation and a warning on stderr.
 - **`block`:** fails closed. A match prints nothing on stdout and exits `11` (`sanitizationBlocked`). If Model Armor can't be reached, the output is still withheld and the exit code is the cause's own (auth `2`, network `10`, API `1` or `6`).
+- Only `MATCH_FOUND`, or `NO_MATCH_FOUND` with every filter run (`invocationResult: SUCCESS`), is a verdict. A result whose filters were skipped or failed (`PARTIAL`, `FAILURE`) or whose match state is unspecified is a sanitization failure: withheld in `block` mode, annotated in `warn` mode.
 - The template name is parsed strictly, and the request always goes to `modelarmor.<location>.rep.googleapis.com`.
 
 `--sanitize` applies to generated methods and to the helpers that return user content (for example `gmail +read`, `+search`, `+triage`, `+watch`, `events +subscribe`, the `workflow` helpers, and the app helpers). Every `gmail` helper screens its printed result, except `+attachments`, which rejects `--sanitize` because binary files cannot be scanned, and the helpers that send or create something:
@@ -489,6 +492,8 @@ gwsr gmail users messages get --params '{"userId":"me","id":"MSG"}' \
 - `gmail +send`, `+reply`, `+reply-all` and `+forward` (including `--draft`) screen the outgoing subject and body, quoted or forwarded text included, **before** sending. `+filter create` screens the new filter before creating it, and `+unsubscribe` screens the unsubscribe URL before the one-click POST.
 - In `block` mode a match (exit `11`) or a Model Armor failure (the cause's exit code) sends or creates nothing. In `warn` mode the action goes ahead after a warning on stderr, and the printed result carries the `_sanitization` annotation.
 - `--dry-run` never calls Model Armor; it prints the planned request unscreened.
+
+If a response labelled JSON doesn't parse, the error normally quotes the first 200 bytes of it. With `--sanitize` set, in either mode, the error withholds the content instead, because it was never screened.
 
 `gwsr modelarmor +create-template --project my-project --location us-central1 --template-id my-tmpl --preset jailbreak` creates a template from the built-in preset.
 

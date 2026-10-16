@@ -84,6 +84,25 @@ pub(super) async fn emit_screened(
     crate::output::emit(&crate::formatter::format_value(&value, format)?)
 }
 
+/// [`emit_screened`] for the result of a helper that changed the mailbox
+/// (labels, trash, a deleted filter). If screening withholds the result,
+/// the error says the change was made, so it is not mistaken for a refusal.
+pub(super) async fn emit_applied(
+    sanitize: &crate::helpers::modelarmor::SanitizeConfig,
+    format: &crate::formatter::OutputFormat,
+    value: serde_json::Value,
+) -> Result<(), GwsError> {
+    use crate::helpers::modelarmor::{note_applied_write, require_pass, sanitize_value};
+    let screened = match sanitize_value(sanitize, value.clone())
+        .await
+        .and_then(require_pass)
+    {
+        Ok(v) => v,
+        Err(e) => return Err(note_applied_write(e, &value)),
+    };
+    crate::output::emit(&crate::formatter::format_value(&screened, format)?)
+}
+
 pub struct GmailHelper;
 
 /// Read/write scope used for fetching messages and sending/drafting.

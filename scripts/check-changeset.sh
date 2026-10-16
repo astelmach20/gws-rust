@@ -15,14 +15,31 @@ base="$1"
 
 status=0
 
-# 1. No generated google-* registry crates. Path dependencies (our own crates) are fine.
-for manifest in crates/*/Cargo.toml; do
-  if offending="$(grep -En '^google-[A-Za-z0-9_-]+[[:space:]]*=' "$manifest" | grep -v 'path[[:space:]]*=')"; then
-    while IFS= read -r line; do
-      echo "::error file=${manifest},line=${line%%:*}::Generated google-* crates are not allowed; the CLI builds its commands from Discovery documents at runtime."
-    done <<<"$offending"
+# 1. No generated google-* registry crates, in any form Cargo accepts: `google-x = ...`,
+#    `google-x.workspace = true`, a `[dependencies.google-x]` table, a rename via
+#    `package = "google-x"`, or a `[workspace.dependencies]` entry in the root manifest.
+#    Inline path dependencies (our own crates) are fine. Prints the offending line numbers.
+# shellcheck disable=SC2016 # the single-quoted program is awk, not shell
+google_crates_awk='
+  { sub(/\r$/, "") }
+  /^[[:space:]]*\[/ {
+    header = $0
+    sub(/#.*/, "", header)
+    gsub(/[[:space:]"'\'']/, "", header)
+    in_deps = (header ~ /(^\[|\.)(dev-|build-)?dependencies\]$/)
+    if (header ~ /(^\[|\.)(dev-|build-)?dependencies\.google-[A-Za-z0-9_-]+\]$/) print FNR
+    next
+  }
+  in_deps && /^[[:space:]]*["'\'']?google-[A-Za-z0-9_-]+["'\'']?[[:space:]]*[.=]/ && !/path[[:space:]]*=/ { print FNR; next }
+  /(^|[{,[:space:]])package[[:space:]]*=[[:space:]]*["'\'']google-/ { print FNR }
+'
+for manifest in Cargo.toml crates/*/Cargo.toml; do
+  [[ -f "$manifest" ]] || continue
+  offending="$(awk "$google_crates_awk" "$manifest")"
+  for line in $offending; do
+    echo "::error file=${manifest},line=${line}::Generated google-* crates are not allowed; the CLI builds its commands from Discovery documents at runtime."
     status=1
-  fi
+  done
 done
 
 merge_base="$(git merge-base "$base" HEAD)"

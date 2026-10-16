@@ -89,13 +89,14 @@ fn plan(api: &GmailApi, targets: &Targets, add: &[String], remove: &[String]) ->
     requests
 }
 
+/// Print the summary of a change that was made (labels, archive, trash).
 async fn print(
     value: Value,
     matches: &ArgMatches,
     sanitize: &crate::helpers::modelarmor::SanitizeConfig,
 ) -> Result<(), GwsError> {
     let format = crate::helpers::http::output_format(matches)?;
-    super::emit_screened(sanitize, &format, value).await
+    super::emit_applied(sanitize, &format, value).await
 }
 
 /// An unauthenticated client used only to render dry-run URLs.

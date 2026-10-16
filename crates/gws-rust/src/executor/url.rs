@@ -75,7 +75,22 @@ pub(crate) fn path_template(method: &RestMethod) -> &str {
     }
 }
 
-/// Build the URL and query parameters for `method`.
+/// Whether responses are JSON only when asked for with `alt=json`: the
+/// document's `alt` parameter offers `json` but defaults to something else
+/// (the Groups Settings API defaults to Atom XML).
+fn json_needs_alt(doc: &RestDescription) -> bool {
+    doc.parameters.get("alt").is_some_and(|alt| {
+        alt.default.as_deref().is_some_and(|d| d != "json")
+            && alt
+                .enum_values
+                .as_ref()
+                .is_some_and(|e| e.iter().any(|v| v == "json"))
+    })
+}
+
+/// Build the URL and query parameters for `method`. When the document's
+/// default response format is not JSON, `alt=json` is added unless the
+/// caller chose an `alt`.
 pub(crate) fn build_url(
     doc: &RestDescription,
     method: &RestMethod,
@@ -106,6 +121,9 @@ pub(crate) fn build_url(
             }
             other => query.push((key.clone(), scalar_to_string(other))),
         }
+    }
+    if !params.contains_key("alt") && json_needs_alt(doc) {
+        query.push(("alt".to_string(), "json".to_string()));
     }
 
     let url =
@@ -263,6 +281,35 @@ mod tests {
         let u = build_url(&doc, &m, &params, UrlTarget::Method, &google()).unwrap();
         assert_eq!(u.url, "https://api.googleapis.com/files/123");
         assert_eq!(u.query, vec![("q".to_string(), "search term".to_string())]);
+    }
+
+    /// The Groups Settings API answers in Atom XML unless asked for JSON.
+    #[test]
+    fn asks_for_json_when_the_default_format_is_not_json() {
+        let alt = |default: &str| MethodParameter {
+            location: Some("query".to_string()),
+            default: Some(default.to_string()),
+            enum_values: Some(vec!["atom".to_string(), "json".to_string()]),
+            ..Default::default()
+        };
+        let mut doc = doc_with_base("https://www.googleapis.com/groups/v1/groups/");
+        doc.parameters.insert("alt".into(), alt("atom"));
+        let m = method("{groupUniqueId}", path_params(&["groupUniqueId"]));
+        let mut params = Map::new();
+        params.insert("groupUniqueId".into(), json!("eng@example.com"));
+        let u = build_url(&doc, &m, &params, UrlTarget::Method, &google()).unwrap();
+        assert_eq!(u.query, vec![("alt".to_string(), "json".to_string())]);
+
+        // An explicit alt is the caller's choice.
+        params.insert("alt".into(), json!("atom"));
+        let u = build_url(&doc, &m, &params, UrlTarget::Method, &google()).unwrap();
+        assert_eq!(u.query, vec![("alt".to_string(), "atom".to_string())]);
+        params.remove("alt");
+
+        // Documents that already default to JSON are left alone.
+        doc.parameters.insert("alt".into(), alt("json"));
+        let u = build_url(&doc, &m, &params, UrlTarget::Method, &google()).unwrap();
+        assert!(u.query.is_empty(), "{:?}", u.query);
     }
 
     #[test]
