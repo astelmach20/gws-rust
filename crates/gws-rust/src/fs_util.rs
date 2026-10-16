@@ -216,10 +216,27 @@ fn still_at_path(file: &File, path: &Path) -> io::Result<bool> {
     }
 }
 
-/// Windows exposes no stable file identity to compare. Deleting a lock file
-/// another process holds open only marks it delete-pending there, and a
-/// later open of the path fails loudly instead of locking an orphan.
-#[cfg(not(unix))]
+/// Whether `path` still names the file `file` has open (same volume and file
+/// index). A missing path means the file was deleted.
+///
+/// On current Windows (10 1903 and later, Server 2019 and later) deleting a
+/// file that other processes hold open uses POSIX semantics on NTFS: the
+/// name disappears at once, so the next open of the path creates a new
+/// file, exactly as on Unix. (Where deletion only marks the file
+/// delete-pending, opening the path fails with "access denied", which is
+/// reported as an error.)
+#[cfg(windows)]
+fn still_at_path(file: &File, path: &Path) -> io::Result<bool> {
+    let open = same_file::Handle::from_file(file.try_clone()?)?;
+    match same_file::Handle::from_path(path) {
+        Ok(named) => Ok(open == named),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(e),
+    }
+}
+
+/// Other platforms: no file identity to compare.
+#[cfg(not(any(unix, windows)))]
 fn still_at_path(_file: &File, _path: &Path) -> io::Result<bool> {
     Ok(true)
 }
@@ -240,7 +257,6 @@ mod tests {
     use super::*;
     use std::fs;
 
-    #[cfg(unix)]
     #[test]
     fn lock_waiter_does_not_keep_a_lock_on_a_deleted_file() {
         let dir = tempfile::tempdir().unwrap();
@@ -255,7 +271,16 @@ mod tests {
         // third process locking the path is excluded.
         fs::remove_file(&path).unwrap();
         drop(holder);
-        let waiter = waiter.join().unwrap().unwrap();
+        let waiter = match waiter.join().unwrap() {
+            Ok(waiter) => waiter,
+            // Without POSIX delete semantics (old Windows, or a file system
+            // other than NTFS) the deleted file stays delete-pending while
+            // the waiter has it open, and reopening the path is refused:
+            // a loud error, never a lock on the orphan.
+            #[cfg(windows)]
+            Err(e) if e.kind() == io::ErrorKind::PermissionDenied => return,
+            Err(e) => panic!("{e}"),
+        };
         assert!(path.exists(), "the waiter recreated the lock file");
         let third = FileLock::acquire(&path, Duration::from_millis(200)).unwrap_err();
         assert_eq!(third.kind(), io::ErrorKind::TimedOut, "{third}");
