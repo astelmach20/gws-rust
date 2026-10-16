@@ -639,13 +639,15 @@ async fn download(
     output: Option<&str>,
     overwrite: bool,
 ) -> Result<Value, GwsError> {
+    // A dry run plans the metadata read too, so the plan lists every request
+    // a real run sends; the file's name and type are unknown.
+    let meta = get_metadata(api, file_id).await?;
     let (name, target) = if api.is_dry_run() {
         (
             "<file name>".to_string(),
             resolve_target(output, "download", None, overwrite)?,
         )
     } else {
-        let meta = get_metadata(api, file_id).await?;
         let mime = str_field(&meta, "mimeType")?;
         if mime.starts_with("application/vnd.google-apps.") {
             return Err(native_download_error(&meta, file_id, mime)?);
@@ -881,10 +883,11 @@ async fn export(
     overwrite: bool,
 ) -> Result<Value, GwsError> {
     let format = export_format(to)?;
+    // A dry run plans the metadata read too; the file's name is unknown.
+    let meta = get_metadata(api, file_id).await?;
     let name = if api.is_dry_run() {
         "export".to_string()
     } else {
-        let meta = get_metadata(api, file_id).await?;
         let mime = str_field(&meta, "mimeType")?;
         if mime == SHORTCUT {
             let target = shortcut_target(&meta, file_id)?;
@@ -2271,14 +2274,41 @@ mod tests {
         let api = dry_api("drive/v3/");
         export(&api, "DOC1", "pdf", Some("-"), false).await.unwrap();
         let plan = api.planned();
-        assert_eq!(plan.len(), 1);
+        assert_eq!(plan.len(), 2, "{plan:?}");
         assert!(
-            plan[0]["url"]
+            plan[1]["url"]
                 .as_str()
                 .unwrap()
                 .ends_with("/files/DOC1/export")
         );
-        assert_eq!(plan[0]["query_params"]["mimeType"], "application/pdf");
+        assert_eq!(plan[1]["query_params"]["mimeType"], "application/pdf");
+    }
+
+    /// A real `+download` / `+export` reads the file's metadata before the
+    /// content request; the dry-run plan lists that GET first.
+    #[tokio::test]
+    async fn download_and_export_dry_runs_plan_the_metadata_read() {
+        let dl = dry_api("drive/v3/");
+        download(&dl, "F1", Some("-"), false).await.unwrap();
+        let ex = dry_api("drive/v3/");
+        export(&ex, "F1", "pdf", Some("-"), false).await.unwrap();
+        for (plan, content_suffix) in [
+            (dl.planned(), "/files/F1"),
+            (ex.planned(), "/files/F1/export"),
+        ] {
+            assert_eq!(plan.len(), 2, "{plan:?}");
+            assert_eq!(plan[0]["method"], "GET", "{plan:?}");
+            assert!(
+                plan[0]["url"].as_str().unwrap().ends_with("/files/F1"),
+                "{plan:?}"
+            );
+            assert_eq!(plan[0]["query_params"]["fields"], FILE_FIELDS, "{plan:?}");
+            assert!(
+                plan[1]["url"].as_str().unwrap().ends_with(content_suffix),
+                "{plan:?}"
+            );
+        }
+        assert_eq!(dl.planned()[1]["query_params"]["alt"], "media");
     }
 
     #[tokio::test]
