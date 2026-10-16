@@ -334,19 +334,25 @@ fn renew_report(reactivate: bool, renewed: Vec<Value>, failed: Vec<Value>) -> Va
     json!({ "action": if reactivate { "reactivate" } else { "renew" }, "renewed": renewed, "failed": failed })
 }
 
+/// The `--dry-run` plan: what [`run`] would do. A named subscription is
+/// renewed directly, so only `--all` lists subscriptions with a filter
+/// (`--event-types` then only selects the OAuth scope).
+fn dry_run_plan(config: &RenewConfig) -> Value {
+    json!({
+        "dry_run": true,
+        "action": if config.reactivate { "reactivate" } else { "renew (ttl=0s: maximum lifetime)" },
+        "subscription": config.subscription,
+        "filter": config.all.then(|| list_filter(&config.event_types)),
+        "withinSeconds": (config.all && !config.reactivate).then_some(config.within_secs),
+        "state": (config.all && config.reactivate).then_some("SUSPENDED"),
+    })
+}
+
 /// Handles the `+renew` command.
 pub(super) async fn handle_renew(matches: &ArgMatches) -> Result<(), GwsError> {
     let config = parse_renew_args(matches)?;
     if crate::args::dry_run(matches)? {
-        let plan = json!({
-            "dry_run": true,
-            "action": if config.reactivate { "reactivate" } else { "renew (ttl=0s: maximum lifetime)" },
-            "subscription": config.subscription,
-            "filter": (!config.event_types.is_empty()).then(|| list_filter(&config.event_types)),
-            "withinSeconds": (config.all && !config.reactivate).then_some(config.within_secs),
-            "state": (config.all && config.reactivate).then_some("SUSPENDED"),
-        });
-        return crate::helpers::http::print_value(matches, &plan);
+        return crate::helpers::http::print_value(matches, &dry_run_plan(&config));
     }
     let scopes = if config.event_types.is_empty() {
         ALL_EVENT_SCOPES.to_vec()
@@ -456,6 +462,34 @@ mod tests {
                 .is_err(),
             "--name was removed"
         );
+    }
+
+    /// The dry-run plan names a list filter only when `run` lists: with
+    /// `--subscription-id`, `--event-types` just selects the OAuth scope.
+    #[test]
+    fn dry_run_plan_lists_a_filter_only_for_all() {
+        const CHAT: &str = "google.workspace.chat.message.v1.created";
+        let single = dry_run_plan(
+            &parse_renew_args(&events_matches(&[
+                "+renew",
+                "--subscription-id",
+                "S1",
+                "--event-types",
+                CHAT,
+            ]))
+            .unwrap(),
+        );
+        assert_eq!(single["subscription"], "subscriptions/S1");
+        assert_eq!(single["filter"], Value::Null, "{single}");
+        assert_eq!(single["withinSeconds"], Value::Null, "{single}");
+
+        let all = dry_run_plan(
+            &parse_renew_args(&events_matches(&["+renew", "--all", "--event-types", CHAT]))
+                .unwrap(),
+        );
+        assert_eq!(all["subscription"], Value::Null);
+        assert_eq!(all["filter"], format!("event_types:\"{CHAT}\""), "{all}");
+        assert_eq!(all["withinSeconds"], 3600, "{all}");
     }
 
     #[test]
