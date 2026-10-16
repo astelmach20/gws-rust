@@ -445,12 +445,13 @@ pub(crate) fn is_timeout(err: &GwsError) -> bool {
         return false;
     };
     let root: &(dyn std::error::Error + 'static) = e.as_ref();
+    // A connect timeout is a connection that could not be made: the request
+    // was never sent, so it is not "no response within the timeout".
+    let no_response = |e: &reqwest::Error| e.is_timeout() && !e.is_connect();
     std::iter::successors(Some(root), |e| e.source()).any(|e| match e.downcast_ref::<SendError>() {
         Some(SendError::Timeout { .. }) => true,
-        Some(SendError::Transport { source, .. }) => source.is_timeout(),
-        _ => e
-            .downcast_ref::<reqwest::Error>()
-            .is_some_and(reqwest::Error::is_timeout),
+        Some(SendError::Transport { source, .. }) => no_response(source),
+        _ => e.downcast_ref::<reqwest::Error>().is_some_and(no_response),
     })
 }
 
@@ -566,6 +567,41 @@ mod tests {
         assert_eq!(err.exit_code(), GwsError::EXIT_CODE_NETWORK);
         assert!(err.to_string().starts_with("get x"), "{err}");
         assert!(!is_timeout(&err));
+    }
+
+    /// A Pub/Sub pull that times out means "no messages yet", but a connect
+    /// timeout means the host could not be reached and nothing was sent: it
+    /// must surface as a network error, not as an empty pull.
+    #[tokio::test]
+    async fn connect_timeout_is_not_a_response_timeout() {
+        struct NeverResolves;
+        impl reqwest::dns::Resolve for NeverResolves {
+            fn resolve(&self, _: reqwest::dns::Name) -> reqwest::dns::Resolving {
+                Box::pin(std::future::pending())
+            }
+        }
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .dns_resolver(std::sync::Arc::new(NeverResolves))
+            .connect_timeout(Duration::from_millis(20))
+            .build()
+            .unwrap();
+        let policy = gws_rust_core::client::RetryPolicy {
+            max_attempts: 1,
+            response_timeout: Some(Duration::from_secs(5)),
+            ..Default::default()
+        };
+        let err = gws_rust_core::client::send(&policy, Idempotency::Idempotent, || {
+            client.get("http://pubsub.invalid/v1/x")
+        })
+        .await
+        .unwrap_err();
+        let gws = GwsError::from(err);
+        assert!(matches!(gws, GwsError::Network(_)), "{gws:?}");
+        assert!(
+            !is_timeout(&gws),
+            "a connect timeout read as no response: {gws}"
+        );
     }
 
     #[tokio::test]
