@@ -323,7 +323,9 @@ fn decode_text_body(
     let decoded = decode_base64url(data).map_err(|e| {
         GwsError::other(format!("{mime_label} body has invalid base64url data: {e}"))
     })?;
-    let charset = content_type.and_then(|ct| content_type_param(ct, "charset"));
+    let charset = content_type
+        .and_then(|ct| content_type_param(ct, "charset"))
+        .map(resolve_charset_alias);
     let encoding = match charset.as_deref() {
         // US-ASCII is a subset of UTF-8. (encoding_rs maps the label to
         // windows-1252, which would garble UTF-8 text mislabeled as ASCII.)
@@ -359,6 +361,69 @@ fn decode_text_body(
         );
     }
     Ok(text.into_owned())
+}
+
+/// Charset names mail clients send that are not WHATWG labels, so
+/// encoding_rs does not know them, mapped to a label it does know. Mostly
+/// Windows code page names (`cp932`) and spellings like `latin-1`.
+/// Code pages encoding_rs has no decoder for (`cp437`, `cp850`, `johab`,
+/// `utf-7`) are left out and stay unknown, with a warning.
+const CHARSET_ALIASES: &[(&str, &str)] = &[
+    ("cp932", "shift_jis"),
+    ("windows-932", "shift_jis"),
+    ("cp936", "gbk"),
+    ("ms936", "gbk"),
+    ("windows-936", "gbk"),
+    ("cp949", "euc-kr"),
+    ("ms949", "euc-kr"),
+    ("uhc", "euc-kr"),
+    ("x-windows-949", "euc-kr"),
+    ("ks_c_5601", "euc-kr"),
+    ("euckr", "euc-kr"),
+    ("cp950", "big5"),
+    ("ms950", "big5"),
+    ("windows-950", "big5"),
+    ("cp874", "windows-874"),
+    ("ms874", "windows-874"),
+    ("eucjp", "euc-jp"),
+    ("cp20932", "euc-jp"),
+    ("cp51932", "euc-jp"),
+    ("cp50220", "iso-2022-jp"),
+    ("cp50221", "iso-2022-jp"),
+    ("cp50222", "iso-2022-jp"),
+    ("cp54936", "gb18030"),
+    ("cp20866", "koi8-r"),
+    ("koi8r", "koi8-r"),
+    ("cp21866", "koi8-u"),
+    ("cp10000", "macintosh"),
+    ("cp1200", "utf-16le"),
+    ("cp1201", "utf-16be"),
+    ("cp65001", "utf-8"),
+    ("cp20127", "us-ascii"),
+    ("latin-1", "iso-8859-1"),
+    ("latin9", "iso-8859-15"),
+    ("latin-9", "iso-8859-15"),
+    ("cp28591", "iso-8859-1"),
+    ("cp28592", "iso-8859-2"),
+    ("cp28593", "iso-8859-3"),
+    ("cp28594", "iso-8859-4"),
+    ("cp28595", "iso-8859-5"),
+    ("cp28596", "iso-8859-6"),
+    ("cp28597", "iso-8859-7"),
+    ("cp28598", "iso-8859-8"),
+    ("cp28599", "iso-8859-9"),
+    ("cp28603", "iso-8859-13"),
+    ("cp28605", "iso-8859-15"),
+];
+
+/// The label encoding_rs knows for a charset alias in [`CHARSET_ALIASES`]
+/// (case-insensitive), or `label` unchanged.
+fn resolve_charset_alias(label: String) -> String {
+    let trimmed = label.trim();
+    CHARSET_ALIASES
+        .iter()
+        .find(|(alias, _)| alias.eq_ignore_ascii_case(trimmed))
+        .map_or(label, |(_, canonical)| (*canonical).to_string())
 }
 
 /// The value of parameter `name` (case-insensitive) in a MIME header such as
@@ -1121,6 +1186,47 @@ mod tests {
                 extract_plain_text_body(&payload).unwrap(),
                 "Hi caf\u{e9}",
                 "{ct}: {bytes:02X?}"
+            );
+        }
+    }
+
+    /// Common charset aliases that are not WHATWG labels (Windows code page
+    /// names and the like) decode in the charset they name, not as UTF-8.
+    #[test]
+    fn test_charset_aliases_unknown_to_whatwg_are_decoded() {
+        for (charset, bytes, text) in [
+            ("cp932", b"\x93\xfa\x96\x7b".as_slice(), "\u{65e5}\u{672c}"),
+            ("CP936", b"\xc4\xe3\xba\xc3", "\u{4f60}\u{597d}"),
+            ("cp949", b"\xc7\xd1\xb1\xdb", "\u{d55c}\u{ae00}"),
+            ("cp950", b"\xa4\xa4\xa4\xe5", "\u{4e2d}\u{6587}"),
+            ("cp874", b"\xa1", "\u{e01}"),
+            ("latin-1", b"caf\xe9", "caf\u{e9}"),
+            ("latin9", b"\xa4", "\u{20ac}"),
+            ("cp28605", b"\xa4", "\u{20ac}"),
+            ("cp65001", b"caf\xc3\xa9", "caf\u{e9}"),
+            ("cp20127", b"plain", "plain"),
+            ("koi8r", b"\xf0\xd2\xc9", "\u{41f}\u{440}\u{438}"),
+        ] {
+            let payload = json!({
+                "mimeType": "text/plain",
+                "headers": [{ "name": "Content-Type", "value": format!("text/plain; charset={charset}") }],
+                "body": { "data": URL_SAFE.encode(bytes) }
+            });
+            assert_eq!(
+                extract_plain_text_body(&payload).unwrap(),
+                text,
+                "{charset}"
+            );
+        }
+        // Every alias resolves to a label encoding_rs knows.
+        for (alias, canonical) in CHARSET_ALIASES {
+            assert!(
+                encoding_rs::Encoding::for_label(alias.as_bytes()).is_none(),
+                "{alias} is already a WHATWG label"
+            );
+            assert!(
+                encoding_rs::Encoding::for_label(canonical.as_bytes()).is_some(),
+                "{alias} -> {canonical}"
             );
         }
     }
