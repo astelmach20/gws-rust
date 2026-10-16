@@ -268,6 +268,19 @@ pub(crate) fn parse_calls<'a>(
             Some(Value::Object(m)) => m.clone(),
             Some(_) => return Err(at("\"params\" must be an object".to_string())),
         };
+        // Each part's body is decoded as JSON text: a media download
+        // (`alt=media`) or a binary format (`alt=proto`) would come back
+        // mangled, and Google does not serve media downloads in batches.
+        match params.get("alt") {
+            None | Some(Value::Null) => {}
+            Some(Value::String(alt)) if alt == "json" => {}
+            Some(alt) => {
+                return Err(at(format!(
+                    "\"alt\": {alt} is not supported in batch requests, whose results are JSON; \
+                     run {name} as a separate command instead"
+                )));
+            }
+        }
         super::apply_shared_drive_default(method, &mut params);
         let body = obj.get("json").filter(|v| !v.is_null()).cloned();
         if body.is_some() && method.request.is_none() {
@@ -1073,6 +1086,37 @@ mod tests {
         assert!(accepted.is_empty(), "accepted ids: {accepted:?}");
         let ok = json!({"id": "row-1_a.b", "method": "files.get", "params": {"fileId": "1"}});
         assert!(parse_calls(&doc, &ok.to_string(), &opts()).is_ok());
+    }
+
+    /// A batch result is JSON text, and Google serves no media downloads in
+    /// a batch: `alt=media` (or another non-JSON `alt`) is refused before
+    /// anything is sent, instead of printing the file as a mangled string.
+    #[test]
+    #[serial_test::serial]
+    fn rejects_non_json_alt() {
+        let mut doc = drive_doc("https://www.googleapis.com/");
+        doc.parameters.insert(
+            "alt".into(),
+            MethodParameter {
+                location: Some("query".into()),
+                param_type: Some("string".into()),
+                enum_values: Some(vec!["json".into(), "media".into(), "proto".into()]),
+                ..Default::default()
+            },
+        );
+        for alt in ["media", "proto"] {
+            let line = json!({"method": "files.get", "params": {"fileId": "1", "alt": alt}});
+            let err = parse_calls(&doc, &line.to_string(), &opts())
+                .map(|c| format!("accepted: {}", c[0].path_and_query))
+                .unwrap_or_else(|e| e.to_string());
+            assert!(
+                err.contains("batch input line 1") && err.contains("not supported in batch"),
+                "{alt}: {err}"
+            );
+        }
+        let line = json!({"method": "files.get", "params": {"fileId": "1", "alt": "json"}});
+        let calls = parse_calls(&doc, &line.to_string(), &opts()).unwrap();
+        assert_eq!(calls[0].path_and_query, "/drive/v3/files/1?alt=json");
     }
 
     #[test]
