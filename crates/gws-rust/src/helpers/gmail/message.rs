@@ -439,6 +439,17 @@ pub(super) fn get_part_header<'a>(part: &'a Value, name: &str) -> Option<&'a str
         })
 }
 
+/// Whether `part`'s `Content-Disposition` is `attachment` (in any case, after
+/// any leading whitespace). The body walk and the file listing must agree on
+/// this, or a part is fetched as the body and listed as a file at once.
+fn disposition_is_attachment(part: &Value) -> bool {
+    get_part_header(part, "Content-Disposition").is_some_and(|d| {
+        d.trim_start()
+            .get(.."attachment".len())
+            .is_some_and(|word| word.eq_ignore_ascii_case("attachment"))
+    })
+}
+
 /// The attachment ID of a body text part whose bytes Gmail returns by
 /// reference instead of inline, which it does for large bodies.
 ///
@@ -457,11 +468,9 @@ fn referenced_body_attachment_id(part: &Value) -> Option<&str> {
         return None;
     }
     let filename = part.get("filename").and_then(Value::as_str).unwrap_or("");
-    let explicitly_attachment = get_part_header(part, "Content-Disposition")
-        .is_some_and(|d| d.to_ascii_lowercase().starts_with("attachment"));
     if !filename.is_empty()
         || get_part_header(part, "Content-ID").is_some()
-        || explicitly_attachment
+        || disposition_is_attachment(part)
     {
         return None;
     }
@@ -616,14 +625,7 @@ fn extract_payload_recursive(
     // the disposition decides between inline and attachment below. An
     // `attachment` disposition also makes an unnamed text part a file, not
     // the body.
-    let disposition_header = get_part_header(part, "Content-Disposition");
-    let explicitly_attachment = disposition_header
-        .map(|d| {
-            d.trim_start()
-                .to_ascii_lowercase()
-                .starts_with("attachment")
-        })
-        .unwrap_or(false);
+    let explicitly_attachment = disposition_is_attachment(part);
 
     // Primary signal: does this part have fetchable binary data?
     // A part is a file (attachment or inline image) when its bytes are fetchable
@@ -1363,6 +1365,47 @@ mod tests {
         // The embedded message's text is not fetched as this message's body;
         // it stays a downloadable part, like the embedded message's other files.
         assert_eq!(ids, vec![Some("LOG"), Some("INNER"), Some("FILE")]);
+    }
+
+    /// A text part marked as an attachment is a file, not a body Gmail
+    /// returned by reference, however the disposition is spaced or cased:
+    /// the body walk must agree with the file listing, or the attachment's
+    /// bytes are fetched and read as the message body.
+    #[test]
+    fn test_spaced_attachment_disposition_is_not_fetched_as_the_body() {
+        for value in [
+            " attachment",
+            "\tATTACHMENT; filename=\"log.txt\"",
+            "Attachment",
+        ] {
+            let mut payload = json!({
+                "mimeType": "multipart/mixed",
+                "parts": [
+                    { "mimeType": "text/plain", "body": { "data": "SGk", "size": 2 } },
+                    {
+                        "mimeType": "text/plain",
+                        "headers": [{ "name": "Content-Disposition", "value": value }],
+                        "body": { "attachmentId": "LOG", "size": 10 }
+                    }
+                ]
+            });
+            assert!(
+                referenced_body_attachment_ids(&payload).is_empty(),
+                "{value:?}"
+            );
+            inline_referenced_bodies(&mut payload, &Default::default()).unwrap();
+            let contents = extract_payload_contents(&payload).unwrap();
+            assert_eq!(contents.body_text.as_deref(), Some("Hi"), "{value:?}");
+            let ids: Vec<_> = contents.parts.iter().map(|p| p.attachment_id()).collect();
+            assert_eq!(ids, vec![Some("LOG")], "{value:?}");
+        }
+        // Another disposition is still a body returned by reference.
+        let part = json!({
+            "mimeType": "text/plain",
+            "headers": [{ "name": "Content-Disposition", "value": " inline" }],
+            "body": { "attachmentId": "BODY", "size": 10 }
+        });
+        assert_eq!(referenced_body_attachment_ids(&part), vec!["BODY"]);
     }
 
     #[test]
