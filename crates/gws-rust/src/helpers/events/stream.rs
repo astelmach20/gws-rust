@@ -91,11 +91,18 @@ pub(crate) fn emit_diagnostic(level: &str, event: &str, fields: Value) {
     if level != "error" && crate::logging::quiet() {
         return;
     }
+    crate::output::eprint_line(&diagnostic_line(level, event, fields));
+}
+
+/// The JSON line [`emit_diagnostic`] writes. Fields carry API- and
+/// message-derived text, so C1 controls and bidi overrides, which serde_json
+/// writes raw, are escaped as in the error envelope.
+fn diagnostic_line(level: &str, event: &str, fields: Value) -> String {
     let mut record = json!({ "level": level, "event": event });
     if let (Some(obj), Value::Object(extra)) = (record.as_object_mut(), fields) {
         obj.extend(extra);
     }
-    crate::output::eprint_line(&format!("{record}"));
+    crate::output::escape_json_for_terminal(record.to_string())
 }
 
 /// Consecutive-failure budget with capped, jittered exponential backoff.
@@ -500,6 +507,30 @@ mod tests {
     use super::*;
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    /// Diagnostic fields carry API- and message-derived text (a Pub/Sub
+    /// error, a Gmail message id, a Model Armor reason). serde_json leaves C1
+    /// controls (U+009B is an 8-bit CSI) and bidi overrides raw, so the line
+    /// escapes them, like the error envelope does.
+    #[test]
+    fn diagnostic_line_escapes_c1_and_bidi_controls() {
+        let text = "a\u{9b}31mb\u{202E}c\u{2066}d\u{85}e\u{1b}[2Jf";
+        let line = diagnostic_line("warning", "message_gone", json!({ "id": text }));
+        assert!(
+            !line
+                .chars()
+                .any(|c| c.is_control() || crate::output::is_dangerous_unicode(c)),
+            "{line:?}"
+        );
+        assert!(
+            line.contains("\\u009b") && line.contains("\\u202e"),
+            "{line}"
+        );
+        let v: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(v["id"], text);
+        assert_eq!(v["level"], "warning");
+        assert_eq!(v["event"], "message_gone");
+    }
 
     #[test]
     fn transient_classification() {
