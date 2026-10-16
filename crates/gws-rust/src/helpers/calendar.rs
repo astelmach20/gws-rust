@@ -1051,11 +1051,20 @@ async fn update(api: &Api, m: &ArgMatches, tz: &TzInfo) -> Result<Value, GwsErro
             && optional(m, "duration")?.is_none())
         || (optional(m, "start")?.is_none()
             && (optional(m, "end")?.is_some() || optional(m, "duration")?.is_some()));
-    let current = if needs_current && !api.is_dry_run() {
-        Some(
-            api.send(ApiRequest::get(event_url(api, calendar_id, event_id)))
-                .await?,
-        )
+    let current = if needs_current {
+        let event = api
+            .send(ApiRequest::get(event_url(api, calendar_id, event_id)))
+            .await?;
+        // A dry run only plans the GET (so the plan lists every request a
+        // real run sends); the current event is unknown.
+        if api.is_dry_run() {
+            if keeps_event_zone && offset_time {
+                api.plan_note(json!({"note": "times with an offset keep each end's current time zone at run time"}))?;
+            }
+            None
+        } else {
+            Some(event)
+        }
     } else {
         None
     };
@@ -2290,6 +2299,58 @@ mod tests {
             json!({"dateTime": "2026-03-18T15:00:00", "timeZone": "America/Denver"})
         );
         assert_eq!(a.body["start"]["timeZone"], "America/Denver");
+    }
+
+    /// Run `+update` in dry-run mode and return its plan.
+    async fn update_plan(args: &[&str]) -> Vec<Value> {
+        let api = dry_api("");
+        let mut argv = vec!["gwsr", "+update", "--event-id", "E1"];
+        argv.extend_from_slice(args);
+        let m = parse(&argv);
+        update(
+            &api,
+            m.subcommand_matches("+update").unwrap(),
+            &tz("UTC", false),
+        )
+        .await
+        .unwrap();
+        api.planned()
+    }
+
+    /// A real run reads the current event before patching it when it merges
+    /// attendees or keeps the event's time zones; the plan lists that GET.
+    #[tokio::test]
+    async fn update_plan_lists_the_current_event_read() {
+        for args in [
+            &["--add-attendee", "c@x"][..],
+            &["--remove-attendee", "b@x"][..],
+            &[
+                "--start",
+                "2026-03-18T15:00:00-06:00",
+                "--end",
+                "2026-03-18T16:00:00-06:00",
+            ][..],
+        ] {
+            let plan = update_plan(args).await;
+            let methods: Vec<&str> = plan.iter().filter_map(|p| p["method"].as_str()).collect();
+            assert_eq!(methods, ["GET", "PATCH"], "{args:?}: {plan:?}");
+        }
+        let plan = update_plan(&[
+            "--start",
+            "2026-03-18T15:00:00-06:00",
+            "--end",
+            "2026-03-18T16:00:00-06:00",
+        ])
+        .await;
+        assert!(
+            plan.iter()
+                .any(|p| p["note"].as_str().is_some_and(|n| n.contains("time zone"))),
+            "{plan:?}"
+        );
+        // A field-only change needs no read.
+        let plan = update_plan(&["--summary", "New"]).await;
+        assert_eq!(plan.len(), 1, "{plan:?}");
+        assert_eq!(plan[0]["method"], "PATCH");
     }
 
     #[tokio::test]
