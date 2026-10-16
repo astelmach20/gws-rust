@@ -504,9 +504,13 @@ impl Audit {
     fn parse_at(m: &ArgMatches, now: chrono::DateTime<chrono::Utc>) -> Result<Self, GwsError> {
         use chrono::SubsecRound;
         let application = required(m, "application")?;
+        // Whole seconds, so that a default end is exactly where a look-back
+        // without --until counts from: `--since 30d` spans 30 days, not 30
+        // days and a fraction of a second.
+        let now_s = now.trunc_subsecs(0);
         let mut end = optional(m, "until")?.map(until_time).transpose()?;
         let since = required(m, "since")?;
-        let start = since_time(since, end.unwrap_or_else(|| now.trunc_subsecs(0)))?;
+        let start = since_time(since, end.unwrap_or(now_s))?;
         // The API rejects these itself, but only after a round trip, and
         // with a less specific message.
         if let Some(end) = end
@@ -527,7 +531,7 @@ impl Audit {
         if application == "gmail" {
             // Gmail requires both ends of the range: default the end to now,
             // as the API does for every other application.
-            let until = *end.get_or_insert(now);
+            let until = *end.get_or_insert(now_s);
             if until - start > chrono::TimeDelta::days(GMAIL_MAX_RANGE_DAYS) {
                 return Err(GwsError::Validation(format!(
                     "Gmail audit queries cover at most {GMAIL_MAX_RANGE_DAYS} days; \
@@ -945,6 +949,15 @@ mod tests {
     fn gmail_audit_range_is_at_most_30_days() {
         let now = "2026-02-01T00:00:00Z";
         assert!(parse_audit(&["--application", "gmail", "--since", "30d"], now).is_ok());
+        // The clock is almost never on a whole second: a 30-day look-back
+        // still spans exactly 30 days, ending where it counts from.
+        let a = parse_audit(
+            &["--application", "gmail", "--since", "30d"],
+            "2026-02-01T00:00:00.750Z",
+        )
+        .unwrap();
+        assert_eq!(a.start, "2026-01-02T00:00:00Z");
+        assert_eq!(a.end.as_deref(), Some("2026-02-01T00:00:00Z"));
         let err = parse_audit(&["--application", "gmail", "--since", "31d"], now).unwrap_err();
         assert!(matches!(err, GwsError::Validation(_)), "{err:?}");
         let err = parse_audit(
