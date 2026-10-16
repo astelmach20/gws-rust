@@ -405,4 +405,83 @@ mod tests {
             assert!(detail.contains("credentials were not rejected"), "{r}");
         }
     }
+
+    /// An error status without an OAuth error body (a proxy asking for
+    /// authentication, a captive portal's redirect or HTML page) is not
+    /// Google's verdict on the credential, so it must not be reported as a
+    /// verified "not authenticated" either. A real OAuth error still is.
+    #[tokio::test]
+    async fn non_oauth_error_response_is_not_a_verified_failure() {
+        let cases = [
+            (
+                407,
+                ResponseTemplate::new(407)
+                    .set_body_string("<html>Proxy Authentication Required</html>"),
+            ),
+            (302, ResponseTemplate::new(302)),
+            (
+                403,
+                ResponseTemplate::new(403).set_body_string("<html>Sign in to the Wi-Fi</html>"),
+            ),
+            (
+                401,
+                ResponseTemplate::new(401).set_body_json(serde_json::json!({"code": 401})),
+            ),
+        ];
+        for (status, template) in cases {
+            let dir = tempfile::tempdir().unwrap();
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/token"))
+                .respond_with(template)
+                .mount(&server)
+                .await;
+            let r = build_report(&profile_env(dir.path(), &server), false).await;
+            assert_eq!(r["verified"], false, "HTTP {status}: {r}");
+            assert_eq!(r["authenticated"], true, "HTTP {status}: {r}");
+            assert!(r.get("token_error").is_none(), "HTTP {status}: {r}");
+            let detail = r["verification_error"].as_str().unwrap_or_default();
+            assert!(detail.contains(&format!("HTTP {status}")), "{r}");
+            assert!(detail.contains("credentials were not rejected"), "{r}");
+        }
+
+        // Google's OAuth error is a verdict: still a verified failure.
+        let dir = tempfile::tempdir().unwrap();
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/token"))
+            .respond_with(ResponseTemplate::new(401).set_body_json(serde_json::json!({
+                "error": "invalid_client",
+                "error_description": "The OAuth client was not found."
+            })))
+            .mount(&server)
+            .await;
+        let r = build_report(&profile_env(dir.path(), &server), false).await;
+        assert_eq!(r["verified"], true, "{r}");
+        assert_eq!(r["authenticated"], false, "{r}");
+        assert!(
+            r["token_error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("invalid_client"),
+            "{r}"
+        );
+    }
+
+    /// A default-profile environment with a stored user credential whose
+    /// token endpoint is `server`.
+    fn profile_env(dir: &std::path::Path, server: &MockServer) -> AuthEnv {
+        let (ks, _) = memory_keystore(dir);
+        let mut e = env(dir);
+        e.paths.ensure_dir().unwrap();
+        let ct = ks
+            .encrypt(
+                Purpose::Credentials,
+                br#"{"type":"authorized_user","client_id":"cid-1234567890.apps","client_secret":"cs","refresh_token":"rt"}"#,
+            )
+            .unwrap();
+        crate::fs_util::atomic_write(&e.paths.credentials, &ct).unwrap();
+        e.endpoints = crate::auth::token::tests::endpoints(server);
+        e.with_keystore(ks)
+    }
 }

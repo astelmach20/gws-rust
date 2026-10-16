@@ -83,10 +83,12 @@ pub(crate) fn oauth_client(
         .set_token_uri(token_url))
 }
 
-/// The [`AuthError`] for a token-endpoint server failure
-/// ([`http::is_server_failure`]): retryable statuses, the same set as the API
-/// path, are [`AuthError::TokenEndpointUnavailable`] (exit 6); any other 5xx
-/// is the permanent [`AuthError::TokenEndpointFailed`] (exit 1).
+/// The [`AuthError`] for a token-endpoint response that is no verdict on the
+/// credential: a server failure ([`http::is_server_failure`]) or an error
+/// status without an OAuth error body ([`http::is_oauth_error`]). Retryable
+/// statuses, the same set as the API path, are
+/// [`AuthError::TokenEndpointUnavailable`] (exit 6); any other status is the
+/// permanent [`AuthError::TokenEndpointFailed`] (exit 1).
 fn server_failure(status: u16, detail: String) -> AuthError {
     if gws_rust_core::error::is_retryable_status_code(status) {
         AuthError::TokenEndpointUnavailable { status, detail }
@@ -120,9 +122,10 @@ pub(crate) fn map_token_error(
                 other => AuthError::TokenEndpoint(format!("{other}: {description}")),
             }
         }
-        RequestTokenError::Request(http::HttpError::ServerFailure { status, detail }) => {
-            server_failure(status, detail)
-        }
+        RequestTokenError::Request(
+            http::HttpError::ServerFailure { status, detail }
+            | http::HttpError::NotOAuthError { status, detail },
+        ) => server_failure(status, detail),
         RequestTokenError::Request(e) => AuthError::Network(format!("{e}")),
         RequestTokenError::Parse(e, _) => {
             AuthError::TokenEndpoint(format!("unparseable token response: {e}"))
@@ -326,7 +329,9 @@ pub async fn service_account_token(
                 }
                 format!("{}: {desc}", err.error)
             }
-            Err(_) => format!("HTTP {status}: {}", http::body_excerpt(&body)),
+            // No OAuth error body: a proxy or captive portal answered, not
+            // Google with a verdict on the key.
+            Err(_) => return Err(server_failure(status.as_u16(), http::body_excerpt(&body))),
         };
         return Err(AuthError::TokenEndpoint(detail));
     }
@@ -705,6 +710,61 @@ pub(crate) mod tests {
                 assert!(!text.contains("retry later"), "{text}");
             }
         }
+    }
+
+    /// An error status without an OAuth error body (a proxy's 407, a
+    /// captive portal's redirect or HTML page) is no verdict on the
+    /// credential: it must not exit 2 ("sign in again"), and the message
+    /// keeps the HTTP status instead of a JSON parse error.
+    #[tokio::test]
+    async fn token_endpoint_non_oauth_errors_are_not_auth_errors() {
+        use crate::error::GwsError;
+        let cases = [
+            (
+                407,
+                ResponseTemplate::new(407).set_body_string("<html>Proxy Authentication</html>"),
+            ),
+            (302, ResponseTemplate::new(302)),
+            (
+                403,
+                ResponseTemplate::new(403).set_body_string("<html>Captive portal</html>"),
+            ),
+        ];
+        for (status, template) in cases {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/token"))
+                .respond_with(template)
+                .mount(&server)
+                .await;
+            let refresh = refresh_user(&user(), None, &endpoints(&server), "gwsr auth login")
+                .await
+                .unwrap_err();
+            let sa =
+                service_account_token(&test_sa_key(), &["s".into()], None, &endpoints(&server))
+                    .await
+                    .unwrap_err();
+            for err in [refresh, sa] {
+                assert!(
+                    matches!(err, AuthError::TokenEndpointFailed { .. }),
+                    "HTTP {status}: {err:?}"
+                );
+                let gws = GwsError::from(err);
+                let text = gws.to_string();
+                assert_eq!(gws.exit_code(), GwsError::EXIT_CODE_API, "{text}");
+                assert!(text.contains(&format!("HTTP {status}")), "{text}");
+                assert!(text.contains("not rejected"), "{text}");
+            }
+        }
+    }
+
+    #[test]
+    fn oauth_error_bodies_are_recognized() {
+        assert!(http::is_oauth_error(br#"{"error":"invalid_grant"}"#));
+        assert!(!http::is_oauth_error(b""));
+        assert!(!http::is_oauth_error(b"<html></html>"));
+        assert!(!http::is_oauth_error(br#"{"error":{"code":401}}"#));
+        assert!(!http::is_oauth_error(br#"["error"]"#));
     }
 
     #[tokio::test]
