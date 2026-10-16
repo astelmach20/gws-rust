@@ -147,7 +147,7 @@ fn untrusted(metadata: &std::fs::Metadata) -> Option<String> {
 fn untrusted_for(metadata: &std::fs::Metadata, owner: u32) -> Option<String> {
     use std::os::unix::fs::MetadataExt;
     if metadata.uid() != owner {
-        return Some(format!("owned by another user (uid {})", metadata.uid()));
+        return Some("owned by another user".to_string());
     }
     let mode = metadata.mode() & 0o777;
     (mode & 0o022 != 0).then(|| format!("writable by group or others (mode {mode:o})"))

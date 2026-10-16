@@ -356,11 +356,7 @@ impl DiscoveryCache {
         if meta.uid() != self.owner {
             return Err(DiscoveryError::InsecurePermissions {
                 path: path.to_path_buf(),
-                reason: format!(
-                    "is owned by another user (uid {}, expected {})",
-                    meta.uid(),
-                    self.owner
-                ),
+                reason: "is owned by another user".to_string(),
             });
         }
         let mode = meta.mode() & 0o777;
