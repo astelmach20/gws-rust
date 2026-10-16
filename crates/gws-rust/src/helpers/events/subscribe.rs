@@ -303,26 +303,52 @@ impl StreamStep for SubscribeStep<'_> {
                 self.pull_timeout,
             )
             .await?;
-        for m in &received {
+        // The events handled (written or blocked) before any failure. They
+        // are acknowledged even when a later event fails, so Pub/Sub does not
+        // redeliver (and the stream print again) what was already written.
+        let mut handled = Vec::with_capacity(received.len());
+        let mut failure = None;
+        for m in received {
             let event = decode_cloud_event(&m.message);
-            // Fail closed: a block-mode sanitization error aborts before emit/ack.
-            match sanitize_value(self.sanitize, event)
-                .await
-                .map_err(StepError::Transient)?
-            {
-                Sanitized::Pass(v) => self.output(&v).await?,
-                Sanitized::Blocked(r) => emit_diagnostic(
-                    "warning",
-                    "blocked",
-                    json!({ "ackId": m.ack_id, "filterMatchState": r.filter_match_state }),
-                ),
+            // Fail closed: a block-mode sanitization error aborts before this
+            // event is emitted or acknowledged.
+            let result = match sanitize_value(self.sanitize, event).await {
+                Ok(Sanitized::Pass(v)) => self.output(&v).await,
+                Ok(Sanitized::Blocked(r)) => {
+                    emit_diagnostic(
+                        "warning",
+                        "blocked",
+                        json!({ "ackId": m.ack_id, "filterMatchState": r.filter_match_state }),
+                    );
+                    Ok(())
+                }
+                Err(e) => Err(StepError::Transient(e)),
+            };
+            if let Err(e) = result {
+                failure = Some(e);
+                break;
             }
+            handled.push(m.ack_id);
         }
         if self.config.no_ack {
-            return Ok(());
+            return failure.map_or(Ok(()), Err);
         }
-        let ack_ids: Vec<String> = received.into_iter().map(|m| m.ack_id).collect();
-        self.pubsub.ack(&self.subscription, &ack_ids).await
+        let acked = self.pubsub.ack(&self.subscription, &handled).await;
+        match (failure, acked) {
+            (None, acked) => acked,
+            (Some(e), Ok(())) => Err(e),
+            // The batch's own failure is the step's error; the failed
+            // acknowledgement (the written events will be redelivered) is
+            // reported beside it.
+            (Some(e), Err(StepError::Transient(ack) | StepError::Fatal(ack))) => {
+                emit_diagnostic(
+                    "error",
+                    "ack_failed",
+                    json!({ "message": ack.to_string(), "ackIds": handled }),
+                );
+                Err(e)
+            }
+        }
     }
 }
 
