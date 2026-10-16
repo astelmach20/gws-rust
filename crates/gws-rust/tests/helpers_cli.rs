@@ -1163,6 +1163,43 @@ async fn stream_helpers_honor_jq_and_format() {
     }
 }
 
+// ── Model Armor input from stdin ────────────────────────────────────────
+
+/// Unreadable stdin (here: not UTF-8) is bad input (exit 3), as it is for
+/// every other flag that reads stdin, not an internal error (exit 5).
+#[test]
+fn modelarmor_sanitize_rejects_unreadable_stdin_as_validation() {
+    let dir = setup();
+    seed(dir.path(), "modelarmor", "v1", "");
+    let template = "projects/my-project/locations/us-central1/templates/t";
+    let out = gwsr(dir.path())
+        .args(["modelarmor", "+sanitize-prompt", "--template", template])
+        .arg("--dry-run")
+        .write_stdin(vec![0xff, 0xfe, b'h', b'i'])
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(3), "{stderr}");
+    assert!(stderr.contains("stdin"), "{stderr}");
+
+    // Readable stdin is still accepted.
+    let out = gwsr(dir.path())
+        .args(["modelarmor", "+sanitize-prompt", "--template", template])
+        .arg("--dry-run")
+        .write_stdin("hello")
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        stdout_json(&out)["requests"][0]["body"]["userPromptData"]["text"],
+        "hello"
+    );
+}
+
 // ── Dot-segment path parameters ─────────────────────────────────────────
 
 /// A path parameter of `.` or `..` must never reach the server: URL parsing
