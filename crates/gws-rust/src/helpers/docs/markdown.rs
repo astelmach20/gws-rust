@@ -77,6 +77,13 @@ pub(super) struct Rendered {
     spans: Vec<Span>,
 }
 
+/// Characters `insertText` silently drops: the control characters
+/// U+0000-U+0008 and U+000C-U+001F, and the Basic Multilingual Plane Private
+/// Use Area U+E000-U+F8FF. Tab, newline and the line break (U+000B) are kept.
+fn docs_strips(c: char) -> bool {
+    matches!(c, '\u{0}'..='\u{8}' | '\u{c}'..='\u{1f}' | '\u{e000}'..='\u{f8ff}')
+}
+
 fn utf16_len(s: &str) -> u64 {
     s.encode_utf16().count() as u64
 }
@@ -103,8 +110,11 @@ struct Builder {
 
 impl Builder {
     fn push(&mut self, s: &str) {
-        self.out.text.push_str(s);
-        self.len += utf16_len(s);
+        // Docs strips these from inserted text; counting them would shift
+        // every later style range off the text it was meant for.
+        let kept: String = s.chars().filter(|&c| !docs_strips(c)).collect();
+        self.out.text.push_str(&kept);
+        self.len += utf16_len(&kept);
     }
 
     fn begin_para(&mut self, kind: ParaKind) {
@@ -364,11 +374,13 @@ pub(super) fn render(md: &str) -> Result<Rendered, GwsError> {
                 b.text("");
                 let start = b.len;
                 b.push(&t);
-                b.out.spans.push(Span {
-                    start,
-                    end: b.len,
-                    style: SpanStyle::Code,
-                });
+                if b.len > start {
+                    b.out.spans.push(Span {
+                        start,
+                        end: b.len,
+                        style: SpanStyle::Code,
+                    });
+                }
             }
             Event::SoftBreak => b.text(" "),
             Event::HardBreak => {
@@ -615,6 +627,21 @@ mod tests {
         assert_eq!(para[0]["range"], json!({"startIndex": 11, "endIndex": 13}));
         assert_eq!(para[1]["range"], json!({"startIndex": 11, "endIndex": 13}));
         assert_eq!(para[1]["paragraphStyle"]["namedStyleType"], "HEADING_1");
+    }
+
+    #[test]
+    fn characters_docs_strips_do_not_shift_style_ranges() {
+        // Docs drops control characters and Private Use Area characters from
+        // inserted text, so they must not count toward later offsets.
+        let r = render("a\u{c}\u{1b}\u{f8ff} **b** `\u{e000}`").unwrap();
+        assert_eq!(r.text, "a b \n");
+        let bold = r.spans.iter().find(|s| s.style == SpanStyle::Bold).unwrap();
+        assert_eq!((bold.start, bold.end), (2, 3));
+        // A code span left empty is not styled (an empty range is rejected).
+        assert!(r.spans.iter().all(|s| s.style != SpanStyle::Code));
+        // Tabs and line breaks are kept.
+        let r = render("x\ty").unwrap();
+        assert_eq!(r.text, "x\ty\n");
     }
 
     #[test]
