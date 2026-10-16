@@ -36,6 +36,12 @@ use super::http::{self, Endpoints};
 /// Lifetime requested for service-account assertions (Google's maximum).
 const JWT_LIFETIME_SECS: i64 = 3600;
 
+/// How far a service-account assertion's `iat` is backdated, so a local clock
+/// slightly ahead of Google's does not produce an assertion issued "in the
+/// future", which the token endpoint rejects (`invalid_grant: Invalid JWT`).
+/// The same 10 seconds as Go's `golang.org/x/oauth2/jwt`.
+const JWT_CLOCK_SKEW_SECS: i64 = 10;
+
 /// A freshly obtained access token.
 #[derive(Debug, Clone)]
 pub struct AccessToken {
@@ -233,12 +239,15 @@ pub(crate) fn sign_assertion(
     if let Some(kid) = &sa.private_key_id {
         header["kid"] = serde_json::json!(kid);
     }
+    // Backdated for clock skew; `exp` is measured from the backdated `iat`
+    // so the assertion never exceeds Google's one-hour maximum.
+    let iat = now.saturating_sub(JWT_CLOCK_SKEW_SECS);
     let mut claims = serde_json::json!({
         "iss": sa.client_email,
         "scope": scopes.join(" "),
         "aud": audience,
-        "iat": now,
-        "exp": now + JWT_LIFETIME_SECS,
+        "iat": iat,
+        "exp": iat.saturating_add(JWT_LIFETIME_SECS),
     });
     if let Some(sub) = subject {
         claims["sub"] = serde_json::json!(sub);
@@ -413,7 +422,11 @@ pub(crate) mod tests {
         assert_eq!(claims["iss"], "sa@p.iam.gserviceaccount.com");
         assert_eq!(claims["sub"], "admin@example.com");
         assert_eq!(claims["aud"], "https://oauth2.googleapis.com/token");
-        assert_eq!(claims["exp"], 1_000 + JWT_LIFETIME_SECS);
+        assert_eq!(claims["iat"], 1_000 - JWT_CLOCK_SKEW_SECS);
+        assert_eq!(
+            claims["exp"],
+            1_000 - JWT_CLOCK_SKEW_SECS + JWT_LIFETIME_SECS
+        );
 
         // Verify with the public key.
         let key = parse_private_key(sa.private_key.expose_secret()).unwrap();
@@ -426,6 +439,20 @@ pub(crate) mod tests {
         public
             .verify(format!("{}.{}", parts[0], parts[1]).as_bytes(), &sig)
             .unwrap();
+    }
+
+    /// The assertion's `iat` is backdated (like Go's `golang.org/x/oauth2`),
+    /// so a local clock a few seconds ahead of Google's does not make the
+    /// token endpoint reject it as issued in the future, and `exp` stays
+    /// within Google's one-hour maximum from `iat`.
+    #[test]
+    fn assertion_iat_is_backdated_for_clock_skew() {
+        let jwt = sign_assertion(&test_sa_key(), &["s".into()], None, "aud", 1_000).unwrap();
+        let claims = decode_part(jwt.split('.').nth(1).unwrap());
+        let iat = claims["iat"].as_i64().unwrap();
+        let exp = claims["exp"].as_i64().unwrap();
+        assert_eq!(iat, 990, "{claims}");
+        assert_eq!(exp - iat, 3600, "{claims}");
     }
 
     #[test]
