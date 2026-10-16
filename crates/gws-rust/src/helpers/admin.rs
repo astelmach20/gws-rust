@@ -140,8 +140,8 @@ fn directory_commands(cmd: Command) -> Command {
         Command::new("+user-create")
             .about("[Helper] Create a user account")
             .arg(Arg::new("email").long("email").help("Primary email").required(true).value_name("EMAIL"))
-            .arg(Arg::new("given-name").long("given-name").help("First name").required(true).value_name("NAME"))
-            .arg(Arg::new("family-name").long("family-name").help("Last name").required(true).value_name("NAME"))
+            .arg(Arg::new("given-name").long("given-name").allow_hyphen_values(true).help("First name").required(true).value_name("NAME"))
+            .arg(Arg::new("family-name").long("family-name").allow_hyphen_values(true).help("Last name").required(true).value_name("NAME"))
             .arg(
                 Arg::new("org-unit")
                     .long("org-unit")

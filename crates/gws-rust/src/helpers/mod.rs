@@ -392,6 +392,81 @@ mod tests {
         }
     }
 
+    /// Free-text options take a value that starts with '-' (a title such as
+    /// `-draft`, a Gmail query such as `-in:spam`, a body that is a Markdown
+    /// list) instead of rejecting it as an unknown flag.
+    #[test]
+    fn free_text_options_accept_a_leading_hyphen() {
+        const FREE_TEXT: &[(&str, &str, &str, &[&str])] = &[
+            (
+                "admin",
+                "directory_v1",
+                "+user-create",
+                &["given-name", "family-name"],
+            ),
+            (
+                "calendar",
+                "v3",
+                "+insert",
+                &["summary", "location", "description"],
+            ),
+            (
+                "calendar",
+                "v3",
+                "+update",
+                &["summary", "location", "description"],
+            ),
+            ("calendar", "v3", "+agenda", &["calendar-name"]),
+            ("calendar", "v3", "+rsvp", &["comment"]),
+            ("chat", "v1", "+send", &["text"]),
+            ("docs", "v1", "+create", &["title"]),
+            ("drive", "v3", "+upload", &["name"]),
+            ("drive", "v3", "+share", &["message"]),
+            ("gmail", "v1", "+send", &["subject", "body"]),
+            ("gmail", "v1", "+reply", &["body"]),
+            ("gmail", "v1", "+reply-all", &["body"]),
+            ("gmail", "v1", "+forward", &["body"]),
+            ("gmail", "v1", "+triage", &["query"]),
+            ("gmail", "v1", "+search", &["query"]),
+            (
+                "gmail",
+                "v1",
+                "+filter create",
+                &["from", "to", "subject", "query", "exclude"],
+            ),
+            ("modelarmor", "v1", "+sanitize-prompt", &["text"]),
+            ("modelarmor", "v1", "+sanitize-response", &["text"]),
+            ("people", "v1", "+find", &["query"]),
+            ("sheets", "v4", "+create", &["title", "sheet"]),
+            ("slides", "v1", "+create", &["title"]),
+            ("tasks", "v1", "+add", &["title", "notes"]),
+            ("workflow", "v1", "+file-announce", &["message"]),
+        ];
+        for (name, version, sub_name, flags) in FREE_TEXT {
+            let helper = get_helper(name).expect("helper registered");
+            let cmd = helper.inject_commands(Command::new("gwsr"), &doc(name, version));
+            let sub = sub_name.split(' ').fold(&cmd, |c, s| {
+                c.find_subcommand(s)
+                    .unwrap_or_else(|| panic!("{name} {sub_name} exists"))
+            });
+            // Only the flag under test is given, so nothing else may be
+            // required.
+            let groups: Vec<_> = sub.get_groups().map(|g| g.get_id().clone()).collect();
+            let mut sub = sub.clone().mut_args(|a| a.required(false));
+            for g in groups {
+                sub = sub.mut_group(g, |g| g.required(false));
+            }
+            for flag in *flags {
+                let m = sub
+                    .clone()
+                    .try_get_matches_from(["x", &format!("--{flag}"), "-draft"])
+                    .unwrap_or_else(|e| panic!("{name} {sub_name} --{flag} -draft: {e}"));
+                let got: Vec<&String> = m.get_many::<String>(flag).unwrap().collect();
+                assert_eq!(got, ["-draft"], "{name} {sub_name} --{flag}");
+            }
+        }
+    }
+
     /// Every helper command follows the flag conventions: IDs are `--<noun>-id`,
     /// there are no positional arguments, and every flag has help text.
     #[test]

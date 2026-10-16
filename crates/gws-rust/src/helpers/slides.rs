@@ -37,6 +37,7 @@ impl Helper for SlidesHelper {
                 .arg(
                     Arg::new("title")
                         .long("title")
+                        .allow_hyphen_values(true)
                         .help("Presentation title")
                         .required(true)
                         .value_name("TITLE"),

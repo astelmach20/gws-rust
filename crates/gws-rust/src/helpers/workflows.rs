@@ -231,6 +231,7 @@ fn build_file_announce_cmd() -> Command {
             .arg(
                 Arg::new("message")
                     .long("message")
+                    .allow_hyphen_values(true)
                     .help("Custom announcement text (the file link is appended)")
                     .value_name("TEXT"),
             ),

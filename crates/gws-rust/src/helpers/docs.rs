@@ -75,6 +75,7 @@ impl Helper for DocsHelper {
                 .arg(
                     Arg::new("title")
                         .long("title")
+                        .allow_hyphen_values(true)
                         .help("Document title")
                         .required(true)
                         .value_name("TITLE"),
