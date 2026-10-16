@@ -42,7 +42,8 @@ gwsr workflow +meeting-prep --calendar-id team@example.com
 ## Tips
 
 - Read-only. Shows the next timed event that has not started yet, skipping
-- all-day, cancelled and declined events, with attendees and description.
+- all-day, cancelled and declined events and working-location, out-of-office,
+- focus-time and birthday entries, with attendees and description.
 
 ## See Also
 

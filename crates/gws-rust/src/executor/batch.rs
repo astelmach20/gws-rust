@@ -108,6 +108,7 @@ pub struct BatchContext {
 pub async fn handle_batch_command(args: &BatchArgs, ctx: &BatchContext) -> Result<(), GwsError> {
     let resolved =
         crate::services::resolve_service_spec(&args.service, ctx.api_version.as_deref())?;
+    crate::service::require_discovery_api(&resolved.api_name, "batch")?;
     let doc =
         crate::discovery::fetch_discovery_document(&resolved.api_name, &resolved.version).await?;
 
