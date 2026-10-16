@@ -450,7 +450,12 @@ impl Gate {
                 "Confirmation required: {action}. Re-run with --yes to proceed (or --dry-run to preview)."
             ))),
             Decision::Prompt => {
-                if ask(&format!("About to {action}. Proceed? [y/N] "))? {
+                // The action names arguments (IDs, addresses) that may come
+                // from an LLM: escape sequences in them must not reach the
+                // terminal, where they could rewrite the question the user
+                // answers or drive the terminal (OSC 52 sets the clipboard).
+                let shown = crate::output::sanitize_for_terminal(action);
+                if ask(&format!("About to {shown}. Proceed? [y/N] "))? {
                     Ok(())
                 } else {
                     Err(GwsError::ConfirmationRequired(format!(
@@ -557,6 +562,18 @@ mod tests {
         gate(false, false, true)
             .check_with(Impact::Destructive, "x", |p| {
                 assert!(p.contains("About to x"));
+                Ok(true)
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn prompt_strips_terminal_escapes_from_the_action() {
+        let action = "delete event e1\u{1b}]52;c;cm0gLXJmIH4=\u{7}\r\u{1b}[2Kdelete event e2";
+        gate(false, false, true)
+            .check_with(Impact::Destructive, action, |p| {
+                assert!(!p.chars().any(char::is_control), "{p:?}");
+                assert!(p.contains("delete event e1"), "{p:?}");
                 Ok(true)
             })
             .unwrap();
