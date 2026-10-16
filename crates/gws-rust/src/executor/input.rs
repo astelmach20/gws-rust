@@ -266,15 +266,24 @@ pub(crate) fn validate_params(
     }
 
     for (name, def) in &method.parameters {
-        if def.required && !params.contains_key(name) {
-            let kind = if def.location.as_deref() == Some("path") {
-                "path parameter"
-            } else {
-                "parameter"
-            };
-            errors.push(format!(
+        if !def.required {
+            continue;
+        }
+        let kind = if def.location.as_deref() == Some("path") {
+            "path parameter"
+        } else {
+            "parameter"
+        };
+        match params.get(name) {
+            None => errors.push(format!(
                 "required {kind} '{name}' is missing; provide it via --params"
-            ));
+            )),
+            // A repeated parameter is sent once per item, so `[]` sends
+            // nothing: the request would go out without the parameter.
+            Some(Value::Array(items)) if items.is_empty() => errors.push(format!(
+                "required {kind} '{name}' is an empty array; give at least one value"
+            )),
+            Some(_) => {}
         }
     }
 
@@ -569,6 +578,39 @@ mod tests {
             msg.contains("required path parameter 'fileId' is missing"),
             "{msg}"
         );
+    }
+
+    /// A repeated parameter expands into one query entry per item, so `[]`
+    /// sends nothing at all: for a required one (`storage.*.testIamPermissions`
+    /// `permissions`, YouTube `part`) that is the same as leaving it out.
+    #[test]
+    fn required_repeated_param_rejects_an_empty_array() {
+        let (doc, mut method) = doc_and_method();
+        method.parameters.insert(
+            "part".to_string(),
+            MethodParameter {
+                repeated: true,
+                required: true,
+                ..param("string")
+            },
+        );
+        let check = |params: Value| {
+            let Value::Object(map) = params else {
+                unreachable!()
+            };
+            validate_params(&doc, &method, &map, false)
+        };
+        let msg = check(json!({"fileId": "f", "part": []}))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            msg.contains("required parameter 'part' is an empty array"),
+            "{msg}"
+        );
+        check(json!({"fileId": "f", "part": ["id"]})).unwrap();
+        check(json!({"fileId": "f", "part": "id"})).unwrap();
+        // An optional repeated parameter may still be given as [].
+        check(json!({"fileId": "f", "part": ["id"], "ids": []})).unwrap();
     }
 
     /// `cloudidentity.groups.delete` and a `{date}` path parameter shaped
