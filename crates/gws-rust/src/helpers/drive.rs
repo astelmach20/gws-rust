@@ -1855,6 +1855,15 @@ async fn sync_walk(
             };
             entries.push((child_id.to_string(), local_name, kind, child));
         }
+        // A download creates its directory, but a folder with no file to
+        // download (empty, or only sub-folders and skipped items) must still
+        // be mirrored.
+        std::fs::create_dir_all(&local_dir).map_err(|e| {
+            GwsError::other(anyhow::anyhow!(
+                "cannot create the directory '{}' for Drive folder '{id}': {e}",
+                local_dir.display()
+            ))
+        })?;
         let keys: Vec<(&str, &str)> = entries
             .iter()
             .map(|(cid, n, _, _)| (cid.as_str(), n.as_str()))
@@ -2914,6 +2923,45 @@ mod tests {
             std::fs::read(dir.path().join("R2-Reports/a.txt")).unwrap(),
             b"F2"
         );
+    }
+
+    /// A folder with nothing to download (empty, holding only an empty
+    /// sub-folder, or only skipped items) is still mirrored as a directory.
+    #[tokio::test]
+    async fn sync_mirrors_folders_with_no_file_to_download() {
+        let server = MockServer::start().await;
+        mount_listing(
+            &server,
+            "ROOT",
+            json!([
+                {"id": "E", "name": "Empty", "mimeType": FOLDER_MIME},
+                {"id": "O", "name": "Outer", "mimeType": FOLDER_MIME},
+                {"id": "S", "name": "Forms", "mimeType": FOLDER_MIME}
+            ]),
+        )
+        .await;
+        mount_listing(&server, "E", json!([])).await;
+        mount_listing(
+            &server,
+            "O",
+            json!([{"id": "I", "name": "Inner", "mimeType": FOLDER_MIME}]),
+        )
+        .await;
+        mount_listing(&server, "I", json!([])).await;
+        mount_listing(
+            &server,
+            "S",
+            json!([{"id": "FORM", "name": "Survey",
+                    "mimeType": "application/vnd.google-apps.form"}]),
+        )
+        .await;
+        let api = api(&server.uri(), "drive/v3/");
+        let dir = tempfile::tempdir().unwrap();
+        let v = sync(&api, "ROOT", dir.path()).await.unwrap();
+        assert!(v["downloaded"].as_array().unwrap().is_empty(), "{v}");
+        for sub in ["Empty", "Outer", "Outer/Inner", "Forms"] {
+            assert!(dir.path().join(sub).is_dir(), "{sub} missing: {v}");
+        }
     }
 
     /// A folder with two parents in the synced tree is mirrored once; the
