@@ -67,16 +67,43 @@ fn header_values<'a>(msg: &'a Value, name: &str) -> Vec<&'a str> {
         .unwrap_or_default()
 }
 
-/// Parse `List-Unsubscribe`: a comma-separated list of `<uri>` entries.
+/// The URIs of a `List-Unsubscribe` value: the `<...>` entries (RFC 2369
+/// §2), in order. A URI may itself contain a comma (`?ids=1,2`), so the
+/// value is not split on commas; text outside the angle brackets, such as a
+/// `(comment)`, is not part of any URI; and white space inside the brackets
+/// (left by header folding) is ignored. A value with no angle brackets at
+/// all (non-conforming senders) is split on commas instead.
+fn list_unsubscribe_uris(value: &str) -> Vec<String> {
+    let without_ws = |s: &str| s.chars().filter(|c| !c.is_whitespace()).collect::<String>();
+    if !value.contains('<') {
+        return value
+            .split(',')
+            .map(without_ws)
+            .filter(|u| !u.is_empty())
+            .collect();
+    }
+    let mut uris = Vec::new();
+    let mut rest = value;
+    while let Some(open) = rest.find('<') {
+        let after = &rest[open + 1..];
+        let Some(close) = after.find('>') else {
+            break;
+        };
+        let uri = without_ws(&after[..close]);
+        if !uri.is_empty() {
+            uris.push(uri);
+        }
+        rest = &after[close + 1..];
+    }
+    uris
+}
+
+/// Parse `List-Unsubscribe` into its `https:` and `mailto:` URIs.
 fn parse_list_unsubscribe(value: &str) -> (Vec<String>, Vec<String>) {
     let mut https = Vec::new();
     let mut mailto = Vec::new();
-    for entry in value.split(',') {
-        let uri = entry
-            .trim()
-            .trim_start_matches('<')
-            .trim_end_matches('>')
-            .trim();
+    for uri in list_unsubscribe_uris(value) {
+        let uri = uri.as_str();
         let lower = uri.to_ascii_lowercase();
         if lower.starts_with("https://") {
             https.push(uri.to_string());
@@ -392,6 +419,40 @@ mod tests {
             one_click_target(&info).unwrap().as_str(),
             "https://list.example.com/u/abc"
         );
+    }
+
+    #[test]
+    fn list_unsubscribe_uris_are_the_angle_bracket_entries() {
+        // A comma inside a URI does not split it, and a comment after an
+        // entry (RFC 2369 §2) is not part of the URI.
+        let (https, mailto) = parse_list_unsubscribe(
+            "<https://list.example.com/u?ids=1,2&t=x> (one click), \
+             <mailto:u@list.example.com?subject=a,b> (Use this to leave)",
+        );
+        assert_eq!(https, vec!["https://list.example.com/u?ids=1,2&t=x"]);
+        assert_eq!(mailto, vec!["mailto:u@list.example.com?subject=a,b"]);
+        let info = extract_info(&msg(&[
+            (
+                "List-Unsubscribe",
+                "<https://list.example.com/u?ids=1,2> (unsubscribe)",
+            ),
+            ("List-Unsubscribe-Post", "List-Unsubscribe=One-Click"),
+            ("Authentication-Results", "mx.google.com; dkim=pass"),
+        ]));
+        assert_eq!(
+            one_click_target(&info).unwrap().as_str(),
+            "https://list.example.com/u?ids=1,2"
+        );
+
+        // White space a folded header leaves inside a URI is ignored.
+        let (https, _) = parse_list_unsubscribe("<https://list.example.com/\r\n u/abc>");
+        assert_eq!(https, vec!["https://list.example.com/u/abc"]);
+
+        // Without angle brackets (non-conforming), entries are split on commas.
+        let (https, mailto) =
+            parse_list_unsubscribe("https://list.example.com/u, mailto:u@list.example.com");
+        assert_eq!(https, vec!["https://list.example.com/u"]);
+        assert_eq!(mailto, vec!["mailto:u@list.example.com"]);
     }
 
     #[test]
