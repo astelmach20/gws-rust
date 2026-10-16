@@ -245,7 +245,11 @@ pub(super) fn parse_original_message(msg: &Value) -> Result<OriginalMessage, Gws
     let references = parse_msg_ids(&parsed_headers.references);
     let in_reply_to = parse_msg_ids(&parsed_headers.in_reply_to);
 
-    let reply_to = non_empty_then(&parsed_headers.reply_to, Mailbox::parse_header_list);
+    // A Reply-To that names no mailbox (only an empty group such as
+    // `undisclosed-recipients:;`, or nothing parseable) gives the reply no
+    // address, so the reply goes to From as if there were no Reply-To.
+    let reply_to = non_empty_then(&parsed_headers.reply_to, Mailbox::parse_header_list)
+        .filter(|mailboxes| !mailboxes.is_empty());
     let cc = non_empty_then(&parsed_headers.cc, Mailbox::parse_header_list);
     let date = Some(parsed_headers.date).filter(|s| !s.is_empty());
 
@@ -1463,6 +1467,25 @@ mod tests {
         });
         // No Message-ID header (only a look-alike name): parsed, with no ID.
         assert_eq!(parse_original_message(&msg).unwrap().message_id, "");
+    }
+
+    #[test]
+    fn reply_to_naming_no_mailbox_is_treated_as_absent() {
+        for reply_to in ["undisclosed-recipients:;", "Team: ;", "<>"] {
+            let msg = json!({
+                "payload": {
+                    "mimeType": "text/plain",
+                    "headers": [
+                        { "name": "From", "value": "alice@example.com" },
+                        { "name": "Reply-To", "value": reply_to },
+                        { "name": "Message-ID", "value": "<msg@example.com>" }
+                    ],
+                    "body": { "data": URL_SAFE.encode("Hello") }
+                }
+            });
+            let original = parse_original_message(&msg).unwrap();
+            assert!(original.reply_to.is_none(), "{reply_to:?}");
+        }
     }
 
     #[test]

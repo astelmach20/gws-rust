@@ -1671,6 +1671,96 @@ async fn gmail_helpers_honor_the_api_base_override() {
     }
 }
 
+/// A Reply-To that is only an empty group (`undisclosed-recipients:;`) names
+/// no one: the reply goes to From instead of failing with "No To recipient
+/// remains".
+#[tokio::test(flavor = "multi_thread")]
+async fn gmail_reply_to_an_empty_reply_to_group_goes_to_from() {
+    use base64::Engine as _;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let original = json!({
+        "id": "M1",
+        "threadId": "T1",
+        "payload": {
+            "mimeType": "text/plain",
+            "headers": [
+                {"name": "From", "value": "Alice <alice@example.com>"},
+                {"name": "Reply-To", "value": "undisclosed-recipients:;"},
+                {"name": "To", "value": "me@example.com"},
+                {"name": "Subject", "value": "Plan"},
+                {"name": "Message-ID", "value": "<m1@example.com>"}
+            ],
+            "body": {"data": base64::engine::general_purpose::URL_SAFE.encode("Original")}
+        }
+    });
+    for verb in ["+reply", "+reply-all"] {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/gmail/v1/users/me/messages/M1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&original))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/gmail/v1/users/me/profile"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(json!({"emailAddress": "me@example.com"})),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/gmail/v1/users/me/settings/sendAs"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"sendAs": [
+                {"sendAsEmail": "me@example.com", "isPrimary": true, "isDefault": true}
+            ]})))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/upload/gmail/v1/users/me/drafts"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id": "D1"})))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let dir = setup();
+        seed(dir.path(), "gmail", "v1", "");
+
+        let out = gwsr(dir.path())
+            .env("GWSR_TOKEN", "test-token")
+            .env("GWSR_API_BASE_URL", server.uri())
+            .env("HTTPS_PROXY", "http://127.0.0.1:9")
+            .args([
+                "gmail",
+                verb,
+                "--message-id",
+                "M1",
+                "--body",
+                "Hi",
+                "--draft",
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{verb}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+
+        let requests = server.received_requests().await.unwrap();
+        let upload = requests
+            .iter()
+            .find(|r| r.url.path().ends_with("/drafts"))
+            .unwrap();
+        let body = String::from_utf8_lossy(&upload.body);
+        let raw_headers = body.split("\r\n\r\n").nth(2).unwrap();
+        let to = raw_headers
+            .lines()
+            .find_map(|l| l.strip_prefix("To: "))
+            .unwrap_or_default();
+        assert!(to.contains("<alice@example.com>"), "{verb}: {raw_headers}");
+    }
+}
+
 /// With `GWSR_RESTRICT_PATHS=cwd`, the files a helper writes *under* a
 /// validated `--dir` must stay under the current directory too: a remote file
 /// name that walks through a symlinked sub-directory must not escape it.
