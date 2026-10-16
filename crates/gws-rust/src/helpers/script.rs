@@ -50,6 +50,7 @@ fn dir_arg(help: &'static str) -> Arg {
         .help(help)
         .default_value(".")
         .value_name("DIR")
+        .value_hint(clap::ValueHint::DirPath)
 }
 
 impl Helper for ScriptHelper {

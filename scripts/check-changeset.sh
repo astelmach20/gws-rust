@@ -70,18 +70,21 @@ frontmatter_awk='
   state == 1 && /^---[[:space:]]*$/ { state = 2; exit }
   state == 1 && (/^[[:space:]]*$/ || /^[[:space:]]*#/) { next }
   state == 1 {
-    line = $0
-    if (match(line, /^("[^"]+"|'\''[^'\'']+'\''|[^"'\'':#[:space:]][^:#]*)[[:space:]]*:[[:space:]]*/)) {
+    # A key ends at a colon followed by whitespace, as in YAML (`key:value` is one scalar);
+    # the appended space lets a bare `key:` at the end of the line match too.
+    line = $0 " "
+    if (match(line, /^("[^"]+"|'\''[^'\'']+'\''|[^"'\'':#[:space:]][^:#]*)[[:space:]]*:[[:space:]]+/)) {
       key = substr(line, 1, RLENGTH); value = substr(line, RLENGTH + 1)
       sub(/[[:space:]]*:[[:space:]]*$/, "", key)
       sub(/[[:space:]]+(#.*)?$/, "", value)
       if (key ~ /^["'\'']/) key = substr(key, 2, length(key) - 2)
+      if (seen[key]++) { print "error\t\"" key "\" is listed more than once"; next }
       if (value ~ /^"[^"]*"$/ || value ~ /^'\''[^'\'']*'\''$/) value = substr(value, 2, length(value) - 2)
       if (value ~ /^(major|minor|patch|none)$/) { print "package\t" key; next }
       print "error\tinvalid bump type \"" value "\" for \"" key "\"; use major, minor, patch or none"
       next
     }
-    print "error\tunreadable front matter line: " line
+    print "error\tunreadable front matter line: " $0
   }
   END {
     if (state == 0) print "error\tmissing front matter: the file must start with a --- line"

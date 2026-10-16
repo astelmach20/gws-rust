@@ -67,7 +67,7 @@ fn value_args(cmd: Command) -> Command {
         Arg::new("csv-file")
             .long("csv-file")
             .help("Import rows from a CSV file, or '-' for stdin")
-            .value_name("PATH"),
+            .value_name("PATH").value_hint(clap::ValueHint::FilePath),
     )
     .group(
         ArgGroup::new("input")
@@ -113,7 +113,7 @@ TIPS:
                         .long("output")
                         .short('o')
                         .help("Write the values as CSV to this path, or '-' for stdout")
-                        .value_name("PATH"),
+                        .value_name("PATH").value_hint(clap::ValueHint::AnyPath),
                 )
                 .arg(
                     Arg::new("overwrite")
