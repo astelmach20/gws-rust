@@ -419,7 +419,10 @@ impl UploadArgs {
             None => determine_filename(raw)?,
         };
         let content_type = match optional(m, "mime-type")? {
-            Some(t) => t.to_string(),
+            Some(t) => {
+                check_mime_type(t)?;
+                t.to_string()
+            }
             None => mime_guess2::from_path(&path)
                 .first()
                 .map(|m| m.to_string())
@@ -432,6 +435,25 @@ impl UploadArgs {
             content_type,
             convert: flag(m, "convert")?,
         })
+    }
+}
+
+/// Validate `--mime-type`, which is sent as the `X-Upload-Content-Type`
+/// header: no control characters (which would otherwise fail only when the
+/// request is built, as a network error) and a `type/subtype` essence.
+fn check_mime_type(value: &str) -> Result<(), GwsError> {
+    crate::validate::reject_dangerous_chars(value, "--mime-type")?;
+    let essence = value.split(';').next().unwrap_or_default().trim();
+    let valid_token = |t: &str| {
+        !t.is_empty()
+            && t.chars()
+                .all(|c| c.is_ascii_alphanumeric() || "!#$&-^_.+".contains(c))
+    };
+    match essence.split_once('/') {
+        Some((kind, sub)) if valid_token(kind) && valid_token(sub) => Ok(()),
+        _ => Err(GwsError::Validation(format!(
+            "--mime-type '{value}' is not a media type (expected type/subtype, e.g. text/csv)"
+        ))),
     }
 }
 
@@ -1922,6 +1944,41 @@ mod tests {
         };
         let v = upload(&api, &args).await.unwrap();
         assert_eq!(v["id"], "NEW");
+    }
+
+    /// `--mime-type` goes into the `X-Upload-Content-Type` header: control
+    /// characters and anything that is not a `type/subtype` media type are
+    /// refused up front, before credentials are loaded.
+    #[test]
+    fn upload_rejects_an_invalid_mime_type() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("r.txt");
+        std::fs::write(&file, "data").unwrap();
+        let file = file.to_str().unwrap();
+        for bad in [
+            "text/plain\r\nX-Evil: 1",
+            "text/plain\n",
+            "plain",
+            "",
+            "text/",
+        ] {
+            let m = matches(&["gwsr", "+upload", "--file", file, "--mime-type", bad]);
+            let (_, sub) = m.subcommand().unwrap();
+            let err = UploadArgs::parse(sub)
+                .err()
+                .unwrap_or_else(|| panic!("{bad:?} accepted"));
+            assert!(matches!(err, GwsError::Validation(_)), "{bad:?}: {err:?}");
+            assert!(err.to_string().contains("--mime-type"), "{err}");
+        }
+        for good in [
+            "text/plain",
+            "text/csv; charset=utf-8",
+            "application/vnd.ms-excel.sheet.macroEnabled.12",
+        ] {
+            let m = matches(&["gwsr", "+upload", "--file", file, "--mime-type", good]);
+            let (_, sub) = m.subcommand().unwrap();
+            assert_eq!(UploadArgs::parse(sub).unwrap().content_type, good);
+        }
     }
 
     #[tokio::test]
