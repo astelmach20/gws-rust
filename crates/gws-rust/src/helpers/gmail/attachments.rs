@@ -71,7 +71,9 @@ pub(super) async fn fetch_original_parts(
             filename: part.filename.clone(),
             content_type: part.content_type.clone(),
             data,
-            content_id: part.content_id.clone(),
+            // Only an inline image goes beside the HTML body; any other
+            // inline part (an Apple Mail PDF) is sent as a regular attachment.
+            content_id: part.content_id.clone().filter(|_| part.is_inline_image()),
         });
     }
 
@@ -350,6 +352,33 @@ mod tests {
             err.to_string().contains("empty (0 bytes)"),
             "error should mention empty file: {}",
             err
+        );
+    }
+
+    /// Apple Mail sends ordinary files as `Content-Disposition: inline` with
+    /// a Content-ID. Forwarded, such a PDF is a regular attachment, not an
+    /// image beside the HTML body; a real inline image keeps its Content-ID.
+    #[tokio::test]
+    async fn fetch_original_parts_keeps_content_id_only_for_inline_images() {
+        let server = wiremock::MockServer::start().await;
+        let api = crate::helpers::gmail::test_support::mock_api(&server);
+        let part = |filename: &str, content_type: &str| OriginalPart {
+            filename: filename.to_string(),
+            content_type: content_type.to_string(),
+            size: 2,
+            data: PartData::Inline(crate::helpers::gmail::test_support::base64url("hi")),
+            content_id: Some(format!("{filename}@example.com")),
+        };
+        let parts = [
+            part("report.pdf", "application/pdf"),
+            part("logo.png", "image/png"),
+        ];
+        let fetched = fetch_original_parts(&api, "m1", &parts, 0).await.unwrap();
+        assert_eq!(fetched[0].content_id, None);
+        assert!(!fetched[0].is_inline());
+        assert_eq!(
+            fetched[1].content_id.as_deref(),
+            Some("logo.png@example.com")
         );
     }
 }
