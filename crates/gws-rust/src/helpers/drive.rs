@@ -319,6 +319,7 @@ TIPS:
                     (api, v)
                 }
                 "+download" => {
+                    refuse_unscreened_stdout(m, sanitize, "+download")?;
                     check_output(m)?;
                     let api = Api::new(doc, &[SCOPE_DRIVE_READONLY], dry, sanitize).await?;
                     let v = download(
@@ -334,6 +335,7 @@ TIPS:
                     (api, v)
                 }
                 "+export" => {
+                    refuse_unscreened_stdout(m, sanitize, "+export")?;
                     check_output(m)?;
                     let api = Api::new(doc, &[SCOPE_DRIVE_READONLY], dry, sanitize).await?;
                     let v = export(
@@ -519,6 +521,26 @@ fn str_field<'v>(v: &'v Value, key: &str) -> Result<&'v str, GwsError> {
 /// Check an explicit `--output` before credentials are loaded, so a path the
 /// download could never write to is a validation error, not an auth error.
 /// Without `--output` the default file name comes from Drive at run time.
+/// `--output -` streams the file's raw bytes to stdout, where Model Armor
+/// cannot screen them. With `--sanitize` in effect (either mode) that is
+/// refused before any request, as `gmail +attachments` refuses it: passing
+/// the content through unscreened would defeat the screening asked for.
+/// Writing to a file is unaffected.
+fn refuse_unscreened_stdout(
+    m: &ArgMatches,
+    sanitize: &crate::helpers::modelarmor::SanitizeConfig,
+    verb: &str,
+) -> Result<(), GwsError> {
+    if sanitize.template.is_some() && optional(m, "output")? == Some("-") {
+        return Err(GwsError::Validation(format!(
+            "--sanitize cannot be combined with drive {verb} --output -: the raw file \
+             content streamed to stdout cannot be screened by Model Armor; pass \
+             --output PATH to write it to a file instead"
+        )));
+    }
+    Ok(())
+}
+
 fn check_output(m: &ArgMatches) -> Result<(), GwsError> {
     if let Some(o) = optional(m, "output")? {
         OutputTarget::parse(o, flag(m, "overwrite")?)?;
