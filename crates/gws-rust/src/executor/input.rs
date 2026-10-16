@@ -373,10 +373,18 @@ fn check_scalar(name: &str, def: &MethodParameter, value: &Value, errors: &mut V
         ));
         return;
     }
-    if let (Some(allowed), Value::String(s)) = (&def.enum_values, value)
-        && !allowed.iter().any(|a| a == s)
+    // Compare the text that is sent: a number or boolean goes out as `7` or
+    // `true`, so it must be an enum value as much as a string must.
+    let sent = match value {
+        Value::String(s) => Some(s.clone()),
+        Value::Number(n) => Some(n.to_string()),
+        Value::Bool(b) => Some(b.to_string()),
+        _ => None,
+    };
+    if let (Some(allowed), Some(s)) = (&def.enum_values, sent)
+        && !allowed.contains(&s)
     {
-        let hint = closest(s, allowed.iter().map(String::as_str))
+        let hint = closest(&s, allowed.iter().map(String::as_str))
             .map(|b| format!(" (did you mean '{b}'?)"))
             .unwrap_or_default();
         errors.push(format!(
@@ -560,6 +568,57 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(msg.contains("not repeated"), "{msg}");
+    }
+
+    /// Numbers and booleans are sent as their text (`format=7`), so the
+    /// Discovery `enum` applies to them as much as to strings.
+    #[test]
+    fn enum_rejects_non_string_values() {
+        for value in [json!(7), json!(true), json!(1.5)] {
+            let msg = validate(json!({"fileId": "f", "corpora": value}), false)
+                .unwrap_err()
+                .to_string();
+            assert!(
+                msg.contains(&format!("'corpora' has invalid value '{value}'")),
+                "{value}: {msg}"
+            );
+        }
+        let (doc, mut method) = doc_and_method();
+        method.parameters.insert(
+            "level".to_string(),
+            MethodParameter {
+                enum_values: Some(vec!["1".into(), "2".into()]),
+                ..param("integer")
+            },
+        );
+        method.parameters.insert(
+            "modes".to_string(),
+            MethodParameter {
+                enum_values: Some(vec!["a".into(), "b".into()]),
+                repeated: true,
+                ..param("string")
+            },
+        );
+        let check = |params: Value| {
+            let Value::Object(map) = params else {
+                unreachable!()
+            };
+            validate_params(&doc, &method, &map, false)
+        };
+        // A number that matches an enum value as text is fine.
+        check(json!({"fileId": "f", "level": 2})).unwrap();
+        check(json!({"fileId": "f", "level": "1"})).unwrap();
+        let msg = check(json!({"fileId": "f", "level": 3}))
+            .unwrap_err()
+            .to_string();
+        assert!(msg.contains("'level' has invalid value '3'"), "{msg}");
+        let msg = check(json!({"fileId": "f", "modes": ["a", false]}))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            msg.contains("'modes[1]' has invalid value 'false'"),
+            "{msg}"
+        );
     }
 
     #[test]
