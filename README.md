@@ -452,6 +452,7 @@ Helpers are hand-written commands prefixed with `+`, so they never collide with 
 
 ```bash
 gwsr gmail +send --to alice@example.com --subject 'Hello' --body 'Hi Alice' --attach report.pdf
+gwsr gmail +read --message-id 18f1a2b3c4d --jq '{id, threadId, message_id_header, subject}'  # id and threadId are Gmail API IDs
 gwsr gmail +reply --message-id 18f1a2b3c4d --body 'Thanks!'
 gwsr gmail +search --query 'from:billing newer_than:7d' --max 20
 gwsr drive +upload --file ./report.docx --folder-id FOLDER_ID --convert

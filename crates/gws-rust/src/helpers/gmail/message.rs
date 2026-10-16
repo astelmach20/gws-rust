@@ -91,9 +91,17 @@ impl OriginalPart {
 /// non-blank `text/html` part rendered as text.
 #[derive(Default, Serialize)]
 pub(super) struct OriginalMessage {
+    /// Gmail API message ID: what `--message-id` takes. Serialized as `id`,
+    /// the name `+search` and `+triage` use.
+    pub id: Option<String>,
+    /// Gmail API thread ID, serialized as `threadId` like `+search`/`+triage`.
+    #[serde(rename = "threadId")]
     pub thread_id: Option<String>,
-    /// Bare message ID (no angle brackets), e.g. `"abc@example.com"`; empty
-    /// when the message has no `Message-ID` header.
+    /// Bare RFC 5322 `Message-ID` header (no angle brackets), e.g.
+    /// `"abc@example.com"`; empty when the message has no `Message-ID`
+    /// header. Serialized as `message_id_header` so it is never mistaken
+    /// for the Gmail API ID.
+    #[serde(rename = "message_id_header")]
     pub message_id: String,
     /// Bare message IDs (no angle brackets) forming the references chain.
     pub references: Vec<String>,
@@ -120,6 +128,7 @@ impl OriginalMessage {
     /// Placeholder used for `--dry-run` to avoid requiring auth/network.
     pub(super) fn dry_run_placeholder(message_id: &str) -> Self {
         Self {
+            id: Some(message_id.to_string()),
             thread_id: Some(format!("thread-{message_id}")),
             message_id: format!("{message_id}@example.com"),
             from: Mailbox::parse("sender@example.com"),
@@ -202,11 +211,14 @@ pub(super) fn non_empty_slice<T>(s: &[T]) -> Option<&[T]> {
 }
 
 pub(super) fn parse_original_message(msg: &Value) -> Result<OriginalMessage, GwsError> {
-    let thread_id = msg
-        .get("threadId")
-        .and_then(|v| v.as_str())
-        .filter(|s| !s.is_empty())
-        .map(String::from);
+    let api_id = |key: &str| {
+        msg.get(key)
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(String::from)
+    };
+    let id = api_id("id");
+    let thread_id = api_id("threadId");
 
     let snippet = msg
         .get("snippet")
@@ -273,6 +285,7 @@ pub(super) fn parse_original_message(msg: &Value) -> Result<OriginalMessage, Gws
     let date = Some(parsed_headers.date).filter(|s| !s.is_empty());
 
     Ok(OriginalMessage {
+        id,
         thread_id,
         message_id,
         references,
@@ -969,6 +982,30 @@ mod tests {
         assert!(original.date.is_none());
         assert!(original.references.is_empty());
         assert!(original.body_html.is_none());
+    }
+
+    #[test]
+    fn test_original_message_serializes_api_ids_apart_from_the_header() {
+        let msg = json!({
+            "id": "18f1a2b3c4d",
+            "threadId": "t1",
+            "payload": {
+                "mimeType": "text/plain",
+                "headers": [
+                    { "name": "From", "value": "alice@example.com" },
+                    { "name": "Message-ID", "value": "<min@example.com>" }
+                ],
+                "body": { "data": URL_SAFE.encode("Hello") }
+            }
+        });
+        let original = parse_original_message(&msg).unwrap();
+        assert_eq!(original.id.as_deref(), Some("18f1a2b3c4d"));
+        let v = serde_json::to_value(&original).unwrap();
+        assert_eq!(v["id"], "18f1a2b3c4d");
+        assert_eq!(v["threadId"], "t1");
+        assert_eq!(v["message_id_header"], "min@example.com");
+        assert!(v.get("message_id").is_none());
+        assert!(v.get("thread_id").is_none());
     }
 
     #[test]
