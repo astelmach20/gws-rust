@@ -86,15 +86,23 @@ fn overrides() -> Option<&'static GlobalOverrides> {
 ///
 /// # Errors
 ///
-/// Fails if `GWSR_CONFIG_DIR` is unset and the home directory is unknown.
+/// Fails if `GWSR_CONFIG_DIR` is unset and the home directory is unknown, or
+/// if the directory exists but another user owns it or may write to it
+/// ([`crate::fs_util::check_trusted_config_path`]): its config file, OAuth
+/// client and profiles would then be someone else's choice.
 pub fn try_config_dir() -> anyhow::Result<PathBuf> {
-    if let Some(dir) = &crate::env::get()?.config_dir {
-        return Ok(dir.clone());
-    }
-    let home = dirs::home_dir().context(
-        "cannot determine the home directory; set GWSR_CONFIG_DIR to choose a config directory",
-    )?;
-    Ok(home.join(".config").join("gwsr"))
+    let dir = match &crate::env::get()?.config_dir {
+        Some(dir) => dir.clone(),
+        None => dirs::home_dir()
+            .context(
+                "cannot determine the home directory; set GWSR_CONFIG_DIR to choose a config \
+                 directory",
+            )?
+            .join(".config")
+            .join("gwsr"),
+    };
+    crate::fs_util::check_trusted_config_path(&dir)?;
+    Ok(dir)
 }
 
 /// Validate a profile name: 1-64 characters of `[a-z0-9_.-]`, not starting
@@ -343,8 +351,10 @@ pub struct ProfileMetadata {
 ///
 /// # Errors
 ///
-/// Fails if the file exists but cannot be read or parsed.
+/// Fails if the file exists but cannot be read or parsed, or another user
+/// owns it or may write to it.
 pub fn load_metadata(path: &Path) -> anyhow::Result<Option<ProfileMetadata>> {
+    crate::fs_util::check_trusted_config_path(path)?;
     match std::fs::read_to_string(path) {
         Ok(s) => serde_json::from_str(&s)
             .map(Some)

@@ -1286,6 +1286,39 @@ fn invalid_config_profile_fails_even_when_overridden_or_unused() {
     }
 }
 
+/// A config directory or file that other users may write (for example one
+/// created under a shared `GWSR_CONFIG_DIR`) could hold a planted config, so
+/// it is refused with a configuration error instead of being read.
+#[cfg(unix)]
+#[test]
+fn config_writable_by_other_users_is_refused() {
+    use std::os::unix::fs::PermissionsExt;
+    let env = Env::new();
+    env.write_config("format = \"table\"\n");
+    let file = env.config_dir().join("config.toml");
+    let set_mode = |path: &std::path::Path, mode: u32| {
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
+    };
+    for (path, mode) in [(&file, 0o666), (&env.config_dir(), 0o777)] {
+        set_mode(&env.config_dir(), 0o700);
+        set_mode(&file, 0o600);
+        set_mode(path, mode);
+        env.cmd()
+            .args(["cache", "clear", "--dry-run"])
+            .assert()
+            .code(8)
+            .stdout("")
+            .stderr(predicate::str::contains("writable by group or others"))
+            .stderr(predicate::str::contains("\"configError\""));
+    }
+    set_mode(&env.config_dir(), 0o755);
+    set_mode(&file, 0o644);
+    env.cmd()
+        .args(["cache", "clear", "--dry-run"])
+        .assert()
+        .success();
+}
+
 #[test]
 fn auth_configuration_errors_exit_with_the_config_code() {
     let env = Env::new();
