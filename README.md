@@ -222,7 +222,7 @@ Checked in this order:
 2. `GWSR_CREDENTIALS_FILE` (authorized-user or service-account JSON)
 3. The active profile's encrypted credentials (`gwsr auth login`)
 4. `GOOGLE_APPLICATION_CREDENTIALS`
-5. `~/.config/gcloud/application_default_credentials.json`
+5. gcloud's Application Default Credentials file: `~/.config/gcloud/application_default_credentials.json`, or `%APPDATA%\gcloud\application_default_credentials.json` on Windows
 
 Once a source exists, it is used or the command fails. A damaged or undecryptable credentials file is never deleted or silently skipped. A profile you selected explicitly never falls back to Application Default Credentials, and `--profile` together with `GWSR_TOKEN`, `GWSR_TOKEN_FILE` or `GWSR_CREDENTIALS_FILE` is a configuration error instead of silently using the other identity. `--dry-run` loads no credentials at all.
 
