@@ -2234,6 +2234,136 @@ async fn wait_without_operations_get_is_refused_before_sending() {
     assert!(err.to_string().contains("operations.get"), "{err}");
 }
 
+/// A storage-style document: the only `operations.get` is nested,
+/// `buckets.operations.get` at `b/{bucket}/operations/{operationId}` with
+/// parameterOrder `[bucket, operationId]`, and `files.relocate` at
+/// `b/{bucket}/relocate` starts an operation.
+fn nested_operations_doc(root: &str) -> RestDescription {
+    let mut d = doc(root);
+    d.resources.remove("operations");
+    let mut bucket_param = HashMap::new();
+    bucket_param.insert("bucket".into(), pparam());
+    d.resources.get_mut("files").unwrap().methods.insert(
+        "relocate".into(),
+        RestMethod {
+            id: Some("storage.buckets.relocate".into()),
+            http_method: "POST".into(),
+            path: "b/{bucket}/relocate".into(),
+            parameters: bucket_param.clone(),
+            parameter_order: vec!["bucket".into()],
+            response: sref("Operation"),
+            ..Default::default()
+        },
+    );
+    let mut get_params = bucket_param;
+    get_params.insert("operationId".into(), pparam());
+    let mut ops = RestResource::default();
+    ops.methods.insert(
+        "get".into(),
+        RestMethod {
+            id: Some("storage.buckets.operations.get".into()),
+            http_method: "GET".into(),
+            path: "b/{bucket}/operations/{operationId}".into(),
+            parameters: get_params,
+            parameter_order: vec!["bucket".into(), "operationId".into()],
+            response: sref("Operation"),
+            ..Default::default()
+        },
+    );
+    let mut buckets = RestResource::default();
+    buckets.resources.insert("operations".into(), ops);
+    d.resources.insert("buckets".into(), buckets);
+    d
+}
+
+#[tokio::test]
+async fn wait_with_nested_operations_get_fills_its_path_parameters() {
+    // The operation id goes to `operationId`, the placeholder after
+    // `operations/`, and `bucket` comes from the request. It used to go to
+    // parameterOrder[0], `bucket`, so the poll hit the wrong URL.
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/drive/v3/b/bk1/relocate"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "kind": "storage#operation",
+            "name": "projects/_/buckets/bk1/operations/op9",
+            "done": false
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/drive/v3/b/bk1/operations/op9"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "name": "projects/_/buckets/bk1/operations/op9",
+            "done": true,
+            "response": {"relocated": true}
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let d = nested_operations_doc(&server.uri());
+    let mut call = Call::new(&d, "relocate", &server);
+    call.params = json!({"bucket": "bk1"});
+    call.options.wait = Some(WaitConfig {
+        timeout: Duration::from_secs(5),
+        initial_interval: Duration::from_millis(1),
+        max_interval: Duration::from_millis(5),
+    });
+    let em = Emitter::capturing();
+    call.run(&em).await.unwrap();
+    assert_eq!(lines(&em)[0], json!({"relocated": true}));
+}
+
+#[tokio::test]
+async fn wait_with_nested_operations_get_missing_a_path_parameter_is_refused_before_sending() {
+    // `files.download` has no `bucket`, so buckets.operations.get cannot be
+    // addressed: refuse before the operation is started.
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({"name": "op10", "done": false})),
+        )
+        .expect(0)
+        .mount(&server)
+        .await;
+    let d = nested_operations_doc(&server.uri());
+    let mut call = Call::new(&d, "download", &server);
+    call.params = json!({"fileId": "f1"});
+    call.options.wait = Some(WaitConfig::default());
+    let err = call.run(&Emitter::capturing()).await.unwrap_err();
+    assert!(matches!(err, GwsError::Validation(_)), "{err:?}");
+    assert!(err.to_string().contains("'bucket'"), "{err}");
+}
+
+#[tokio::test]
+async fn wait_with_an_ambiguous_operations_get_is_refused_before_sending() {
+    // Two path parameters and neither follows `operations/`: there is no
+    // telling which one takes the operation name.
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({"name": "op11", "done": false})),
+        )
+        .expect(0)
+        .mount(&server)
+        .await;
+    let mut d = nested_operations_doc(&server.uri());
+    let get = d
+        .resources
+        .get_mut("buckets")
+        .and_then(|b| b.resources.get_mut("operations"))
+        .and_then(|o| o.methods.get_mut("get"))
+        .unwrap();
+    get.path = "b/{bucket}/ops/{operationId}".into();
+    let mut call = Call::new(&d, "relocate", &server);
+    call.params = json!({"bucket": "bk1"});
+    call.options.wait = Some(WaitConfig::default());
+    let err = call.run(&Emitter::capturing()).await.unwrap_err();
+    assert!(matches!(err, GwsError::Validation(_)), "{err:?}");
+    assert!(err.to_string().contains("cannot tell"), "{err}");
+}
+
 // ── Batch ───────────────────────────────────────────────────────────────
 
 #[tokio::test]
