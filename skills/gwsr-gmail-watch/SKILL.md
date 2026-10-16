@@ -53,7 +53,7 @@ gwsr gmail +watch --project my-project --cleanup --output-dir ./emails
 
 ## Tips
 
-- stdout carries one JSON message per line. Transient errors are retried with backoff and reported as single-line JSON on stderr; the watcher exits after --max-failures consecutive failures. Delivery is at-least-once.
+- stdout carries one JSON message per line. Transient errors are retried with backoff and reported as single-line JSON on stderr; the watcher tolerates --max-failures consecutive failures and exits on the next one. Delivery is at-least-once.
 - Gmail watch expires after 7 days; re-run to renew. Press Ctrl-C to stop.
 
 ## See Also
