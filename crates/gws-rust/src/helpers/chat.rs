@@ -82,6 +82,7 @@ impl Helper for ChatHelper {
                 .arg(
                     Arg::new("text")
                         .long("text")
+                        .allow_hyphen_values(true)
                         .help("Message text (Chat formatting such as *bold* is supported)")
                         .required(true)
                         .value_name("TEXT"),

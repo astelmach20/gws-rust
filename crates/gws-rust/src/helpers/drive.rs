@@ -81,6 +81,7 @@ impl Helper for DriveHelper {
                 .arg(
                     Arg::new("name")
                         .long("name")
+                        .allow_hyphen_values(true)
                         .help("Name in Drive (defaults to the local file name)")
                         .value_name("NAME"),
                 )
@@ -230,6 +231,7 @@ TIPS:
                 .arg(
                     Arg::new("message")
                         .long("message")
+                        .allow_hyphen_values(true)
                         .help("Custom message for the notification email")
                         .conflicts_with("no-notify")
                         .value_name("TEXT"),

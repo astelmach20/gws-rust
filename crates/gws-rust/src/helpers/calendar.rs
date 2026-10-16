@@ -100,14 +100,16 @@ impl Helper for CalendarHelper {
                 .arg(
                     Arg::new("summary")
                         .long("summary")
+                        .allow_hyphen_values(true)
                         .help("Event title")
                         .required(true)
                         .value_name("TEXT"),
                 )
-                .arg(Arg::new("location").long("location").help("Event location").value_name("TEXT"))
+                .arg(Arg::new("location").long("location").allow_hyphen_values(true).help("Event location").value_name("TEXT"))
                 .arg(
                     Arg::new("description")
                         .long("description")
+                        .allow_hyphen_values(true)
                         .help("Event description")
                         .value_name("TEXT"),
                 )
@@ -175,6 +177,7 @@ TIPS:
                 .arg(
                     Arg::new("calendar-name")
                         .long("calendar-name")
+                        .allow_hyphen_values(true)
                         .help("Only calendars whose name contains TEXT")
                         .value_name("TEXT"),
                 )
@@ -235,11 +238,12 @@ TIPS:
                 .about("[Helper] Change fields of an existing event")
                 .arg(calendar_id_arg())
                 .arg(event_id_arg())
-                .arg(Arg::new("summary").long("summary").help("New title").value_name("TEXT"))
-                .arg(Arg::new("location").long("location").help("New location").value_name("TEXT"))
+                .arg(Arg::new("summary").long("summary").allow_hyphen_values(true).help("New title").value_name("TEXT"))
+                .arg(Arg::new("location").long("location").allow_hyphen_values(true).help("New location").value_name("TEXT"))
                 .arg(
                     Arg::new("description")
                         .long("description")
+                        .allow_hyphen_values(true)
                         .help("New description")
                         .value_name("TEXT"),
                 )
@@ -306,6 +310,7 @@ TIPS:
                 .arg(
                     Arg::new("comment")
                         .long("comment")
+                        .allow_hyphen_values(true)
                         .help("Note to the organizer")
                         .value_name("TEXT"),
                 )

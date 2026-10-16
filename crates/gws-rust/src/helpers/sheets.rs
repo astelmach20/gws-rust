@@ -169,6 +169,7 @@ TIPS:
                 .arg(
                     Arg::new("title")
                         .long("title")
+                        .allow_hyphen_values(true)
                         .help("Spreadsheet title")
                         .required(true)
                         .value_name("TITLE"),
@@ -176,6 +177,7 @@ TIPS:
                 .arg(
                     Arg::new("sheet")
                         .long("sheet")
+                        .allow_hyphen_values(true)
                         .help("Sheet (tab) name; repeat for several (default: one 'Sheet1')")
                         .action(ArgAction::Append)
                         .value_name("NAME"),
