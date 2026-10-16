@@ -3483,3 +3483,97 @@ async fn output_saves_a_resource_that_only_looks_like_an_operation() {
         serde_json::from_slice(&std::fs::read(env.work_dir().join("group.json")).unwrap()).unwrap();
     assert_eq!(saved, group);
 }
+
+// ── Outbound confirmation for membership grants ─────────────────────────
+
+/// Adding someone to a Chat space notifies them and opens the space's
+/// messages to them, like `admin +group-add-member`: under
+/// `GWSR_REQUIRE_CONFIRM=1` it is refused without `--yes`, directly and in
+/// `gwsr batch`. The generated command used to send it, and had no `--yes`.
+#[tokio::test(flavor = "multi_thread")]
+async fn require_confirm_gates_chat_space_member_adds() {
+    use wiremock::matchers::any;
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    Mock::given(any())
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({"name": "spaces/s/members/m"})),
+        )
+        .mount(&server)
+        .await;
+    let env = Env::new();
+    let doc = json!({
+        "name": "chat",
+        "version": "v1",
+        "rootUrl": "https://chat.googleapis.com/",
+        "servicePath": "",
+        "batchPath": "batch",
+        "schemas": {"Membership": {"id": "Membership", "type": "object", "properties": {
+            "name": {"type": "string"},
+            "member": {"type": "object", "properties": {
+                "name": {"type": "string"},
+                "type": {"type": "string"}
+            }}
+        }}},
+        "resources": {"spaces": {"resources": {"members": {"methods": {"create": {
+            "id": "chat.spaces.members.create",
+            "httpMethod": "POST",
+            "path": "v1/{+parent}/members",
+            "parameters": {
+                "parent": {"type": "string", "location": "path", "required": true, "pattern": "^spaces/[^/]+$"}
+            },
+            "parameterOrder": ["parent"],
+            "request": {"$ref": "Membership"},
+            "response": {"$ref": "Membership"},
+            "scopes": ["https://www.googleapis.com/auth/chat.memberships"]
+        }}}}}}
+    });
+    std::fs::write(
+        env.cache_dir().join("discovery/chat+v1.json"),
+        serde_json::to_string(&doc).unwrap(),
+    )
+    .unwrap();
+    let cmd = |require: &str| {
+        let mut c = env.cmd();
+        c.env("GWSR_TOKEN", "test-token")
+            .env("GWSR_API_BASE_URL", server.uri())
+            .env("GWSR_REQUIRE_CONFIRM", require);
+        c
+    };
+    let add = [
+        "chat",
+        "spaces",
+        "members",
+        "create",
+        "--params",
+        r#"{"parent":"spaces/s"}"#,
+        "--json",
+        r#"{"member":{"name":"users/someone@example.com","type":"HUMAN"}}"#,
+    ];
+    let out = cmd("1").args(add).output().unwrap();
+    assert_eq!(out.status.code(), Some(7), "{}", stderr_of(&out));
+    assert_eq!(
+        stderr_error(&out)["error"]["reason"],
+        "confirmationRequired"
+    );
+    let out = cmd("1")
+        .args(["batch", "chat"])
+        .write_stdin(
+            r#"{"method":"spaces.members.create","params":{"parent":"spaces/s"},"json":{"member":{"name":"users/someone@example.com","type":"HUMAN"}}}"#,
+        )
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(7), "batch: {}", stderr_of(&out));
+    assert!(
+        server.received_requests().await.unwrap().is_empty(),
+        "nothing may be sent before confirmation"
+    );
+
+    // --yes confirms; without the policy the add is not gated.
+    let mut with_yes = add.to_vec();
+    with_yes.push("--yes");
+    cmd("1").args(&with_yes).assert().success();
+    cmd("0").args(add).assert().success();
+    assert_eq!(server.received_requests().await.unwrap().len(), 2);
+}

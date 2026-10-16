@@ -125,8 +125,15 @@ pub(crate) const OUTBOUND_METHODS: &[&str] = &[
     "gmail.users.settings.updateAutoForwarding",
     "gmail.users.settings.forwardingAddresses.create",
     "gmail.users.settings.sendAs.create",
+    // Emails a verification message to the send-as address.
+    "gmail.users.settings.sendAs.verify",
     "gmail.users.settings.filters.create",
     "chat.spaces.messages.create",
+    // Adding people to a Chat or Meet space, or creating a Chat space with
+    // members, notifies them and gives them access to the space.
+    "chat.spaces.members.create",
+    "chat.spaces.setup",
+    "meet.spaces.members.create",
     "drive.permissions.create",
     "drive.permissions.update",
     // Calendar sharing (notifies the grantee unless sendNotifications=false,
@@ -136,6 +143,10 @@ pub(crate) const OUTBOUND_METHODS: &[&str] = &[
     "calendar.acl.patch",
     "script.scripts.run",
     "directory.members.insert",
+    // The same group membership through Cloud Identity, and admin roles.
+    "cloudidentity.groups.memberships.create",
+    "directory.users.makeAdmin",
+    "directory.roleAssignments.insert",
 ];
 
 /// Calendar event writes that email attendees only when asked to:
@@ -499,6 +510,13 @@ mod tests {
             "gmail.users.settings.forwardingAddresses.create",
             "gmail.users.settings.sendAs.create",
             "gmail.users.settings.filters.create",
+            "gmail.users.settings.sendAs.verify",
+            "chat.spaces.members.create",
+            "chat.spaces.setup",
+            "meet.spaces.members.create",
+            "cloudidentity.groups.memberships.create",
+            "directory.users.makeAdmin",
+            "directory.roleAssignments.insert",
         ] {
             assert_eq!(
                 method_impact(&m("POST", id), &none, None),
