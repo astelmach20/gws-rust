@@ -2095,6 +2095,25 @@ async fn json_numbers_pass_through_unchanged() {
 }
 
 #[tokio::test]
+async fn json_content_type_is_matched_case_insensitively() {
+    // Media types are case-insensitive (RFC 9110 §8.3.1): a proxy or API that
+    // sends `Application/JSON` still returns a JSON document.
+    for ct in ["Application/JSON; charset=UTF-8", "TEXT/JSON"] {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(r#"{"id":"1"}"#, ct))
+            .mount(&server)
+            .await;
+        let d = doc(&server.uri());
+        let mut call = Call::new(&d, "get", &server);
+        call.params = json!({"fileId": "1"});
+        let em = Emitter::capturing();
+        call.run(&em).await.unwrap();
+        assert_eq!(lines(&em), vec![json!({"id": "1"})], "{ct}");
+    }
+}
+
+#[tokio::test]
 async fn text_response_is_wrapped_in_json() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
