@@ -136,7 +136,15 @@ impl TokenCache {
                 );
                 self.write_blocking(cache).await?;
             }
-            None => tracing::debug!(key, "token has no expiry; not caching it"),
+            None => {
+                tracing::debug!(key, "token has no expiry; not caching it");
+                // A forced refresh replaces the entry the API rejected. Left
+                // in place, that rejected token would be served again until
+                // it expires.
+                if cache.entries.remove(key).is_some() {
+                    self.write_blocking(cache).await?;
+                }
+            }
         }
         Ok(fresh.token)
     }
@@ -392,6 +400,39 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(t.expose_secret(), "ya29.new");
+    }
+
+    /// After a 401, the forced refresh replaces the rejected cached token
+    /// even when the new token has no expiry (and so is not cached itself):
+    /// the next command must not be served the rejected token again.
+    #[tokio::test]
+    async fn force_refresh_without_expiry_drops_the_rejected_token() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = cache_in(dir.path());
+        cache
+            .get_or_fetch("k", Freshness::Cached, || async {
+                Ok(token("ya29.rejected", 3600))
+            })
+            .await
+            .unwrap();
+        let t = cache
+            .get_or_fetch("k", Freshness::ForceRefresh, || async {
+                Ok(AccessToken {
+                    token: SecretString::from("ya29.no-expiry".to_string()),
+                    expires_at: None,
+                    scopes: None,
+                })
+            })
+            .await
+            .unwrap();
+        assert_eq!(t.expose_secret(), "ya29.no-expiry");
+        let t = cache
+            .get_or_fetch("k", Freshness::Cached, || async {
+                Ok(token("ya29.fresh", 3600))
+            })
+            .await
+            .unwrap();
+        assert_eq!(t.expose_secret(), "ya29.fresh");
     }
 
     #[tokio::test]
