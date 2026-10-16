@@ -147,12 +147,17 @@ fn docs_markdown_write_dry_run_builds_native_requests() {
         String::from_utf8_lossy(&out.stderr)
     );
     let v = stdout_json(&out);
-    let body = &v["requests"]
+    let sent: Vec<&Value> = v["requests"]
         .as_array()
         .unwrap()
         .iter()
-        .find(|r| r.get("url").is_some())
-        .unwrap()["body"];
+        .filter(|r| r.get("url").is_some())
+        .collect();
+    // The document read a real run sends for the end index, then the write.
+    assert_eq!(sent.len(), 2, "{v}");
+    assert_eq!(sent[0]["method"], "GET");
+    assert_eq!(sent[0]["url"], "https://docs.googleapis.com/v1/documents/D");
+    let body = &sent[1]["body"];
     let reqs = body["requests"].as_array().unwrap();
     assert_eq!(reqs[0]["insertText"]["text"], "Hi\na\nb");
     assert!(
