@@ -678,8 +678,7 @@ pub(crate) async fn execute_to(
             break;
         }
 
-        let is_json =
-            content_type.contains("application/json") || content_type.contains("text/json");
+        let is_json = download::is_json(&content_type);
         if !is_json && !content_type.is_empty() {
             if pages > 0 {
                 return Err(non_json_page(
