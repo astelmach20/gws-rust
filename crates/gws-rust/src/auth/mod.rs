@@ -312,6 +312,27 @@ pub fn token_provider(scopes: &[&str]) -> ScopedTokenProvider {
     ScopedTokenProvider::new(scopes)
 }
 
+/// Whether gwsr can obtain a different access token from `source` after an
+/// API rejects the current one with HTTP 401.
+///
+/// `GWSR_TOKEN` is a fixed token: "refreshing" it would resend the same
+/// rejected value. `GWSR_TOKEN_FILE` is read again, so a token rotated by
+/// whatever writes the file is picked up; every other source mints a new
+/// token.
+pub(crate) fn source_can_refresh(source: &CredentialSource) -> bool {
+    !matches!(source, CredentialSource::TokenEnv)
+}
+
+/// [`source_can_refresh`] for this process's credential source.
+///
+/// # Errors
+///
+/// Credential-source resolution failures (conflicting or missing sources).
+pub(crate) fn active_source_can_refresh() -> anyhow::Result<bool> {
+    let env = AuthEnv::from_process()?;
+    Ok(source_can_refresh(&env.source()?))
+}
+
 /// Obtain an access token for `scopes` using the configured credentials
 /// (see [`credentials`] for the source order).
 ///
@@ -665,6 +686,26 @@ mod tests {
             client_secret: secrecy::SecretString::from("secret".to_string()),
             project_id: project.map(str::to_string),
             source: client_config::ClientSource::BuiltIn,
+        }
+    }
+
+    /// Only `GWSR_TOKEN` is fixed: every other source can yield a new token
+    /// after a 401, so the transport still refreshes once for them.
+    #[test]
+    fn only_the_token_env_var_cannot_refresh() {
+        let p = std::path::PathBuf::from("/tmp/x.json");
+        assert!(!source_can_refresh(&CredentialSource::TokenEnv));
+        for source in [
+            CredentialSource::TokenFile(p.clone()),
+            CredentialSource::CredentialsFile(p.clone()),
+            CredentialSource::Profile {
+                name: "default".to_string(),
+                path: p.clone(),
+            },
+            CredentialSource::AdcEnv(p.clone()),
+            CredentialSource::AdcWellKnown(p),
+        ] {
+            assert!(source_can_refresh(&source), "{source:?}");
         }
     }
 
