@@ -19,6 +19,14 @@ use super::cli::{list_values, parse_optional_trimmed, required_str};
 use super::prelude::*;
 use crate::confirm::{self, Impact};
 
+/// Scope for `users.settings.filters` (list, create, delete).
+const FILTERS_SCOPE: &str = GMAIL_SETTINGS_SCOPE;
+/// Scope for `users.labels.list`, which resolves label names. That method
+/// does not accept `gmail.settings.basic`, and a token is narrowed to the
+/// requested scopes when they were all granted (`gwsr auth login --full`
+/// grants both), so the labels are listed with a token of their own.
+const LABELS_SCOPE: &str = GMAIL_READONLY_SCOPE;
+
 /// A filter to create, with label names not yet resolved to IDs.
 #[derive(Debug, Clone, PartialEq)]
 struct FilterSpec {
@@ -128,7 +136,7 @@ pub(super) async fn handle_filter(
                     )],
                 );
             }
-            let api = super::api::authenticated(&[GMAIL_SETTINGS_SCOPE]).await?;
+            let api = super::api::authenticated(&[FILTERS_SCOPE]).await?;
             let filters = api.list_filters().await?;
             print(filters, sub, sanitize).await
         }
@@ -162,11 +170,15 @@ pub(super) async fn handle_filter(
                 ));
                 return crate::helpers::http::print_dry_run(matches, requests);
             }
-            let api = super::api::authenticated(&[GMAIL_SETTINGS_SCOPE]).await?;
+            let api = super::api::authenticated(&[FILTERS_SCOPE]).await?;
             let body = if spec.add_labels.is_empty() && spec.remove_labels.is_empty() {
                 build_filter(&spec, &[], &[])
             } else {
-                let labels = api.list_labels().await?;
+                // A token narrowed to the filters scope cannot list labels.
+                let labels = super::api::authenticated(&[LABELS_SCOPE])
+                    .await?
+                    .list_labels()
+                    .await?;
                 let add = resolve_label_ids(&spec.add_labels, &labels)?;
                 let remove = resolve_label_ids(&spec.remove_labels, &labels)?;
                 build_filter(&spec, &add, &remove)
@@ -204,7 +216,7 @@ pub(super) async fn handle_filter(
                     )],
                 );
             }
-            let api = super::api::authenticated(&[GMAIL_SETTINGS_SCOPE]).await?;
+            let api = super::api::authenticated(&[FILTERS_SCOPE]).await?;
             api.delete_filter(&id).await?;
             let format = crate::helpers::http::output_format(sub)?;
             super::emit_applied(
@@ -225,6 +237,34 @@ pub(super) async fn handle_filter(
 mod tests {
     use super::*;
     use crate::helpers::gmail::test_support::helper_matches;
+
+    /// Each call is made with a scope its method accepts, per the Gmail
+    /// Discovery document. A token is narrowed to exactly the requested
+    /// scopes when the grant has them all, so a label lookup made with the
+    /// filters token is refused (`labels.list` does not take
+    /// `gmail.settings.basic`).
+    #[test]
+    fn each_call_uses_a_scope_its_method_accepts() {
+        let doc: crate::discovery::RestDescription = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/scopes/gmail_v1_filters.json"
+        ))
+        .unwrap();
+        let users = &doc.resources["users"];
+        let filters = &users.resources["settings"].resources["filters"];
+        for (method, scope) in [
+            (&users.resources["labels"].methods["list"], LABELS_SCOPE),
+            (&filters.methods["list"], FILTERS_SCOPE),
+            (&filters.methods["create"], FILTERS_SCOPE),
+            (&filters.methods["delete"], FILTERS_SCOPE),
+        ] {
+            assert!(
+                method.scopes.iter().any(|s| s == scope),
+                "{:?} does not accept {scope}; it accepts {:?}",
+                method.id,
+                method.scopes
+            );
+        }
+    }
 
     fn create(args: &[&str]) -> ArgMatches {
         let mut full = vec!["+filter", "create"];
