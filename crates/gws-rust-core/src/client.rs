@@ -382,11 +382,18 @@ pub fn is_retryable_status(status: StatusCode) -> bool {
 /// Parse a `Retry-After` header: delta-seconds or an HTTP-date. An invalid
 /// value is `None`, which callers treat as "no hint" and fall back to their
 /// own backoff (RFC 9110 lets recipients ignore an invalid Retry-After); a
-/// date in the past means "retry now".
+/// date in the past means "retry now". Delta-seconds is digits only (RFC 9110
+/// §10.2.3, so no sign); a value too large for `u64` is still a valid request
+/// to wait and saturates rather than being ignored.
 pub fn parse_retry_after(value: &str, now: SystemTime) -> Option<Duration> {
     let value = value.trim();
-    if let Ok(secs) = value.parse::<u64>() {
-        return Some(Duration::from_secs(secs));
+    if !value.is_empty() && value.bytes().all(|b| b.is_ascii_digit()) {
+        // All digits, so parsing can only fail by overflowing.
+        return Some(
+            value
+                .parse::<u64>()
+                .map_or(Duration::MAX, Duration::from_secs),
+        );
     }
     let when = httpdate::parse_http_date(value).ok()?;
     Some(when.duration_since(now).unwrap_or(Duration::ZERO))
@@ -665,6 +672,41 @@ mod tests {
         let earlier = httpdate::fmt_http_date(now - Duration::from_secs(30));
         assert_eq!(parse_retry_after(&earlier, now), Some(Duration::ZERO));
         assert_eq!(parse_retry_after("soon", now), None);
+    }
+
+    /// A delta-seconds value too large for `u64` is still a valid (huge)
+    /// request to wait, not a garbage value to ignore. Signs are not digits.
+    #[test]
+    fn retry_after_overflowing_seconds_is_huge_not_ignored() {
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        assert_eq!(
+            parse_retry_after("99999999999999999999999", now),
+            Some(Duration::MAX)
+        );
+        assert_eq!(parse_retry_after("+5", now), None);
+        assert_eq!(parse_retry_after("-5", now), None);
+        assert_eq!(parse_retry_after("", now), None);
+    }
+
+    #[tokio::test]
+    async fn overflowing_retry_after_stops_retrying() {
+        let server = MockServer::start().await;
+        let calls = mount_sequence(
+            &server,
+            "GET",
+            vec![
+                ResponseTemplate::new(503).insert_header("retry-after", "99999999999999999999999"),
+            ],
+        )
+        .await;
+        let client = shared_client().unwrap();
+        let url = format!("{}/r", server.uri());
+        let sent = send(&fast_policy(), Idempotency::FromMethod, || client.get(&url))
+            .await
+            .unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(sent.response.status(), 503);
+        assert!(sent.gave_up);
     }
 
     #[test]
