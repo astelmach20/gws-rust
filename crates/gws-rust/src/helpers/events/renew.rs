@@ -238,6 +238,17 @@ async fn run(api: &EventsApi, config: &RenewConfig, now: i64) -> Result<Value, G
             }
         }
     };
+    if let Some(name) = &config.subscription {
+        // One named subscription: its failure is the command's failure, with
+        // its own class (a 503 exits 6 for a retry, a 404 exits 1, a refused
+        // token 2). The transport's context already names the subscription.
+        let op = api.renew(name, config.reactivate).await?;
+        return Ok(renew_report(
+            config.reactivate,
+            vec![json!({ "name": name, "operation": op })],
+            Vec::new(),
+        ));
+    }
     let mut renewed = Vec::new();
     let mut failed = Vec::new();
     for name in &names {
@@ -246,16 +257,26 @@ async fn run(api: &EventsApi, config: &RenewConfig, now: i64) -> Result<Value, G
             Err(e) => failed.push(json!({ "name": name, "error": e.to_string() })),
         }
     }
-    let out = json!({ "action": if config.reactivate { "reactivate" } else { "renew" }, "renewed": renewed, "failed": failed });
     if failed.is_empty() {
-        Ok(out)
-    } else {
-        Err(GwsError::other(format!(
-            "{} of {} subscription(s) could not be renewed: {out}",
-            failed.len(),
-            names.len()
-        )))
+        return Ok(renew_report(config.reactivate, renewed, failed));
     }
+    let count = failed.len();
+    let out = renew_report(config.reactivate, renewed, failed);
+    // Like `gwsr batch` and `drive +sync`: a partial failure is an API
+    // outcome (exit 1), not an internal error.
+    Err(GwsError::Api {
+        code: 207,
+        message: format!(
+            "{count} of {} subscription(s) could not be renewed: {out}",
+            names.len()
+        ),
+        reason: "renewPartialFailure".to_string(),
+        enable_url: None,
+    })
+}
+
+fn renew_report(reactivate: bool, renewed: Vec<Value>, failed: Vec<Value>) -> Value {
+    json!({ "action": if reactivate { "reactivate" } else { "renew" }, "renewed": renewed, "failed": failed })
 }
 
 /// Handles the `+renew` command.
@@ -436,6 +457,70 @@ mod tests {
         };
         let out = run(&api(&server), &config, 0).await.unwrap();
         assert_eq!(out["renewed"][0]["name"], "subscriptions/S1");
+    }
+
+    /// A failed renewal is an API outcome, not an internal error (exit 5):
+    /// a named subscription keeps its own error class, so a cron job can
+    /// retry a 503 (exit 6), and a partial `--all` failure exits 1.
+    #[tokio::test]
+    async fn renew_failures_keep_the_api_error_class() {
+        let server = MockServer::start().await;
+        Mock::given(method("PATCH"))
+            .and(path("/v1/subscriptions/busy"))
+            .respond_with(ResponseTemplate::new(503).set_body_json(
+                json!({"error": {"code": 503, "message": "unavailable", "status": "UNAVAILABLE"}}),
+            ))
+            .mount(&server)
+            .await;
+        Mock::given(method("PATCH"))
+            .and(path("/v1/subscriptions/gone"))
+            .respond_with(ResponseTemplate::new(404).set_body_json(
+                json!({"error": {"code": 404, "message": "not found", "status": "NOT_FOUND"}}),
+            ))
+            .mount(&server)
+            .await;
+        for (id, exit) in [
+            ("busy", GwsError::EXIT_CODE_API_RETRYABLE),
+            ("gone", GwsError::EXIT_CODE_API),
+        ] {
+            let config = RenewConfig {
+                subscription: Some(format!("subscriptions/{id}")),
+                all: false,
+                event_types: vec![],
+                within_secs: 3600,
+                reactivate: false,
+            };
+            let err = run(&api(&server), &config, 0).await.unwrap_err();
+            assert_eq!(err.exit_code(), exit, "{id}: {err:?}");
+            assert!(err.to_string().contains(id), "{err}");
+        }
+
+        Mock::given(method("GET"))
+            .and(path("/v1/subscriptions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "subscriptions": [
+                    {"name": "subscriptions/ok", "expireTime": "1970-01-01T00:10:00Z"},
+                    {"name": "subscriptions/gone", "expireTime": "1970-01-01T00:10:00Z"}
+                ]
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("PATCH"))
+            .and(path("/v1/subscriptions/ok"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"name": "operations/1"})))
+            .mount(&server)
+            .await;
+        let config = RenewConfig {
+            subscription: None,
+            all: true,
+            event_types: vec!["google.workspace.chat.message.v1.created".into()],
+            within_secs: 3600,
+            reactivate: false,
+        };
+        let err = run(&api(&server), &config, 0).await.unwrap_err();
+        assert_eq!(err.exit_code(), GwsError::EXIT_CODE_API, "{err:?}");
+        assert!(err.to_string().contains("1 of 2"), "{err}");
+        assert!(err.to_string().contains("subscriptions/ok"), "{err}");
     }
 
     /// Listing subscriptions treats an empty nextPageToken as the last page
