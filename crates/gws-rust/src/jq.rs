@@ -26,6 +26,9 @@ use crate::error::GwsError;
 
 type Data = data::JustLut<Val>;
 
+/// jq builtins `--jq` does not offer (see [`JqFilter::compile`]).
+const DISABLED_FUNS: &[&str] = &["env"];
+
 /// A compiled jq filter.
 pub struct JqFilter {
     source: String,
@@ -46,9 +49,14 @@ impl JqFilter {
         let defs = jaq_core::defs()
             .chain(jaq_std::defs())
             .chain(jaq_json::defs());
+        // jq's `env` returns the whole process environment, secrets such as
+        // `GWSR_TOKEN` and `GWSR_CLIENT_SECRET` included, which gwsr never
+        // prints. A `--jq` expression (often written by an LLM) must not be
+        // able to put them on stdout, so `env` is left undefined.
         let funs = jaq_core::funs()
             .chain(jaq_std::funs())
-            .chain(jaq_json::funs());
+            .chain(jaq_json::funs())
+            .filter(|(name, _, _)| !DISABLED_FUNS.contains(name));
 
         let arena = Arena::default();
         let program = File {
@@ -175,5 +183,22 @@ mod tests {
     #[test]
     fn empty_produces_no_outputs() {
         assert!(run("empty", json!(1)).unwrap().is_empty());
+    }
+
+    /// `env` would print the whole process environment, secrets such as
+    /// `GWSR_TOKEN` and `GWSR_CLIENT_SECRET` included, to stdout.
+    #[test]
+    fn env_is_not_available() {
+        for expr in ["env", "env.GWSR_TOKEN", "[env | keys[]]"] {
+            let err = JqFilter::compile(expr).unwrap_err();
+            assert!(matches!(err, GwsError::Validation(_)), "{expr}: {err:?}");
+            assert!(err.to_string().contains("env"), "{expr}: {err}");
+        }
+        assert!(JqFilter::compile("$ENV").is_err());
+        // Other std functions are still there.
+        assert_eq!(
+            run("now | type", json!(null)).unwrap(),
+            vec![json!("number")]
+        );
     }
 }
