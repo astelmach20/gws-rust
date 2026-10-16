@@ -2577,6 +2577,111 @@ async fn gmail_outgoing_helpers_reject_control_characters_in_headers() {
     );
 }
 
+/// Label names are resolved to IDs with a `users.labels.list` read before
+/// the change: the dry-run plan lists that read first, as a real run sends it.
+#[test]
+fn gmail_label_dry_runs_list_the_labels_read() {
+    let dir = setup();
+    seed(dir.path(), "gmail", "v1", "");
+    let plan = |args: &[&str]| {
+        let out = gwsr(dir.path()).args(args).output().unwrap();
+        assert!(
+            out.status.success(),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let plan = stdout_json(&out);
+        plan["requests"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| {
+                format!(
+                    "{} {}",
+                    r["method"].as_str().unwrap(),
+                    r["url"].as_str().unwrap()
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    let labels = "GET https://gmail.googleapis.com/gmail/v1/users/me/labels";
+
+    let requests = plan(&[
+        "gmail",
+        "+label",
+        "--message-id",
+        "m1",
+        "--add",
+        "Receipts",
+        "--dry-run",
+    ]);
+    assert_eq!(
+        requests,
+        [
+            labels,
+            "POST https://gmail.googleapis.com/gmail/v1/users/me/messages/m1/modify"
+        ]
+    );
+
+    let requests = plan(&[
+        "gmail",
+        "+filter",
+        "create",
+        "--from",
+        "boss@example.com",
+        "--add-label",
+        "Receipts",
+        "--dry-run",
+    ]);
+    assert_eq!(
+        requests,
+        [
+            labels,
+            "POST https://gmail.googleapis.com/gmail/v1/users/me/settings/filters"
+        ]
+    );
+
+    // `--archive` removes INBOX, which is resolved like any label name.
+    let requests = plan(&[
+        "gmail",
+        "+filter",
+        "create",
+        "--from",
+        "boss@example.com",
+        "--archive",
+        "--dry-run",
+    ]);
+    assert_eq!(
+        requests,
+        [
+            labels,
+            "POST https://gmail.googleapis.com/gmail/v1/users/me/settings/filters"
+        ]
+    );
+
+    // Without labels to resolve, a real run reads no labels.
+    let requests = plan(&[
+        "gmail",
+        "+filter",
+        "create",
+        "--from",
+        "boss@example.com",
+        "--forward",
+        "fwd@example.com",
+        "--yes",
+        "--dry-run",
+    ]);
+    assert_eq!(
+        requests,
+        ["POST https://gmail.googleapis.com/gmail/v1/users/me/settings/filters"]
+    );
+    let requests = plan(&["gmail", "+archive", "--message-id", "m1", "--dry-run"]);
+    assert_eq!(
+        requests,
+        ["POST https://gmail.googleapis.com/gmail/v1/users/me/messages/m1/modify"]
+    );
+}
+
 #[test]
 fn gmail_filter_forward_is_gated_under_policy() {
     let dir = setup();
