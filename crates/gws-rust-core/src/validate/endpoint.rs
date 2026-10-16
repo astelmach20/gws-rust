@@ -51,12 +51,18 @@ fn is_loopback(url: &Url) -> bool {
 /// `value` with the user-info part of a `scheme://user:password@host` URL
 /// replaced by `***`, so an error message that echoes a rejected URL never
 /// repeats a password. Works on text that is not a valid URL too.
+///
+/// The user info is taken to end at the last `@` before the first `/` or
+/// `\`. `?` and `#` end the authority of a valid URL, but an unencoded
+/// password may contain them, and such a URL is exactly the kind that gets
+/// rejected and echoed, so they do not end it here. A `/` path that holds an
+/// `@` (`https://host/users/a@b`) is left as is.
 pub fn hide_url_credentials(value: &str) -> String {
     let Some(start) = value.find("://").map(|i| i + 3) else {
         return value.to_string();
     };
     let rest = &value[start..];
-    let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let authority_end = rest.find(['/', '\\']).unwrap_or(rest.len());
     match rest[..authority_end].rfind('@') {
         Some(at) => format!("{}***{}", &value[..start], &rest[at..]),
         None => value.to_string(),
@@ -75,13 +81,17 @@ fn parse_url(raw: &str, what: &str) -> Result<Url, GwsError> {
             "{what} must not contain credentials"
         )));
     }
+    // A password with an unencoded `?` or `#` parses as a query or fragment.
+    let shown = hide_url_credentials(raw);
     if url.query().is_some() || url.fragment().is_some() {
         return Err(GwsError::Validation(format!(
-            "{what} '{raw}' must not contain a query string or fragment"
+            "{what} '{shown}' must not contain a query string or fragment"
         )));
     }
     if url.host().is_none() {
-        return Err(GwsError::Validation(format!("{what} '{raw}' has no host")));
+        return Err(GwsError::Validation(format!(
+            "{what} '{shown}' has no host"
+        )));
     }
     Ok(url)
 }
@@ -222,6 +232,35 @@ impl EndpointPolicy {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `?` and `#` end the authority of a valid URL, but in a URL typed with
+    /// an unencoded password they sit inside the user info: the URL fails to
+    /// parse (or parses with the password in its query or fragment), and the
+    /// error echoed it.
+    #[test]
+    fn rejected_url_hides_password_with_query_or_fragment_chars() {
+        for raw in [
+            "https://user:FAKE#pass@proxy.example/",
+            "https://user:FAKE?pass@proxy.example/",
+            "https://user:12#FAKEpass@proxy.example/",
+            "https://user:12?FAKEpass@proxy.example/",
+        ] {
+            let message = parse_api_base_override(Some(raw)).unwrap_err().to_string();
+            assert!(!message.contains("pass"), "{raw}: {message}");
+            assert!(message.contains("***@proxy.example"), "{raw}: {message}");
+            let message = validate_api_base_with(raw, None).unwrap_err().to_string();
+            assert!(!message.contains("pass"), "{raw}: {message}");
+            let message = EndpointPolicy::default()
+                .check(raw)
+                .unwrap_err()
+                .to_string();
+            assert!(!message.contains("pass"), "{raw}: {message}");
+        }
+        assert_eq!(
+            hide_url_credentials("https://proxy.example/a?b=c@d#e@f"),
+            "https://proxy.example/a?b=c@d#e@f"
+        );
+    }
 
     #[test]
     fn dot_segment_urls_are_refused() {

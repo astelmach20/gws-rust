@@ -28,7 +28,10 @@
 //!   or run code (sending mail or chat messages, sharing, RSVPs, running
 //!   scripts), including the generated methods in [`OUTBOUND_METHODS`] and
 //!   the Calendar event writes in [`NOTIFYING_METHODS`] when they would email
-//!   attendees. Gated only when `GWSR_REQUIRE_CONFIRM` is `1`/`true`.
+//!   attendees, the Gmail vacation responder in [`AUTO_REPLY_METHODS`] when
+//!   it turns auto-replies on, and the Groups Settings writes in
+//!   [`GROUP_SETTINGS_METHODS`] when they open a group to outsiders. Gated
+//!   only when `GWSR_REQUIRE_CONFIRM` is `1`/`true`.
 //!
 //! | gated action           | `--yes` or `--dry-run` | terminal | no terminal |
 //! |------------------------|------------------------|----------|-------------|
@@ -189,6 +192,14 @@ pub(crate) const OUTBOUND_METHODS: &[&str] = &[
     "calendar.acl.update",
     "calendar.acl.patch",
     "script.scripts.run",
+    // Deploying an Apps Script project publishes its code as a web app,
+    // add-on or API executable that other people can run.
+    "script.projects.deployments.create",
+    "script.projects.deployments.update",
+    // A Classroom guardian invitation emails the guardian.
+    "classroom.userProfiles.guardianInvitations.create",
+    // Commenting on a Drive approval notifies its initiator and reviewers.
+    "drive.approvals.comment",
     "directory.members.insert",
     // The same group membership through Cloud Identity, and admin roles.
     "cloudidentity.groups.memberships.create",
@@ -228,6 +239,56 @@ fn notifies_attendees(params: &serde_json::Map<String, serde_json::Value>) -> bo
     send_updates || send_notifications
 }
 
+/// Gmail's vacation responder, which auto-replies to people who write to
+/// the user. Gated only when the body turns auto-replies on (see
+/// [`enables_auto_reply`]).
+pub(crate) const AUTO_REPLY_METHODS: &[&str] = &["gmail.users.settings.updateVacation"];
+
+/// Whether a vacation-settings body turns auto-replies on. Any
+/// `enableAutoReply` other than absent, `null` or `false` counts, so an
+/// unexpected value is gated rather than let through.
+fn enables_auto_reply(body: Option<&serde_json::Value>) -> bool {
+    use serde_json::Value;
+    match body.and_then(|b| b.get("enableAutoReply")) {
+        None | Some(Value::Null) | Some(Value::Bool(false)) => false,
+        Some(Value::String(s)) => !s.eq_ignore_ascii_case("false"),
+        Some(_) => true,
+    }
+}
+
+/// Groups Settings writes. Gated only when the body opens the group to
+/// people outside the organization (see [`GROUP_OPENING_SETTINGS`]).
+pub(crate) const GROUP_SETTINGS_METHODS: &[&str] = &[
+    "groupsSettings.groups.update",
+    "groupsSettings.groups.patch",
+];
+
+/// `(field, value)` pairs that let any Internet user join the group or read
+/// its messages, or let users outside the organization become members. The
+/// API takes `allowExternalMembers` as the string `"true"`; a JSON `true`
+/// counts too.
+pub(crate) const GROUP_OPENING_SETTINGS: &[(&str, &str)] = &[
+    ("whoCanJoin", "ANYONE_CAN_JOIN"),
+    ("whoCanViewGroup", "ANYONE_CAN_VIEW"),
+    ("allowExternalMembers", "true"),
+];
+
+/// Whether `body` opens a group through a [`GROUP_SETTINGS_METHODS`]
+/// method `id`. Values match case-insensitively.
+fn opens_group(id: &str, body: Option<&serde_json::Value>) -> bool {
+    use serde_json::Value;
+    GROUP_SETTINGS_METHODS.contains(&id)
+        && body.is_some_and(|b| {
+            GROUP_OPENING_SETTINGS
+                .iter()
+                .any(|(field, open)| match b.get(field) {
+                    Some(Value::String(s)) => s.eq_ignore_ascii_case(open),
+                    Some(Value::Bool(v)) => v.to_string() == *open,
+                    _ => false,
+                })
+        })
+}
+
 /// Whether a Discovery method is destructive.
 pub(crate) fn is_destructive_method(method: &RestMethod) -> bool {
     method.http_method.eq_ignore_ascii_case("DELETE")
@@ -252,6 +313,8 @@ pub(crate) fn method_impact(
         Some(Impact::Destructive)
     } else if OUTBOUND_METHODS.contains(&id)
         || (NOTIFYING_METHODS.contains(&id) && notifies_attendees(params))
+        || (AUTO_REPLY_METHODS.contains(&id) && enables_auto_reply(body))
+        || opens_group(id, body)
     {
         Some(Impact::Outbound)
     } else {
@@ -265,6 +328,8 @@ pub(crate) fn may_be_gated(method: &RestMethod) -> bool {
     is_destructive_method(method)
         || OUTBOUND_METHODS.contains(&id)
         || NOTIFYING_METHODS.contains(&id)
+        || AUTO_REPLY_METHODS.contains(&id)
+        || GROUP_SETTINGS_METHODS.contains(&id)
         || BODY_DESTRUCTIVE_METHODS.iter().any(|(m, _, _)| *m == id)
 }
 
@@ -844,6 +909,150 @@ mod tests {
                 &params(json!({})),
                 Some(&json!({"role": "owner", "type": "anyone"}))
             ),
+            None
+        );
+    }
+
+    /// Deploying Apps Script code, emailing a Classroom guardian and
+    /// commenting on a Drive approval are outbound whatever the body.
+    #[test]
+    fn deployments_guardian_invitations_and_approval_comments_are_outbound() {
+        let none = serde_json::Map::new();
+        for (http, id) in [
+            ("POST", "script.projects.deployments.create"),
+            ("PUT", "script.projects.deployments.update"),
+            ("POST", "classroom.userProfiles.guardianInvitations.create"),
+            ("POST", "drive.approvals.comment"),
+        ] {
+            let method = RestMethod {
+                http_method: http.to_string(),
+                id: Some(id.to_string()),
+                ..Default::default()
+            };
+            assert!(may_be_gated(&method), "{id}");
+            assert_eq!(
+                method_impact(&method, &none, None),
+                Some(Impact::Outbound),
+                "{id}"
+            );
+        }
+        // Reading deployments, or creating a version, is not gated.
+        for (http, id) in [
+            ("GET", "script.projects.deployments.list"),
+            ("POST", "script.projects.versions.create"),
+            ("POST", "drive.approvals.approve"),
+        ] {
+            let method = RestMethod {
+                http_method: http.to_string(),
+                id: Some(id.to_string()),
+                ..Default::default()
+            };
+            assert!(!may_be_gated(&method), "{id}");
+            assert_eq!(method_impact(&method, &none, None), None, "{id}");
+        }
+    }
+
+    /// The vacation responder emails whoever writes to the user, so turning
+    /// it on is outbound; turning it off is not.
+    #[test]
+    fn vacation_responder_is_outbound_only_when_enabled() {
+        use serde_json::json;
+        let method = RestMethod {
+            http_method: "PUT".to_string(),
+            id: Some("gmail.users.settings.updateVacation".to_string()),
+            ..Default::default()
+        };
+        let none = serde_json::Map::new();
+        assert!(may_be_gated(&method));
+        for body in [
+            json!({"enableAutoReply": true, "responseSubject": "Away"}),
+            json!({"enableAutoReply": "true"}),
+            json!({"enableAutoReply": "yes"}),
+            json!({"enableAutoReply": 1}),
+        ] {
+            assert_eq!(
+                method_impact(&method, &none, Some(&body)),
+                Some(Impact::Outbound),
+                "{body}"
+            );
+        }
+        for body in [
+            Some(json!({"enableAutoReply": false})),
+            Some(json!({"enableAutoReply": "FALSE"})),
+            Some(json!({"enableAutoReply": null})),
+            Some(json!({"responseSubject": "Away"})),
+            None,
+        ] {
+            assert_eq!(
+                method_impact(&method, &none, body.as_ref()),
+                None,
+                "{body:?}"
+            );
+        }
+        // The field on another Gmail settings method is not gated.
+        let pop = RestMethod {
+            http_method: "PUT".to_string(),
+            id: Some("gmail.users.settings.updatePop".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(
+            method_impact(&pop, &none, Some(&json!({"enableAutoReply": true}))),
+            None
+        );
+    }
+
+    /// Opening a group to anyone on the Internet, or to external members,
+    /// grants access to people outside the organization.
+    #[test]
+    fn group_settings_are_outbound_only_when_they_open_the_group() {
+        use serde_json::json;
+        let m = |http: &str, id: &str| RestMethod {
+            http_method: http.to_string(),
+            id: Some(id.to_string()),
+            ..Default::default()
+        };
+        let none = serde_json::Map::new();
+        for method in [
+            m("PUT", "groupsSettings.groups.update"),
+            m("PATCH", "groupsSettings.groups.patch"),
+        ] {
+            assert!(may_be_gated(&method));
+            for body in [
+                json!({"whoCanJoin": "ANYONE_CAN_JOIN"}),
+                json!({"whoCanJoin": "anyone_can_join"}),
+                json!({"whoCanViewGroup": "ANYONE_CAN_VIEW", "name": "g"}),
+                json!({"allowExternalMembers": "true"}),
+                json!({"allowExternalMembers": "TRUE"}),
+                json!({"allowExternalMembers": true}),
+                json!({"whoCanJoin": "INVITED_CAN_JOIN", "allowExternalMembers": "true"}),
+            ] {
+                assert_eq!(
+                    method_impact(&method, &none, Some(&body)),
+                    Some(Impact::Outbound),
+                    "{body}"
+                );
+            }
+            for body in [
+                Some(json!({"whoCanJoin": "ALL_IN_DOMAIN_CAN_JOIN"})),
+                Some(json!({"whoCanViewGroup": "ALL_MEMBERS_CAN_VIEW"})),
+                Some(json!({"allowExternalMembers": "false"})),
+                Some(json!({"allowExternalMembers": false})),
+                Some(json!({"description": "ANYONE_CAN_JOIN"})),
+                Some(json!({})),
+                None,
+            ] {
+                assert_eq!(
+                    method_impact(&method, &none, body.as_ref()),
+                    None,
+                    "{body:?}"
+                );
+            }
+        }
+        // Reading a group's settings is not gated.
+        let get = m("GET", "groupsSettings.groups.get");
+        assert!(!may_be_gated(&get));
+        assert_eq!(
+            method_impact(&get, &none, Some(&json!({"whoCanJoin": "ANYONE_CAN_JOIN"}))),
             None
         );
     }
