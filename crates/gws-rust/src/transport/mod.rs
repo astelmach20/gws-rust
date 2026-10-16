@@ -359,7 +359,7 @@ impl Transport {
         errors::with_context(err, context)
     }
 
-    /// Send and require a 2xx response (or `extra_ok`); other statuses become
+    /// Send and require a 2xx response; other statuses become
     /// [`GwsError::Api`] prefixed with `context`.
     pub(crate) async fn send_ok(
         &self,
@@ -367,15 +367,13 @@ impl Transport {
         url: &str,
         idempotency: Idempotency,
         context: &str,
-        extra_ok: Option<StatusCode>,
         customize: impl Fn(reqwest::RequestBuilder) -> reqwest::RequestBuilder,
     ) -> Result<reqwest::Response, GwsError> {
         let sent = self
             .send(method, url, idempotency, customize)
             .await
             .map_err(|e| errors::with_context(e, context))?;
-        let status = sent.response.status();
-        if status.is_success() || Some(status) == extra_ok {
+        if sent.response.status().is_success() {
             return Ok(sent.response);
         }
         Err(self.error_for(sent, context).await)
@@ -394,7 +392,7 @@ impl Transport {
     ) -> Result<Value, GwsError> {
         let needs_length = matches!(method, Method::POST | Method::PUT | Method::PATCH);
         let resp = self
-            .send_ok(method, url, idempotency, context, None, |rb| {
+            .send_ok(method, url, idempotency, context, |rb| {
                 let rb = if query.is_empty() {
                     rb
                 } else {
