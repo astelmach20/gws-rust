@@ -305,6 +305,19 @@ impl AuthEnv {
         self.profile.source != ProfileSource::Default
     }
 
+    /// The profile selection, as the user wrote it, when it was made for this
+    /// command (`--profile`, or `GWSR_PROFILE`, which means the same): another
+    /// identity (`GWSR_TOKEN`, `GWSR_TOKEN_FILE`, `GWSR_CREDENTIALS_FILE`)
+    /// conflicts with it instead of silently replacing it. A profile pinned
+    /// in `config.toml` is a standing default that those sources override.
+    fn per_command_profile(&self) -> Option<String> {
+        match self.profile.source {
+            ProfileSource::Flag => Some(format!("--profile {}", self.profile.name)),
+            ProfileSource::EnvVar => Some(format!("GWSR_PROFILE={}", self.profile.name)),
+            ProfileSource::ConfigFile | ProfileSource::Default => None,
+        }
+    }
+
     /// Determine which source applies, without reading secrets.
     ///
     /// # Errors
@@ -323,15 +336,14 @@ impl AuthEnv {
             self.token_file.clone().map(CredentialSource::TokenFile)
         };
         if let Some(src) = direct {
-            if self.profile.source == ProfileSource::Flag {
+            if let Some(selection) = self.per_command_profile() {
                 let var = if self.token.is_some() {
                     "GWSR_TOKEN"
                 } else {
                     "GWSR_TOKEN_FILE"
                 };
                 return Err(AuthError::Config(format!(
-                    "--profile {} conflicts with {var}; unset one of them",
-                    self.profile.name
+                    "{selection} conflicts with {var}; unset one of them"
                 )));
             }
             if self.impersonate.is_some() {
@@ -345,10 +357,9 @@ impl AuthEnv {
         }
 
         if let Some(path) = &self.credentials_file {
-            if self.profile.source == ProfileSource::Flag {
+            if let Some(selection) = self.per_command_profile() {
                 return Err(AuthError::Config(format!(
-                    "--profile {} conflicts with GWSR_CREDENTIALS_FILE; unset one of them",
-                    self.profile.name
+                    "{selection} conflicts with GWSR_CREDENTIALS_FILE; unset one of them"
                 )));
             }
             if !path.exists() {
@@ -683,6 +694,43 @@ mod tests {
         let mut env = env_in(dir.path(), ProfileSource::Default);
         env.token = Some(SecretString::from("tok".to_string()));
         assert_eq!(env.source().unwrap(), CredentialSource::TokenEnv);
+    }
+
+    /// `GWSR_PROFILE` selects a profile as explicitly as `--profile` ("same
+    /// as --profile"), so another identity from GWSR_TOKEN, GWSR_TOKEN_FILE
+    /// or GWSR_CREDENTIALS_FILE conflicts with it instead of silently
+    /// replacing it. A profile pinned in config.toml (`gwsr auth use`) is a
+    /// standing default, not a per-command choice: those sources still win
+    /// over it.
+    #[test]
+    fn other_identities_conflict_with_gwsr_profile_env_var() {
+        let dir = tempfile::tempdir().unwrap();
+        let token_path = dir.path().join("token");
+        write_private(&token_path, "ya29.abc");
+        let sa_path = dir.path().join("sa.json");
+        write_private(&sa_path, SA_JSON);
+
+        let set = |env: &mut AuthEnv, var: &str| match var {
+            "GWSR_TOKEN" => env.token = Some(SecretString::from("tok".to_string())),
+            "GWSR_TOKEN_FILE" => env.token_file = Some(token_path.clone()),
+            _ => env.credentials_file = Some(sa_path.clone()),
+        };
+        for var in ["GWSR_TOKEN", "GWSR_TOKEN_FILE", "GWSR_CREDENTIALS_FILE"] {
+            let mut env = env_in(dir.path(), ProfileSource::EnvVar);
+            set(&mut env, var);
+            let err = env.source().unwrap_err();
+            assert!(matches!(err, AuthError::Config(_)), "{var}: {err:?}");
+            assert!(
+                err.to_string().contains(&format!(
+                    "GWSR_PROFILE={DEFAULT_PROFILE} conflicts with {var}"
+                )),
+                "{err}"
+            );
+
+            let mut env = env_in(dir.path(), ProfileSource::ConfigFile);
+            set(&mut env, var);
+            assert!(env.source().is_ok(), "{var} with a config.toml profile");
+        }
     }
 
     #[test]

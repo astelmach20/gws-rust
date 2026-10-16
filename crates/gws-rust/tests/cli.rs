@@ -1191,6 +1191,27 @@ fn explicit_profile_is_never_silently_replaced_by_gwsr_token() {
     );
 }
 
+/// `GWSR_PROFILE` means the same as `--profile`, so a `GWSR_TOKEN` for
+/// another identity conflicts with it too instead of silently winning.
+#[test]
+fn gwsr_profile_is_never_silently_replaced_by_gwsr_token() {
+    let env = Env::new();
+    let out = env
+        .cmd()
+        .args(["auth", "status", "--offline"])
+        .env("GWSR_PROFILE", "work")
+        .env("GWSR_TOKEN", "ya29.another-identity")
+        .output()
+        .unwrap();
+    let status: Value = serde_json::from_str(&stdout_of(&out)).unwrap();
+    assert_eq!(status["authenticated"], false, "{status}");
+    let err = status["credential_error"].as_str().unwrap_or_default();
+    assert!(
+        err.contains("GWSR_PROFILE=work conflicts with GWSR_TOKEN"),
+        "{status}"
+    );
+}
+
 /// The hint's `gwsr auth login` command must sign in to the profile the
 /// failed command used. Plain `gwsr auth login --scopes ...` would sign in to
 /// the config/default profile instead, leaving `--profile work` broken and
