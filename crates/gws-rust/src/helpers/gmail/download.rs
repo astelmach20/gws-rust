@@ -165,18 +165,26 @@ async fn download(
     std::fs::create_dir_all(dir)
         .map_err(|e| GwsError::other(format!("Failed to create {}: {e}", dir.display())))?;
     let paths = plan_paths(dir, parts, overwrite)?;
-    let mut saved = Vec::with_capacity(parts.len());
+    let total = parts.len();
+    let mut saved: Vec<Value> = Vec::with_capacity(total);
     for (part, path) in parts.iter().zip(paths) {
-        let data = match &part.data {
-            PartData::AttachmentId(id) => api.get_attachment(message_id, id).await?,
-            PartData::Inline(b64) => decode_base64url(b64).map_err(|e| {
-                GwsError::other(format!(
-                    "Invalid inline data for part '{}': {e}",
-                    part.filename
-                ))
-            })?,
+        let data = match save_part(api, message_id, part, &path, overwrite).await {
+            Ok(data) => data,
+            Err(e) => {
+                // The files before this one are already on disk: say which.
+                let written: Vec<&str> = saved.iter().filter_map(|s| s["path"].as_str()).collect();
+                let note = if written.is_empty() {
+                    format!("Wrote 0 of {total} attachments")
+                } else {
+                    format!(
+                        "Wrote {} of {total} attachments before failing ({})",
+                        written.len(),
+                        written.join(", ")
+                    )
+                };
+                return Err(crate::helpers::modelarmor::prefix_message(e, &note));
+            }
         };
-        crate::output_file::write_atomic(&path, &data, overwrite).await?;
         saved.push(json!({
             "filename": part.filename,
             "path": path.display().to_string(),
@@ -185,6 +193,27 @@ async fn download(
         }));
     }
     Ok(saved)
+}
+
+/// Fetch (or decode) one part and write it to `path`; returns its bytes.
+async fn save_part(
+    api: &GmailApi,
+    message_id: &str,
+    part: &OriginalPart,
+    path: &Path,
+    overwrite: bool,
+) -> Result<Vec<u8>, GwsError> {
+    let data = match &part.data {
+        PartData::AttachmentId(id) => api.get_attachment(message_id, id).await?,
+        PartData::Inline(b64) => decode_base64url(b64).map_err(|e| {
+            GwsError::other(format!(
+                "Invalid inline data for part '{}': {e}",
+                part.filename
+            ))
+        })?,
+    };
+    crate::output_file::write_atomic(path, &data, overwrite).await?;
+    Ok(data)
 }
 
 /// Handle `+attachments`.
@@ -479,6 +508,33 @@ mod tests {
         let plain = root.path().join("plain.txt");
         std::fs::write(&plain, b"x").unwrap();
         assert_eq!(mode(&written), mode(&plain));
+    }
+
+    /// A failure part-way leaves the earlier attachments on disk; the error
+    /// must say which, and keep its own class (exit code).
+    #[tokio::test]
+    async fn failure_part_way_lists_the_attachments_already_written() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/gmail/v1/users/me/messages/m1/attachments/A2"))
+            .respond_with(ResponseTemplate::new(403))
+            .mount(&server)
+            .await;
+        let dir = tempfile::tempdir().unwrap();
+        let parts = vec![
+            part("a.txt", PartData::Inline("aGk".into()), false),
+            part("b.bin", PartData::AttachmentId("A2".into()), false),
+        ];
+        let err = download(&mock_api(&server), "m1", &parts, dir.path(), false)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, GwsError::Api { code: 403, .. }), "{err:?}");
+        let msg = err.to_string();
+        assert!(msg.contains("Wrote 1 of 2 attachments"), "{msg}");
+        let written = dir.path().join("a.txt");
+        assert!(msg.contains(&written.display().to_string()), "{msg}");
+        assert_eq!(std::fs::read(&written).unwrap(), b"hi");
+        assert!(!dir.path().join("b.bin").exists());
     }
 
     #[tokio::test]
