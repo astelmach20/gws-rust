@@ -349,7 +349,7 @@ Ranges contain `!`, which interactive bash history-expands inside double quotes.
 - `--timeout SECS` (or `GWSR_TIMEOUT`, or `timeout_secs` in `config.toml`; default 60, `0` disables) limits the wait for a response and each gap while reading the body. Uploads get longer limits scaled by size. Discovery document fetches use `GWSR_TIMEOUT` / `timeout_secs` (the document is loaded before a method's `--timeout` is parsed). The connect timeout is 10 seconds.
 - Idempotent requests are retried (up to 4 attempts) with capped exponential backoff and full jitter on 408, 429, 500, 502, 503 and 504, on connection errors and timeouts, and on Google 403 `rateLimitExceeded`/`userRateLimitExceeded`. `Retry-After` is honored; if it asks for more than 60 seconds, `gwsr` stops retrying and returns that response.
 - **Non-idempotent requests (POST/PATCH) are sent at most once**, unless the connection never opened or the request carries a `requestId`. A timed-out `gmail +send` is never re-sent.
-- A `401` triggers one forced token refresh and a retry, for every command, including long-running streams.
+- A `401` triggers one forced token refresh and a retry, for every command, including long-running streams. A fixed `GWSR_TOKEN` cannot be refreshed, so a `401` with it fails at once (exit 2).
 
 ### Quota project
 
