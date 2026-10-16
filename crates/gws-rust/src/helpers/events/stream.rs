@@ -33,11 +33,11 @@ use std::time::Duration;
 /// Classification of one failed loop iteration.
 #[derive(Debug)]
 pub(crate) enum StepError {
-    /// Retry after a backoff (counts against the failure budget).
-    Transient {
-        status: Option<u16>,
-        message: String,
-    },
+    /// Retry after a backoff (counts against the failure budget). The error
+    /// is kept whole: when the budget runs out it is the command's error,
+    /// with its own class (a lost connection exits 10, a refused token 2, a
+    /// 403 rate limit 6).
+    Transient(GwsError),
     /// Stop the loop and report this error.
     Fatal(GwsError),
 }
@@ -50,17 +50,11 @@ impl From<GwsError> for StepError {
     /// bounded by the failure budget.
     fn from(e: GwsError) -> Self {
         match &e {
-            GwsError::Api { code, .. } if e.is_retryable() => StepError::Transient {
-                status: Some(*code),
-                message: e.to_string(),
-            },
+            GwsError::Api { .. } if e.is_retryable() => StepError::Transient(e),
             GwsError::Api { .. } | GwsError::Validation(_) | GwsError::Discovery(_) => {
                 StepError::Fatal(e)
             }
-            _ => StepError::Transient {
-                status: None,
-                message: e.to_string(),
-            },
+            _ => StepError::Transient(e),
         }
     }
 }
@@ -90,8 +84,12 @@ impl StreamPrinter {
     }
 }
 
-/// Write one diagnostic record to stderr as a single JSON line.
+/// Write one diagnostic record to stderr as a single JSON line. With `-q`
+/// only `error` records are written.
 pub(crate) fn emit_diagnostic(level: &str, event: &str, fields: Value) {
+    if level != "error" && crate::logging::quiet() {
+        return;
+    }
     let mut record = json!({ "level": level, "event": event });
     if let (Some(obj), Value::Object(extra)) = (record.as_object_mut(), fields) {
         obj.extend(extra);
@@ -212,22 +210,19 @@ pub(crate) async fn run_stream<S: StreamStep>(
                 }
             }
             Err(StepError::Fatal(e)) => return Err(e),
-            Err(StepError::Transient { status, message }) => {
+            Err(StepError::Transient(e)) => {
                 let Some(delay) = budget.record_failure() else {
-                    let summary = format!(
-                        "giving up after {} consecutive transient failures; last error: {message}",
+                    let context = format!(
+                        "giving up after {} consecutive transient failures; last error",
                         budget.consecutive() - 1
                     );
-                    return Err(match status {
-                        Some(code) => GwsError::Api {
-                            code,
-                            message: summary,
-                            reason: "transientFailureBudgetExhausted".to_string(),
-                            enable_url: None,
-                        },
-                        None => GwsError::other(summary),
-                    });
+                    return Err(crate::helpers::modelarmor::prefix_message(e, &context));
                 };
+                let status = match &e {
+                    GwsError::Api { code, .. } => Some(*code),
+                    _ => None,
+                };
+                let message = e.to_string();
                 emit_diagnostic(
                     "warning",
                     "transient_error",
@@ -485,7 +480,7 @@ mod tests {
         for code in [408, 429, 500, 502, 503, 504] {
             assert!(matches!(
                 StepError::from(api(code)),
-                StepError::Transient { .. }
+                StepError::Transient(_)
             ));
         }
         for code in [400, 401, 403, 404, 409, 501] {
@@ -499,10 +494,7 @@ mod tests {
         };
         assert!(matches!(
             StepError::from(e),
-            StepError::Transient {
-                status: Some(503),
-                ..
-            }
+            StepError::Transient(GwsError::Api { code: 503, .. })
         ));
         let e = GwsError::Api {
             code: 403,
@@ -517,7 +509,7 @@ mod tests {
         ));
         assert!(matches!(
             StepError::from(GwsError::other("net")),
-            StepError::Transient { status: None, .. }
+            StepError::Transient(GwsError::Other(_))
         ));
     }
 
@@ -540,10 +532,7 @@ mod tests {
             assert!(
                 matches!(
                     StepError::from(e),
-                    StepError::Transient {
-                        status: Some(403),
-                        ..
-                    }
+                    StepError::Transient(GwsError::Api { code: 403, .. })
                 ),
                 "{reason}"
             );
@@ -598,10 +587,12 @@ mod tests {
     }
 
     fn transient(code: u16) -> Result<(), StepError> {
-        Err(StepError::Transient {
-            status: Some(code),
+        Err(StepError::Transient(GwsError::Api {
+            code,
             message: format!("HTTP {code}"),
-        })
+            reason: "backendError".into(),
+            enable_url: None,
+        }))
     }
 
     #[tokio::test]
@@ -627,6 +618,41 @@ mod tests {
                 assert!(message.contains("giving up after 2"));
             }
             other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    /// When the budget runs out, the last failure decides the exit code: a
+    /// lost connection is a network error (10), a refused token an auth
+    /// error (2), and a 403 rate limit keeps its reason so it stays
+    /// retryable (6). None of them is an internal error (5).
+    #[tokio::test]
+    async fn exhausted_budget_keeps_the_last_error_class() {
+        let rate_limited = || GwsError::Api {
+            code: 403,
+            message: "Quota exceeded".into(),
+            reason: "rateLimitExceeded".into(),
+            enable_url: None,
+        };
+        let cases: [(fn() -> GwsError, i32); 3] = [
+            (
+                || GwsError::Network("connection refused".into()),
+                GwsError::EXIT_CODE_NETWORK,
+            ),
+            (
+                || GwsError::Auth("token refresh failed".into()),
+                GwsError::EXIT_CODE_AUTH,
+            ),
+            (rate_limited, GwsError::EXIT_CODE_API_RETRYABLE),
+        ];
+        for (make, exit) in cases {
+            let mut s = Scripted {
+                results: [Err(StepError::from(make())), Err(StepError::from(make()))].into(),
+                calls: 0,
+            };
+            let err = run_stream(&fast(true, 1), &mut s).await.unwrap_err();
+            assert_eq!(err.exit_code(), exit, "{err:?}");
+            assert!(err.to_string().contains("giving up after 1"), "{err}");
+            assert!(err.to_string().contains(&make().to_string()), "{err}");
         }
     }
 
@@ -686,10 +712,7 @@ mod tests {
             .unwrap_err();
         assert!(matches!(
             err,
-            StepError::Transient {
-                status: Some(503),
-                ..
-            }
+            StepError::Transient(GwsError::Api { code: 503, .. })
         ));
     }
 

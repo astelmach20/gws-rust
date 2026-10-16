@@ -48,11 +48,26 @@ fn is_loopback(url: &Url) -> bool {
     }
 }
 
+/// `value` with the user-info part of a `scheme://user:password@host` URL
+/// replaced by `***`, so an error message that echoes a rejected URL never
+/// repeats a password. Works on text that is not a valid URL too.
+pub fn hide_url_credentials(value: &str) -> String {
+    let Some(start) = value.find("://").map(|i| i + 3) else {
+        return value.to_string();
+    };
+    let rest = &value[start..];
+    let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    match rest[..authority_end].rfind('@') {
+        Some(at) => format!("{}***{}", &value[..start], &rest[at..]),
+        None => value.to_string(),
+    }
+}
+
 fn parse_url(raw: &str, what: &str) -> Result<Url, GwsError> {
     let url = Url::parse(raw).map_err(|e| {
         GwsError::Validation(format!(
             "{what} '{}' is not a valid URL: {e}",
-            raw.escape_debug()
+            hide_url_credentials(raw).escape_debug()
         ))
     })?;
     if !url.username().is_empty() || url.password().is_some() {
@@ -174,7 +189,8 @@ impl EndpointPolicy {
         super::reject_dot_segments(url)?;
         let parsed = Url::parse(url).map_err(|e| {
             GwsError::Validation(format!(
-                "Refusing to send credentials to invalid URL {url:?}: {e}"
+                "Refusing to send credentials to invalid URL {:?}: {e}",
+                hide_url_credentials(url)
             ))
         })?;
         let clean_userinfo = parsed.username().is_empty() && parsed.password().is_none();

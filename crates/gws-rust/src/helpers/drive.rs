@@ -1416,6 +1416,20 @@ fn plan_sync(
             })
         }
         None => {
+            // The state keeps one path per ID, so a copy of the same item at
+            // another path (a file with two parents in the synced tree, or
+            // a rename only in case on a case-insensitive file system) has
+            // no record here. It was still written by the sync when it holds
+            // exactly what the item's record says the sync wrote.
+            if let Some(rec) = state.records.get(id)
+                && let Some(local) = unchanged_locally(path, stat.clone(), &rec.local)?
+            {
+                return Ok(if remote.same_content(&rec.remote) {
+                    SyncAction::Unchanged(local)
+                } else {
+                    SyncAction::Download
+                });
+            }
             // Not written by a previous sync (or the state was lost). Adopt
             // it when Drive's checksum proves it already is the same file.
             if let Some(expected) = &remote.sha256_checksum {
@@ -1652,12 +1666,22 @@ async fn sync_walk(
     // (folder ID, local directory, path relative to `dir` joined by '/')
     let mut stack: Vec<(String, PathBuf, String)> =
         vec![(folder_id.to_string(), dir.to_path_buf(), String::new())];
-    let mut visited = std::collections::HashSet::new();
+    // Folder ID -> the local directory it is mirrored into.
+    let mut visited: std::collections::HashMap<String, PathBuf> = std::collections::HashMap::new();
 
     while let Some((id, local_dir, rel_dir)) = stack.pop() {
-        if !visited.insert(id.clone()) {
+        // A folder with more than one parent in the tree is mirrored once;
+        // say where, rather than silently leaving the other path empty.
+        if let Some(first) = visited.get(&id) {
+            skipped.push(json!({
+                "id": id,
+                "path": local_dir.display().to_string(),
+                "mimeType": FOLDER_MIME,
+                "reason": format!("folder already mirrored at '{}'", first.display()),
+            }));
             continue;
         }
+        visited.insert(id.clone(), local_dir.clone());
         let mut entries = Vec::new();
         for child in list_children(api, &id).await? {
             let child_id = str_field(&child, "id")?;
@@ -2450,6 +2474,52 @@ mod tests {
         );
     }
 
+    /// A folder with two parents in the synced tree is mirrored once; the
+    /// other path is reported under "skipped", not silently left empty.
+    #[tokio::test]
+    async fn sync_reports_a_folder_reached_through_a_second_parent() {
+        let server = MockServer::start().await;
+        mount_listing(
+            &server,
+            "ROOT",
+            json!([
+                {"id": "A", "name": "a", "mimeType": FOLDER_MIME},
+                {"id": "B", "name": "b", "mimeType": FOLDER_MIME}
+            ]),
+        )
+        .await;
+        let shared = json!([{"id": "F", "name": "shared", "mimeType": FOLDER_MIME}]);
+        mount_listing(&server, "A", shared.clone()).await;
+        mount_listing(&server, "B", shared).await;
+        mount_listing(
+            &server,
+            "F",
+            json!([{"id": "X", "name": "x.txt", "mimeType": "text/plain"}]),
+        )
+        .await;
+        let api = api(&server.uri(), "drive/v3/");
+        let dir = tempfile::tempdir().unwrap();
+        let v = sync(&api, "ROOT", dir.path()).await.unwrap();
+        assert_eq!(ids(&v, "downloaded"), ["X"], "{v}");
+        assert_eq!(ids(&v, "skipped"), ["F"], "{v}");
+        let skipped = &v["skipped"][0];
+        let mirrored = PathBuf::from(v["downloaded"][0]["path"].as_str().unwrap());
+        let mirrored = mirrored.parent().unwrap();
+        let other = if mirrored.starts_with(dir.path().join("a")) {
+            dir.path().join("b").join("shared")
+        } else {
+            dir.path().join("a").join("shared")
+        };
+        assert_eq!(skipped["path"], other.display().to_string(), "{v}");
+        assert!(
+            skipped["reason"]
+                .as_str()
+                .unwrap()
+                .contains(&mirrored.display().to_string()),
+            "{v}"
+        );
+    }
+
     #[tokio::test]
     async fn sync_keeps_a_folder_and_file_with_one_name_apart() {
         let server = MockServer::start().await;
@@ -3011,6 +3081,65 @@ mod tests {
         // Released: the next run goes ahead.
         let v = sync(&api, "ROOT", dir.path()).await.unwrap();
         assert_eq!(ids(&v, "downloaded"), ["A"], "{v}");
+    }
+
+    /// A file with two parents inside the synced tree is listed in both
+    /// folders under one ID. The state keeps one path per ID, so the copy at
+    /// the other path must still count as written by the sync: not as an
+    /// untracked conflict on every later run, and updated when Drive changes.
+    #[tokio::test]
+    async fn sync_tracks_a_file_listed_in_two_synced_folders() {
+        let server = MockServer::start().await;
+        let api = api(&server.uri(), "drive/v3/");
+        let dir = tempfile::tempdir().unwrap();
+        let mount = |modified: &'static str, body: &'static [u8]| {
+            let server = &server;
+            async move {
+                server.reset().await;
+                let doc = json!({"id": "D", "name": "notes", "mimeType": DOC,
+                                 "modifiedTime": modified, "version": "1"});
+                mount_listing(
+                    server,
+                    "ROOT",
+                    json!([doc.clone(), {"id": "S", "name": "sub", "mimeType": FOLDER_MIME}]),
+                )
+                .await;
+                mount_listing(server, "S", json!([doc])).await;
+                Mock::given(method("GET"))
+                    .and(path("/drive/v3/files/D/export"))
+                    .respond_with(ResponseTemplate::new(200).set_body_bytes(body.to_vec()))
+                    .mount(server)
+                    .await;
+            }
+        };
+        let top = dir.path().join("notes.docx");
+        let nested = dir.path().join("sub").join("notes.docx");
+
+        mount("2024-01-01T00:00:00Z", b"v1").await;
+        let v = sync(&api, "ROOT", dir.path()).await.unwrap();
+        assert_eq!(ids(&v, "downloaded"), ["D", "D"], "{v}");
+
+        // Nothing changed: nothing to do, and no conflict.
+        let v = sync(&api, "ROOT", dir.path()).await.unwrap();
+        assert!(ids(&v, "conflicts").is_empty(), "{v}");
+        assert!(sync_failure(&v).is_none(), "{v}");
+        assert_eq!(v["unchanged"].as_array().unwrap().len(), 2, "{v}");
+
+        // Changed in Drive: both pristine copies are updated.
+        mount("2024-02-01T00:00:00Z", b"v2").await;
+        let v = sync(&api, "ROOT", dir.path()).await.unwrap();
+        assert!(ids(&v, "conflicts").is_empty(), "{v}");
+        assert_eq!(ids(&v, "downloaded"), ["D", "D"], "{v}");
+        assert_eq!(std::fs::read(&top).unwrap(), b"v2");
+        assert_eq!(std::fs::read(&nested).unwrap(), b"v2");
+
+        // A copy edited locally is still kept and reported.
+        edit_locally(&top, b"mine");
+        mount("2024-03-01T00:00:00Z", b"v3").await;
+        let v = sync(&api, "ROOT", dir.path()).await.unwrap();
+        assert_eq!(ids(&v, "conflicts"), ["D"], "{v}");
+        assert_eq!(std::fs::read(&top).unwrap(), b"mine");
+        assert_eq!(std::fs::read(&nested).unwrap(), b"v3");
     }
 
     #[tokio::test]

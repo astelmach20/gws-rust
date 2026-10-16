@@ -320,6 +320,14 @@ pub enum SendError {
         retried_allowed: bool,
     },
 
+    #[error("{method} {url}: no data received for {}s while reading the HTTP {status} response body (see --timeout)", timeout.as_secs())]
+    BodyTimeout {
+        method: Method,
+        url: String,
+        status: StatusCode,
+        timeout: Duration,
+    },
+
     #[error("{method} {url}: failed to read HTTP {status} response body: {source}")]
     ReadBody {
         method: Method,
@@ -348,6 +356,7 @@ impl From<SendError> for GwsError {
             SendError::Build(_) => GwsError::other(err),
             SendError::Transport { .. }
             | SendError::Timeout { .. }
+            | SendError::BodyTimeout { .. }
             | SendError::ReadBody { .. } => GwsError::Network(Box::new(err)),
         }
     }
@@ -382,11 +391,18 @@ pub fn is_retryable_status(status: StatusCode) -> bool {
 /// Parse a `Retry-After` header: delta-seconds or an HTTP-date. An invalid
 /// value is `None`, which callers treat as "no hint" and fall back to their
 /// own backoff (RFC 9110 lets recipients ignore an invalid Retry-After); a
-/// date in the past means "retry now".
+/// date in the past means "retry now". Delta-seconds is digits only (RFC 9110
+/// §10.2.3, so no sign); a value too large for `u64` is still a valid request
+/// to wait and saturates rather than being ignored.
 pub fn parse_retry_after(value: &str, now: SystemTime) -> Option<Duration> {
     let value = value.trim();
-    if let Ok(secs) = value.parse::<u64>() {
-        return Some(Duration::from_secs(secs));
+    if !value.is_empty() && value.bytes().all(|b| b.is_ascii_digit()) {
+        // All digits, so parsing can only fail by overflowing.
+        return Some(
+            value
+                .parse::<u64>()
+                .map_or(Duration::MAX, Duration::from_secs),
+        );
     }
     let when = httpdate::parse_http_date(value).ok()?;
     Some(when.duration_since(now).unwrap_or(Duration::ZERO))
@@ -419,6 +435,7 @@ async fn classify(
     response: reqwest::Response,
     method: &Method,
     url: &str,
+    body_timeout: Option<Duration>,
 ) -> Result<Verdict, SendError> {
     let status = response.status();
     let retry_after = header_retry_after(response.headers());
@@ -432,18 +449,29 @@ async fn classify(
         return Ok(Verdict::Done(response));
     }
     // A 403 is only retryable when the body names a rate-limit reason, so the
-    // body must be read and the response rebuilt around it.
+    // body must be read and the response rebuilt around it. The read is
+    // bounded by the response timeout: a body that stalls must not hang the
+    // request past `--timeout`.
     let version = response.version();
     let headers = response.headers().clone();
-    let body = response
-        .bytes()
-        .await
-        .map_err(|source| SendError::ReadBody {
-            method: method.clone(),
-            url: url.to_string(),
-            status,
-            source,
-        })?;
+    let read = response.bytes();
+    let body = match body_timeout {
+        Some(limit) => tokio::time::timeout(limit, read)
+            .await
+            .map_err(|_elapsed| SendError::BodyTimeout {
+                method: method.clone(),
+                url: url.to_string(),
+                status,
+                timeout: limit,
+            })?,
+        None => read.await,
+    }
+    .map_err(|source| SendError::ReadBody {
+        method: method.clone(),
+        url: url.to_string(),
+        status,
+        source,
+    })?;
     let rate_limited = is_rate_limit_body(&body);
     let response = rebuild_response(status, version, headers, body);
     Ok(if rate_limited {
@@ -536,7 +564,7 @@ pub async fn send(
             }
         };
 
-        match classify(response, &method, &url).await? {
+        match classify(response, &method, &url, policy.response_timeout).await? {
             Verdict::Done(response) => {
                 return Ok(Sent {
                     response,
@@ -669,6 +697,41 @@ mod tests {
         let earlier = httpdate::fmt_http_date(now - Duration::from_secs(30));
         assert_eq!(parse_retry_after(&earlier, now), Some(Duration::ZERO));
         assert_eq!(parse_retry_after("soon", now), None);
+    }
+
+    /// A delta-seconds value too large for `u64` is still a valid (huge)
+    /// request to wait, not a garbage value to ignore. Signs are not digits.
+    #[test]
+    fn retry_after_overflowing_seconds_is_huge_not_ignored() {
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        assert_eq!(
+            parse_retry_after("99999999999999999999999", now),
+            Some(Duration::MAX)
+        );
+        assert_eq!(parse_retry_after("+5", now), None);
+        assert_eq!(parse_retry_after("-5", now), None);
+        assert_eq!(parse_retry_after("", now), None);
+    }
+
+    #[tokio::test]
+    async fn overflowing_retry_after_stops_retrying() {
+        let server = MockServer::start().await;
+        let calls = mount_sequence(
+            &server,
+            "GET",
+            vec![
+                ResponseTemplate::new(503).insert_header("retry-after", "99999999999999999999999"),
+            ],
+        )
+        .await;
+        let client = shared_client().unwrap();
+        let url = format!("{}/r", server.uri());
+        let sent = send(&fast_policy(), Idempotency::FromMethod, || client.get(&url))
+            .await
+            .unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(sent.response.status(), 503);
+        assert!(sent.gave_up);
     }
 
     #[test]
@@ -983,6 +1046,47 @@ mod tests {
             SendError::Transport { attempts, .. } => assert_eq!(attempts, 4),
             other => panic!("unexpected error: {other}"),
         }
+    }
+
+    /// A 403 is read to look for a rate-limit reason. A body that stops
+    /// arriving is bounded by the response timeout instead of hanging the
+    /// request forever.
+    #[tokio::test]
+    async fn stalled_forbidden_body_times_out() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/r", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 4096];
+            let read = socket.read(&mut buf).await.unwrap();
+            assert!(read > 0, "no request arrived");
+            // Promise 100 bytes, send 8, then go silent with the socket open.
+            socket
+                .write_all(b"HTTP/1.1 403 Forbidden\r\ncontent-length: 100\r\n\r\n{\"error\"")
+                .await
+                .unwrap();
+            std::future::pending::<()>().await;
+            drop(socket);
+        });
+        let client = shared_client().unwrap();
+        let policy = RetryPolicy {
+            response_timeout: Some(Duration::from_millis(200)),
+            ..fast_policy()
+        };
+        let err = tokio::time::timeout(
+            Duration::from_secs(5),
+            send(&policy, Idempotency::FromMethod, || client.get(&url)),
+        )
+        .await
+        .expect("send ignored the response timeout while reading a 403 body")
+        .unwrap_err();
+        assert!(
+            matches!(err, SendError::BodyTimeout { status, .. } if status == 403),
+            "{err}"
+        );
+        assert!(err.to_string().contains("--timeout"), "{err}");
+        server.abort();
     }
 
     /// A local server that accepts each of the first `drops` connections,
