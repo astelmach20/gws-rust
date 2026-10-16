@@ -1636,6 +1636,65 @@ fn modelarmor_sanitize_rejects_unreadable_stdin_as_validation() {
     );
 }
 
+/// A Model Armor `--json` body must be a JSON object without repeated keys,
+/// as every other `--json` body is: an array or a string is not a request,
+/// and `{"a":1,"a":2}` would silently send only the last value.
+#[test]
+fn modelarmor_json_bodies_must_be_objects() {
+    let dir = setup();
+    seed(dir.path(), "modelarmor", "v1", "");
+    let template = "projects/my-project/locations/us-central1/templates/t";
+    let commands: [&[&str]; 3] = [
+        &[
+            "modelarmor",
+            "+create-template",
+            "--project",
+            "my-project",
+            "--location",
+            "us-central1",
+            "--template-id",
+            "t",
+        ],
+        &["modelarmor", "+sanitize-prompt", "--template", template],
+        &["modelarmor", "+sanitize-response", "--template", template],
+    ];
+    let cases = [
+        ("[]", "--json must be a JSON object, got array"),
+        ("\"x\"", "--json must be a JSON object, got string"),
+        ("null", "--json must be a JSON object, got null"),
+        ("{\"a\":1,\"a\":2}", "duplicate key 'a'"),
+    ];
+    for command in commands {
+        for (body, expected) in cases {
+            let out = gwsr(dir.path())
+                .args(command)
+                .args(["--json", body, "--dry-run"])
+                .output()
+                .unwrap();
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            assert_eq!(
+                out.status.code(),
+                Some(3),
+                "{command:?} --json {body} was accepted: stdout={} stderr={stderr}",
+                String::from_utf8_lossy(&out.stdout)
+            );
+            assert!(stderr.contains(expected), "{command:?} {body}: {stderr}");
+        }
+        // An object is still sent as given.
+        let out = gwsr(dir.path())
+            .args(command)
+            .args(["--json", "{\"a\":1}", "--dry-run"])
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{command:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(stdout_json(&out)["requests"][0]["body"], json!({"a": 1}));
+    }
+}
+
 // ── -q and stream diagnostics ───────────────────────────────────────────
 
 /// `-q` means "only print errors on stderr": the info/warning diagnostics of
