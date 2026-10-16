@@ -471,17 +471,18 @@ impl Api {
             return print_value(matches, &json!({ "dry_run": true, "requests": planned }));
         }
         use crate::helpers::modelarmor::{note_applied_write, require_pass, sanitize_value};
-        let screened = match sanitize_value(&self.sanitize, value.clone()).await {
-            Ok(outcome) => require_pass(outcome),
+        let printed = match sanitize_value(&self.sanitize, value.clone()).await {
+            Ok(outcome) => require_pass(outcome).and_then(|v| print_value(matches, &v)),
             Err(e) => Err(e),
         };
-        match screened {
-            Ok(v) => print_value(matches, &v),
-            // The write already happened: say so, and name what it made.
+        match printed {
+            // The write already happened, so a screening, `--jq` or format
+            // failure must not read as "nothing changed, retry": say so, and
+            // name what it made.
             Err(e) if self.wrote.load(std::sync::atomic::Ordering::Relaxed) => {
                 Err(note_applied_write(e, value))
             }
-            Err(e) => Err(e),
+            other => other,
         }
     }
 
