@@ -894,6 +894,13 @@ mod tests {
             let ceiling = Duration::from_millis(100 * 2u64.pow(retry)).min(policy.max_delay);
             assert!(policy.backoff(retry) <= ceiling);
         }
+        // Full jitter spreads over the whole range: 200 draws all landing
+        // in the lower half (or at zero) has probability 2^-200.
+        let longest = (0..200).map(|_| policy.backoff(1)).max().unwrap();
+        assert!(
+            longest > Duration::from_millis(100),
+            "backoff never waits more than half its 200ms ceiling (longest {longest:?})"
+        );
     }
 
     #[test]
@@ -1269,6 +1276,31 @@ mod tests {
         assert_eq!(sent.response.status(), 429);
         assert_eq!(sent.retry_after, Some(Duration::from_secs(3600)));
         assert!(sent.retry_note().unwrap().contains("3600s"));
+
+        // A Retry-After within max_retry_after is waited out, although the
+        // policy's own backoff is at most 5ms.
+        let server = MockServer::start().await;
+        let calls = mount_sequence(
+            &server,
+            "GET",
+            vec![
+                ResponseTemplate::new(429).insert_header("retry-after", "1"),
+                ResponseTemplate::new(200),
+            ],
+        )
+        .await;
+        let url = format!("{}/r", server.uri());
+        let start = std::time::Instant::now();
+        let sent = send(&fast_policy(), Idempotency::FromMethod, || client.get(&url))
+            .await
+            .unwrap();
+        assert_eq!(sent.response.status(), 200);
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert!(
+            start.elapsed() >= Duration::from_secs(1),
+            "retried after {:?}, not after the server's Retry-After: 1",
+            start.elapsed()
+        );
     }
 
     #[tokio::test]
