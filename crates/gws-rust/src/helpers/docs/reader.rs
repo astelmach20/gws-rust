@@ -324,9 +324,20 @@ fn cell_text(cell: &Value, document: &Value, markdown: bool) -> String {
     if let Some(content) = cell.get("content").and_then(Value::as_array) {
         render_elements(content, document, markdown, &mut s);
     }
+    // A GFM table cell is one line: its paragraphs and line breaks are
+    // joined with spaces. In Markdown a line break was written as a hard
+    // break, a `\` ending the line (an odd number of them: literal
+    // backslashes are escaped in pairs), which would be literal text here.
     let joined = s
         .lines()
         .map(str::trim)
+        .map(|l| {
+            let trailing = l.len() - l.trim_end_matches('\\').len();
+            match l.strip_suffix('\\') {
+                Some(rest) if markdown && trailing % 2 == 1 => rest.trim_end(),
+                _ => l,
+            }
+        })
         .filter(|l| !l.is_empty())
         .collect::<Vec<_>>()
         .join(" ");
@@ -516,6 +527,25 @@ mod tests {
             cell(json!({"textRun": {"content": "x|y", "textStyle": {"weightedFontFamily": {"fontFamily": "Courier New"}}}})),
         ]}]}}]}});
         assert!(render(&document, true).starts_with("| a\\|b | `x\\|y` |\n"));
+    }
+
+    #[test]
+    fn line_breaks_in_table_cells_leave_no_backslash() {
+        // A table cell is one line, so a hard break (`\` + newline) cannot
+        // be kept; the cell's lines are joined with spaces instead.
+        let mono = json!({"weightedFontFamily": {"fontFamily": "Courier New"}});
+        let cell = |runs: Value| json!({"content": [{"paragraph": {"elements": runs}}]});
+        let document = json!({"body": {"content": [{"table": {"tableRows": [{"tableCells": [
+            cell(json!([{"textRun": {"content": "one\u{000b}two\n"}}])),
+            cell(json!([{"textRun": {"content": "x\u{000b}y", "textStyle": mono}}])),
+            cell(json!([{"textRun": {"content": "back\\\u{000b}slash\n"}}])),
+        ]}]}}]}});
+        let md = render(&document, true);
+        assert!(
+            md.starts_with("| one two | `x` `y` | back\\\\ slash |\n"),
+            "{md:?}"
+        );
+        assert_eq!(render(&document, false), "one two\tx y\tback\\ slash\n");
     }
 
     /// Parse Markdown back and describe it as (block structure, text, inline
