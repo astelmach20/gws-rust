@@ -250,7 +250,7 @@ Keys are never copied between backends, and a new key is never generated while e
     └── profile.json                   account and granted scopes (no secrets)
 ```
 
-Credential, token and client files that are readable by group or others are refused. A corrupt token cache is moved aside to `.corrupt-<time>`, never deleted.
+Credential, token and client files that are readable by group or others, or owned by another user, are refused. So are a config directory, `config.toml` and `profile.json` that another user owns or that group or others may write (exit `8`). A corrupt token cache is moved aside to `.corrupt-<time>`, never deleted.
 
 ### Status, export and logout
 

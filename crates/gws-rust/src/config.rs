@@ -169,8 +169,9 @@ pub fn parse_config(text: &str, origin: &Path) -> Result<ConfigFile, GwsError> {
 }
 
 /// Load `path` if it exists. A missing file is not an error; an unreadable
-/// or invalid one is.
+/// or invalid one is, and so is one another user owns or may write to.
 pub fn load_config_file(path: &Path) -> Result<Option<ConfigFile>, GwsError> {
+    check_trusted(path)?;
     match std::fs::read_to_string(path) {
         Ok(text) => parse_config(&text, path).map(Some),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
@@ -287,6 +288,7 @@ pub fn profile_in(path: &Path) -> Result<Option<String>, GwsError> {
 /// `gwsr auth use`), preserving every other key and comment. The existing
 /// file must be valid; it is replaced atomically.
 pub fn set_profile_in(path: &Path, name: &str) -> Result<(), GwsError> {
+    check_trusted(path)?;
     let text = match std::fs::read_to_string(path) {
         Ok(text) => text,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
@@ -308,6 +310,12 @@ pub fn set_profile_in(path: &Path, name: &str) -> Result<(), GwsError> {
             anyhow::Error::new(e).context(format!("cannot write config file {}", path.display())),
         )
     })
+}
+
+/// Refuse a config file that another user owns or may write to (it chooses
+/// the profile, the log file and the Model Armor template).
+fn check_trusted(path: &Path) -> Result<(), GwsError> {
+    crate::fs_util::check_trusted_config_path(path).map_err(|e| GwsError::Config(format!("{e:#}")))
 }
 
 /// Load and resolve settings from the validated environment and the config
@@ -505,6 +513,33 @@ log_file = '{ABS_LOG_DIR}'
     const ABS_LOG_DIR: &str = "/var/log/gwsr";
     #[cfg(windows)]
     const ABS_LOG_DIR: &str = r"C:\ProgramData\gwsr\logs";
+
+    /// Another user could have planted a config file they may write to; it
+    /// is neither loaded nor rewritten by `gwsr auth use`.
+    #[cfg(unix)]
+    #[test]
+    fn config_file_writable_by_others_is_refused() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("config.toml");
+        std::fs::write(&path, "format = \"table\"\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o666)).unwrap();
+        for result in [
+            load_config_file(&path).map(|_| ()),
+            set_profile_in(&path, "work"),
+        ] {
+            assert!(
+                matches!(&result, Err(GwsError::Config(msg)) if msg.contains("writable by group or others")),
+                "expected a config error refusing the shared file"
+            );
+        }
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "format = \"table\"\n"
+        );
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(load_config_file(&path).unwrap().is_some());
+    }
 
     #[test]
     fn missing_file_is_not_an_error_but_unreadable_is() {

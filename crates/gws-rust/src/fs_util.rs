@@ -94,15 +94,16 @@ pub fn ensure_private_dir(dir: &Path) -> io::Result<()> {
     Ok(())
 }
 
-/// Refuse secret files that are readable or writable by group/other.
+/// Refuse secret files that belong to another user or are readable or
+/// writable by group/other.
 ///
 /// This follows symlinks (the permissions of the target matter), mirroring
 /// OpenSSH's handling of private keys. On non-Unix platforms this is a no-op.
 ///
 /// # Errors
 ///
-/// Returns an error naming the file, its mode and the `chmod` fix when the
-/// file is accessible to anyone but its owner.
+/// Returns an error naming the file and the fix when the file is owned by
+/// another user, or is accessible to anyone but its owner.
 pub fn check_private_file(path: &Path) -> anyhow::Result<()> {
     #[cfg(unix)]
     {
@@ -110,6 +111,7 @@ pub fn check_private_file(path: &Path) -> anyhow::Result<()> {
         use std::os::unix::fs::PermissionsExt;
         let meta =
             std::fs::metadata(path).with_context(|| format!("cannot stat '{}'", path.display()))?;
+        check_owner(path, &meta, effective_uid())?;
         let mode = meta.permissions().mode() & 0o777;
         if mode & 0o077 != 0 {
             anyhow::bail!(
@@ -123,6 +125,81 @@ pub fn check_private_file(path: &Path) -> anyhow::Result<()> {
     #[cfg(not(unix))]
     {
         let _unused = path;
+    }
+    Ok(())
+}
+
+/// Refuse a configuration file or directory that another user could have
+/// written: one owned by someone other than the effective user (or root), or
+/// writable by group or others. Its contents decide where requests go and
+/// which credentials they use, so a config directory under a shared location
+/// (`GWSR_CONFIG_DIR=/tmp/...`) must not be trusted when someone else created
+/// it. A missing `path` is accepted (there is nothing to read).
+///
+/// This follows symlinks, like [`check_private_file`]. On non-Unix platforms
+/// this is a no-op.
+///
+/// # Errors
+///
+/// Returns an error naming the path and the fix when it is untrusted, or when
+/// its metadata cannot be read.
+pub fn check_trusted_config_path(path: &Path) -> anyhow::Result<()> {
+    #[cfg(unix)]
+    {
+        use anyhow::Context;
+        let meta = match std::fs::metadata(path) {
+            Ok(meta) => meta,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => {
+                return Err(e).with_context(|| format!("cannot stat '{}'", path.display()));
+            }
+        };
+        check_not_shared(path, &meta, effective_uid())?;
+    }
+    #[cfg(not(unix))]
+    {
+        let _unused = path;
+    }
+    Ok(())
+}
+
+/// The process's effective user id.
+#[cfg(unix)]
+fn effective_uid() -> u32 {
+    rustix::process::geteuid().as_raw()
+}
+
+/// Fail unless `meta` (of `path`) belongs to `euid` or to root. Root-owned
+/// files are trusted as OpenSSH trusts them: root can replace anything anyway.
+#[cfg(unix)]
+fn check_owner(path: &Path, meta: &std::fs::Metadata, euid: u32) -> anyhow::Result<()> {
+    use std::os::unix::fs::MetadataExt;
+    let owner = meta.uid();
+    if owner != euid && owner != 0 {
+        anyhow::bail!(
+            "refusing to use '{}': it is owned by another user, who could have planted or \
+             changed it. Use a directory you own, or take ownership of it with: \
+             chown \"$(id -u)\" '{}'",
+            path.display(),
+            path.display()
+        );
+    }
+    Ok(())
+}
+
+/// [`check_owner`], and fail when group or others may write `path`.
+#[cfg(unix)]
+fn check_not_shared(path: &Path, meta: &std::fs::Metadata, euid: u32) -> anyhow::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    check_owner(path, meta, euid)?;
+    let mode = meta.permissions().mode() & 0o777;
+    if mode & 0o022 != 0 {
+        anyhow::bail!(
+            "refusing to use '{}': it is writable by group or others (mode {mode:04o}), so \
+             another user could have planted or changed it. Restrict it with: chmod go-w '{}'",
+            path.display(),
+            path.display()
+        );
     }
     Ok(())
 }
@@ -441,6 +518,59 @@ mod tests {
 
         fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
         check_private_file(&path).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn config_paths_writable_by_others_are_refused() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        // Missing is fine: there is nothing to read.
+        check_trusted_config_path(&path).unwrap();
+        fs::write(&path, b"").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+        check_trusted_config_path(&path).unwrap();
+        for mode in [0o664, 0o646, 0o666] {
+            fs::set_permissions(&path, fs::Permissions::from_mode(mode)).unwrap();
+            let err = check_trusted_config_path(&path).unwrap_err().to_string();
+            assert!(err.contains("writable by group or others"), "{err}");
+            assert!(err.contains("chmod go-w"), "{err}");
+        }
+        fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o777)).unwrap();
+        let err = check_trusted_config_path(dir.path())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("writable by group or others"), "{err}");
+        fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o755)).unwrap();
+        check_trusted_config_path(dir.path()).unwrap();
+    }
+
+    /// A config directory under a shared location may have been created by
+    /// another user with an ordinary 0755/0644 mode: it is not trusted.
+    #[cfg(unix)]
+    #[test]
+    fn config_paths_owned_by_another_user_are_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let meta = fs::metadata(dir.path()).unwrap();
+        let me = effective_uid();
+        check_not_shared(dir.path(), &meta, me).unwrap();
+        let other = me.wrapping_add(1).max(1);
+        if me != 0 {
+            // Root-owned paths are trusted (below), so only a non-root run can
+            // see the refusal.
+            let err = check_not_shared(dir.path(), &meta, other)
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("owned by another user"), "{err}");
+            assert!(err.contains("chown \"$(id -u)\""), "{err}");
+        }
+        // Root-owned files are trusted whoever runs gwsr. `/` is not owned
+        // by root in every build sandbox (Nix), so only check it when it is.
+        let root_owned = fs::metadata("/").unwrap();
+        if std::os::unix::fs::MetadataExt::uid(&root_owned) == 0 {
+            check_owner(Path::new("/"), &root_owned, other).unwrap();
+        }
     }
 
     #[test]
