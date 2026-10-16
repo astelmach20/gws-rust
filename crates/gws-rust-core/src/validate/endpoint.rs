@@ -187,6 +187,8 @@ impl EndpointPolicy {
     pub fn check(&self, url: &str) -> Result<Url, GwsError> {
         // Parsing would silently drop `.`/`..` segments and retarget the call.
         super::reject_dot_segments(url)?;
+        // An empty ID would retarget it too (`events/` is the collection).
+        super::reject_empty_path_segments(url)?;
         let parsed = Url::parse(url).map_err(|e| {
             GwsError::Validation(format!(
                 "Refusing to send credentials to invalid URL {:?}: {e}",
