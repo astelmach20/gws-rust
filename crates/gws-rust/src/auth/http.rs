@@ -57,20 +57,26 @@ pub enum HttpError {
     /// decided by [`gws_rust_core::error::is_retryable_status_code`].
     #[error("HTTP {status}: {detail}")]
     ServerFailure { status: u16, detail: String },
-    /// The endpoint answered any other error status without an OAuth error
-    /// body ([`is_oauth_error`]): a proxy, a captive portal or a wrong
-    /// endpoint answered, not Google with a verdict on the credential.
-    #[error("HTTP {status} without an OAuth error response: {detail}")]
-    NotOAuthError { status: u16, detail: String },
+    /// The endpoint answered with something that is not an OAuth token
+    /// endpoint response ([`is_oauth_response`]): a proxy, a captive portal
+    /// or a wrong endpoint answered, not Google with a verdict on the
+    /// credential.
+    #[error("HTTP {status} that is not an OAuth token response: {detail}")]
+    NotOAuthResponse { status: u16, detail: String },
 }
 
-/// Whether `body` is an OAuth error response (RFC 6749 section 5.2): a JSON
-/// object with a string `error` code. Only such a body is a verdict on the
-/// credential; anything else (an HTML page from a proxy, an empty body) is
-/// not.
-pub fn is_oauth_error(body: &[u8]) -> bool {
-    serde_json::from_slice::<serde_json::Value>(body)
-        .is_ok_and(|v| v.get("error").is_some_and(serde_json::Value::is_string))
+/// Whether `body` can be an OAuth token endpoint response with `status`: a
+/// JSON object, and for an error status one with a string `error` code (RFC
+/// 6749 section 5.2). Only an error of that form is a verdict on the
+/// credential; anything else (an HTML page from a proxy or captive portal, an
+/// empty body) is not.
+pub fn is_oauth_response(status: reqwest::StatusCode, body: &[u8]) -> bool {
+    match serde_json::from_slice::<serde_json::Value>(body) {
+        Ok(serde_json::Value::Object(map)) => {
+            status.is_success() || map.get("error").is_some_and(serde_json::Value::is_string)
+        }
+        _ => false,
+    }
 }
 
 /// Longest excerpt of a failed endpoint's body kept in the error.
@@ -130,8 +136,8 @@ pub fn client() -> anyhow::Result<reqwest::Client> {
 ///
 /// Network, timeout or response-conversion errors, and
 /// [`HttpError::ServerFailure`] for a response [`is_server_failure`] matches,
-/// and [`HttpError::NotOAuthError`] for any other error status whose body is
-/// not an OAuth error ([`is_oauth_error`]).
+/// and [`HttpError::NotOAuthResponse`] for any other response that is not an
+/// OAuth token response ([`is_oauth_response`]).
 pub async fn execute(
     client: reqwest::Client,
     request: oauth2::HttpRequest,
@@ -151,8 +157,8 @@ pub async fn execute(
         builder = builder.header(name, value);
     }
     let body = response.bytes().await?.to_vec();
-    if !status.is_success() && !is_oauth_error(&body) {
-        return Err(HttpError::NotOAuthError {
+    if !is_oauth_response(status, &body) {
+        return Err(HttpError::NotOAuthResponse {
             status: status.as_u16(),
             detail: body_excerpt(&body),
         });

@@ -427,6 +427,10 @@ mod tests {
                 401,
                 ResponseTemplate::new(401).set_body_json(serde_json::json!({"code": 401})),
             ),
+            (
+                200,
+                ResponseTemplate::new(200).set_body_string("<html>Sign in to the Wi-Fi</html>"),
+            ),
         ];
         for (status, template) in cases {
             let dir = tempfile::tempdir().unwrap();
