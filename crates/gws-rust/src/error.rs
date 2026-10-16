@@ -452,14 +452,28 @@ pub fn error_envelope(err: &CliError, ctx: &ErrorContext) -> Value {
                 .take_while(|l| !l.trim().is_empty())
                 .map(str::trim)
                 .collect();
-            json!({
+            let mut envelope = json!({
                 "error": {
                     "code": 400,
                     "message": strip_error_prefix(&summary.join(" ")),
                     "reason": "validationError",
                     "retryable": false,
                 }
-            })
+            });
+            // clap's suggestions ("a similar argument exists: '--params'")
+            // are the hint; the human form prints them too.
+            let tips: Vec<&str> = rendered
+                .lines()
+                .filter_map(|l| l.trim().strip_prefix("tip:"))
+                .map(str::trim)
+                .filter(|t| !t.is_empty())
+                .collect();
+            if !tips.is_empty()
+                && let Some(obj) = envelope.get_mut("error").and_then(Value::as_object_mut)
+            {
+                obj.insert("hint".into(), Value::String(tips.join("; ")));
+            }
+            envelope
         }
         CliError::Gws(e) => {
             let mut envelope = e.to_json();
@@ -624,6 +638,39 @@ mod tests {
             env["error"]["message"],
             "the following required arguments were not provided: --x <x>"
         );
+    }
+
+    /// clap's "did you mean" tips, which the human form prints, are the
+    /// envelope's `hint`; an error without tips has none.
+    #[test]
+    fn clap_suggestions_become_the_hint() {
+        let cmd = clap::Command::new("t")
+            .arg(clap::Arg::new("params").long("params"))
+            .subcommand(clap::Command::new("files"));
+        let e = cmd
+            .clone()
+            .try_get_matches_from(["t", "--param", "x"])
+            .unwrap_err();
+        let env = error_envelope(&CliError::from(e), &ErrorContext::default());
+        assert_eq!(
+            env["error"]["message"],
+            "unexpected argument '--param' found"
+        );
+        assert_eq!(
+            env["error"]["hint"],
+            "a similar argument exists: '--params'"
+        );
+
+        let e = cmd.try_get_matches_from(["t", "fils"]).unwrap_err();
+        let env = error_envelope(&CliError::from(e), &ErrorContext::default());
+        assert_eq!(env["error"]["hint"], "a similar subcommand exists: 'files'");
+
+        let e = clap::Command::new("t")
+            .arg(clap::Arg::new("x").long("x").required(true))
+            .try_get_matches_from(["t"])
+            .unwrap_err();
+        let env = error_envelope(&CliError::from(e), &ErrorContext::default());
+        assert!(env["error"].get("hint").is_none(), "{env}");
     }
 
     #[test]
