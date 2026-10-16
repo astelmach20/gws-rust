@@ -2926,6 +2926,83 @@ async fn output_to_an_existing_directory_is_rejected_before_any_request() {
     assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0);
 }
 
+/// `-o downloads/` (or `downloads/.`) names a directory even when it does not
+/// exist yet. It used to be resolved without its trailing separator and the
+/// payload was saved as a *file* named `downloads`.
+#[tokio::test(flavor = "multi_thread")]
+async fn output_path_ending_in_a_separator_is_rejected_before_any_request() {
+    use wiremock::matchers::any;
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    Mock::given(any())
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_raw(b"%PDF-1.7 payload".to_vec(), "application/pdf"),
+        )
+        .mount(&server)
+        .await;
+    let env = Env::new();
+    let doc = json!({
+        "name": "drive",
+        "version": "v3",
+        "rootUrl": "https://www.googleapis.com/",
+        "servicePath": "drive/v3/",
+        "resources": {"files": {"methods": {"get": {
+            "id": "drive.files.get",
+            "httpMethod": "GET",
+            "path": "files/{fileId}",
+            "parameters": {
+                "fileId": {"type": "string", "location": "path", "required": true},
+                "alt": {"type": "string", "location": "query"}
+            },
+            "parameterOrder": ["fileId"],
+            "supportsMediaDownload": true,
+            "scopes": ["https://www.googleapis.com/auth/drive.readonly"]
+        }}}}
+    });
+    std::fs::write(
+        env.cache_dir().join("discovery/drive+v3.json"),
+        serde_json::to_string(&doc).unwrap(),
+    )
+    .unwrap();
+
+    for target in ["downloads/", "downloads/."] {
+        let out = env
+            .cmd()
+            .env("GWSR_TOKEN", "test-token")
+            .env("GWSR_API_BASE_URL", server.uri())
+            .args([
+                "drive",
+                "files",
+                "get",
+                "--params",
+                r#"{"fileId":"f1","alt":"media"}"#,
+                "-o",
+                target,
+            ])
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(3), "{target}: {}", stderr_of(&out));
+        let err = stderr_error(&out);
+        assert!(
+            err["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("names a directory"),
+            "{target}: {err}"
+        );
+        assert!(
+            !env.work_dir().join("downloads").exists(),
+            "{target}: nothing may be written"
+        );
+    }
+    assert!(
+        server.received_requests().await.unwrap().is_empty(),
+        "nothing may be downloaded for an output path that names a directory"
+    );
+}
+
 /// `-o -` streams the payload raw to stdout, where Model Armor cannot screen
 /// it: with `--sanitize` in either mode the combination is refused (exit 3)
 /// before any request, instead of passing the content through unscreened.
