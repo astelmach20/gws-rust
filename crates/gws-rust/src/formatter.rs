@@ -602,16 +602,12 @@ fn format_table(
             }
             let width = flat
                 .iter()
-                .map(|(k, _)| display_width(&sanitize_for_terminal(k)))
+                .map(|(k, _)| display_width(&table_key(k)))
                 .max()
                 .unwrap_or(0);
             let mut out = String::new();
             for (key, val) in &flat {
-                let line = format!(
-                    "{}  {}",
-                    pad(&sanitize_for_terminal(key), width),
-                    table_cell(val)
-                );
+                let line = format!("{}  {}", pad(&table_key(key), width), table_cell(val));
                 out.push_str(line.trim_end());
                 out.push('\n');
             }
@@ -678,28 +674,24 @@ fn format_array_as_table(
         fixed.as_ref().map(|l| l.columns.as_slice()),
         items,
     )?;
-    let columns: Vec<String> = raw_columns
+    // Header text is sanitized for display; rows stay keyed by the raw key,
+    // so two keys that display alike still keep their own values.
+    let columns: Vec<String> = raw_columns.iter().map(|c| table_key(c)).collect();
+    let rows: Vec<std::collections::HashMap<&str, String>> = rows
         .iter()
-        .map(|c| sanitize_for_terminal(c))
-        .collect();
-    let rows: Vec<std::collections::HashMap<String, String>> = rows
-        .iter()
-        .map(|r| {
-            r.iter()
-                .map(|(k, v)| (sanitize_for_terminal(k), table_cell(v)))
-                .collect()
-        })
+        .map(|r| r.iter().map(|(k, v)| (k.as_str(), table_cell(v))).collect())
         .collect();
     // Width: terminal display columns, capped. Later pages of a stream keep the first
     // page's widths so their rows line up under its header.
     let widths: Vec<usize> = match &fixed {
         Some(layout) => layout.widths.clone(),
-        None => columns
+        None => raw_columns
             .iter()
-            .map(|c| {
+            .zip(&columns)
+            .map(|(raw, c)| {
                 let data = rows
                     .iter()
-                    .map(|r| r.get(c).map_or(0, |v| display_width(v)))
+                    .map(|r| r.get(raw.as_str()).map_or(0, |v| display_width(v)))
                     .max()
                     .unwrap_or(0);
                 data.max(display_width(c)).min(MAX_COLUMN_WIDTH)
@@ -721,12 +713,12 @@ fn format_array_as_table(
         out.push('\n');
     }
     for row in &rows {
-        let cells: Vec<String> = columns
+        let cells: Vec<String> = raw_columns
             .iter()
             .zip(&widths)
             .map(|(c, w)| {
                 pad(
-                    &truncate_cell(row.get(c).map_or("", |v| v.as_str()), *w),
+                    &truncate_cell(row.get(c.as_str()).map_or("", |v| v.as_str()), *w),
                     *w,
                 )
             })
@@ -847,7 +839,18 @@ fn format_csv(
 
 /// A table cell: the value's text with terminal control sequences removed.
 fn table_cell(value: &Value) -> String {
-    sanitize_for_terminal(&value_to_cell(value)).replace(['\n', '\t'], " ")
+    one_line(&value_to_cell(value))
+}
+
+/// A column name or key as shown in a table, cleaned like a cell.
+fn table_key(key: &str) -> String {
+    one_line(key)
+}
+
+/// `s` without terminal control sequences, on one line: a newline or tab
+/// would break the table's rows and alignment.
+fn one_line(s: &str) -> String {
+    sanitize_for_terminal(s).replace(['\n', '\t'], " ")
 }
 
 /// Neutralise spreadsheet formula injection (OWASP): a text cell starting with
@@ -1628,6 +1631,34 @@ mod tests {
             !single.contains('\u{1b}') && !single.contains('\u{9b}'),
             "{single:?}"
         );
+    }
+
+    #[test]
+    fn table_keys_with_line_breaks_stay_on_one_line() {
+        // Map keys come from the API (e.g. labels, Sheets developer
+        // metadata): a newline in one must not break the header or a
+        // key/value line, just as it cannot break a cell.
+        let out = fmt(
+            &json!([{"a\nb": "x", "c\td": "y"}, {"a\nb": "z", "c\td": "w"}]),
+            OutputFormat::Table,
+        );
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(lines.len(), 4, "{out:?}");
+        assert_eq!(lines[0], "a b  c d");
+        assert_eq!(lines[2], "x    y");
+        assert_eq!(lines[3], "z    w");
+        let single = fmt(&json!({"k\ney": "v", "id": 1}), OutputFormat::Table);
+        assert_eq!(single, "id    1\nk ey  v");
+    }
+
+    #[test]
+    fn table_keys_that_sanitize_alike_keep_their_own_values() {
+        // `a` and `a\u{202e}` both display as `a`; each column still shows
+        // its own value (keys sort `a` first) rather than whichever key was
+        // sanitized last.
+        let out = fmt(&json!([{"a\u{202e}": "1", "a": "2"}]), OutputFormat::Table);
+        let row = out.lines().nth(2).unwrap_or_default();
+        assert_eq!(row, "2  1", "{out:?}");
     }
 
     #[test]
