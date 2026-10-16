@@ -19,7 +19,7 @@
 
 use jaq_core::load::{Arena, File, Loader};
 use jaq_core::{Ctx, Vars, data};
-use jaq_json::Val;
+use jaq_json::{Num, Val};
 use serde_json::Value;
 
 use crate::error::GwsError;
@@ -116,7 +116,7 @@ impl JqFilter {
                     )));
                 }
             };
-            let rendered = out.to_string();
+            let rendered = jq_compatible(out).to_string();
             let value: Value = serde_json::from_str(&rendered).map_err(|e| {
                 GwsError::Validation(format!(
                     "--jq '{}' produced a value that is not valid JSON ({rendered}): {e}",
@@ -127,6 +127,37 @@ impl JqFilter {
         }
         Ok(outputs)
     }
+}
+
+/// jaq prints the non-finite floats `nan`, `infinite` and `-infinite` as
+/// `NaN`, `Infinity` and `-Infinity`, which are not JSON. jq prints `null`
+/// for NaN and the largest finite double, with its sign, for an infinity;
+/// so does `--jq`. A value without such numbers is returned unchanged.
+fn jq_compatible(val: Val) -> Val {
+    fn non_finite(val: &Val) -> bool {
+        match val {
+            Val::Num(Num::Float(f)) => !f.is_finite(),
+            Val::Arr(a) => a.iter().any(non_finite),
+            Val::Obj(o) => o.iter().any(|(k, v)| non_finite(k) || non_finite(v)),
+            _ => false,
+        }
+    }
+    fn replace(val: Val) -> Val {
+        match val {
+            Val::Num(Num::Float(f)) if f.is_nan() => Val::Null,
+            Val::Num(Num::Float(f)) if f.is_infinite() => {
+                Val::Num(Num::Float(f64::MAX.copysign(f)))
+            }
+            Val::Arr(a) => Val::Arr(jaq_json::Rc::new(a.iter().cloned().map(replace).collect())),
+            Val::Obj(o) => Val::Obj(jaq_json::Rc::new(
+                o.iter()
+                    .map(|(k, v)| (replace(k.clone()), replace(v.clone())))
+                    .collect(),
+            )),
+            other => other,
+        }
+    }
+    if non_finite(&val) { replace(val) } else { val }
 }
 
 #[cfg(test)]
@@ -183,6 +214,23 @@ mod tests {
     #[test]
     fn empty_produces_no_outputs() {
         assert!(run("empty", json!(1)).unwrap().is_empty());
+    }
+
+    /// jq prints `nan` as `null` and an infinity as the largest finite
+    /// double with its sign, at any depth; jaq's `NaN`/`Infinity` are not
+    /// JSON.
+    #[test]
+    fn non_finite_numbers_print_like_jq() {
+        assert_eq!(run("nan", json!(null)).unwrap(), vec![json!(null)]);
+        assert_eq!(run("infinite", json!(null)).unwrap(), vec![json!(f64::MAX)]);
+        assert_eq!(
+            run("-infinite", json!(null)).unwrap(),
+            vec![json!(-f64::MAX)]
+        );
+        assert_eq!(
+            run("{a: [nan, infinite, 1.5], b: .}", json!("x")).unwrap(),
+            vec![json!({"a": [null, f64::MAX, 1.5], "b": "x"})]
+        );
     }
 
     /// `env` would print the whole process environment, secrets such as
