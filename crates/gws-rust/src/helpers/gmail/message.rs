@@ -524,8 +524,56 @@ pub(super) fn inline_referenced_bodies(
 /// and metadata for all attachment/inline parts.
 fn extract_payload_contents(payload: &Value) -> Result<PayloadContents, GwsError> {
     let mut contents = PayloadContents::default();
-    extract_payload_recursive(payload, &mut contents, &mut 0, false)?;
+    let bodies = extract_payload_recursive(payload, &mut contents, &mut 0, false)?;
+    contents.body_text = bodies.text;
+    contents.body_html = bodies.html;
     Ok(contents)
+}
+
+/// The text and HTML body found under one MIME node.
+#[derive(Default)]
+struct NodeBodies {
+    text: Option<String>,
+    html: Option<String>,
+}
+
+impl NodeBodies {
+    /// Combine the bodies of a container's children.
+    ///
+    /// The children of `multipart/alternative` are renderings of the same
+    /// content, so the first one of each kind wins. The children of any
+    /// other multipart (`mixed`, `related`, ...) are shown one after the
+    /// other, so a body split around inline attachments (as Apple Mail
+    /// sends it) is joined in order instead of losing every piece but the
+    /// first.
+    fn combine(children: Vec<NodeBodies>, alternative: bool) -> NodeBodies {
+        let mut combined = NodeBodies::default();
+        for child in children {
+            if alternative {
+                combined.text = combined.text.or(child.text);
+                combined.html = combined.html.or(child.html);
+            } else {
+                append_body(&mut combined.text, child.text, "\n");
+                append_body(&mut combined.html, child.html, "");
+            }
+        }
+        combined
+    }
+}
+
+/// Append `next` to `acc`, putting `separator` between them unless `acc`
+/// already ends with a line break.
+fn append_body(acc: &mut Option<String>, next: Option<String>, separator: &str) {
+    let Some(next) = next else { return };
+    match acc {
+        None => *acc = Some(next),
+        Some(existing) => {
+            if !existing.ends_with('\n') {
+                existing.push_str(separator);
+            }
+            existing.push_str(&next);
+        }
+    }
 }
 
 /// `in_embedded_message` is true below a `message/rfc822` node: that subtree
@@ -535,7 +583,7 @@ fn extract_payload_recursive(
     contents: &mut PayloadContents,
     part_counter: &mut usize,
     in_embedded_message: bool,
-) -> Result<(), GwsError> {
+) -> Result<NodeBodies, GwsError> {
     let mime_type = part.get("mimeType").and_then(|v| v.as_str()).unwrap_or("");
 
     let filename = part.get("filename").and_then(|v| v.as_str()).unwrap_or("");
@@ -582,19 +630,26 @@ fn extract_payload_recursive(
     };
     let is_hydratable = part_data.is_some();
 
-    // A body text part has inline body.data, no attachmentId, no filename, and no Content-ID.
+    // A body text part has inline body.data, no attachmentId, no filename,
+    // no Content-ID, is not marked as an attachment, and is not inside an
+    // encapsulated message.
     let body_text_data = body_data.filter(|_| {
-        !is_hydratable && !in_embedded_message && filename.is_empty() && content_id_header.is_none()
+        !is_hydratable
+            && !in_embedded_message
+            && !explicitly_attachment
+            && filename.is_empty()
+            && content_id_header.is_none()
     });
 
+    let mut bodies = NodeBodies::default();
     if let Some(data) = body_text_data {
         // MIME types are case-insensitive (RFC 2045 §5.1) and Gmail reports
         // them as the sender wrote them, e.g. `TEXT/PLAIN`.
         let content_type = get_part_header(part, "Content-Type");
-        if mime_type.eq_ignore_ascii_case("text/plain") && contents.body_text.is_none() {
-            contents.body_text = Some(decode_text_body(data, content_type, "text/plain")?);
-        } else if mime_type.eq_ignore_ascii_case("text/html") && contents.body_html.is_none() {
-            contents.body_html = Some(decode_text_body(data, content_type, "text/html")?);
+        if mime_type.eq_ignore_ascii_case("text/plain") {
+            bodies.text = Some(decode_text_body(data, content_type, "text/plain")?);
+        } else if mime_type.eq_ignore_ascii_case("text/html") {
+            bodies.html = Some(decode_text_body(data, content_type, "text/html")?);
         }
     } else if let Some(part_data) = part_data {
         // This part has fetchable data — classify as inline or attachment
@@ -642,13 +697,26 @@ fn extract_payload_recursive(
         // etc.). An encapsulated message's files are still collected, but
         // its text is not this message's body.
         let embedded = in_embedded_message || mime_type.eq_ignore_ascii_case("message/rfc822");
+        let mut children = Vec::new();
         if let Some(child_parts) = part.get("parts").and_then(|p| p.as_array()) {
             for child in child_parts {
-                extract_payload_recursive(child, contents, part_counter, embedded)?;
+                children.push(extract_payload_recursive(
+                    child,
+                    contents,
+                    part_counter,
+                    embedded,
+                )?);
             }
         }
+        // An encapsulated message is another message: its files are still
+        // collected, but its text is not this message's body (joining it
+        // would append the forwarded message to this one).
+        if !mime_type.eq_ignore_ascii_case("message/rfc822") {
+            let alternative = mime_type.eq_ignore_ascii_case("multipart/alternative");
+            bodies = NodeBodies::combine(children, alternative);
+        }
     }
-    Ok(())
+    Ok(bodies)
 }
 
 #[cfg(test)]
@@ -1096,6 +1164,85 @@ mod tests {
         );
     }
 
+    /// Apple Mail sends an HTML body with inline attachments as several
+    /// `text/html` (and `text/plain`) pieces around the attachments. Every
+    /// piece is part of the body, in order.
+    #[test]
+    fn test_body_split_around_inline_attachments_is_joined() {
+        let pdf = |id: &str| {
+            json!({
+                "mimeType": "application/pdf",
+                "filename": format!("{id}.pdf"),
+                "headers": [{ "name": "Content-Disposition", "value": "inline" }],
+                "body": { "attachmentId": id, "size": 10 }
+            })
+        };
+        let payload = json!({
+            "mimeType": "multipart/alternative",
+            "parts": [
+                {
+                    "mimeType": "multipart/mixed",
+                    "parts": [
+                        { "mimeType": "text/plain", "body": { "data": URL_SAFE.encode("Before\n") } },
+                        pdf("A1"),
+                        { "mimeType": "text/plain", "body": { "data": URL_SAFE.encode("After") } }
+                    ]
+                },
+                {
+                    "mimeType": "multipart/mixed",
+                    "parts": [
+                        { "mimeType": "text/html", "body": { "data": URL_SAFE.encode("<p>Before</p>") } },
+                        pdf("A2"),
+                        { "mimeType": "text/html", "body": { "data": URL_SAFE.encode("<p>Middle</p>") } },
+                        pdf("A3"),
+                        { "mimeType": "text/html", "body": { "data": URL_SAFE.encode("<p>After</p>") } }
+                    ]
+                }
+            ]
+        });
+        let contents = extract_payload_contents(&payload).unwrap();
+        assert_eq!(contents.body_text.as_deref(), Some("Before\nAfter"));
+        assert_eq!(
+            contents.body_html.as_deref(),
+            Some("<p>Before</p><p>Middle</p><p>After</p>")
+        );
+        assert_eq!(contents.parts.len(), 3);
+    }
+
+    /// Plain-text pieces that don't end in a line break are joined with one,
+    /// so the words of adjacent pieces don't run together.
+    #[test]
+    fn test_split_plain_body_pieces_are_separated_by_a_line_break() {
+        let payload = json!({
+            "mimeType": "multipart/mixed",
+            "parts": [
+                { "mimeType": "text/plain", "body": { "data": URL_SAFE.encode("Body") } },
+                { "mimeType": "text/plain", "body": { "data": URL_SAFE.encode("-- \nList footer") } }
+            ]
+        });
+        assert_eq!(
+            extract_plain_text_body(&payload).as_deref(),
+            Some("Body\n-- \nList footer")
+        );
+    }
+
+    /// The alternatives of `multipart/alternative` are the same content, so
+    /// they are never joined: the first of each kind wins.
+    #[test]
+    fn test_alternative_bodies_are_not_joined() {
+        let payload = json!({
+            "mimeType": "multipart/alternative",
+            "parts": [
+                { "mimeType": "text/plain", "body": { "data": URL_SAFE.encode("Plain") } },
+                { "mimeType": "text/html", "body": { "data": URL_SAFE.encode("<p>Rich</p>") } },
+                { "mimeType": "text/html", "body": { "data": URL_SAFE.encode("<p>Richer</p>") } }
+            ]
+        });
+        let contents = extract_payload_contents(&payload).unwrap();
+        assert_eq!(contents.body_text.as_deref(), Some("Plain"));
+        assert_eq!(contents.body_html.as_deref(), Some("<p>Rich</p>"));
+    }
+
     /// MIME types are case-insensitive: a body part Gmail reports as
     /// `TEXT/PLAIN` or `Text/Html` is still the body.
     #[test]
@@ -1117,6 +1264,45 @@ mod tests {
         assert_eq!(contents.body_text.as_deref(), Some("Plain body"));
         assert_eq!(contents.body_html.as_deref(), Some("<p>HTML body</p>"));
         assert!(contents.parts.is_empty());
+    }
+
+    /// Joining must not pull in the text of an embedded message or of a
+    /// text part marked as an attachment.
+    #[test]
+    fn test_join_skips_embedded_messages_and_attachment_text() {
+        let payload = json!({
+            "mimeType": "multipart/mixed",
+            "parts": [
+                { "mimeType": "text/plain", "body": { "data": URL_SAFE.encode("Outer") } },
+                {
+                    "mimeType": "text/plain",
+                    "headers": [{ "name": "Content-Disposition", "value": "attachment" }],
+                    "body": { "data": URL_SAFE.encode("log line") }
+                },
+                {
+                    "mimeType": "message/rfc822",
+                    "body": { "size": 0 },
+                    "parts": [{
+                        "mimeType": "multipart/mixed",
+                        "parts": [
+                            { "mimeType": "text/plain", "body": { "data": URL_SAFE.encode("Inner") } },
+                            {
+                                "mimeType": "application/pdf",
+                                "filename": "inner.pdf",
+                                "body": { "attachmentId": "INNER", "size": 10 }
+                            }
+                        ]
+                    }]
+                }
+            ]
+        });
+        let contents = extract_payload_contents(&payload).unwrap();
+        assert_eq!(contents.body_text.as_deref(), Some("Outer"));
+        assert_eq!(contents.body_html, None);
+        // The text part marked as an attachment is a file (#328), not body.
+        assert_eq!(contents.parts.len(), 2);
+        assert_eq!(contents.parts[0].attachment_id(), None);
+        assert_eq!(contents.parts[1].attachment_id(), Some("INNER"));
     }
 
     /// A large body that Gmail returns by attachment ID is read from the
