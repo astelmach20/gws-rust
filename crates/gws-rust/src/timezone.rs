@@ -525,10 +525,17 @@ mod tests {
 
     #[test]
     fn local_timezone_is_parseable_when_detected() {
-        // Detection can legitimately fail in minimal containers; when it
-        // succeeds the name must be a valid IANA zone.
-        if let Ok(tz) = local_timezone() {
-            assert!(!tz.name().is_empty());
+        // Detection can legitimately fail in minimal containers. When the OS
+        // reports an IANA zone, the fallback must use that zone, not fail.
+        let detected = iana_time_zone::get_timezone();
+        match (&detected, local_timezone()) {
+            (Ok(name), Ok(tz)) if name.parse::<Tz>().is_ok() => assert_eq!(tz.name(), name),
+            (Ok(name), Err(e)) if name.parse::<Tz>().is_ok() => {
+                panic!("the OS reports {name}, but local_timezone() failed: {e}")
+            }
+            (Ok(name), Ok(tz)) => panic!("{name} is not an IANA zone, yet resolved to {tz}"),
+            (Ok(_), Err(_)) | (Err(_), Err(_)) => {}
+            (Err(e), Ok(tz)) => panic!("detection failed ({e}), yet resolved to {tz}"),
         }
     }
 
