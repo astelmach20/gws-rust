@@ -344,11 +344,14 @@ fn decode_text_body(
             }
         },
     };
-    let (text, had_errors) = encoding.decode_without_bom_handling(&decoded);
+    // A byte-order mark is not text: it is removed, and a UTF-8 or UTF-16
+    // BOM names the encoding (the endianness of a `charset=utf-16` body is
+    // only known from its BOM).
+    let (text, used, had_errors) = encoding.decode(&decoded);
     if had_errors {
         tracing::warn!(
             "{mime_label} body is not valid {}; invalid bytes were replaced with U+FFFD",
-            encoding.name()
+            used.name()
         );
     }
     Ok(text.into_owned())
@@ -1084,6 +1087,38 @@ mod tests {
             "body": { "data": URL_SAFE.encode([0x93, 0xFA, 0x96, 0x7B]) }
         });
         assert_eq!(extract_plain_text_body(&sjis).unwrap(), "\u{65e5}\u{672c}");
+    }
+
+    /// A byte-order mark is removed from the body, and a UTF-16 BOM decides
+    /// the byte order of a `charset=utf-16` body (RFC 2781 §3.3).
+    #[test]
+    fn test_body_byte_order_mark_is_honored_and_removed() {
+        for (ct, bytes) in [
+            (
+                "text/plain; charset=utf-8",
+                b"\xEF\xBB\xBFHi caf\xC3\xA9".to_vec(),
+            ),
+            ("text/plain", b"\xEF\xBB\xBFHi caf\xC3\xA9".to_vec()),
+            (
+                "text/plain; charset=utf-16",
+                b"\xFE\xFF\x00H\x00i\x00 \x00c\x00a\x00f\x00\xE9".to_vec(),
+            ),
+            (
+                "text/plain; charset=utf-16",
+                b"\xFF\xFEH\x00i\x00 \x00c\x00a\x00f\x00\xE9\x00".to_vec(),
+            ),
+        ] {
+            let payload = json!({
+                "mimeType": "text/plain",
+                "headers": [{ "name": "Content-Type", "value": ct }],
+                "body": { "data": URL_SAFE.encode(&bytes) }
+            });
+            assert_eq!(
+                extract_plain_text_body(&payload).unwrap(),
+                "Hi caf\u{e9}",
+                "{ct}: {bytes:02X?}"
+            );
+        }
     }
 
     #[test]
