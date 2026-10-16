@@ -231,7 +231,7 @@ fn render_paragraph(
 /// Backslash-escape the characters that would otherwise turn literal
 /// document text into Markdown syntax (emphasis, code, links, HTML, entities,
 /// headings, quotes, tables).
-fn escape_markdown(text: &str) -> String {
+pub(super) fn escape_markdown(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     for c in text.chars() {
         if matches!(

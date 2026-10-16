@@ -128,10 +128,14 @@ EXAMPLES:
   gwsr docs +read --document-id DOC_ID --output - | less
 
 TIPS:
-  Read-only. Prints JSON {documentId, title, bodyFormat, body} by default.
+  Read-only. Prints JSON {documentId, title, bodyFormat, body, tabs} by default.
   Headings, lists, bold/italic/strikethrough, inline code, links and tables
     are rendered; images appear as [image] placeholders.
-  Only the first tab of multi-tab documents is read.",
+  Every tab is read, child tabs after their parent. With more than one tab,
+    each starts with a '=== Tab: Parent > Child ===' line, and the JSON
+    output lists them in 'tabs' (tabId, title, parentTabId).
+  --body-format raw prints the document with includeTabsContent: the
+    content is under 'tabs', not 'body'.",
                 ),
         )
         .subcommand(content_args(
@@ -151,6 +155,7 @@ Some **bold** text and a [link](https://example.com).
   cat notes.md | gwsr docs +write --document-id DOC_ID --markdown --text-file -
 
 TIPS:
+  Content is appended to the end of the first tab of a multi-tab document.
   Without --markdown the text is appended verbatim to the last paragraph;
     start it with a newline to begin a new paragraph.
   With --markdown the content starts on a new paragraph and headings,
@@ -193,6 +198,7 @@ EXAMPLES:
   gwsr docs +replace --document-id DOC_ID --find 'DRAFT' --replace-with '' --match-case
 
 TIPS:
+  Replaces in every tab of a multi-tab document.
   Prints occurrencesChanged; 0 means nothing matched.",
                 ),
         )
@@ -228,12 +234,13 @@ TIPS:
                     }
                     let api = Api::new(doc, &[SCOPE_DOCS_READONLY], dry, sanitize).await?;
                     let id = required(m, "document-id")?;
-                    let document = get_document(&api, id).await?;
+                    let document = get_document_with_tabs(&api, id).await?;
                     if api.is_dry_run() || format == "raw" {
                         api.emit(m, &document).await?;
                         return Ok(true);
                     }
-                    let body = reader::render(&document, format == "markdown");
+                    let tabs = flatten_tabs(&document)?;
+                    let body = render_tabs(&tabs, format == "markdown");
                     let body = body.trim_end_matches('\n');
                     match target {
                         None => {
@@ -242,6 +249,7 @@ TIPS:
                                 "title": document.get("title"),
                                 "bodyFormat": format,
                                 "body": body,
+                                "tabs": tabs.iter().map(Tab::summary).collect::<Vec<_>>(),
                             });
                             api.emit(m, &v).await?;
                         }
@@ -325,6 +333,137 @@ async fn get_document(api: &Api, document_id: &str) -> Result<Value, GwsError> {
         encode_path_segment(document_id)
     ))))
     .await
+}
+
+/// `documents.get` with every tab's content. Without `includeTabsContent`
+/// the API returns only the first tab, in the legacy `body` field; with it,
+/// `tabs` is populated and `body` is left empty.
+/// <https://developers.google.com/workspace/docs/api/how-tos/tabs>
+async fn get_document_with_tabs(api: &Api, document_id: &str) -> Result<Value, GwsError> {
+    api.send(
+        ApiRequest::get(api.url(&format!(
+            "v1/documents/{}",
+            encode_path_segment(document_id)
+        )))
+        .query("includeTabsContent", "true"),
+    )
+    .await
+}
+
+/// One tab of a document, in reading order.
+#[derive(Debug)]
+struct Tab<'a> {
+    id: &'a str,
+    title: &'a str,
+    parent_id: Option<&'a str>,
+    /// Titles from the top-level tab down to this one.
+    path: Vec<&'a str>,
+    /// The `DocumentTab`: `body`, `lists` and the rest, in the same shape as
+    /// a legacy single-tab `Document`.
+    content: &'a Value,
+}
+
+impl Tab<'_> {
+    fn summary(&self) -> Value {
+        let mut v = json!({ "tabId": self.id, "title": self.title });
+        if let Some(parent) = self.parent_id {
+            v["parentTabId"] = json!(parent);
+        }
+        v
+    }
+}
+
+/// Every tab of a document fetched with `includeTabsContent=true`, depth
+/// first, so each child tab follows its parent.
+fn flatten_tabs(document: &Value) -> Result<Vec<Tab<'_>>, GwsError> {
+    fn walk<'a>(
+        tabs: &'a [Value],
+        parent: Option<(&'a str, &[&'a str])>,
+        out: &mut Vec<Tab<'a>>,
+    ) -> Result<(), GwsError> {
+        let missing =
+            |p: &str| http::other_err(anyhow::anyhow!("documents.get returned a tab without {p}"));
+        for tab in tabs {
+            let text = |p: &str| {
+                tab.pointer(p)
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| missing(p))
+            };
+            let id = text("/tabProperties/tabId")?;
+            let title = text("/tabProperties/title")?;
+            let content = tab
+                .get("documentTab")
+                .ok_or_else(|| missing("documentTab"))?;
+            let mut path = match parent {
+                Some((_, p)) => p.to_vec(),
+                None => Vec::new(),
+            };
+            path.push(title);
+            let children = tab.get("childTabs").and_then(Value::as_array);
+            out.push(Tab {
+                id,
+                title,
+                parent_id: parent.map(|(id, _)| id),
+                path: path.clone(),
+                content,
+            });
+            if let Some(children) = children {
+                walk(children, Some((id, &path)), out)?;
+            }
+        }
+        Ok(())
+    }
+    let tabs = document
+        .get("tabs")
+        .and_then(Value::as_array)
+        .filter(|t| !t.is_empty())
+        .ok_or_else(|| {
+            http::other_err(anyhow::anyhow!(
+                "documents.get with includeTabsContent returned no tabs"
+            ))
+        })?;
+    let mut out = Vec::new();
+    walk(tabs, None, &mut out)?;
+    Ok(out)
+}
+
+/// Render every tab. A single-tab document renders as its body alone; with
+/// more than one, each tab starts with a `=== Tab: Parent > Child ===` line.
+fn render_tabs(tabs: &[Tab<'_>], markdown: bool) -> String {
+    if let [only] = tabs {
+        return reader::render(only.content, markdown);
+    }
+    let mut out = String::new();
+    for tab in tabs {
+        if !out.is_empty() && !out.ends_with("\n\n") {
+            out.push('\n');
+        }
+        let path = tab
+            .path
+            .iter()
+            .map(|t| {
+                // A title is one line; keep the header on one line too.
+                let t: String = t
+                    .chars()
+                    .map(|c| if c.is_control() { ' ' } else { c })
+                    .collect();
+                if markdown {
+                    reader::escape_markdown(&t)
+                } else {
+                    t
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(" > ");
+        out.push_str(&format!("=== Tab: {path} ===\n\n"));
+        let body = reader::render(tab.content, markdown);
+        let body = body.trim_end_matches('\n');
+        if !body.is_empty() {
+            out.push_str(body);
+            out.push('\n');
+        }
+    }
+    out
 }
 
 fn batch_update_request(api: &Api, document_id: &str, requests: Vec<Value>) -> ApiRequest {
@@ -752,6 +891,93 @@ mod tests {
         )
         .await
         .unwrap();
+    }
+
+    fn tab(id: &str, title: &str, text: &str) -> Value {
+        json!({
+            "tabProperties": {"tabId": id, "title": title},
+            "documentTab": {"body": {"content": [
+                {"endIndex": 1, "sectionBreak": {}},
+                {"startIndex": 1, "paragraph": {"elements": [{"textRun": {"content": text}}]}}
+            ]}}
+        })
+    }
+
+    #[test]
+    fn a_single_tab_renders_without_a_tab_header() {
+        let doc = json!({"tabs": [tab("t.0", "Tab 1", "Only text\n")]});
+        let tabs = flatten_tabs(&doc).unwrap();
+        for markdown in [false, true] {
+            assert_eq!(render_tabs(&tabs, markdown).trim_end(), "Only text");
+        }
+    }
+
+    #[test]
+    fn tab_headers_escape_markdown_and_stay_on_one_line() {
+        let mut child = tab("t.1", "*Notes*\nmore", "B\n");
+        child["tabProperties"]["parentTabId"] = json!("t.0");
+        let mut parent = tab("t.0", "A", "A text\n");
+        parent["childTabs"] = json!([child]);
+        let doc = json!({"tabs": [parent]});
+        let tabs = flatten_tabs(&doc).unwrap();
+        assert_eq!(tabs.len(), 2);
+        assert_eq!(tabs[1].parent_id, Some("t.0"));
+        assert_eq!(
+            render_tabs(&tabs, true),
+            "=== Tab: A ===\n\nA text\n\n=== Tab: A > \\*Notes\\* more ===\n\nB\n"
+        );
+        assert_eq!(
+            render_tabs(&tabs, false),
+            "=== Tab: A ===\n\nA text\n\n=== Tab: A > *Notes* more ===\n\nB\n"
+        );
+    }
+
+    #[test]
+    fn missing_tabs_fail_loudly() {
+        // includeTabsContent always populates `tabs`; a response without
+        // them must not read as an empty document.
+        for doc in [
+            json!({"body": {"content": []}}),
+            json!({"tabs": []}),
+            json!({"tabs": [{"tabProperties": {"title": "T"}, "documentTab": {}}]}),
+            json!({"tabs": [{"tabProperties": {"tabId": "t.0", "title": "T"}}]}),
+        ] {
+            let err = flatten_tabs(&doc).unwrap_err();
+            assert!(err.to_string().contains("documents.get"), "{doc}: {err:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn read_requests_every_tab_but_markdown_write_reads_the_first() {
+        // +read needs every tab. +write appends to the first tab: its end
+        // index comes from the legacy `body` (the first tab), and requests
+        // without a tabId apply to the first tab, so the two agree.
+        let api = dry_api("");
+        get_document_with_tabs(&api, "DOC").await.unwrap();
+        write(
+            &api,
+            "DOC",
+            &Content {
+                text: "**b**".into(),
+                markdown: true,
+            },
+        )
+        .await
+        .unwrap();
+        let gets: Vec<Value> = api
+            .planned()
+            .into_iter()
+            .filter(|p| p["method"] == "GET")
+            .collect();
+        assert_eq!(gets.len(), 2, "{gets:?}");
+        assert_eq!(
+            gets[0]["query_params"]["includeTabsContent"], "true",
+            "{gets:?}"
+        );
+        assert!(
+            !gets[1].to_string().contains("includeTabsContent"),
+            "{gets:?}"
+        );
     }
 
     #[tokio::test]
