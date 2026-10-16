@@ -873,6 +873,33 @@ fn mistyped_static_command_suggests_the_command() {
     }
 }
 
+/// An unregistered API named without a version is an unknown service with
+/// the `<api>:<version>` hint, not a typo of a short command like `dev`.
+#[test]
+fn unregistered_api_without_version_is_an_unknown_service() {
+    let env = Env::new();
+    for name in ["dns", "dlp", "oauth2"] {
+        let out = env
+            .cmd()
+            .args(["--dry-run", name])
+            .assert()
+            .code(3)
+            .get_output()
+            .clone();
+        assert!(stdout_of(&out).is_empty());
+        let message = stderr_error(&out)["error"]["message"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert!(
+            message.starts_with(&format!("Unknown service '{name}'.")),
+            "{message}"
+        );
+        assert!(message.contains("'<api>:<version>'"), "{message}");
+        assert!(!message.contains("Did you mean `gwsr"), "{message}");
+    }
+}
+
 #[test]
 fn human_errors_are_opt_in_via_a_human_format() {
     let env = Env::new();

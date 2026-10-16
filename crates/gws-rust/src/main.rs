@@ -489,6 +489,11 @@ pub fn parse_service_and_version(
 /// without this a mistyped command is reported as an unknown service with
 /// suggestions drawn from services only. A `<api>:<version>` spec, or any
 /// name with `--api-version`, is a Discovery API and never a command.
+///
+/// The command names are short, so only a near miss counts: one edit (a
+/// transposition is one), or one per four characters of the longer word.
+/// Anything further is more likely an unregistered API named without its
+/// version (`dlp`, `oauth2`) and gets the unknown-service error and hint.
 fn mistyped_command(token: &str, api_version_given: bool) -> Option<&'static str> {
     if api_version_given
         || token.contains(':')
@@ -497,8 +502,13 @@ fn mistyped_command(token: &str, api_version_given: bool) -> Option<&'static str
     {
         return None;
     }
-    let names = cli_args::STATIC_COMMANDS.iter().copied();
-    executor::input::closest(token, names)
+    let lower = token.to_ascii_lowercase();
+    cli_args::STATIC_COMMANDS
+        .iter()
+        .map(|&command| (command, strsim::damerau_levenshtein(&lower, command)))
+        .filter(|&(command, distance)| distance <= (command.len().max(lower.len()) / 4).max(1))
+        .min_by_key(|&(_, distance)| distance)
+        .map(|(command, _)| command)
 }
 
 /// argv for the dynamic service command: the top-level global flags that
@@ -744,6 +754,49 @@ mod tests {
         assert_eq!(mistyped_command("completion:v1", false), None);
         assert_eq!(mistyped_command("completion", true), None);
         assert_eq!(mistyped_command("youtube", false), None);
+        assert_eq!(mistyped_command("cahce", false), Some("cache"));
+        assert_eq!(mistyped_command("completoins", false), Some("completions"));
+    }
+
+    /// Unregistered Discovery APIs typed without a version are unknown
+    /// services, not typos of a short command such as `dev` or `auth`.
+    #[test]
+    fn unregistered_api_names_are_not_mistyped_commands() {
+        for name in [
+            "dns",
+            "dlp",
+            "oauth2",
+            "iam",
+            "iap",
+            "run",
+            "file",
+            "fcm",
+            "apikeys",
+            "pubsub",
+            "bigquery",
+            "compute",
+            "storage",
+            "logging",
+            "monitoring",
+            "redis",
+            "spanner",
+            "dataflow",
+            "datastore",
+            "firestore",
+            "translate",
+            "vision",
+            "books",
+            "blogger",
+            "fitness",
+            "webmasters",
+            "chrome",
+            "admob",
+            "dataproc",
+            "speech",
+            "language",
+        ] {
+            assert_eq!(mistyped_command(name, false), None, "{name}");
+        }
     }
 
     #[test]
