@@ -78,12 +78,24 @@ pub(crate) struct LoginArgs {
 
 pub(crate) fn parse_args(m: &clap::ArgMatches) -> Result<LoginArgs, GwsError> {
     let scope_mode = if let Some(list) = crate::args::value::<String>(m, "scopes")? {
-        let scopes: Vec<String> = list
+        let entries: Vec<&str> = list
             .split(',')
             .map(str::trim)
             .filter(|s| !s.is_empty())
-            .map(scopes::normalize_scope)
             .collect();
+        // The authorization request joins scopes with spaces, so an entry
+        // with inner whitespace would silently become several scopes (or a
+        // bogus one) and be recorded as one scope that was never granted.
+        if let Some(bad) = entries
+            .iter()
+            .find(|s| crate::env::check_printable(s).is_err())
+        {
+            return Err(GwsError::Validation(format!(
+                "--scopes: {bad:?} contains whitespace, control or non-ASCII characters; \
+                 separate scopes with commas (e.g. --scopes gmail.modify,drive.readonly)"
+            )));
+        }
+        let scopes: Vec<String> = entries.into_iter().map(scopes::normalize_scope).collect();
         if scopes.is_empty() {
             return Err(GwsError::Validation(
                 "--scopes needs at least one scope".into(),
@@ -427,6 +439,39 @@ mod tests {
             ["gmail".to_string(), "drive".to_string()]
                 .into_iter()
                 .collect()
+        );
+    }
+
+    /// The authorization URL joins scopes with spaces, so an entry with inner
+    /// whitespace (scopes separated by spaces instead of commas) would turn
+    /// into other scopes than the ones recorded. It is refused instead.
+    #[test]
+    fn scopes_with_inner_whitespace_are_rejected() {
+        for bad in [
+            "gmail.modify drive.readonly",
+            "drive.readonly,gmail.modify https://mail.google.com/",
+            "drive\tfile",
+            "drive.readonly\u{7}",
+            "drïve",
+        ] {
+            let err = match parse_args(&matches(&["--scopes", bad])) {
+                Ok(_) => panic!("{bad:?} was accepted"),
+                Err(e) => e,
+            };
+            assert!(matches!(err, GwsError::Validation(_)), "{bad:?}: {err:?}");
+            assert!(
+                err.to_string().contains("separate scopes with commas"),
+                "{err}"
+            );
+        }
+        // Whitespace around comma-separated entries is still fine.
+        let a = parse_args(&matches(&["--scopes", " drive.readonly , gmail.modify "])).unwrap();
+        assert_eq!(
+            a.scope_mode,
+            ScopeMode::Custom(vec![
+                "https://www.googleapis.com/auth/drive.readonly".into(),
+                "https://www.googleapis.com/auth/gmail.modify".into()
+            ])
         );
     }
 
