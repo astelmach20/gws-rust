@@ -46,6 +46,7 @@ pub async fn handle_schema_command(
     let (service_name, rest) = split_schema_path(path)?;
     let parts: Vec<&str> = std::iter::once(service_name).chain(rest).collect();
     let resolved = resolve_service_spec(service_name, api_version)?;
+    crate::service::require_discovery_api(&resolved.api_name, "schema")?;
     let doc = fetch_discovery_document(&resolved.api_name, &resolved.version).await?;
 
     // Case 1: Schema lookup (e.g., "drive.File")

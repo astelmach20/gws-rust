@@ -584,6 +584,38 @@ fn schema_honors_api_version_flag() {
     assert_eq!(v["description"], "v3 listing");
 }
 
+/// `workflow` has helpers only and no Discovery document. `schema` and
+/// `batch` used to ask the network for one and failed with a Discovery
+/// error (exit 4, or a network error offline) instead of a clear refusal.
+#[test]
+fn schema_and_batch_refuse_a_service_without_a_discovery_document() {
+    let env = Env::new();
+    for (args, stdin) in [
+        (&["schema", "workflow.standup"][..], ""),
+        (&["schema", "wf:v1.Type"], ""),
+        (&["batch", "workflow"], "{\"method\": \"x.get\"}\n"),
+    ] {
+        let out = env
+            .cmd()
+            // Nothing may be fetched: a request would hit this closed proxy.
+            .env("HTTPS_PROXY", "http://127.0.0.1:9")
+            .env("HTTP_PROXY", "http://127.0.0.1:9")
+            .args(args)
+            .write_stdin(stdin)
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(3), "{args:?}: {}", stderr_of(&out));
+        assert!(out.stdout.is_empty(), "{args:?}");
+        let err = stderr_error(&out);
+        let message = err["error"]["message"].as_str().unwrap();
+        assert!(
+            message.contains("has no Discovery document")
+                && message.contains("gwsr workflow --help"),
+            "{args:?}: {message}"
+        );
+    }
+}
+
 // ── Errors ──────────────────────────────────────────────────────────────
 
 /// Parse stderr as exactly one JSON error object.
