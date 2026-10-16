@@ -42,13 +42,19 @@ use clap::{Arg, ArgAction, ArgMatches, Command};
 use crate::discovery::RestMethod;
 use crate::error::GwsError;
 
-/// Non-DELETE API methods that permanently remove data.
+/// Non-DELETE API methods that permanently remove or erase data.
 pub(crate) const PERMANENT_DELETE_METHODS: &[&str] = &[
     "gmail.users.messages.batchDelete",
     "calendar.calendars.clear",
     "people.people.batchDeleteContacts",
     "tasks.tasks.clear",
     "drive.files.emptyTrash",
+    // Admin SDK Directory: delete Chrome printers / print servers in bulk.
+    "admin.customers.chrome.printers.batchDeletePrinters",
+    "admin.customers.chrome.printServers.batchDeletePrintServers",
+    // Cloud Identity: erase a device, or a user's account data on a device.
+    "cloudidentity.devices.wipe",
+    "cloudidentity.devices.deviceUsers.wipe",
 ];
 
 /// Methods that erase data only for some request bodies: `(method id, body
@@ -428,6 +434,24 @@ mod tests {
         assert!(is_destructive_method(&m(
             "POST",
             "gmail.users.messages.batchDelete"
+        )));
+        // Bulk deletes and device wipes are POSTs, but just as irreversible.
+        for id in [
+            "admin.customers.chrome.printers.batchDeletePrinters",
+            "admin.customers.chrome.printServers.batchDeletePrintServers",
+            "cloudidentity.devices.wipe",
+            "cloudidentity.devices.deviceUsers.wipe",
+        ] {
+            assert!(is_destructive_method(&m("POST", id)), "{id}");
+            assert_eq!(
+                method_impact(&m("POST", id), &serde_json::Map::new()),
+                Some(Impact::Destructive),
+                "{id}"
+            );
+        }
+        assert!(!is_destructive_method(&m(
+            "POST",
+            "cloudidentity.devices.cancelWipe"
         )));
         assert!(!is_destructive_method(&m("GET", "drive.files.list")));
         assert!(!is_destructive_method(&m(
