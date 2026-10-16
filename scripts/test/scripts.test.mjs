@@ -65,6 +65,35 @@ describe("homebrew-formula.sh", () => {
   });
 });
 
+describe("release-notes.sh", () => {
+  const brew = "brew install astelmach20/tap/gws-rust";
+
+  it("lists every install method, Homebrew included, for a stable release", () => {
+    const res = run("release-notes.sh", ["1.2.3"]);
+    assert.equal(res.status, 0, res.stderr);
+    assert.ok(res.stdout.includes("npm install -g gws-rust@1.2.3"));
+    assert.ok(res.stdout.includes("cargo install gws-rust --version 1.2.3 --locked"));
+    assert.ok(res.stdout.includes(brew));
+  });
+
+  // The release workflow skips the Homebrew tap for prereleases, so `brew install` would
+  // install the previous stable version instead.
+  it("leaves Homebrew out of a prerelease's install methods", () => {
+    const res = run("release-notes.sh", ["1.2.3-rc.1"]);
+    assert.equal(res.status, 0, res.stderr);
+    assert.ok(res.stdout.includes("npm install -g gws-rust@1.2.3-rc.1"));
+    assert.ok(res.stdout.includes("cargo install gws-rust --version 1.2.3-rc.1 --locked"));
+    assert.ok(!res.stdout.includes(brew), res.stdout);
+    assert.match(res.stdout, /Homebrew.*stable releases only/);
+  });
+
+  it("rejects a version that is not semver", () => {
+    const res = run("release-notes.sh", ["v1.2.3"]);
+    assert.equal(res.status, 2);
+    assert.match(res.stderr, /usage/);
+  });
+});
+
 describe("package-release.sh", { skip: !(hasGnu("tar") && hasGnu("touch")) && "needs GNU tar and coreutils (CI runs on Linux)" }, () => {
   const bin = path.join(tmp("gwsr-bin-"), "gwsr");
   fs.writeFileSync(bin, "#!/bin/sh\necho gwsr\n", { mode: 0o755 });

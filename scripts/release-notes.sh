@@ -12,6 +12,14 @@ version="$1"
 readonly repo="astelmach20/gws-rust"
 readonly base="https://github.com/${repo}/releases/download/v${version}"
 
+# The release workflow updates the Homebrew tap for stable versions only (the same `*-*` test
+# as its plan job), so for a prerelease `brew install` would install the previous stable version.
+if [[ "$version" == *-* ]]; then
+  brew_row="| Homebrew | Not available: the tap is updated for stable releases only |"
+else
+  brew_row="| Homebrew | \`brew install astelmach20/tap/gws-rust\` |"
+fi
+
 cat <<NOTES
 ## Install
 
@@ -19,7 +27,7 @@ cat <<NOTES
 |---|---|
 | npm | \`npm install -g gws-rust@${version}\` |
 | Cargo | \`cargo install gws-rust --version ${version} --locked\` |
-| Homebrew | \`brew install astelmach20/tap/gws-rust\` |
+${brew_row}
 
 Prebuilt archives are attached below as \`gws-rust-${version}-<target>.tar.gz\` (\`.zip\` on Windows).
 Linux \`*-musl\` archives are fully static and run on any distribution.
