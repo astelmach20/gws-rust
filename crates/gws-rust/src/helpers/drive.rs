@@ -1637,12 +1637,22 @@ async fn sync_walk(
     // (folder ID, local directory, path relative to `dir` joined by '/')
     let mut stack: Vec<(String, PathBuf, String)> =
         vec![(folder_id.to_string(), dir.to_path_buf(), String::new())];
-    let mut visited = std::collections::HashSet::new();
+    // Folder ID -> the local directory it is mirrored into.
+    let mut visited: std::collections::HashMap<String, PathBuf> = std::collections::HashMap::new();
 
     while let Some((id, local_dir, rel_dir)) = stack.pop() {
-        if !visited.insert(id.clone()) {
+        // A folder with more than one parent in the tree is mirrored once;
+        // say where, rather than silently leaving the other path empty.
+        if let Some(first) = visited.get(&id) {
+            skipped.push(json!({
+                "id": id,
+                "path": local_dir.display().to_string(),
+                "mimeType": FOLDER_MIME,
+                "reason": format!("folder already mirrored at '{}'", first.display()),
+            }));
             continue;
         }
+        visited.insert(id.clone(), local_dir.clone());
         let mut entries = Vec::new();
         for child in list_children(api, &id).await? {
             let child_id = str_field(&child, "id")?;
@@ -2432,6 +2442,52 @@ mod tests {
         assert_eq!(
             std::fs::read(dir.path().join("R2-Reports/a.txt")).unwrap(),
             b"F2"
+        );
+    }
+
+    /// A folder with two parents in the synced tree is mirrored once; the
+    /// other path is reported under "skipped", not silently left empty.
+    #[tokio::test]
+    async fn sync_reports_a_folder_reached_through_a_second_parent() {
+        let server = MockServer::start().await;
+        mount_listing(
+            &server,
+            "ROOT",
+            json!([
+                {"id": "A", "name": "a", "mimeType": FOLDER_MIME},
+                {"id": "B", "name": "b", "mimeType": FOLDER_MIME}
+            ]),
+        )
+        .await;
+        let shared = json!([{"id": "F", "name": "shared", "mimeType": FOLDER_MIME}]);
+        mount_listing(&server, "A", shared.clone()).await;
+        mount_listing(&server, "B", shared).await;
+        mount_listing(
+            &server,
+            "F",
+            json!([{"id": "X", "name": "x.txt", "mimeType": "text/plain"}]),
+        )
+        .await;
+        let api = api(&server.uri(), "drive/v3/");
+        let dir = tempfile::tempdir().unwrap();
+        let v = sync(&api, "ROOT", dir.path()).await.unwrap();
+        assert_eq!(ids(&v, "downloaded"), ["X"], "{v}");
+        assert_eq!(ids(&v, "skipped"), ["F"], "{v}");
+        let skipped = &v["skipped"][0];
+        let mirrored = PathBuf::from(v["downloaded"][0]["path"].as_str().unwrap());
+        let mirrored = mirrored.parent().unwrap();
+        let other = if mirrored.starts_with(dir.path().join("a")) {
+            dir.path().join("b").join("shared")
+        } else {
+            dir.path().join("a").join("shared")
+        };
+        assert_eq!(skipped["path"], other.display().to_string(), "{v}");
+        assert!(
+            skipped["reason"]
+                .as_str()
+                .unwrap()
+                .contains(&mirrored.display().to_string()),
+            "{v}"
         );
     }
 
