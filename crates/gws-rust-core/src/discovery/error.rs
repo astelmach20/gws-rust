@@ -58,12 +58,10 @@ pub enum DiscoveryError {
         source: std::io::Error,
     },
 
-    /// A cache file or directory has permissions that let other users modify it.
-    #[error(
-        "Discovery cache '{}' is writable by group or others (mode {mode:o}); refusing to trust it",
-        path.display()
-    )]
-    InsecurePermissions { path: PathBuf, mode: u32 },
+    /// A cache file or directory belongs to another user or has permissions
+    /// that let other users modify it.
+    #[error("Discovery cache '{}' {reason}; refusing to trust it", path.display())]
+    InsecurePermissions { path: PathBuf, reason: String },
 }
 
 impl DiscoveryError {
