@@ -417,7 +417,6 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
     /// A client file that cannot be inspected is an error, not "no saved
     /// client" (which would fall back to another client).
     #[cfg(unix)]
