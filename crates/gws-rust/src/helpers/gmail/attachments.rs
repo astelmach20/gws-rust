@@ -368,6 +368,7 @@ mod tests {
         let part = |filename: &str, content_type: &str| OriginalPart {
             filename: filename.to_string(),
             content_type: content_type.to_string(),
+            charset: None,
             size: 2,
             data: PartData::Inline(crate::helpers::gmail::test_support::base64url("hi")),
             content_id: Some(format!("{filename}@example.com")),
