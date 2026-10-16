@@ -114,11 +114,18 @@ fn validate_target(url: &str) -> Result<reqwest::Url, GwsError> {
             "List-Unsubscribe URL '{url}' is not https"
         )));
     }
-    let host = parsed.host_str().unwrap_or_default();
+    // A trailing dot names the same (fully qualified) host: `localhost.` is
+    // loopback and `intranet.` a single-label name. RFC 6761 reserves every
+    // `*.localhost` name for loopback too.
+    let host = parsed
+        .host_str()
+        .unwrap_or_default()
+        .trim_end_matches('.')
+        .to_ascii_lowercase();
     let is_ip = host.starts_with('[') || host.parse::<std::net::IpAddr>().is_ok();
-    match host {
-        h if !h.is_empty() && !is_ip && !h.eq_ignore_ascii_case("localhost") && h.contains('.') => {
-        }
+    let loopback_name = host == "localhost" || host.ends_with(".localhost");
+    match host.as_str() {
+        h if !h.is_empty() && !is_ip && !loopback_name && h.contains('.') => {}
         _ => {
             return Err(GwsError::Validation(format!(
                 "List-Unsubscribe URL '{url}' must use a public DNS host name"
@@ -354,12 +361,17 @@ mod tests {
             "https://127.0.0.1/u",
             "https://[::1]/u",
             "https://localhost/u",
+            "https://localhost./u",
+            "https://LocalHost.:8443/u",
+            "https://admin.localhost/u",
             "https://intranet/u",
+            "https://intranet./u",
             "https://user:pw@list.example.com/u",
         ] {
             assert!(validate_target(url).is_err(), "{url} must be rejected");
         }
         assert!(validate_target("https://list.example.com/u?x=1").is_ok());
+        assert!(validate_target("https://list.example.com./u").is_ok());
     }
 
     #[test]
