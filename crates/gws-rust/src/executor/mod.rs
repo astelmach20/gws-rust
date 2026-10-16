@@ -232,7 +232,13 @@ async fn plan_upload(
                 method.id.as_deref().unwrap_or("this method")
             )));
         }
-        UploadMode::Auto => supports_resumable && data.len() > upload::RESUMABLE_THRESHOLD,
+        // Resumable for large files, and for any file when the document
+        // advertises no simple endpoint to send it to.
+        UploadMode::Auto => {
+            supports_resumable
+                && (data.len() > upload::RESUMABLE_THRESHOLD
+                    || method.simple_upload_path().is_none())
+        }
     };
     Ok(UploadPlan {
         data,
