@@ -17,11 +17,13 @@
 //! Renewing sets `ttl` to `0s`, which the API interprets as the maximum
 //! allowed lifetime (`PATCH subscriptions/{id}?updateMask=ttl`).
 //! `--reactivate` calls `:reactivate`, which only applies to SUSPENDED
-//! subscriptions, so `--all --reactivate` selects by state, not expiry. Every failure is reported; the command exits non-zero if
-//! any subscription could not be renewed.
+//! subscriptions, so `--all --reactivate` selects by state, not expiry.
+//! Every failure is reported; the command exits non-zero if any subscription
+//! could not be renewed: `6` (retry later) when every failure is retryable,
+//! `1` when any is permanent.
 
 use super::{parse_event_types, scopes_for_event_types, workspace_events_api_base};
-use crate::error::GwsError;
+use crate::error::{GwsError, is_retryable_status_code};
 use crate::transport::Transport;
 use clap::ArgMatches;
 use gws_rust_core::client::Idempotency;
@@ -251,10 +253,28 @@ async fn run(api: &EventsApi, config: &RenewConfig, now: i64) -> Result<Value, G
     }
     let mut renewed = Vec::new();
     let mut failed = Vec::new();
+    // `Some(code)` while every failure so far is retryable: the HTTP status
+    // the aggregate error carries so that it is retryable too.
+    let mut retry_code: Option<u16> = None;
+    let mut permanent = false;
     for name in &names {
         match api.renew(name, config.reactivate).await {
             Ok(op) => renewed.push(json!({ "name": name, "operation": op })),
-            Err(e) => failed.push(json!({ "name": name, "error": e.to_string() })),
+            Err(e) => {
+                match &e {
+                    // A 403 rate limit is retryable by its reason, which the
+                    // aggregate does not keep: 429 says the same.
+                    GwsError::Api { code, .. } if e.is_retryable() => {
+                        retry_code.get_or_insert(if is_retryable_status_code(*code) {
+                            *code
+                        } else {
+                            429
+                        });
+                    }
+                    _ => permanent = true,
+                }
+                failed.push(json!({ "name": name, "error": e.to_string() }));
+            }
         }
     }
     if failed.is_empty() {
@@ -263,9 +283,15 @@ async fn run(api: &EventsApi, config: &RenewConfig, now: i64) -> Result<Value, G
     let count = failed.len();
     let out = renew_report(config.reactivate, renewed, failed);
     // Like `gwsr batch` and `drive +sync`: a partial failure is an API
-    // outcome (exit 1), not an internal error.
+    // outcome, not an internal error. It is retryable (exit 6), as one named
+    // subscription's failure would be, only when every failure is: a
+    // permanent one (exit 1) is not fixed by running again.
+    let code = match retry_code {
+        Some(code) if !permanent => code,
+        _ => 207,
+    };
     Err(GwsError::Api {
-        code: 207,
+        code,
         message: format!(
             "{count} of {} subscription(s) could not be renewed: {out}",
             names.len()
@@ -461,7 +487,7 @@ mod tests {
 
     /// A failed renewal is an API outcome, not an internal error (exit 5):
     /// a named subscription keeps its own error class, so a cron job can
-    /// retry a 503 (exit 6), and a partial `--all` failure exits 1.
+    /// retry a 503 (exit 6), and a permanent `--all` failure exits 1.
     #[tokio::test]
     async fn renew_failures_keep_the_api_error_class() {
         let server = MockServer::start().await;
@@ -521,6 +547,83 @@ mod tests {
         assert_eq!(err.exit_code(), GwsError::EXIT_CODE_API, "{err:?}");
         assert!(err.to_string().contains("1 of 2"), "{err}");
         assert!(err.to_string().contains("subscriptions/ok"), "{err}");
+    }
+
+    /// `--all` classifies its failures like a single `--subscription-id`
+    /// would: when every failure is retryable (503, 429, a 403 rate limit)
+    /// the run exits 6, so a cron job retries it; any permanent failure
+    /// (here a 404) outranks them and the run exits 1, because retrying
+    /// cannot fix it.
+    #[tokio::test]
+    async fn renew_all_exits_retryable_only_when_every_failure_is() {
+        let error = |code: u16, status: &str, reason: &str| {
+            ResponseTemplate::new(code).set_body_json(json!({"error": {
+                "code": code, "message": status, "status": status,
+                "errors": [{"reason": reason}]
+            }}))
+        };
+        let cases: &[(&[&str], i32)] = &[
+            (&["busy", "limited"], GwsError::EXIT_CODE_API_RETRYABLE),
+            (&["ok", "busy", "quota"], GwsError::EXIT_CODE_API_RETRYABLE),
+            (&["quota"], GwsError::EXIT_CODE_API_RETRYABLE),
+            (&["busy", "gone", "limited"], GwsError::EXIT_CODE_API),
+            (&["gone", "busy"], GwsError::EXIT_CODE_API),
+        ];
+        for (ids, exit) in cases {
+            let server = MockServer::start().await;
+            let subs: Vec<Value> = ids
+                .iter()
+                .map(|id| json!({"name": format!("subscriptions/{id}"), "expireTime": "1970-01-01T00:10:00Z"}))
+                .collect();
+            Mock::given(method("GET"))
+                .and(path("/v1/subscriptions"))
+                .respond_with(
+                    ResponseTemplate::new(200).set_body_json(json!({ "subscriptions": subs })),
+                )
+                .mount(&server)
+                .await;
+            for (id, response) in [
+                (
+                    "ok",
+                    ResponseTemplate::new(200).set_body_json(json!({"name": "operations/1"})),
+                ),
+                ("busy", error(503, "UNAVAILABLE", "backendError")),
+                (
+                    "limited",
+                    error(429, "RESOURCE_EXHAUSTED", "rateLimitExceeded"),
+                ),
+                (
+                    "quota",
+                    error(403, "PERMISSION_DENIED", "userRateLimitExceeded"),
+                ),
+                ("gone", error(404, "NOT_FOUND", "notFound")),
+            ] {
+                Mock::given(method("PATCH"))
+                    .and(path(format!("/v1/subscriptions/{id}")))
+                    .respond_with(response)
+                    .mount(&server)
+                    .await;
+            }
+            let config = RenewConfig {
+                subscription: None,
+                all: true,
+                event_types: vec!["google.workspace.chat.message.v1.created".into()],
+                within_secs: 3600,
+                reactivate: false,
+            };
+            let err = run(&api(&server), &config, 0).await.unwrap_err();
+            assert_eq!(err.exit_code(), *exit, "{ids:?}: {err:?}");
+            let failed = ids.iter().filter(|id| **id != "ok").count();
+            assert!(
+                err.to_string()
+                    .contains(&format!("{failed} of {}", ids.len())),
+                "{ids:?}: {err}"
+            );
+            assert!(
+                matches!(&err, GwsError::Api { reason, .. } if reason == "renewPartialFailure"),
+                "{ids:?}: {err:?}"
+            );
+        }
     }
 
     /// Listing subscriptions treats an empty nextPageToken as the last page

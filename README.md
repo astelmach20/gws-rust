@@ -315,6 +315,8 @@ The fields are `code`, `message`, `reason` and `retryable`, plus `hint` when the
 
 Exit code 5 also covers internal programming errors, such as a command reading an argument it doesn't define.
 
+`events +renew --all` renews each subscription on its own and reports every failure. When any renewal fails (reason `renewPartialFailure`), it exits `6` if every failure was retryable, so running it again can succeed, and `1` as soon as one failure is permanent, because retrying won't fix that one.
+
 ### Logging
 
 stderr log lines are JSON objects, unless `-v` is given or the output format is human. The default level is warnings and errors. Precedence: `-v`/`-vv`/`-vvv` or `-q` > `GWSR_LOG` (a filter such as `gwsr=debug`) > `RUST_LOG` > `log` in `config.toml`. `GWSR_LOG_FILE` (or `log_file`) names a directory that receives daily `gwsr.log.YYYY-MM-DD` JSON files at debug level (directory `0700`, including an existing one, files `0600`). Progress messages appear only with `-v`.
@@ -490,6 +492,8 @@ gwsr gmail users messages get --params '{"userId":"me","id":"MSG"}' \
 - `gmail +send`, `+reply`, `+reply-all` and `+forward` (including `--draft`) screen the outgoing subject and body, quoted or forwarded text included, **before** sending. `+filter create` screens the new filter before creating it, and `+unsubscribe` screens the unsubscribe URL before the one-click POST.
 - In `block` mode a match (exit `11`) or a Model Armor failure (the cause's exit code) sends or creates nothing. In `warn` mode the action goes ahead after a warning on stderr, and the printed result carries the `_sanitization` annotation.
 - `--dry-run` never calls Model Armor; it prints the planned request unscreened.
+
+Content that can't be screened is refused, never passed through unscreened. With `--sanitize` set, in either mode, `-o -` on a generated method and `--output -` on `drive +download` and `drive +export` fail with a validation error (exit `3`) before any request is sent: raw bytes streamed to stdout can't be screened, even when they are text such as a Docs export to Markdown. To keep the file, write it to a path (`-o PATH` / `--output PATH`) instead.
 
 If a response labelled JSON doesn't parse, the error normally quotes the first 200 bytes of it. With `--sanitize` set, in either mode, the error withholds the content instead, because it was never screened.
 

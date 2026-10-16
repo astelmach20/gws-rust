@@ -33,7 +33,7 @@ gwsr admin +user-create --email <EMAIL> --given-name <NAME> --family-name <NAME>
 | `--email` | ✓ | — | Primary email |
 | `--given-name` | ✓ | — | First name |
 | `--family-name` | ✓ | — | Last name |
-| `--org-unit` | — | — | Organizational unit path (default: /) |
+| `--org-unit` | — | — | Organizational unit path from the root, e.g. /Sales (default: /) |
 | `--password-file` | — | — | Read the initial password from a file, or '-' for stdin (default: generate one) |
 | `--no-password-change` | — | — | Do not force a password change at first sign-in |
 
