@@ -198,6 +198,10 @@ describe("check-changeset.sh", () => {
     ["an unreadable front matter line", "---\ngws-rust patch\n---\n\nFix\n", /unreadable front matter line: gws-rust patch/],
     ["another package behind CRLF line endings", '---\r\n"googleworkspace-cli": patch\r\n---\r\n\r\nFix\r\n', /Unknown package 'googleworkspace-cli'/],
     ["another package with a space before the colon", '---\n"googleworkspace-cli" : patch\n---\n\nFix\n', /Unknown package 'googleworkspace-cli'/],
+    ["the package listed twice", '---\n"gws-rust": patch\n"gws-rust": minor\n---\n\nFix\n', /"gws-rust" is listed more than once/],
+    ["the package listed twice in different quoting", "---\ngws-rust: patch\n'gws-rust': patch\n---\n\nFix\n", /"gws-rust" is listed more than once/],
+    ["no space after an unquoted key's colon", "---\ngws-rust:patch\n---\n\nFix\n", /unreadable front matter line: gws-rust:patch/],
+    ["no space after a quoted key's colon", '---\n"gws-rust":patch\n---\n\nFix\n', /unreadable front matter line: "gws-rust":patch/],
   ]) {
     it(`rejects a changeset with ${what}`, () => {
       const r = repo();

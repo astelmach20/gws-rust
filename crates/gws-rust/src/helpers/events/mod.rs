@@ -168,7 +168,7 @@ fn subscribe_cmd() -> Command {
             Arg::new("output-dir")
                 .long("output-dir")
                 .help("Write each event to a separate JSON file in this directory")
-                .value_name("DIR"),
+                .value_name("DIR").value_hint(clap::ValueHint::DirPath),
         )
         .after_help(
             "\

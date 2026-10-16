@@ -93,8 +93,9 @@ impl std::error::Error for Context {
 /// to the message so users can see that the request was already retried.
 ///
 /// A 401 on an authenticated request is [`GwsError::Auth`] (exit code 2): the
-/// transport has already minted a fresh token once, so the credential itself
-/// is expired, revoked or invalid.
+/// transport has already minted a fresh token once (or, for a fixed
+/// `GWSR_TOKEN`, cannot), so the credential itself is expired, revoked or
+/// invalid.
 pub(crate) fn error_from_response(
     status: reqwest::StatusCode,
     error_body: &str,
@@ -111,9 +112,20 @@ pub(crate) fn error_from_response(
     match api_error(status, error_body, retry_note) {
         GwsError::Api {
             message, reason, ..
-        } if status == reqwest::StatusCode::UNAUTHORIZED => GwsError::Auth(format!(
-            "the API rejected the access token (HTTP 401, {reason}): {message}"
-        )),
+        } if status == reqwest::StatusCode::UNAUTHORIZED => {
+            let rejected =
+                format!("the API rejected the access token (HTTP 401, {reason}): {message}");
+            GwsError::Auth(if *auth_method == AuthMethod::FixedToken {
+                // Not retried: signing in again does not replace GWSR_TOKEN.
+                format!(
+                    "{rejected} (GWSR_TOKEN is a fixed access token that gwsr cannot refresh: \
+                     it expired or was revoked. Set GWSR_TOKEN to a new access token, or unset \
+                     it to use another credential.)"
+                )
+            } else {
+                rejected
+            })
+        }
         err => err,
     }
 }
@@ -130,12 +142,11 @@ fn api_error(status: reqwest::StatusCode, error_body: &str, retry_note: Option<&
         && let Some(err_obj) = error_json.get("error")
         && err_obj.is_object()
     {
-        let code = err_obj
-            .get("code")
-            .and_then(Value::as_u64)
-            // An out-of-range body code falls back to the HTTP status.
-            .and_then(|c| u16::try_from(c).ok())
-            .unwrap_or(status.as_u16());
+        // The HTTP status, not the body's `error.code`, is the code: it is
+        // what the client's retry policy acted on, so the exit code (6 or 1)
+        // must agree with it even when a proxy or API sends a body code that
+        // disagrees.
+        let code = status.as_u16();
         let message = err_obj
             .get("message")
             .and_then(Value::as_str)
@@ -243,9 +254,33 @@ mod tests {
                     "{message}"
                 );
                 assert!(message.contains("authError"), "{message}");
+                assert!(!message.contains("GWSR_TOKEN"), "{message}");
             }
             other => panic!("expected Auth error, got {other:?}"),
         }
+    }
+
+    /// A rejected fixed token (`GWSR_TOKEN`) is not retried, so the error
+    /// says why and what replaces it.
+    #[test]
+    fn fixed_token_401_says_it_expired_or_was_revoked() {
+        let body = json!({"error": {"code": 401, "message": "Request had invalid authentication credentials.",
+                                    "errors": [{"reason": "authError"}]}})
+        .to_string();
+        let err = error_from_response(
+            reqwest::StatusCode::UNAUTHORIZED,
+            &body,
+            &AuthMethod::FixedToken,
+            None,
+        );
+        assert_eq!(err.exit_code(), GwsError::EXIT_CODE_AUTH);
+        let message = err.to_string();
+        assert!(
+            message.contains("invalid authentication credentials"),
+            "{message}"
+        );
+        assert!(message.contains("GWSR_TOKEN"), "{message}");
+        assert!(message.contains("expired or was revoked"), "{message}");
     }
 
     #[test]
@@ -260,6 +295,28 @@ mod tests {
         assert_eq!(code, 503);
         assert_eq!(message, "Backend Error (gave up after 4 attempts)");
         assert_eq!(reason, "backendError");
+    }
+
+    /// The HTTP status decides retries (the client retries a 503, never a
+    /// 400), so it must also decide the reported code and the exit code: a
+    /// body `error.code` that disagrees with it must not flip them.
+    #[test]
+    fn http_status_wins_over_a_disagreeing_body_code() {
+        for (status, body_code, exit) in [
+            (503, 400, GwsError::EXIT_CODE_API_RETRYABLE),
+            (400, 503, GwsError::EXIT_CODE_API),
+        ] {
+            let body =
+                json!({"error": {"code": body_code, "message": "m", "status": "X"}}).to_string();
+            let err = error_from_response(
+                reqwest::StatusCode::from_u16(status).unwrap(),
+                &body,
+                &AuthMethod::OAuth,
+                None,
+            );
+            assert_eq!(err.exit_code(), exit, "HTTP {status}, body {body_code}");
+            assert_eq!(api_parts(err).0, status, "HTTP {status}, body {body_code}");
+        }
     }
 
     #[test]

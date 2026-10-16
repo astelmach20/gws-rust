@@ -113,7 +113,8 @@ pub(super) async fn handle_filter(
     sanitize: &crate::helpers::modelarmor::SanitizeConfig,
 ) -> Result<(), GwsError> {
     let dry_run = crate::args::dry_run(matches)?;
-    let base = format!("{}/users/me/settings/filters", super::api::api_base()?);
+    let user = format!("{}/users/me", super::api::api_base()?);
+    let base = format!("{user}/settings/filters");
     match matches.subcommand() {
         Some(("list", sub)) => {
             if dry_run {
@@ -141,16 +142,25 @@ pub(super) async fn handle_filter(
                 )?;
             }
             if dry_run {
-                let body = build_filter(&spec, &spec.add_labels, &spec.remove_labels);
-                return crate::helpers::http::print_dry_run(
-                    matches,
-                    vec![crate::helpers::http::dry_run_request(
-                        "POST",
-                        &base,
+                // A real run lists the labels first when it has names to
+                // resolve to IDs; the plan shows the names as given.
+                let mut requests = Vec::new();
+                if !spec.add_labels.is_empty() || !spec.remove_labels.is_empty() {
+                    requests.push(crate::helpers::http::dry_run_request(
+                        "GET",
+                        &format!("{user}/labels"),
                         &[],
-                        Some(&body),
-                    )],
-                );
+                        None,
+                    ));
+                }
+                let body = build_filter(&spec, &spec.add_labels, &spec.remove_labels);
+                requests.push(crate::helpers::http::dry_run_request(
+                    "POST",
+                    &base,
+                    &[],
+                    Some(&body),
+                ));
+                return crate::helpers::http::print_dry_run(matches, requests);
             }
             let api = super::api::authenticated(&[GMAIL_SETTINGS_SCOPE]).await?;
             let body = if spec.add_labels.is_empty() && spec.remove_labels.is_empty() {

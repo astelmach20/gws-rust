@@ -101,7 +101,7 @@ pub fn method_args(doc: &RestDescription, method: &RestMethod) -> Vec<Arg> {
             .long("output")
             .short('o')
             .help("Write the response payload to PATH (binary media, decoded base64 field, or the JSON) and print a JSON summary; - streams the raw payload to stdout")
-            .value_name("PATH")
+            .value_name("PATH").value_hint(clap::ValueHint::AnyPath)
             .help_heading(HEADING_OUTPUT),
         Arg::new("decode-field")
             .long("decode-field")
@@ -136,6 +136,7 @@ pub fn method_args(doc: &RestDescription, method: &RestMethod) -> Vec<Arg> {
                     "Local file to upload as media content (resumable above 5 MiB when supported)",
                 )
                 .value_name("PATH")
+                .value_hint(clap::ValueHint::FilePath)
                 .help_heading(HEADING_UPLOAD),
         );
         args.push(

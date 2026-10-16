@@ -170,13 +170,21 @@ fn url_path(url: &str) -> String {
 /// built as `.../events/{id}`. The request would address a different
 /// resource than the one named: `DELETE .../events/` names the collection,
 /// and `GET .../messages/` the message list instead of one message.
+///
+/// A segment that starts with `:` counts as empty too: it is what an empty
+/// ID leaves in front of a custom verb (`documents/{documentId}:batchUpdate`
+/// becomes `documents/:batchUpdate`). Path builders percent-encode `:` inside
+/// IDs, so a literal leading `:` only ever comes from such a template.
 pub fn reject_empty_path_segments(url: &str) -> Result<(), GwsError> {
     let path = url_path(url);
     if path.is_empty() || path == "/" {
         return Ok(());
     }
     let segments = path.strip_prefix(['/', '\\']).unwrap_or(&path);
-    if segments.split(['/', '\\']).any(str::is_empty) {
+    if segments
+        .split(['/', '\\'])
+        .any(|segment| segment.is_empty() || segment.starts_with(':'))
+    {
         return Err(GwsError::Validation(format!(
             "Refusing to send a request whose URL path has an empty segment \
              (an empty ID or resource name), which would address a different \
@@ -454,6 +462,10 @@ mod tests {
             "https://www.googleapis.com/drive/v3/files/F1\\\\permissions",
             "https://www.googleapis.com/drive/v3/files/F1/\\permissions",
             "http://127.0.0.1:8080/tasks/v1/lists/\t/tasks",
+            // An empty ID in front of a custom verb (`{documentId}:batchUpdate`).
+            "https://docs.googleapis.com/v1/documents/:batchUpdate",
+            "https://script.googleapis.com/v1/scripts/:run",
+            "https://sheets.googleapis.com/v4/spreadsheets/S1/values/:clear?x=1",
         ] {
             let err = reject_empty_path_segments(bad).unwrap_err();
             assert!(matches!(err, GwsError::Validation(_)), "{bad:?}: {err:?}");
@@ -467,6 +479,10 @@ mod tests {
             "https://www.googleapis.com/drive/v3/files?q=a//b",
             "https://www.googleapis.com/drive/v3/files/F1#a//b",
             "https://www.googleapis.com/calendar/v3/calendars/a%2F%2Fb/events",
+            "https://docs.googleapis.com/v1/documents/D1:batchUpdate",
+            "https://sheets.googleapis.com/v4/spreadsheets/S1/values/A1%3AB2:clear",
+            "https://chat.googleapis.com/v1/spaces:findDirectMessage",
+            "https://www.googleapis.com/drive/v3/files?q=x/:y",
         ] {
             assert!(reject_empty_path_segments(ok).is_ok(), "{ok}");
         }

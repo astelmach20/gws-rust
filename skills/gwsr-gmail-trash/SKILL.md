@@ -23,15 +23,17 @@ Move messages or threads to Trash
 ## Usage
 
 ```bash
-gwsr gmail +trash
+gwsr gmail +trash --message-id <ID>
 ```
+
+Requires at least one of: `--message-id <ID>`, `--thread-id <ID|URL>`.
 
 ## Flags
 
 | Flag | Required | Default | Description |
 |------|----------|---------|-------------|
-| `--message-id` | — | — | Message ID to act on (repeatable or comma-separated) |
-| `--thread-id` | — | — | Thread ID or Gmail web URL to act on (repeatable or comma-separated) |
+| `--message-id` | at least one | — | Message ID to act on (repeatable or comma-separated) |
+| `--thread-id` | at least one | — | Thread ID or Gmail web URL to act on (repeatable or comma-separated) |
 
 ## Examples
 

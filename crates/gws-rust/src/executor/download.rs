@@ -43,10 +43,26 @@ pub enum OutputTarget {
 /// Largest non-JSON text body that is inlined into the JSON output.
 pub(crate) const MAX_INLINE_TEXT: usize = 16 * 1024 * 1024;
 
+/// The lowercased essence (`type/subtype`, without parameters) of a media
+/// type. Media types are case-insensitive (RFC 9110 §8.3.1).
+fn essence(content_type: &str) -> String {
+    let ct = content_type.split(';').next().unwrap_or("");
+    ct.trim().to_ascii_lowercase()
+}
+
+/// Whether a content type is a JSON API response (`application/json` or
+/// `text/json`, in any letter case and with any parameters).
+pub(crate) fn is_json(content_type: &str) -> bool {
+    matches!(
+        essence(content_type).as_str(),
+        "application/json" | "text/json"
+    )
+}
+
 /// Whether a content type is text that can be inlined as a JSON string.
 pub(crate) fn is_textual(content_type: &str) -> bool {
-    let ct = content_type.to_ascii_lowercase();
-    let essence = ct.split(';').next().unwrap_or("").trim();
+    let essence = essence(content_type);
+    let essence = essence.as_str();
     essence.starts_with("text/")
         || essence.ends_with("+json")
         || essence.ends_with("+xml")
@@ -307,6 +323,18 @@ mod tests {
     use super::*;
     use crate::discovery::{JsonSchema, SchemaRef};
     use std::collections::HashMap;
+
+    #[test]
+    fn json_detection_ignores_case_and_parameters() {
+        assert!(is_json("application/json"));
+        assert!(is_json("Application/JSON; charset=UTF-8"));
+        assert!(is_json(" text/JSON "));
+        // The essence must match exactly, not just contain the JSON type.
+        assert!(!is_json("application/jsonl"));
+        assert!(!is_json("text/plain; note=application/json"));
+        assert!(!is_json(""));
+        assert!(is_textual("TEXT/CSV"));
+    }
 
     #[test]
     fn textual_detection_and_wrapping() {

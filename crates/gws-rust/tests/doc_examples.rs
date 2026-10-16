@@ -47,6 +47,7 @@ use std::time::Duration;
 /// Sample values for the upper-case usage placeholders clap prints.
 const PLACEHOLDERS: &[(&str, &str)] = &[
     ("<APP>", "drive"),
+    ("<CSV_ROW>", "a,b"),
     ("<DATE>", "2026-06-17"),
     ("<DIR>", "./out"),
     ("<EMAIL>", "ann@example.com"),
@@ -55,6 +56,7 @@ const PLACEHOLDERS: &[(&str, &str)] = &[
     ("<FORMAT>", "pdf"),
     ("<ID>", "abc123"),
     ("<JSON>", "{}"),
+    ("<LABEL>", "STARRED"),
     ("<LOCATION>", "us-central1"),
     ("<NAME>", "Sample"),
     ("<PATH>", "input.txt"),
