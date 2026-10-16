@@ -929,6 +929,7 @@ mod tests {
     fn gmail_root() -> Command {
         crate::commands::build_cli(&crate::discovery::RestDescription {
             name: "gmail".to_string(),
+            version: "v1".to_string(),
             ..Default::default()
         })
     }

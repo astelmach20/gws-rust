@@ -67,6 +67,7 @@ pub(crate) fn mock_api(server: &wiremock::MockServer) -> GmailApi {
 pub(crate) fn helper_matches(args: &[&str]) -> clap::ArgMatches {
     let doc = crate::discovery::RestDescription {
         name: "gmail".to_string(),
+        version: "v1".to_string(),
         ..Default::default()
     };
     let mut argv = vec!["gwsr"];

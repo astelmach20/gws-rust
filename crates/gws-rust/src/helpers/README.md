@@ -76,7 +76,7 @@ Helper flags must control **orchestration logic**, not API parameters or output 
 
 ## Architecture
 
-Helpers implement the `Helper` trait in `mod.rs` and are registered in the `HELPERS` table (looked up by `get_helper()`).
+Helpers implement the `Helper` trait in `mod.rs` and are registered in the `HELPERS` table (looked up by `get_helper()`). The CLI attaches a helper through `helper_for()`, which offers it only for the API version registered in `services.rs`, so `drive:v2` or another `--api-version` gets the generated commands without helpers that build requests for a different version.
 
 - **`inject_commands`** adds the `+verb` subcommands to the service command. Helper commands are always shown, whatever the authentication state.
 - **`handle`** runs the command. It returns `Ok(true)` if it handled the command, or `Ok(false)` to fall back to the generated Discovery commands.

@@ -34,7 +34,7 @@ pub fn build_cli(doc: &RestDescription) -> Command {
     root = root.bin_name(format!("gwsr {}", doc.name));
 
     // Inject helper commands
-    let helper = crate::helpers::get_helper(&doc.name);
+    let helper = crate::helpers::helper_for(doc);
     if let Some(ref helper) = helper {
         root = helper.inject_commands(root, doc);
     }

@@ -311,6 +311,24 @@ pub fn get_helper(service: &str) -> Option<Box<dyn Helper>> {
         .map(|(_, make)| make())
 }
 
+/// The helper for a loaded Discovery document, if its helpers were written for
+/// that API version. Helpers build version-specific requests (Drive v3 field
+/// names, `sendNotificationEmail`, a `files` list key), so `drive:v2` or
+/// `--api-version` with another version gets only the generated commands
+/// rather than helpers that would send v3 requests to the v2 endpoints.
+pub fn helper_for(doc: &crate::discovery::RestDescription) -> Option<Box<dyn Helper>> {
+    // A synthetic service (`workflow`) has no Discovery version to match.
+    let registered = crate::service::synthetic_document(&doc.name).is_some()
+        || gws_rust_core::services::SERVICES
+            .iter()
+            .any(|s| s.api_name == doc.name && s.version == doc.version);
+    if registered {
+        get_helper(&doc.name)
+    } else {
+        None
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
@@ -388,6 +406,30 @@ mod tests {
                     .iter()
                     .any(|s| s.api_name == *name),
                 "helper {name:?} is keyed by no registered API name"
+            );
+        }
+    }
+
+    /// Helpers apply only to the API version they were written for; another
+    /// version of the same API (`drive:v2`) gets the generated commands alone.
+    #[test]
+    fn helpers_apply_only_to_their_api_version() {
+        for (name, version) in APP_HELPERS {
+            assert!(
+                helper_for(&doc(name, version)).is_some(),
+                "{name} {version}"
+            );
+        }
+        assert!(helper_for(&doc("workflow", "")).is_some());
+        for (name, version) in [
+            ("drive", "v2"),
+            ("calendar", "v2"),
+            ("sheets", "v3"),
+            ("admin", "v1"),
+        ] {
+            assert!(
+                helper_for(&doc(name, version)).is_none(),
+                "{name} {version}"
             );
         }
     }

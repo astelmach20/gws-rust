@@ -86,7 +86,7 @@ The repository is a Cargo workspace with two crates, plus the npm launcher in `n
 ### Request flow
 
 1. `main.rs` applies process hardening, validates every environment variable (`env.rs`), loads `config.toml` and initializes logging. It then parses the static surface in `cli_args.rs`: global flags, `auth`, `schema`, `commands`, `batch`, `cache`, `completions`, `help`, `dev`.
-2. Anything else is a service. `service.rs` resolves the name (aliases, `<api>:<version>`, `--api-version`), then loads the Discovery document through the cache. `commands.rs` builds a `clap::Command` tree from it, and the service's helper (`helpers::get_helper`) injects its `+verb` subcommands.
+2. Anything else is a service. `service.rs` resolves the name (aliases, `<api>:<version>`, `--api-version`), then loads the Discovery document through the cache. `commands.rs` builds a `clap::Command` tree from it, and the service's helper (`helpers::helper_for`, only for the registered API version) injects its `+verb` subcommands.
 3. argv is parsed again against that tree. A helper handles the command, or the executor runs the generated method.
 4. `confirm.rs` gates destructive and outbound actions. `auth` supplies a token for the narrowest granted scope. `transport` sends the request. Results go to stdout through `formatter.rs` / `output.rs`; errors become the stderr envelope in `error.rs`.
 

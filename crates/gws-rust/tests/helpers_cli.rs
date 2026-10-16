@@ -620,6 +620,58 @@ fn script_run_keeps_script_id_unreserved_chars() {
     );
 }
 
+/// Drive helpers build v3 requests, so another Drive version must not run
+/// them: `drive:v2 +share` would POST a v3 permission body to the v2 endpoint.
+#[test]
+fn drive_helpers_are_not_offered_for_another_api_version() {
+    let dir = setup();
+    seed(dir.path(), "drive", "v2", "drive/v2/");
+    let out = gwsr(dir.path())
+        .args([
+            "drive:v2",
+            "+share",
+            "--file-id",
+            "F1",
+            "--email",
+            "a@example.com",
+            "--role",
+            "reader",
+            "--dry-run",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        !out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    assert!(
+        out.stdout.is_empty(),
+        "{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    // The v3 Drive helpers still work.
+    let out = gwsr(dir.path())
+        .args([
+            "drive",
+            "+share",
+            "--file-id",
+            "F1",
+            "--email",
+            "a@example.com",
+            "--role",
+            "reader",
+            "--dry-run",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
 #[test]
 fn upload_rejects_paths_outside_cwd() {
     let dir = setup();
