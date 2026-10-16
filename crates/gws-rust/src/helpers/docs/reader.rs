@@ -15,6 +15,11 @@
 //! Render a Docs API `Document` as plain text or Markdown.
 
 use serde_json::Value;
+use std::collections::HashMap;
+
+/// The last number given to an item at each (list ID, nesting level), so
+/// plain text can number ordered items the way the document shows them.
+type ListNumbers = HashMap<(String, u64), u64>;
 
 /// Deepest list `nestingLevel` the Docs API produces.
 const MAX_NESTING_LEVEL: u64 = 8;
@@ -23,12 +28,24 @@ const MAX_NESTING_LEVEL: u64 = 8;
 pub(super) fn render(document: &Value, markdown: bool) -> String {
     let mut out = String::new();
     if let Some(content) = document.pointer("/body/content").and_then(Value::as_array) {
-        render_elements(content, document, markdown, &mut out);
+        render_elements(
+            content,
+            document,
+            markdown,
+            &mut ListNumbers::new(),
+            &mut out,
+        );
     }
     out
 }
 
-fn render_elements(elements: &[Value], document: &Value, markdown: bool, out: &mut String) {
+fn render_elements(
+    elements: &[Value],
+    document: &Value,
+    markdown: bool,
+    numbers: &mut ListNumbers,
+    out: &mut String,
+) {
     let mut in_list = false;
     for el in elements {
         let is_item = el.pointer("/paragraph/bullet").is_some();
@@ -40,9 +57,9 @@ fn render_elements(elements: &[Value], document: &Value, markdown: bool, out: &m
         }
         in_list = is_item;
         if let Some(p) = el.get("paragraph") {
-            render_paragraph(p, document, markdown, out);
+            render_paragraph(p, document, markdown, numbers, out);
         } else if let Some(t) = el.get("table") {
-            render_table(t, document, markdown, out);
+            render_table(t, document, markdown, numbers, out);
         }
         // sectionBreak and tableOfContents carry no body text of their own.
     }
@@ -62,7 +79,13 @@ fn is_ordered(document: &Value, list_id: &str, level: u64) -> bool {
         .unwrap_or(false)
 }
 
-fn render_paragraph(p: &Value, document: &Value, markdown: bool, out: &mut String) {
+fn render_paragraph(
+    p: &Value,
+    document: &Value,
+    markdown: bool,
+    numbers: &mut ListNumbers,
+    out: &mut String,
+) {
     let mut line = String::new();
     // Markdown: consecutive runs with the same marks, buffered so they are
     // wrapped once (`*xy*`, not `*x**y*`, which reads as literal asterisks).
@@ -165,11 +188,22 @@ fn render_paragraph(p: &Value, document: &Value, markdown: bool, out: &mut Strin
             .and_then(Value::as_u64)
             .unwrap_or(0);
         let list_id = bullet.get("listId").and_then(Value::as_str).unwrap_or("");
+        // An item restarts the numbering of the levels below it, as in the
+        // document; a list continues across the paragraphs between its items.
+        numbers.retain(|(id, l), _| id != list_id || *l <= level);
+        *numbers.entry((list_id.to_string(), level)).or_insert(0) += 1;
         let marker = |level: u64| {
-            if is_ordered(document, list_id, level) {
-                "1."
+            if !is_ordered(document, list_id, level) {
+                "-".to_string()
+            } else if markdown {
+                // CommonMark numbers the items itself.
+                "1.".to_string()
             } else {
-                "-"
+                let n = numbers
+                    .get(&(list_id.to_string(), level))
+                    .copied()
+                    .unwrap_or(1);
+                format!("{n}.")
             }
         };
         // CommonMark nests an item only when it is indented to its parent's
@@ -328,10 +362,10 @@ fn code_span(code: &str) -> String {
     format!("{fence}{pad}{code}{pad}{fence}")
 }
 
-fn cell_text(cell: &Value, document: &Value, markdown: bool) -> String {
+fn cell_text(cell: &Value, document: &Value, markdown: bool, numbers: &mut ListNumbers) -> String {
     let mut s = String::new();
     if let Some(content) = cell.get("content").and_then(Value::as_array) {
-        render_elements(content, document, markdown, &mut s);
+        render_elements(content, document, markdown, numbers, &mut s);
     }
     // A GFM table cell is one line: its paragraphs and line breaks are
     // joined with spaces. In Markdown a line break was written as a hard
@@ -367,7 +401,13 @@ fn cell_text(cell: &Value, document: &Value, markdown: bool) -> String {
     out
 }
 
-fn render_table(table: &Value, document: &Value, markdown: bool, out: &mut String) {
+fn render_table(
+    table: &Value,
+    document: &Value,
+    markdown: bool,
+    numbers: &mut ListNumbers,
+    out: &mut String,
+) {
     let rows = table
         .get("tableRows")
         .and_then(Value::as_array)
@@ -380,7 +420,7 @@ fn render_table(table: &Value, document: &Value, markdown: bool, out: &mut Strin
             .map(|cells| {
                 cells
                     .iter()
-                    .map(|c| cell_text(c, document, markdown))
+                    .map(|c| cell_text(c, document, markdown, numbers))
                     .collect()
             })
             .unwrap_or_default();
@@ -498,6 +538,41 @@ mod tests {
         assert_eq!(list_depth(&md), 3, "nesting lost in:\n{md}");
         // Bullet parents keep the two-space indent.
         assert!(md.contains("\n  1. number under bullet\n"), "{md}");
+    }
+
+    /// Plain text has no renderer to number a list, so each ordered item
+    /// carries its own number: per list and level, continuing across the
+    /// paragraphs between its items and restarting under a new parent item.
+    #[test]
+    fn plain_text_numbers_ordered_list_items() {
+        let item = |list: &str, level: u64, text: &str| {
+            json!({"paragraph": {"bullet": {"listId": list, "nestingLevel": level},
+                "elements": [{"textRun": {"content": format!("{text}\n")}}]}})
+        };
+        let para = |t: &str| json!({"paragraph": {"elements": [{"textRun": {"content": t}}]}});
+        let numbered = json!({"listProperties": {"nestingLevels": [
+            {"glyphType": "DECIMAL"}, {"glyphType": "ALPHA"}
+        ]}});
+        let document = json!({
+            "lists": {"N": numbered.clone(), "M": numbered},
+            "body": {"content": [
+                item("N", 0, "first"),
+                item("N", 1, "sub a"),
+                item("N", 1, "sub b"),
+                item("N", 0, "second"),
+                item("N", 1, "sub again"),
+                para("between\n"),
+                item("N", 0, "third"),
+                item("M", 0, "other list"),
+            ]}
+        });
+        assert_eq!(
+            render(&document, false),
+            "1. first\n   1. sub a\n   2. sub b\n2. second\n   1. sub again\n\
+             between\n3. third\n1. other list\n"
+        );
+        // Markdown keeps `1.`, which CommonMark numbers itself.
+        assert!(render(&document, true).starts_with("1. first\n   1. sub a\n   1. sub b\n"));
     }
 
     #[test]
