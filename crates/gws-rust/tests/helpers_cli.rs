@@ -2297,7 +2297,7 @@ async fn drive_sync_keeps_local_files_and_exits_with_sync_conflict() {
     // +sync first checks that --folder-id is a folder.
     Mock::given(method("GET"))
         .and(path("/drive/v3/files/ROOT"))
-        .and(query_param("fields", "id,mimeType"))
+        .and(query_param("fields", "id,mimeType,trashed"))
         .respond_with(
             ResponseTemplate::new(200).set_body_json(
                 json!({"id": "ROOT", "mimeType": "application/vnd.google-apps.folder"}),
@@ -2380,7 +2380,7 @@ async fn drive_sync_interrupted_by_a_signal_saves_its_state() {
     // +sync first checks that --folder-id is a folder.
     Mock::given(method("GET"))
         .and(path("/drive/v3/files/ROOT"))
-        .and(query_param("fields", "id,mimeType"))
+        .and(query_param("fields", "id,mimeType,trashed"))
         .respond_with(
             ResponseTemplate::new(200).set_body_json(
                 json!({"id": "ROOT", "mimeType": "application/vnd.google-apps.folder"}),
