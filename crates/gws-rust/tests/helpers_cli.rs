@@ -714,14 +714,38 @@ fn drive_helpers_are_not_offered_for_another_api_version() {
     );
 }
 
+/// `GWSR_RESTRICT_PATHS=cwd` refuses an upload from outside the working
+/// directory. The file exists and is readable, so the refusal can only come
+/// from the path policy: without it, the same command plans the upload.
 #[test]
 fn upload_rejects_paths_outside_cwd() {
     let dir = setup();
-    let out = gwsr(dir.path())
-        .args(["drive", "+upload", "--file", "../outside.txt", "--dry-run"])
-        .output()
-        .unwrap();
-    assert_eq!(out.status.code(), Some(3));
+    let work = dir.path().join("work");
+    std::fs::create_dir(&work).unwrap();
+    std::fs::write(dir.path().join("outside.txt"), "data").unwrap();
+    let run = |restrict: Option<&str>| {
+        let mut cmd = gwsr(dir.path());
+        cmd.current_dir(&work);
+        if let Some(policy) = restrict {
+            cmd.env("GWSR_RESTRICT_PATHS", policy);
+        }
+        cmd.args(["drive", "+upload", "--file", "../outside.txt", "--dry-run"])
+            .output()
+            .unwrap()
+    };
+
+    let out = run(Some("cwd"));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(3), "{stderr}");
+    assert!(stderr.contains("GWSR_RESTRICT_PATHS"), "{stderr}");
+    assert!(out.stdout.is_empty(), "{out:?}");
+
+    let out = run(None);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 }
 
 #[test]
