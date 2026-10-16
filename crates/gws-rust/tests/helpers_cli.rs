@@ -1898,7 +1898,11 @@ async fn empty_path_ids_are_rejected_before_sending() {
             "{args:?} was not rejected: stdout={} stderr={stderr}",
             String::from_utf8_lossy(&out.stdout)
         );
-        assert!(stderr.contains("empty segment"), "{args:?}: {stderr}");
+        // `--script-id` is checked as a flag before any path is built.
+        assert!(
+            stderr.contains("empty segment") || stderr.contains("must not be empty"),
+            "{args:?}: {stderr}"
+        );
     }
     let received = server.received_requests().await.unwrap();
     let sent: Vec<String> = received
