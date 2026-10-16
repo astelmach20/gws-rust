@@ -2831,3 +2831,89 @@ fn batch_ids_must_be_unique() {
     };
     assert!(err.contains("duplicate id \"2\""), "{err}");
 }
+
+/// A batch whose calls failed only with errors that may clear on a retry
+/// (429, 503, a 403 rate limit) exits 6 ("retry later"), as each call would
+/// on its own; any permanent failure among them makes it exit 1.
+#[tokio::test]
+async fn batch_exits_retryable_only_when_every_failed_call_is() {
+    let part = |id: usize, status: &str, body: &str| {
+        format!(
+            "--b\r\nContent-Type: application/http\r\nContent-ID: <response-item-{id}>\r\n\r\n\
+             HTTP/1.1 {status}\r\nContent-Type: application/json\r\n\r\n{body}\r\n"
+        )
+    };
+    let ok = r#"{"id":"x"}"#;
+    let too_many =
+        r#"{"error":{"code":429,"message":"slow down","errors":[{"reason":"rateLimitExceeded"}]}}"#;
+    let unavailable = r#"{"error":{"code":503,"message":"backend error"}}"#;
+    let user_rate =
+        r#"{"error":{"code":403,"message":"slow","errors":[{"reason":"userRateLimitExceeded"}]}}"#;
+    let not_found = r#"{"error":{"code":404,"message":"no such file"}}"#;
+    for (parts, exit) in [
+        (
+            vec![
+                ("200 OK", ok),
+                ("429 Too Many Requests", too_many),
+                ("503 Service Unavailable", unavailable),
+            ],
+            6,
+        ),
+        (vec![("200 OK", ok), ("403 Forbidden", user_rate)], 6),
+        (
+            vec![
+                ("429 Too Many Requests", too_many),
+                ("404 Not Found", not_found),
+            ],
+            1,
+        ),
+        (
+            vec![
+                ("404 Not Found", not_found),
+                ("503 Service Unavailable", unavailable),
+            ],
+            1,
+        ),
+    ] {
+        let server = MockServer::start().await;
+        let mut body: String = parts
+            .iter()
+            .enumerate()
+            .map(|(i, (status, b))| part(i + 1, status, b))
+            .collect();
+        body.push_str("--b--\r\n");
+        Mock::given(method("POST"))
+            .and(path("/batch/drive/v3"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_raw(body, "multipart/mixed; boundary=b"),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        let d = doc(&server.uri());
+        let opts = options(&server);
+        let input: String = (1..=parts.len())
+            .map(|i| format!("{{\"method\":\"files.get\",\"params\":{{\"fileId\":\"{i}\"}}}}\n"))
+            .collect();
+        let calls = batch::parse_calls(&d, &input, &opts).unwrap();
+        let em = Emitter::capturing();
+        let err = batch::run_batch(
+            &d,
+            &calls,
+            Some(Credentials::Static("tok".into())),
+            &opts,
+            &SanitizeConfig::default(),
+            &em,
+        )
+        .await
+        .unwrap_err();
+        let statuses: Vec<&str> = parts.iter().map(|(s, _)| *s).collect();
+        assert_eq!(err.exit_code(), exit, "{statuses:?}: {err:?}");
+        assert!(
+            matches!(&err, GwsError::Api { reason, .. } if reason == "batchPartialFailure"),
+            "{err:?}"
+        );
+        // Every result is still printed.
+        assert_eq!(lines(&em).len(), parts.len());
+    }
+}
