@@ -34,6 +34,12 @@ const SCOPE_CALENDAR: &str = "https://www.googleapis.com/auth/calendar";
 const SCOPE_CALENDAR_READONLY: &str = "https://www.googleapis.com/auth/calendar.readonly";
 const SCOPE_FREEBUSY: &str = "https://www.googleapis.com/auth/calendar.freebusy";
 
+/// Scopes for `+freebusy`: `freebusy.query`, plus `settings.get` for the
+/// account time zone, which does not accept `calendar.freebusy`. A token is
+/// narrowed to the requested scopes when they were all granted, so asking
+/// for `calendar.freebusy` alone left the time zone lookup without access.
+const FREEBUSY_SCOPES: &[&str] = &[SCOPE_FREEBUSY, SCOPE_CALENDAR_READONLY];
+
 pub struct CalendarHelper;
 
 fn calendar_id_arg() -> Arg {
@@ -368,7 +374,7 @@ TIPS:
                     optional(m, "working-hours")?
                         .map(time::parse_working_hours)
                         .transpose()?;
-                    let api = Api::new(doc, &[SCOPE_FREEBUSY], dry, sanitize).await?;
+                    let api = Api::new(doc, FREEBUSY_SCOPES, dry, sanitize).await?;
                     let tz = TzInfo::resolve(&api, optional(m, "timezone")?).await?;
                     let v = freebusy(&api, m, &tz).await?;
                     (api, v)
@@ -1284,6 +1290,31 @@ mod tests {
     use super::*;
     use wiremock::matchers::{body_partial_json, method, path, query_param};
     use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    /// `+freebusy` calls `freebusy.query` and, for the account time zone,
+    /// `settings.get`. Its token carries only the requested scopes when they
+    /// were all granted, so each call needs one of them among the scopes its
+    /// method accepts (per the Calendar Discovery document).
+    #[test]
+    fn freebusy_scopes_cover_every_call() {
+        let doc: crate::discovery::RestDescription = serde_json::from_str(include_str!(
+            "../../tests/fixtures/scopes/calendar_v3_freebusy.json"
+        ))
+        .unwrap();
+        for method in [
+            &doc.resources["freebusy"].methods["query"],
+            &doc.resources["settings"].methods["get"],
+        ] {
+            assert!(
+                FREEBUSY_SCOPES
+                    .iter()
+                    .any(|s| method.scopes.iter().any(|a| a == s)),
+                "{:?} accepts none of {FREEBUSY_SCOPES:?}; it accepts {:?}",
+                method.id,
+                method.scopes
+            );
+        }
+    }
 
     fn parse(args: &[&str]) -> ArgMatches {
         CalendarHelper

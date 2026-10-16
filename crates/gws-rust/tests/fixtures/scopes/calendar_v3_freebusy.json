@@ -1,0 +1,53 @@
+{
+  "batchPath": "batch/calendar/v3",
+  "discoveryVersion": "v1",
+  "id": "calendar:v3",
+  "kind": "discovery#restDescription",
+  "name": "calendar",
+  "resources": {
+    "freebusy": {
+      "methods": {
+        "query": {
+          "httpMethod": "POST",
+          "id": "calendar.freebusy.query",
+          "parameters": {},
+          "path": "freeBusy",
+          "scopes": [
+            "https://www.googleapis.com/auth/calendar",
+            "https://www.googleapis.com/auth/calendar.events.freebusy",
+            "https://www.googleapis.com/auth/calendar.freebusy",
+            "https://www.googleapis.com/auth/calendar.readonly"
+          ]
+        }
+      }
+    },
+    "settings": {
+      "methods": {
+        "get": {
+          "httpMethod": "GET",
+          "id": "calendar.settings.get",
+          "parameterOrder": [
+            "setting"
+          ],
+          "parameters": {
+            "setting": {
+              "location": "path",
+              "required": true,
+              "type": "string"
+            }
+          },
+          "path": "users/me/settings/{setting}",
+          "scopes": [
+            "https://www.googleapis.com/auth/calendar",
+            "https://www.googleapis.com/auth/calendar.readonly",
+            "https://www.googleapis.com/auth/calendar.settings",
+            "https://www.googleapis.com/auth/calendar.settings.readonly"
+          ]
+        }
+      }
+    }
+  },
+  "rootUrl": "https://www.googleapis.com/",
+  "servicePath": "calendar/v3/",
+  "version": "v3"
+}
