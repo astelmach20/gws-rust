@@ -1688,7 +1688,7 @@ async fn check_sync_folder(api: &Api, folder_id: &str) -> Result<(), GwsError> {
     let meta = api
         .send(
             ApiRequest::get(api.url(&format!("files/{}", encode_path_segment(folder_id))))
-                .query("fields", "id,mimeType")
+                .query("fields", "id,mimeType,trashed")
                 .query("supportsAllDrives", "true"),
         )
         .await?;
@@ -1699,6 +1699,14 @@ async fn check_sync_folder(api: &Api, folder_id: &str) -> Result<(), GwsError> {
     if mime != FOLDER_MIME {
         return Err(GwsError::Validation(format!(
             "--folder-id '{folder_id}' is not a folder (its type is {mime}); +sync mirrors a Drive folder"
+        )));
+    }
+    // Everything in a trashed folder is trashed too, so the listing (which
+    // leaves out trashed items) would be empty: an empty mirror that looks
+    // like a successful sync.
+    if meta.get("trashed").and_then(Value::as_bool) == Some(true) {
+        return Err(GwsError::Validation(format!(
+            "--folder-id '{folder_id}' is in the trash; restore it in Drive to sync it"
         )));
     }
     Ok(())
@@ -2710,6 +2718,33 @@ mod tests {
         assert!(err.to_string().contains("not a folder"), "{err}");
     }
 
+    /// Everything in a trashed folder is trashed, so its listing (which
+    /// leaves trashed items out) is empty. That must not pass for a
+    /// successful sync of an empty folder.
+    #[tokio::test]
+    async fn sync_fails_loudly_for_a_trashed_folder() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/drive/v3/files"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"files": []})))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/drive/v3/files/BIN"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({"id": "BIN", "mimeType": FOLDER_MIME, "trashed": true})),
+            )
+            .mount(&server)
+            .await;
+        let api = api(&server.uri(), "drive/v3/");
+        let dir = tempfile::tempdir().unwrap();
+        let err = sync(&api, "BIN", dir.path()).await.unwrap_err();
+        assert!(matches!(err, GwsError::Validation(_)), "{err:?}");
+        assert!(err.to_string().contains("in the trash"), "{err}");
+        assert!(!dir.path().join(SYNC_STATE_FILE).exists());
+    }
+
     /// The dry-run plan shows the folder lookup before the listing.
     #[tokio::test]
     async fn sync_dry_run_plans_the_folder_lookup() {
@@ -2721,7 +2756,7 @@ mod tests {
             plan[0]["url"].as_str().unwrap().ends_with("/files/ROOT"),
             "{plan:?}"
         );
-        assert_eq!(plan[0]["query_params"]["fields"], "id,mimeType");
+        assert_eq!(plan[0]["query_params"]["fields"], "id,mimeType,trashed");
         assert!(
             plan[1]["url"].as_str().unwrap().ends_with("/files"),
             "{plan:?}"
@@ -2733,7 +2768,7 @@ mod tests {
     async fn mount_root(server: &MockServer) {
         Mock::given(method("GET"))
             .and(path("/drive/v3/files/ROOT"))
-            .and(query_param("fields", "id,mimeType"))
+            .and(query_param("fields", "id,mimeType,trashed"))
             .respond_with(
                 ResponseTemplate::new(200)
                     .set_body_json(json!({"id": "ROOT", "mimeType": FOLDER_MIME})),
