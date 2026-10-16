@@ -479,6 +479,10 @@ pub(super) async fn handle_subscribe(
             .map_err(|e| GwsError::other(format!("Failed to create {}: {e}", dir.display())))?;
     }
 
+    // Before any resource is created: a Ctrl+C or SIGTERM during setup must
+    // not kill the process, so the stream stops at once and `--cleanup`
+    // still deletes what was created.
+    crate::helpers::listen_for_shutdown();
     let pubsub = PubSubClient::new(&Transport::for_scopes(&[PUBSUB_SCOPE]).await?);
 
     let (subscription, created) = match &config.subscription {
