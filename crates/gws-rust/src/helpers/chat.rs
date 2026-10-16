@@ -290,7 +290,14 @@ mod tests {
             .await;
         let api = api(&server.uri(), "");
         send(&api, "spaces/AAA", "hi", None).await.unwrap();
-        assert!(send(&api, "spaces/AAA", "  ", None).await.is_err());
+        // Blank text is refused before any request: an unmatched POST would
+        // also fail (404), so check the error and the request count.
+        let err = send(&api, "spaces/AAA", "  ", None).await.unwrap_err();
+        assert!(
+            matches!(&err, GwsError::Validation(m) if m.contains("--text must not be empty")),
+            "{err:?}"
+        );
+        assert_eq!(server.received_requests().await.unwrap().len(), 1);
     }
 
     #[tokio::test]

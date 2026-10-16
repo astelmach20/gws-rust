@@ -1213,11 +1213,22 @@ mod tests {
 
     #[tokio::test]
     async fn resumable_upload_rejects_foreign_session_url() {
+        // The foreign origin is a second local server (another port), so a
+        // missing origin check shows up as a request to it, not as a network
+        // error that would make any upload fail.
+        let foreign = MockServer::start().await;
+        Mock::given(wiremock::matchers::any())
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id": "F1"})))
+            .expect(0)
+            .mount(&foreign)
+            .await;
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .respond_with(
-                ResponseTemplate::new(200).insert_header("location", "https://evil.example/upload"),
+                ResponseTemplate::new(200)
+                    .insert_header("location", format!("{}/upload", foreign.uri()).as_str()),
             )
+            .expect(1)
             .mount(&server)
             .await;
         let api = api(&server.uri(), "");
@@ -1225,10 +1236,13 @@ mod tests {
         let file = dir.path().join("a.txt");
         std::fs::write(&file, b"x").unwrap();
         let init = ApiRequest::post(api.root_url("upload/files")).json(json!({}));
+        let err = api
+            .upload_resumable(init, &file, "text/plain")
+            .await
+            .unwrap_err();
         assert!(
-            api.upload_resumable(init, &file, "text/plain")
-                .await
-                .is_err()
+            err.to_string().contains("does not match request origin"),
+            "{err:?}"
         );
     }
 

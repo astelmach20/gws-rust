@@ -829,6 +829,13 @@ mod tests {
         let api = api(&server.uri(), "");
         let v = replace(&api, "DOC", "{{x}}", "y", true).await.unwrap();
         assert_eq!(v["occurrencesChanged"], 3);
-        assert!(replace(&api, "DOC", "", "y", true).await.is_err());
+        // An empty search is refused before any request: an unmatched POST
+        // would also fail (404), so check the error and the request count.
+        let err = replace(&api, "DOC", "", "y", true).await.unwrap_err();
+        assert!(
+            matches!(&err, GwsError::Validation(m) if m.contains("--find must not be empty")),
+            "{err:?}"
+        );
+        assert_eq!(server.received_requests().await.unwrap().len(), 1);
     }
 }
