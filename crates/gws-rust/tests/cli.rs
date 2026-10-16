@@ -434,6 +434,39 @@ fn schema_hints_in_help_and_errors_name_commands_that_run() {
     }
 }
 
+/// A method without parameters still points to its schema: for one that
+/// takes only a request body (Classroom `courses.create`, from the real
+/// Discovery document), the schema is the only description of `--json`.
+#[test]
+fn schema_hint_in_help_of_a_method_without_parameters() {
+    let env = Env::new();
+    let doc: Value =
+        serde_json::from_str(include_str!("fixtures/schema_hint/classroom_v1.json")).unwrap();
+    assert!(
+        doc["resources"]["courses"]["methods"]["create"]["parameters"]
+            .as_object()
+            .unwrap()
+            .is_empty()
+    );
+    env.seed_doc(&doc);
+    let help = env
+        .cmd()
+        .args(["classroom", "courses", "create", "--help"])
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+    let help = stdout_of(&help);
+    assert!(!help.contains("Parameters (pass with --params"), "{help}");
+    let path = schema_path_after(&help, "Full request/response schema: gwsr schema ");
+    assert_eq!(path, "classroom.courses.create");
+    env.cmd()
+        .args(["schema", path])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"schemaRef\":\"Course\""));
+}
+
 /// Methods declared at the top of a Discovery document (not under a
 /// resource), like `oauth2:v2 tokeninfo`, get commands and schema entries.
 #[test]

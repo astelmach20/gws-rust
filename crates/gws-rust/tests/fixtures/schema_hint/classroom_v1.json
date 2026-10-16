@@ -1,0 +1,51 @@
+{
+  "batchPath": "batch",
+  "discoveryVersion": "v1",
+  "id": "classroom:v1",
+  "kind": "discovery#restDescription",
+  "name": "classroom",
+  "resources": {
+    "courses": {
+      "methods": {
+        "create": {
+          "description": "Creates a course. The user specified in `ownerId` is the owner of the created course and added as a teacher. A non-admin requesting user can only create a course with themselves as the owner. Domain admins can create courses owned by any user within their domain. This method returns the following error codes: * `PERMISSION_DENIED` if the requesting user is not permitted to create courses or for access errors. * `NOT_FOUND` if the primary teacher is not a valid user. * `FAILED_PRECONDITION` if the course owner's account is disabled or for the following request errors: * UserCannotOwnCourse * UserGroupsMembershipLimitReached * CourseTitleCannotContainUrl * `ALREADY_EXISTS` if an alias was specified in the `id` and already exists.",
+          "flatPath": "v1/courses",
+          "httpMethod": "POST",
+          "id": "classroom.courses.create",
+          "parameterOrder": [],
+          "parameters": {},
+          "path": "v1/courses",
+          "request": {
+            "$ref": "Course"
+          },
+          "response": {
+            "$ref": "Course"
+          },
+          "scopes": [
+            "https://www.googleapis.com/auth/classroom.courses"
+          ]
+        }
+      }
+    }
+  },
+  "rootUrl": "https://classroom.googleapis.com/",
+  "schemas": {
+    "Course": {
+      "description": "A Course in Classroom.",
+      "id": "Course",
+      "properties": {
+        "id": {
+          "description": "Identifier for this course assigned by Classroom. When creating a course, you may optionally set this identifier to an alias string in the request to create a corresponding alias. The `id` is still assigned by Classroom and cannot be updated after the course is created. Specifying this field in a course update mask results in an error.",
+          "type": "string"
+        },
+        "name": {
+          "description": "Name of the course. For example, \"10th Grade Biology\". The name is required. It must be between 1 and 750 characters and a valid UTF-8 string.",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    }
+  },
+  "servicePath": "",
+  "version": "v1"
+}

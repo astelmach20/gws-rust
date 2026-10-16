@@ -237,19 +237,21 @@ fn summary(desc: Option<&str>) -> String {
     out
 }
 
-/// The "Parameters" block appended to a method's help.
+/// The text appended to a method's help: its "Parameters" block (when it
+/// has parameters) and the `gwsr schema` command that shows its full
+/// request and response, which a method taking only a body needs as much.
 pub fn parameters_help(doc: &RestDescription, method: &RestMethod) -> Option<String> {
     let mut params: Vec<(&String, &crate::discovery::MethodParameter)> = method
         .parameters
         .iter()
         .filter(|(_, p)| !p.deprecated)
         .collect();
-    if params.is_empty() {
-        return None;
-    }
     params.sort_by(|(an, ap), (bn, bp)| bp.required.cmp(&ap.required).then(an.cmp(bn)));
     let width = params.iter().map(|(n, _)| n.len()).max().unwrap_or(0);
-    let mut text = String::from("Parameters (pass with --params '{\"name\": value}'):\n");
+    let mut text = String::new();
+    if !params.is_empty() {
+        text.push_str("Parameters (pass with --params '{\"name\": value}'):\n");
+    }
     for (name, p) in params {
         let mut ty = p.param_type.clone().unwrap_or_else(|| "string".into());
         if p.repeated {
@@ -277,11 +279,12 @@ pub fn parameters_help(doc: &RestDescription, method: &RestMethod) -> Option<Str
         text.push('\n');
     }
     if let Some(path) = crate::schema::method_schema_path(doc, method) {
-        text.push_str(&format!(
-            "\nFull request/response schema: gwsr schema {path}"
-        ));
+        if !text.is_empty() {
+            text.push('\n');
+        }
+        text.push_str(&format!("Full request/response schema: gwsr schema {path}"));
     }
-    Some(text)
+    (!text.is_empty()).then_some(text)
 }
 
 /// The command for one Discovery method (hidden when deprecated).
