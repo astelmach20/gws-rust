@@ -150,6 +150,8 @@ jobs:
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: cargo doc --workspace --all-features --no-deps --locked
+      - name: Check the crate packages ship LICENSE and NOTICE
+        run: scripts/check-crate-package.sh
 
   machete:
     name: Unused dependencies
