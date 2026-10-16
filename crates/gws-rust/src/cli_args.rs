@@ -21,6 +21,7 @@ use std::ffi::OsString;
 use clap::builder::PossibleValuesParser;
 use clap::{ArgAction, Args, CommandFactory, Parser, Subcommand, ValueEnum};
 
+use crate::error::GwsError;
 use crate::formatter::FORMAT_NAMES;
 use crate::generate_skills::GenerateSkillsArgs;
 
@@ -105,6 +106,124 @@ pub fn global_args() -> Vec<clap::Arg> {
         .get_arguments()
         .cloned()
         .collect()
+}
+
+/// Refuse a global option of `cmd` that `argv` gives at more than one
+/// subcommand level (`gwsr --profile a auth --profile b list`).
+///
+/// clap rejects a repeat at one level, but copies a global's value between
+/// levels after parsing, so a repeat across levels used to keep only the
+/// innermost value. Call this after `argv` parsed successfully with `cmd`.
+///
+/// Counted (`-v`) and appending options may repeat and are not checked. To
+/// read the command line exactly as clap does (`--`, `--opt=value`, values
+/// that look like flags), the check parses `argv` again with a copy of `cmd`
+/// whose repeated globals are ordinary per-level options, so each level
+/// keeps its own occurrence. That second parse only runs when a global's
+/// name appears more than once in `argv`.
+///
+/// # Errors
+///
+/// [`GwsError::Validation`] naming the repeated option.
+pub fn reject_repeated_globals<T>(cmd: &clap::Command, argv: &[T]) -> Result<(), GwsError>
+where
+    T: Into<OsString> + AsRef<std::ffi::OsStr> + Clone,
+{
+    let candidates = repeat_candidates(cmd, argv);
+    if candidates.is_empty() {
+        return Ok(());
+    }
+    let mut probe = cmd.clone();
+    for arg in &candidates {
+        probe = probe.mut_arg(arg.get_id(), |a| a.global(false));
+    }
+    add_to_subcommands(&mut probe, &candidates);
+    let matches = probe
+        .try_get_matches_from(argv.iter().cloned())
+        .map_err(|e| {
+            GwsError::other(format!(
+                "re-reading the command line to check for repeated global options failed: {e}"
+            ))
+        })?;
+    for arg in &candidates {
+        let id = arg.get_id().as_str();
+        let mut levels = 0;
+        let mut level = Some(&matches);
+        while let Some(m) = level {
+            if m.value_source(id) == Some(clap::parser::ValueSource::CommandLine) {
+                levels += 1;
+            }
+            level = m.subcommand().map(|(_, sub)| sub);
+        }
+        if levels > 1 {
+            let name = arg
+                .get_long()
+                .map_or_else(|| id.to_string(), |long| format!("--{long}"));
+            return Err(GwsError::Validation(format!(
+                "{name} was given more than once"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Whether [`reject_repeated_globals`] has anything to check: some global of
+/// `cmd` that may not repeat is named more than once in `argv`. Cheap; no
+/// parsing.
+pub fn may_repeat_globals<T: AsRef<std::ffi::OsStr>>(cmd: &clap::Command, argv: &[T]) -> bool {
+    !repeat_candidates(cmd, argv).is_empty()
+}
+
+/// The globals of `cmd` that may not repeat and whose name appears more than
+/// once in `argv` (after the program name).
+fn repeat_candidates<T: AsRef<std::ffi::OsStr>>(cmd: &clap::Command, argv: &[T]) -> Vec<clap::Arg> {
+    cmd.get_arguments()
+        .filter(|a| a.is_global_set())
+        .filter(|a| !matches!(a.get_action(), ArgAction::Count | ArgAction::Append))
+        .filter(|a| {
+            argv.iter()
+                .skip(1)
+                .filter(|t| may_name(a, t.as_ref()))
+                .count()
+                > 1
+        })
+        .cloned()
+        .collect()
+}
+
+/// Whether `token` may be an occurrence of `arg`: a superset (any short
+/// cluster containing its letter counts), confirmed by a real parse.
+fn may_name(arg: &clap::Arg, token: &std::ffi::OsStr) -> bool {
+    let Some(token) = token.to_str() else {
+        return false;
+    };
+    if let Some(long) = arg.get_long()
+        && let Some(rest) = token.strip_prefix("--")
+        && let Some(after) = rest.strip_prefix(long)
+        && (after.is_empty() || after.starts_with('='))
+    {
+        return true;
+    }
+    match (arg.get_short(), token.strip_prefix('-')) {
+        (Some(short), Some(cluster)) if !cluster.starts_with('-') => cluster.contains(short),
+        _ => false,
+    }
+}
+
+/// Give every subcommand of `cmd` (recursively) its own non-global copy of
+/// each of `args`, unless it already has an argument with that id (which
+/// clap's global propagation skips too).
+fn add_to_subcommands(cmd: &mut clap::Command, args: &[clap::Arg]) {
+    for sub in cmd.get_subcommands_mut() {
+        let mut owned = std::mem::take(sub);
+        for arg in args {
+            if !owned.get_arguments().any(|a| a.get_id() == arg.get_id()) {
+                owned = owned.arg(arg.clone().global(false));
+            }
+        }
+        add_to_subcommands(&mut owned, args);
+        *sub = owned;
+    }
 }
 
 /// Shells supported by `gwsr completions`.
@@ -407,6 +526,63 @@ mod tests {
                 .iter()
                 .all(|a| a.get_help_heading() == Some("Global options"))
         );
+    }
+
+    fn nested() -> clap::Command {
+        clap::Command::new("t").args(global_args()).subcommand(
+            clap::Command::new("sub")
+                .arg(clap::Arg::new("raw").long("raw").allow_hyphen_values(true))
+                .arg(clap::Arg::new("rest").num_args(0..).last(true))
+                .subcommand(clap::Command::new("leaf")),
+        )
+    }
+
+    fn repeated(argv: &[&str]) -> Result<(), GwsError> {
+        let cmd = nested();
+        cmd.clone().try_get_matches_from(argv).unwrap();
+        reject_repeated_globals(&cmd, argv)
+    }
+
+    #[test]
+    fn globals_repeated_at_two_levels_are_rejected() {
+        for argv in [
+            &["t", "--profile", "a", "sub", "--profile", "b"][..],
+            &["t", "--profile=a", "sub", "leaf", "--profile=b"],
+            &["t", "sub", "--dry-run", "leaf", "--dry-run"],
+            &["t", "-q", "sub", "leaf", "-q"],
+        ] {
+            let err = repeated(argv).unwrap_err();
+            assert!(
+                err.to_string().contains("was given more than once"),
+                "{argv:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn global_lookalikes_and_repeatable_globals_are_not_repeats() {
+        for argv in [
+            // A value that looks like the flag, as clap reads it.
+            &["t", "--profile", "a", "sub", "--raw", "--profile"][..],
+            &["t", "--profile", "a", "sub", "--", "--profile"],
+            &["t", "--jq=--profile", "sub", "--profile", "a"],
+            &["t", "--profile", "a", "sub", "--raw=--profile"],
+            // Counted and appending globals may repeat.
+            &["t", "-v", "sub", "-v", "leaf", "-vv"],
+            &["t", "--columns", "a", "sub", "--columns", "b"],
+        ] {
+            repeated(argv).unwrap_or_else(|e| panic!("{argv:?}: {e}"));
+        }
+        let cmd = nested();
+        assert!(!may_repeat_globals(&cmd, &["t", "--profile", "a", "sub"]));
+        assert!(!may_repeat_globals(
+            &cmd,
+            &["t", "--profile", "a", "sub", "--profile-x", "--xprofile"]
+        ));
+        assert!(may_repeat_globals(
+            &cmd,
+            &["t", "-qv", "sub", "--quiet=true"]
+        ));
     }
 
     #[test]

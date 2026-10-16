@@ -55,7 +55,7 @@ pub(crate) mod validate;
 use std::ffi::OsString;
 use std::process::ExitCode;
 
-use clap::{FromArgMatches, Parser};
+use clap::{CommandFactory, FromArgMatches, Parser};
 
 use cli_args::{CacheCommand, Cli, DevCommand, GlobalArgs, PreScan, TopCommand};
 use config::{JsonStylePref, Settings};
@@ -255,6 +255,7 @@ fn parse_top_level(args: &[OsString]) -> Result<Option<(Cli, Vec<OsString>)>, Cl
         }
         Err(e) => return Err(e.into()),
     };
+    cli_args::reject_repeated_globals(&Cli::command(), args)?;
     let Some(TopCommand::Help { path }) = &cli.command else {
         return Ok(Some((cli, args.to_vec())));
     };
@@ -535,11 +536,17 @@ async fn run_service(
     let doc = service::load_document(&api_name, &version).await?;
     // Usage lines show the service as typed, so `youtube:v3` stays runnable.
     let cmd = service::build_command(service_token, &doc);
-    let matches = match cmd.try_get_matches_from(service_argv(args, service_args, service_token)) {
+    let argv = service_argv(args, service_args, service_token);
+    // Kept only when a global is named twice: the tree can be large.
+    let repeat_check = cli_args::may_repeat_globals(&cmd, &argv).then(|| cmd.clone());
+    let matches = match cmd.try_get_matches_from(&argv) {
         Ok(m) => m,
         Err(e) if is_display_request(&e) => return print_display(&e),
         Err(e) => return Err(e.into()),
     };
+    if let Some(cmd) = repeat_check {
+        cli_args::reject_repeated_globals(&cmd, &argv)?;
+    }
 
     let global = GlobalArgs::from_arg_matches(&matches)?;
     install_output(&global, settings)?;
