@@ -697,6 +697,42 @@ async fn page_all_repeated_token_is_an_error_not_an_infinite_loop() {
     assert_eq!(lines(&em).len(), 2);
 }
 
+/// A run resumed with `--params '{"pageToken": "p1"}'` has already followed
+/// `p1`: an API that hands `p1` back must be caught on the first page, not
+/// after printing that page a second time.
+#[tokio::test]
+async fn page_all_resumed_token_repeated_is_caught_before_a_duplicate_page() {
+    let server = MockServer::start().await;
+    let (responder, calls) = seq(vec![
+        ResponseTemplate::new(200)
+            .set_body_json(json!({"files": [{"id": "1"}], "nextPageToken": "p1"})),
+        ResponseTemplate::new(200)
+            .set_body_json(json!({"files": [{"id": "1"}], "nextPageToken": "p1"})),
+    ]);
+    Mock::given(method("GET"))
+        .and(path("/drive/v3/files"))
+        .respond_with(responder)
+        .mount(&server)
+        .await;
+    let d = doc(&server.uri());
+    let mut call = Call::new(&d, "list", &server);
+    call.params = json!({"pageToken": "p1"});
+    call.pagination = PaginationConfig {
+        page_all: true,
+        page_limit: 0,
+        page_delay_ms: 0,
+    };
+    let em = Emitter::capturing();
+    let err = call.run(&em).await.unwrap_err();
+    assert!(err.to_string().contains("repeated nextPageToken"), "{err}");
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        1,
+        "the p1 page is not requested again"
+    );
+    assert_eq!(lines(&em).len(), 1, "{}", em.captured_text());
+}
+
 #[tokio::test]
 async fn page_items_emits_one_line_per_item() {
     let server = MockServer::start().await;
