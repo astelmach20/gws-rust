@@ -203,7 +203,7 @@ gwsr auth list              # {"active_profile":"work","active_profile_source":"
 gwsr --profile personal gmail +triage
 ```
 
-Profile names are lowercase (`[a-z0-9_.-]`, up to 64 characters). A directory under `profiles/` whose name is not a valid profile name, such as `Work` from an older gwsr, cannot be selected; `auth list` and `auth status` report it under `invalid_profiles` with a warning. Rename it to a valid name (`Work` to `work`) to use it again or to remove it with `gwsr auth logout --profile work`.
+Profile names are lowercase (`[a-z0-9_.-]`, up to 64 characters), don't start or end with `.`, and aren't Windows device names (`con`, `nul`, `com1`, ...). A directory under `profiles/` whose name is not a valid profile name, such as `Work` from an older gwsr, cannot be selected; `auth list` and `auth status` report it under `invalid_profiles` with a warning. Rename it to a valid name (`Work` to `work`) to use it again or to remove it with `gwsr auth logout --profile work`.
 
 ### Service accounts and domain-wide delegation
 
