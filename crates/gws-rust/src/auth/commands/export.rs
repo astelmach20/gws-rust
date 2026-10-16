@@ -166,25 +166,60 @@ fn prompt_yes(output: &Path) -> Result<bool, GwsError> {
     Ok(line.trim() == "yes")
 }
 
-/// Create `path` exclusively with mode 0600 (never overwrite, never follow a
-/// pre-existing symlink).
+/// Write `data` to the new file `path` with mode 0600: never overwrite, never
+/// follow a pre-existing symlink, and never leave a partial file behind.
 pub(super) fn write_new_private_file(path: &Path, data: &[u8]) -> Result<(), GwsError> {
-    let mut opts = std::fs::OpenOptions::new();
-    opts.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        opts.mode(0o600);
-    }
-    let mut file = opts.open(path).map_err(|e| {
+    write_new_private_file_with(path, |file| file.write_all(data))
+}
+
+/// [`write_new_private_file`] with the write itself supplied by the caller
+/// (tests inject a failing one).
+///
+/// The bytes go to a private temporary file in the target directory, which
+/// is fsynced and then moved to `path` only if nothing exists there
+/// (`persist_noclobber`). A failed write or sync deletes the temporary file,
+/// so a retry is not refused because of a half-written file; it is reported
+/// as an I/O failure, not as invalid input.
+fn write_new_private_file_with(
+    path: &Path,
+    write: impl FnOnce(&mut std::fs::File) -> std::io::Result<()>,
+) -> Result<(), GwsError> {
+    let exists = || {
         GwsError::Validation(format!(
-            "cannot create '{}': {e} (the file must not already exist)",
+            "'{}' already exists; refusing to overwrite it with unmasked credentials",
             path.display()
         ))
+    };
+    let io_error = |what: &str, e: &dyn std::fmt::Display| {
+        GwsError::other(anyhow::anyhow!("{what} '{}': {e}", path.display()))
+    };
+    // Refuse an existing path (a dangling symlink included) before any
+    // secret is written; `persist_noclobber` re-checks at the rename.
+    match std::fs::symlink_metadata(path) {
+        Ok(_) => return Err(exists()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(io_error("cannot inspect", &e)),
+    }
+    let dir = match path.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p,
+        _ => Path::new("."),
+    };
+    // `tempfile` creates the file with `O_EXCL` and mode 0600.
+    let mut tmp = tempfile::Builder::new()
+        .prefix(".gwsr-export-")
+        .tempfile_in(dir)
+        .map_err(|e| io_error("cannot create a temporary file for", &e))?;
+    write(tmp.as_file_mut())
+        .and_then(|()| tmp.as_file().sync_all())
+        .map_err(|e| io_error("cannot write", &e))?;
+    tmp.persist_noclobber(path).map_err(|e| {
+        if e.error.kind() == std::io::ErrorKind::AlreadyExists {
+            exists()
+        } else {
+            io_error("cannot create", &e.error)
+        }
     })?;
-    file.write_all(data)
-        .and_then(|()| file.sync_all())
-        .map_err(|e| GwsError::Validation(format!("cannot write '{}': {e}", path.display())))
+    crate::fs_util::sync_dir(dir).map_err(|e| io_error("cannot sync the directory of", &e))
 }
 
 #[cfg(test)]
@@ -226,6 +261,28 @@ mod tests {
         confirm(true, false, out, never).unwrap();
         confirm(false, true, out, |_| Ok(true)).unwrap();
         assert!(confirm(false, true, out, |_| Ok(false)).is_err());
+    }
+
+    /// A write that fails part-way leaves no file behind, is reported as an
+    /// I/O failure (not invalid input, exit 3), and a retry succeeds.
+    #[test]
+    fn failed_write_leaves_no_partial_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("creds.json");
+        let err = write_new_private_file_with(&path, |file| {
+            file.write_all(br#"{"refresh_token":"1//par"#)?;
+            Err(std::io::Error::other("disk full"))
+        })
+        .unwrap_err();
+        assert!(matches!(err, GwsError::Other(_)), "{err:?}");
+        assert!(err.to_string().contains("disk full"), "{err}");
+        assert_eq!(
+            std::fs::read_dir(dir.path()).unwrap().count(),
+            0,
+            "no partial or temporary file is left behind"
+        );
+        write_new_private_file(&path, b"{}").unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"{}");
     }
 
     #[test]
