@@ -88,7 +88,7 @@ gwsr <service> <resource> [sub-resource] <method> [flags]
 | `--page-items[=FIELD]` | Fetch every page, one JSON line per item |
 | `--page-limit <N>` | Stop after N pages (default: unlimited) |
 | `--wait` | Poll a returned long-running operation until it finishes |
-| `-y, --yes` | Confirm a destructive method (required when not on a terminal) |
+| `-y, --yes` | Confirm without prompting. When stdin or stderr is not a terminal, destructive actions require it; outbound ones (send, share, notify, run code) only when GWSR_REQUIRE_CONFIRM=1 |
 
 Unknown `--params` names and body fields are rejected; run `gwsr schema <service>.<resource>.<method>`
 to see what a method accepts.

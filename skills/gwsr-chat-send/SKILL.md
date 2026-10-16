@@ -33,7 +33,7 @@ gwsr chat +send --space-id <ID> --text <TEXT>
 | `--space-id` | ✓ | — | Space ID, as 'AAAA...' or 'spaces/AAAA...' |
 | `--text` | ✓ | — | Message text (Chat formatting such as *bold* is supported) |
 | `--thread` | — | — | Reply in this thread (spaces/SPACE/threads/THREAD); falls back to a new thread if it no longer exists |
-| `--yes` | — | — | Confirm this action without prompting (required when not on a terminal) |
+| `--yes` | — | — | Confirm without prompting. When stdin or stderr is not a terminal, destructive actions require it; outbound ones (send, share, notify, run code) only when GWSR_REQUIRE_CONFIRM=1 |
 
 ## Examples
 

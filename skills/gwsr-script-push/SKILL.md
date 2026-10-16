@@ -32,7 +32,7 @@ gwsr script +push --script-id <ID>
 |------|----------|---------|-------------|
 | `--script-id` | ✓ | — | Apps Script project ID |
 | `--dir` | — | . | Directory with the script files |
-| `--yes` | — | — | Confirm this action without prompting (required when not on a terminal) |
+| `--yes` | — | — | Confirm without prompting. When stdin or stderr is not a terminal, destructive actions require it; outbound ones (send, share, notify, run code) only when GWSR_REQUIRE_CONFIRM=1 |
 
 ## Examples
 

@@ -31,7 +31,7 @@ gwsr gmail +unsubscribe --message-id <ID>
 | Flag | Required | Default | Description |
 |------|----------|---------|-------------|
 | `--message-id` | ✓ | — | ID of a message from the mailing list |
-| `--yes` | — | — | Confirm this action without prompting (required when not on a terminal) |
+| `--yes` | — | — | Confirm without prompting. When stdin or stderr is not a terminal, destructive actions require it; outbound ones (send, share, notify, run code) only when GWSR_REQUIRE_CONFIRM=1 |
 
 ## Examples
 

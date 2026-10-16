@@ -50,7 +50,7 @@ Requires at least one of: `--add-label <LABEL>`, `--remove-label <LABEL>`, `--ar
 
 | Flag | Required | Default | Description |
 |------|----------|---------|-------------|
-| `--yes` | — | — | Confirm this action without prompting (required when not on a terminal) |
+| `--yes` | — | — | Confirm without prompting. When stdin or stderr is not a terminal, destructive actions require it; outbound ones (send, share, notify, run code) only when GWSR_REQUIRE_CONFIRM=1 |
 | `--from` | at least one | — | Match sender |
 | `--to` | at least one | — | Match recipient |
 | `--subject` | at least one | — | Match subject |
@@ -81,7 +81,7 @@ gwsr gmail +filter delete --filter-id <ID>
 | Flag | Required | Default | Description |
 |------|----------|---------|-------------|
 | `--filter-id` | ✓ | — | ID of the filter to delete |
-| `--yes` | — | — | Confirm this action without prompting (required when not on a terminal) |
+| `--yes` | — | — | Confirm without prompting. When stdin or stderr is not a terminal, destructive actions require it; outbound ones (send, share, notify, run code) only when GWSR_REQUIRE_CONFIRM=1 |
 
 ## Examples
 
