@@ -16,7 +16,7 @@
 
 use super::dispatch::{Delivery, deliver, outgoing_content};
 use super::prelude::*;
-use super::sender::resolve_sender;
+use super::sender::{SendAsIdentity, resolve_sender_with, send_as_identities};
 
 /// Handle the `+reply` and `+reply-all` subcommands.
 pub(super) async fn handle_reply(
@@ -31,44 +31,35 @@ pub(super) async fn handle_reply(
         &format!("send a reply to message {}", config.message_id),
     )?;
 
-    let (original, api, self_email) = if delivery.dry_run {
+    let (original, api, own_list) = if delivery.dry_run {
         (
             OriginalMessage::dry_run_placeholder(&config.message_id),
             None,
-            None,
+            Vec::new(),
         )
     } else {
         let api = super::api::authenticated(&[GMAIL_SCOPE]).await?;
         let orig = api.get_original_message(&config.message_id).await?;
-        config.from = resolve_sender(&api, config.from.as_deref()).await?;
-        // Fetch the primary address for self-reply detection (both modes) and
-        // self-dedup (reply-all). The --from alias (if any) is handled separately.
-        let self_addr = fetch_user_email(&api).await?;
-        (orig, Some(api), Some(self_addr))
+        let identities = send_as_identities(&api).await?;
+        config.from = resolve_sender_with(config.from.as_deref(), &identities)?;
+        let own = own_addresses(&api, &identities).await?;
+        (orig, Some(api), own)
     };
-
-    let self_email = self_email.as_deref();
+    let own: Vec<&str> = own_list.iter().map(String::as_str).collect();
 
     // Determine reply recipients
-    let from_alias_email = config
-        .from
-        .as_ref()
-        .and_then(|addrs| addrs.first())
-        .map(|m| m.email.as_str());
     let mut reply_to = if reply_all {
         build_reply_all_recipients(
             &original,
             config.cc.as_deref(),
             config.remove.as_deref(),
-            self_email,
-            from_alias_email,
+            &own,
         )
     } else {
         Ok(build_reply_recipients(
             &original,
             config.cc.as_deref(),
-            self_email,
-            from_alias_email,
+            &own,
         ))
     }?;
 
@@ -166,16 +157,26 @@ pub(super) struct ReplyConfig {
     pub attachments: Vec<Attachment>,
 }
 
-/// Fetch the authenticated user's primary email from the Gmail profile API.
-/// Used for self-reply detection in both modes (switching to original-To-based
-/// addressing) and, in reply-all, for self-dedup (excluding the user).
-async fn fetch_user_email(api: &GmailApi) -> Result<String, GwsError> {
+/// Every address that is the user's: the primary address from the Gmail
+/// profile and every send-as alias (which includes any `--from` address).
+///
+/// Used for self-reply detection in both modes (switching to
+/// original-To-based addressing) and, in reply-all, for self-exclusion, as
+/// Gmail web does: a message received at, or sent from, an alias is still
+/// yours.
+async fn own_addresses(
+    api: &GmailApi,
+    identities: &[SendAsIdentity],
+) -> Result<Vec<String>, GwsError> {
     let profile = api.profile().await?;
-    profile
+    let primary = profile
         .get("emailAddress")
         .and_then(Value::as_str)
         .map(str::to_string)
-        .ok_or_else(|| GwsError::other("Gmail profile response is missing emailAddress"))
+        .ok_or_else(|| GwsError::other("Gmail profile response is missing emailAddress"))?;
+    let mut own = vec![primary];
+    own.extend(identities.iter().map(|id| id.mailbox.email.clone()));
+    Ok(own)
 }
 
 // --- Message construction ---
@@ -187,19 +188,13 @@ fn extract_reply_to_address(original: &OriginalMessage) -> Vec<Mailbox> {
     }
 }
 
-/// Whether `original` was sent by the user (primary address or `--from` alias).
+/// Whether `original` was sent by the user: its From is one of `own`, the
+/// user's addresses (primary address and every send-as alias).
 ///
 /// Gmail web addresses a reply to your own message to the original To
-/// recipients and ignores Reply-To. We approximate "sent by you" by checking
-/// the primary address and the current From alias.
-fn is_self_reply(
-    original: &OriginalMessage,
-    self_email: Option<&str>,
-    from_alias: Option<&str>,
-) -> bool {
-    [self_email, from_alias]
-        .into_iter()
-        .flatten()
+/// recipients and ignores Reply-To.
+fn is_self_reply(original: &OriginalMessage, own: &[&str]) -> bool {
+    own.iter()
         .any(|e| original.from.email.eq_ignore_ascii_case(e))
 }
 
@@ -209,11 +204,10 @@ fn is_self_reply(
 fn build_reply_recipients(
     original: &OriginalMessage,
     extra_cc: Option<&[Mailbox]>,
-    self_email: Option<&str>,
-    from_alias: Option<&str>,
+    own: &[&str],
 ) -> ReplyRecipients {
-    let to = if is_self_reply(original, self_email, from_alias) {
-        let excluded = collect_excluded_emails(None, self_email, from_alias);
+    let to = if is_self_reply(original, own) {
+        let excluded = collect_excluded_emails(None, own);
         let others: Vec<Mailbox> = original
             .to
             .iter()
@@ -239,11 +233,10 @@ fn build_reply_all_recipients(
     original: &OriginalMessage,
     extra_cc: Option<&[Mailbox]>,
     remove: Option<&[Mailbox]>,
-    self_email: Option<&str>,
-    from_alias: Option<&str>,
+    own: &[&str],
 ) -> Result<ReplyRecipients, GwsError> {
-    let excluded = collect_excluded_emails(remove, self_email, from_alias);
-    let self_reply = is_self_reply(original, self_email, from_alias);
+    let excluded = collect_excluded_emails(remove, own);
+    let self_reply = is_self_reply(original, own);
 
     // When replying to your own message, the original sender (you) would be
     // excluded from To, leaving it empty. Gmail web uses the original To
@@ -266,7 +259,7 @@ fn build_reply_all_recipients(
     // A note-to-self has no one else in To to reply to: keep the original To
     // recipients (yourself), as `+reply` does, minus anyone named in --remove.
     if to.is_empty() && self_reply {
-        let removed = collect_excluded_emails(remove, None, None);
+        let removed = collect_excluded_emails(remove, &[]);
         to = filter_to(&to_candidates, &removed, &mut to_emails);
     }
 
@@ -342,8 +335,7 @@ fn dedup_recipients(
 
 fn collect_excluded_emails(
     remove: Option<&[Mailbox]>,
-    self_email: Option<&str>,
-    from_alias: Option<&str>,
+    own: &[&str],
 ) -> std::collections::HashSet<String> {
     let mut excluded = std::collections::HashSet::new();
 
@@ -356,8 +348,8 @@ fn collect_excluded_emails(
         );
     }
 
-    // Exclude the user's own address and any --from alias
-    for raw in [self_email, from_alias].into_iter().flatten() {
+    // Exclude every address of the user's: primary and send-as aliases
+    for raw in own {
         let email = Mailbox::parse(raw).email_lowercase();
         if !email.is_empty() {
             excluded.insert(email);
@@ -610,7 +602,7 @@ mod tests {
             ..Default::default()
         };
 
-        let recipients = build_reply_all_recipients(&original, None, None, None, None).unwrap();
+        let recipients = build_reply_all_recipients(&original, None, None, &[]).unwrap();
         assert_eq!(recipients.to.len(), 1);
         assert_eq!(recipients.to[0].email, "alice@example.com");
         let cc = recipients.cc.unwrap();
@@ -634,8 +626,7 @@ mod tests {
         };
 
         let remove = Mailbox::parse_list("carol@example.com");
-        let recipients =
-            build_reply_all_recipients(&original, None, Some(&remove), None, None).unwrap();
+        let recipients = build_reply_all_recipients(&original, None, Some(&remove), &[]).unwrap();
         let cc = recipients.cc.unwrap();
         assert!(cc.iter().any(|m| m.email == "bob@example.com"));
         assert!(!cc.iter().any(|m| m.email == "carol@example.com"));
@@ -651,8 +642,7 @@ mod tests {
         };
 
         let remove = Mailbox::parse_list("alice@example.com");
-        let recipients =
-            build_reply_all_recipients(&original, None, Some(&remove), None, None).unwrap();
+        let recipients = build_reply_all_recipients(&original, None, Some(&remove), &[]).unwrap();
         assert!(recipients.to.is_empty());
     }
 
@@ -673,8 +663,7 @@ mod tests {
             &original,
             None,
             None,
-            Some("me@example.com"),
-            Some("sales@example.com"),
+            &["me@example.com", "sales@example.com"],
         )
         .unwrap();
         let cc = recipients.cc.unwrap();
@@ -686,7 +675,7 @@ mod tests {
 
     #[test]
     fn test_build_reply_all_from_alias_is_self_reply() {
-        // When from_alias matches original.from, this is a self-reply.
+        // When an alias of yours sent the original, this is a self-reply.
         // To should be the original To recipients, not empty.
         let original = OriginalMessage {
             from: Mailbox::parse("sales@example.com"),
@@ -699,8 +688,7 @@ mod tests {
             &original,
             None,
             None,
-            Some("me@example.com"),
-            Some("sales@example.com"),
+            &["me@example.com", "sales@example.com"],
         )
         .unwrap();
         assert_eq!(recipients.to.len(), 1);
@@ -714,7 +702,7 @@ mod tests {
             to: vec![Mailbox::parse("bob@example.com")],
             ..Default::default()
         };
-        let recipients = build_reply_recipients(&original, None, Some("me@example.com"), None);
+        let recipients = build_reply_recipients(&original, None, &["me@example.com"]);
         assert_eq!(recipients.to.len(), 1);
         assert_eq!(recipients.to[0].email, "bob@example.com");
         assert!(recipients.cc.is_none());
@@ -729,12 +717,8 @@ mod tests {
             reply_to: Some(vec![Mailbox::parse("list@example.com")]),
             ..Default::default()
         };
-        let recipients = build_reply_recipients(
-            &original,
-            None,
-            Some("me@example.com"),
-            Some("sales@example.com"),
-        );
+        let recipients =
+            build_reply_recipients(&original, None, &["me@example.com", "sales@example.com"]);
         assert_eq!(recipients.to.len(), 1);
         assert_eq!(recipients.to[0].email, "bob@example.com");
     }
@@ -751,8 +735,7 @@ mod tests {
             ..Default::default()
         };
         let extra_cc = Mailbox::parse_list("dave@example.com");
-        let recipients =
-            build_reply_recipients(&original, Some(&extra_cc), Some("ME@example.com"), None);
+        let recipients = build_reply_recipients(&original, Some(&extra_cc), &["ME@example.com"]);
         // Self is dropped from To; original Cc is not carried over (plain reply).
         assert_eq!(recipients.to.len(), 1);
         assert_eq!(recipients.to[0].email, "bob@example.com");
@@ -769,7 +752,7 @@ mod tests {
             to: vec![Mailbox::parse("me@example.com")],
             ..Default::default()
         };
-        let recipients = build_reply_recipients(&original, None, Some("me@example.com"), None);
+        let recipients = build_reply_recipients(&original, None, &["me@example.com"]);
         assert_eq!(recipients.to.len(), 1);
         assert_eq!(recipients.to[0].email, "me@example.com");
     }
@@ -784,12 +767,8 @@ mod tests {
             ],
             ..Default::default()
         };
-        let recipients = build_reply_recipients(
-            &original,
-            None,
-            Some("me@example.com"),
-            Some("sales@example.com"),
-        );
+        let recipients =
+            build_reply_recipients(&original, None, &["me@example.com", "sales@example.com"]);
         assert_eq!(recipients.to.len(), 1);
         assert_eq!(recipients.to[0].email, "alice@example.com");
         assert!(recipients.cc.is_none());
@@ -803,7 +782,7 @@ mod tests {
             reply_to: Some(vec![Mailbox::parse("list@example.com")]),
             ..Default::default()
         };
-        let recipients = build_reply_recipients(&original, None, Some("me@example.com"), None);
+        let recipients = build_reply_recipients(&original, None, &["me@example.com"]);
         assert_eq!(recipients.to.len(), 1);
         assert_eq!(recipients.to[0].email, "list@example.com");
     }
@@ -938,8 +917,7 @@ mod tests {
             ..Default::default()
         };
         let remove = Mailbox::parse_list("ann@example.com");
-        let recipients =
-            build_reply_all_recipients(&original, None, Some(&remove), None, None).unwrap();
+        let recipients = build_reply_all_recipients(&original, None, Some(&remove), &[]).unwrap();
         let cc = recipients.cc.unwrap();
         // joann@example.com should remain, ann@example.com should be removed
         assert_eq!(cc.len(), 1);
@@ -972,8 +950,7 @@ mod tests {
         assert_eq!(to[0].email, "alice@example.com");
 
         let recipients =
-            build_reply_all_recipients(&original, None, None, Some("me@example.com"), None)
-                .unwrap();
+            build_reply_all_recipients(&original, None, None, &["me@example.com"]).unwrap();
         let emails = |list: &[Mailbox]| list.iter().map(|m| m.email.clone()).collect::<Vec<_>>();
         assert_eq!(emails(&recipients.to), vec!["alice@example.com"]);
         assert_eq!(
@@ -1001,7 +978,7 @@ mod tests {
             }
         });
         let original = parse_original_message(&msg).unwrap();
-        let recipients = build_reply_all_recipients(&original, None, None, None, None).unwrap();
+        let recipients = build_reply_all_recipients(&original, None, None, &[]).unwrap();
 
         let emails = |list: &[Mailbox]| list.iter().map(|m| m.email.clone()).collect::<Vec<_>>();
         assert_eq!(emails(&recipients.to), vec!["alice@example.com"]);
@@ -1019,7 +996,7 @@ mod tests {
             to: vec![Mailbox::parse("bob@example.com")],
             ..Default::default()
         };
-        let recipients = build_reply_all_recipients(&original, None, None, None, None).unwrap();
+        let recipients = build_reply_all_recipients(&original, None, None, &[]).unwrap();
         assert_eq!(recipients.to[0].email, "list@example.com");
         let cc = recipients.cc.unwrap();
         assert!(cc.iter().any(|m| m.email == "bob@example.com"));
@@ -1037,7 +1014,7 @@ mod tests {
             ],
             ..Default::default()
         };
-        let recipients = build_reply_all_recipients(&original, None, None, None, None).unwrap();
+        let recipients = build_reply_all_recipients(&original, None, None, &[]).unwrap();
         assert_eq!(recipients.to[0].email, "alice@example.com");
         let cc = recipients.cc.unwrap();
         assert_eq!(cc.len(), 1);
@@ -1055,8 +1032,7 @@ mod tests {
             ..Default::default()
         };
         let remove = Mailbox::parse_list("Carol <carol@example.com>");
-        let recipients =
-            build_reply_all_recipients(&original, None, Some(&remove), None, None).unwrap();
+        let recipients = build_reply_all_recipients(&original, None, Some(&remove), &[]).unwrap();
         let cc = recipients.cc.unwrap();
         assert_eq!(cc.len(), 1);
         assert_eq!(cc[0].email, "bob@example.com");
@@ -1070,8 +1046,7 @@ mod tests {
             ..Default::default()
         };
         let extra_cc = Mailbox::parse_list("extra@example.com");
-        let recipients =
-            build_reply_all_recipients(&original, Some(&extra_cc), None, None, None).unwrap();
+        let recipients = build_reply_all_recipients(&original, Some(&extra_cc), None, &[]).unwrap();
         let cc = recipients.cc.unwrap();
         assert!(cc.iter().any(|m| m.email == "bob@example.com"));
         assert!(cc.iter().any(|m| m.email == "extra@example.com"));
@@ -1084,7 +1059,7 @@ mod tests {
             to: vec![Mailbox::parse("alice@example.com")],
             ..Default::default()
         };
-        let recipients = build_reply_all_recipients(&original, None, None, None, None).unwrap();
+        let recipients = build_reply_all_recipients(&original, None, None, &[]).unwrap();
         assert!(recipients.cc.is_none());
     }
 
@@ -1098,7 +1073,7 @@ mod tests {
             ],
             ..Default::default()
         };
-        let recipients = build_reply_all_recipients(&original, None, None, None, None).unwrap();
+        let recipients = build_reply_all_recipients(&original, None, None, &[]).unwrap();
         let cc = recipients.cc.unwrap();
         assert_eq!(cc.len(), 1);
         assert_eq!(cc[0].email, "bob@example.com");
@@ -1122,7 +1097,7 @@ mod tests {
             ]),
             ..Default::default()
         };
-        let recipients = build_reply_all_recipients(&original, None, None, None, None).unwrap();
+        let recipients = build_reply_all_recipients(&original, None, None, &[]).unwrap();
         assert_eq!(recipients.to.len(), 2);
         assert_eq!(recipients.to[0].email, "list@example.com");
         assert_eq!(recipients.to[1].email, "owner@example.com");
@@ -1140,7 +1115,7 @@ mod tests {
             to: Mailbox::parse_list(r#""Doe, John" <john@example.com>, alice@example.com"#),
             ..Default::default()
         };
-        let recipients = build_reply_all_recipients(&original, None, None, None, None).unwrap();
+        let recipients = build_reply_all_recipients(&original, None, None, &[]).unwrap();
         let cc = recipients.cc.unwrap();
         assert!(cc.iter().any(|m| m.email == "john@example.com"));
         assert!(cc.iter().any(|m| m.email == "alice@example.com"));
@@ -1154,7 +1129,7 @@ mod tests {
             ..Default::default()
         };
         let remove = Mailbox::parse_list("john@example.com");
-        let recipients = build_reply_all_recipients(&original, None, Some(&remove), None, None);
+        let recipients = build_reply_all_recipients(&original, None, Some(&remove), &[]);
         let cc = recipients.unwrap().cc.unwrap();
         assert!(!cc.iter().any(|m| m.email == "john@example.com"));
         assert!(cc.iter().any(|m| m.email == "alice@example.com"));
@@ -1171,8 +1146,7 @@ mod tests {
             ..Default::default()
         };
         let recipients =
-            build_reply_all_recipients(&original, None, None, Some("me@example.com"), None)
-                .unwrap();
+            build_reply_all_recipients(&original, None, None, &["me@example.com"]).unwrap();
         let cc = recipients.cc.unwrap();
         assert!(cc.iter().any(|m| m.email == "bob@example.com"));
         assert!(!cc.iter().any(|m| m.email == "me@example.com"));
@@ -1189,8 +1163,7 @@ mod tests {
             ..Default::default()
         };
         let recipients =
-            build_reply_all_recipients(&original, None, None, Some("me@example.com"), None)
-                .unwrap();
+            build_reply_all_recipients(&original, None, None, &["me@example.com"]).unwrap();
         let cc = recipients.cc.unwrap();
         assert!(cc.iter().any(|m| m.email == "bob@example.com"));
         assert!(!cc.iter().any(|m| m.email_lowercase() == "me@example.com"));
@@ -1207,7 +1180,7 @@ mod tests {
             ]),
             ..Default::default()
         };
-        let recipients = build_reply_all_recipients(&original, None, None, None, None).unwrap();
+        let recipients = build_reply_all_recipients(&original, None, None, &[]).unwrap();
         let cc = recipients.cc.unwrap();
         assert_eq!(
             cc.iter().filter(|m| m.email == "bob@example.com").count(),
@@ -1230,8 +1203,7 @@ mod tests {
             ..Default::default()
         };
         let recipients =
-            build_reply_all_recipients(&original, None, None, Some("me@example.com"), None)
-                .unwrap();
+            build_reply_all_recipients(&original, None, None, &["me@example.com"]).unwrap();
         // To should be the original To recipients, not the original sender
         assert_eq!(recipients.to.len(), 2);
         assert!(recipients.to.iter().any(|m| m.email == "alice@example.com"));
@@ -1249,15 +1221,10 @@ mod tests {
             to: vec![Mailbox::parse("alice@example.com")],
             ..Default::default()
         };
-        // self_email is primary, from_alias matches the original sender
-        let recipients = build_reply_all_recipients(
-            &original,
-            None,
-            None,
-            Some("me@gmail.com"),
-            Some("alias@work.com"),
-        )
-        .unwrap();
+        // The primary address and an alias; the alias sent the original
+        let recipients =
+            build_reply_all_recipients(&original, None, None, &["me@gmail.com", "alias@work.com"])
+                .unwrap();
         assert_eq!(recipients.to.len(), 1);
         assert_eq!(recipients.to[0].email, "alice@example.com");
     }
@@ -1274,8 +1241,7 @@ mod tests {
             ..Default::default()
         };
         let recipients =
-            build_reply_all_recipients(&original, None, None, Some("me@example.com"), None)
-                .unwrap();
+            build_reply_all_recipients(&original, None, None, &["me@example.com"]).unwrap();
         // Self should still be excluded from To
         assert_eq!(recipients.to.len(), 1);
         assert_eq!(recipients.to[0].email, "alice@example.com");
@@ -1292,8 +1258,7 @@ mod tests {
             ..Default::default()
         };
         let recipients =
-            build_reply_all_recipients(&original, None, None, Some("me@example.com"), None)
-                .unwrap();
+            build_reply_all_recipients(&original, None, None, &["me@example.com"]).unwrap();
         assert_eq!(recipients.to.len(), 1);
         assert_eq!(recipients.to[0].email, "ME@example.com");
         let cc = recipients.cc.unwrap();
@@ -1302,14 +1267,9 @@ mod tests {
 
         // --remove still wins: removing yourself leaves no To recipient.
         let remove = Mailbox::parse_list("me@example.com");
-        let recipients = build_reply_all_recipients(
-            &original,
-            None,
-            Some(&remove),
-            Some("me@example.com"),
-            None,
-        )
-        .unwrap();
+        let recipients =
+            build_reply_all_recipients(&original, None, Some(&remove), &["me@example.com"])
+                .unwrap();
         assert!(recipients.to.is_empty());
     }
 
@@ -1324,8 +1284,7 @@ mod tests {
             ..Default::default()
         };
         let recipients =
-            build_reply_all_recipients(&original, None, None, Some("me@example.com"), None)
-                .unwrap();
+            build_reply_all_recipients(&original, None, None, &["me@example.com"]).unwrap();
         assert_eq!(recipients.to.len(), 1);
         assert_eq!(recipients.to[0].email, "alice@example.com");
         // No CC — Reply-To address should not appear anywhere
@@ -1564,14 +1523,9 @@ mod tests {
 
         // build_reply_all_recipients with --remove alice, self=me
         let remove = Mailbox::parse_list("alice@example.com");
-        let recipients = build_reply_all_recipients(
-            &original,
-            None,
-            Some(&remove),
-            Some("me@example.com"),
-            None,
-        )
-        .unwrap();
+        let recipients =
+            build_reply_all_recipients(&original, None, Some(&remove), &["me@example.com"])
+                .unwrap();
 
         // To is empty (alice removed)
         assert!(recipients.to.is_empty());
