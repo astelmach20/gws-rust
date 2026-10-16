@@ -71,11 +71,14 @@ pub enum AuthError {
     /// The refresh token is expired or revoked.
     #[error(
         "the stored refresh token was rejected ({description}); it has expired or been revoked. \
-         Run `{login_command}` to sign in again"
+         {remedy}"
     )]
     InvalidGrant {
         description: String,
-        login_command: String,
+        /// What replaces the rejected credential: signing in to the profile
+        /// in use, or renewing the file it came from (see
+        /// [`rejected_grant_remedy`]).
+        remedy: String,
     },
     /// Google refused the requested scopes.
     #[error(
@@ -125,6 +128,53 @@ pub enum AuthError {
     /// could not be written).
     #[error("{0}")]
     Internal(String),
+}
+
+impl AuthError {
+    /// Replace the remedy of an [`AuthError::InvalidGrant`] with `remedy`;
+    /// any other error is returned unchanged.
+    pub(crate) fn with_grant_remedy(self, remedy: &str) -> Self {
+        match self {
+            AuthError::InvalidGrant { description, .. } => AuthError::InvalidGrant {
+                description,
+                remedy: remedy.to_string(),
+            },
+            other => other,
+        }
+    }
+}
+
+/// What replaces a refresh token from `source` that Google rejected.
+///
+/// Only a gwsr profile is renewed by `gwsr auth login`. A
+/// `GWSR_CREDENTIALS_FILE` takes precedence over every profile, so signing in
+/// again would change nothing; Application Default Credentials are renewed
+/// with gcloud (or replaced by a gwsr profile, which takes precedence).
+pub(crate) fn rejected_grant_remedy(env: &AuthEnv, source: &CredentialSource) -> String {
+    let login = login_command(env);
+    match source {
+        CredentialSource::CredentialsFile(path) => format!(
+            "Replace '{}' (GWSR_CREDENTIALS_FILE) with a valid credential, or unset \
+             GWSR_CREDENTIALS_FILE and run `{login}`; signing in again does not help while \
+             GWSR_CREDENTIALS_FILE is set, because it takes precedence over every profile",
+            path.display()
+        ),
+        CredentialSource::AdcEnv(path) => format!(
+            "Replace '{}' (GOOGLE_APPLICATION_CREDENTIALS) with a valid credential, or run \
+             `{login}` to use a gwsr profile instead (it takes precedence over Application \
+             Default Credentials)",
+            path.display()
+        ),
+        CredentialSource::AdcWellKnown(path) => format!(
+            "Run `gcloud auth application-default login` to renew the Application Default \
+             Credentials in '{}', or run `{login}` to use a gwsr profile instead (it takes \
+             precedence over them)",
+            path.display()
+        ),
+        CredentialSource::Profile { .. }
+        | CredentialSource::TokenEnv
+        | CredentialSource::TokenFile(_) => format!("Run `{login}` to sign in again"),
+    }
 }
 
 /// The CLI error category of an auth-layer failure.
@@ -359,8 +409,11 @@ pub async fn get_token_fresh(
             let downscope = downscope(scopes, granted.as_deref());
             let login = login_command(env);
             let endpoints = env.endpoints.clone();
+            let remedy = rejected_grant_remedy(env, &source);
             let fetch = || async {
-                token::refresh_user(user, downscope.as_deref(), &endpoints, &login).await
+                token::refresh_user(user, downscope.as_deref(), &endpoints, &login)
+                    .await
+                    .map_err(|e| e.with_grant_remedy(&remedy))
             };
             if matches!(source, CredentialSource::Profile { .. }) {
                 // The grant fingerprint keeps a token minted from a previous
@@ -750,7 +803,7 @@ mod tests {
             (
                 AuthError::InvalidGrant {
                     description: "expired".into(),
-                    login_command: "gwsr auth login".into(),
+                    remedy: "Run `gwsr auth login` to sign in again".into(),
                 },
                 2,
                 "authError",
@@ -1011,6 +1064,68 @@ mod tests {
         assert!(
             env.paths.credentials.exists(),
             "credentials survive invalid_grant"
+        );
+    }
+
+    /// A rejected refresh token from a file outside gwsr's profiles is not
+    /// fixed by `gwsr auth login`: GWSR_CREDENTIALS_FILE takes precedence over
+    /// every profile, and ADC is renewed with gcloud. The message must name
+    /// the file and its fix instead of only "sign in again".
+    #[tokio::test]
+    async fn rejected_refresh_token_from_a_file_names_that_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/token"))
+            .respond_with(ResponseTemplate::new(400).set_body_json(serde_json::json!({
+                "error": "invalid_grant", "error_description": "Token has been expired or revoked."
+            })))
+            .mount(&server)
+            .await;
+        let file = dir.path().join("user.json");
+        crate::fs_util::atomic_write(&file, USER_JSON.as_bytes()).unwrap();
+        let base = dir.path().join("config");
+        let fresh_env = || {
+            let mut env = AuthEnv::new(
+                base.clone(),
+                ActiveProfile {
+                    name: "default".into(),
+                    source: ProfileSource::Default,
+                },
+                ProfilePaths::new(&base, "default"),
+            );
+            env.endpoints = token::tests::endpoints(&server);
+            env
+        };
+        let rejected = |env: AuthEnv| async move {
+            let err = get_token_fresh(&env, &["x".to_string()], Freshness::Cached)
+                .await
+                .unwrap_err();
+            assert!(matches!(err, AuthError::InvalidGrant { .. }), "{err:?}");
+            let msg = err.to_string();
+            assert_eq!(GwsError::from(err).exit_code(), 2, "{msg}");
+            msg
+        };
+
+        let mut env = fresh_env();
+        env.credentials_file = Some(file.clone());
+        let msg = rejected(env).await;
+        assert!(msg.contains("GWSR_CREDENTIALS_FILE"), "{msg}");
+        assert!(msg.contains(&file.display().to_string()), "{msg}");
+        assert!(!msg.contains("to sign in again"), "{msg}");
+
+        let mut env = fresh_env();
+        env.adc_env = Some(file.clone());
+        let msg = rejected(env).await;
+        assert!(msg.contains("GOOGLE_APPLICATION_CREDENTIALS"), "{msg}");
+        assert!(msg.contains(&file.display().to_string()), "{msg}");
+
+        let mut env = fresh_env();
+        env.adc_well_known = Some(file.clone());
+        let msg = rejected(env).await;
+        assert!(
+            msg.contains("gcloud auth application-default login"),
+            "{msg}"
         );
     }
 
