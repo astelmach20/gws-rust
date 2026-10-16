@@ -18,7 +18,7 @@
 
 use super::Helper;
 use super::http::{self, Api, ApiRequest, OutputTarget, case_insensitive_key, safe_filename};
-use crate::args::{flag, optional, required};
+use crate::args::{flag, optional, optional_non_empty, required};
 use crate::confirm::{self, Impact, with_yes};
 use crate::error::GwsError;
 use crate::validate::encode_path_segment;
@@ -446,7 +446,7 @@ impl UploadArgs {
         Ok(Self {
             path,
             name,
-            folder_id: optional(m, "folder-id")?.map(str::to_string),
+            folder_id: optional_non_empty(m, "folder-id")?.map(str::to_string),
             content_type,
             convert_to,
         })
@@ -1042,13 +1042,13 @@ enum Grantee {
 
 impl ShareArgs {
     fn parse(m: &ArgMatches) -> Result<Self, GwsError> {
-        let grantee = if let Some(email) = optional(m, "email")? {
+        let grantee = if let Some(email) = optional_non_empty(m, "email")? {
             if flag(m, "group")? {
                 Grantee::Group(email.to_string())
             } else {
                 Grantee::User(email.to_string())
             }
-        } else if let Some(domain) = optional(m, "domain")? {
+        } else if let Some(domain) = optional_non_empty(m, "domain")? {
             Grantee::Domain(domain.to_string())
         } else if flag(m, "anyone")? {
             Grantee::Anyone

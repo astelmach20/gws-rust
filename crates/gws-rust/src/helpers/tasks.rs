@@ -20,7 +20,7 @@
 
 use super::Helper;
 use super::http::{self, Api, ApiRequest};
-use crate::args::{flag, optional, required};
+use crate::args::{flag, optional, required, required_non_empty};
 use crate::error::GwsError;
 use crate::validate::encode_path_segment;
 use clap::{Arg, ArgAction, ArgMatches, Command};
@@ -125,12 +125,13 @@ TIPS:
             let dry = crate::args::dry_run(m)?;
             let (api, value) = match name {
                 "+add" => {
+                    let title = required_non_empty(m, "title")?;
                     let due = optional(m, "due")?.map(parse_due).transpose()?;
                     let api = Api::new(doc, &[SCOPE_TASKS], dry, sanitize).await?;
                     let v = add(
                         &api,
                         required(m, "list-id")?,
-                        required(m, "title")?,
+                        title,
                         optional(m, "notes")?,
                         due.as_deref(),
                     )

@@ -101,6 +101,28 @@ pub(crate) fn required<'a>(m: &'a ArgMatches, name: &str) -> Result<&'a str, Gws
     optional(m, name)?.ok_or_else(|| GwsError::Validation(format!("--{name} is required")))
 }
 
+/// Refuse an empty or blank value for `--{name}`: it would otherwise reach
+/// the API as `""` (an empty parent, grantee, ID or title).
+fn non_empty<'a>(value: &'a str, name: &str) -> Result<&'a str, GwsError> {
+    if value.trim().is_empty() {
+        return Err(GwsError::Validation(format!("--{name} must not be empty")));
+    }
+    Ok(value)
+}
+
+/// [`required`], refusing an empty or blank value.
+pub(crate) fn required_non_empty<'a>(m: &'a ArgMatches, name: &str) -> Result<&'a str, GwsError> {
+    non_empty(required(m, name)?, name)
+}
+
+/// [`optional`], refusing an empty or blank value when one is given.
+pub(crate) fn optional_non_empty<'a>(
+    m: &'a ArgMatches,
+    name: &str,
+) -> Result<Option<&'a str>, GwsError> {
+    optional(m, name)?.map(|v| non_empty(v, name)).transpose()
+}
+
 /// All values of a repeatable string argument (empty when not given).
 pub(crate) fn many(m: &ArgMatches, name: &str) -> Result<Vec<String>, GwsError> {
     Ok(m.try_get_many::<String>(name)
@@ -177,6 +199,30 @@ mod tests {
             required(&empty, "name"),
             Err(GwsError::Validation(ref m)) if m == "--name is required"
         ));
+    }
+
+    #[test]
+    fn non_empty_variants_refuse_empty_and_blank_values() {
+        let m = matches(&["t", "--name", "a"]);
+        assert_eq!(required_non_empty(&m, "name").unwrap(), "a");
+        assert_eq!(optional_non_empty(&m, "name").unwrap(), Some("a"));
+        assert_eq!(optional_non_empty(&matches(&["t"]), "name").unwrap(), None);
+        assert!(matches!(
+            required_non_empty(&matches(&["t"]), "name"),
+            Err(GwsError::Validation(ref m)) if m == "--name is required"
+        ));
+        for blank in ["", " ", "\t"] {
+            let m = matches(&["t", "--name", blank]);
+            for result in [
+                required_non_empty(&m, "name").map(Some),
+                optional_non_empty(&m, "name"),
+            ] {
+                assert!(
+                    matches!(result, Err(GwsError::Validation(ref m)) if m == "--name must not be empty"),
+                    "{blank:?}: {result:?}"
+                );
+            }
+        }
     }
 
     // clap reports undefined ids only with debug assertions (see module docs).
