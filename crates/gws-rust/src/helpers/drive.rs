@@ -367,7 +367,19 @@ TIPS:
                     let dir = crate::validate::validate_safe_output_dir(required(m, "dir")?)?;
                     let overwrite = flag(m, "overwrite")?;
                     let api = Api::new(doc, &[SCOPE_DRIVE_READONLY], dry, sanitize).await?;
-                    let v = run_sync(&api, required(m, "folder-id")?, &dir, overwrite).await?;
+                    let folder_id = required(m, "folder-id")?;
+                    let v = match run_sync(&api, folder_id, &dir, overwrite).await? {
+                        SyncEnd::Done(v) => v,
+                        SyncEnd::Interrupted(signal) => {
+                            tracing::warn!(
+                                "drive +sync interrupted by {}; the sync state of the files finished so far was saved to '{}'; run it again to continue",
+                                signal.name(),
+                                dir.join(SYNC_STATE_FILE).display()
+                            );
+                            crate::helpers::exit_for_signal(signal);
+                            return Ok(true);
+                        }
+                    };
                     api.emit(m, &v).await?;
                     return match sync_failure(&v) {
                         Some(err) => Err(err),
@@ -1509,17 +1521,65 @@ fn sync_failure(report: &Value) -> Option<GwsError> {
 /// `+sync` with the default of keeping conflicting local files.
 #[cfg(test)]
 async fn sync(api: &Api, folder_id: &str, dir: &Path) -> Result<Value, GwsError> {
-    run_sync(api, folder_id, dir, false).await
+    sync_uninterrupted(api, folder_id, dir, false).await
 }
 
-/// Mirror `folder_id` into `dir`, then save the sync state, also when the
-/// walk was aborted part-way, so files already mirrored stay tracked.
-async fn run_sync(
+/// `+sync` that no signal interrupts, so tests leave the process's signal
+/// handling alone.
+#[cfg(test)]
+#[allow(clippy::panic)]
+async fn sync_uninterrupted(
     api: &Api,
     folder_id: &str,
     dir: &Path,
     overwrite: bool,
 ) -> Result<Value, GwsError> {
+    match run_sync_until(api, folder_id, dir, overwrite, std::future::pending()).await? {
+        SyncEnd::Done(report) => Ok(report),
+        SyncEnd::Interrupted(signal) => panic!("a pending future never interrupts ({signal:?})"),
+    }
+}
+
+/// How a `+sync` run ended.
+#[derive(Debug)]
+enum SyncEnd {
+    /// The walk finished; the report to print.
+    Done(Value),
+    /// A signal stopped the walk; the state of what finished was saved.
+    Interrupted(crate::helpers::ShutdownSignal),
+}
+
+/// [`run_sync_until`] a SIGINT or SIGTERM.
+async fn run_sync(
+    api: &Api,
+    folder_id: &str,
+    dir: &Path,
+    overwrite: bool,
+) -> Result<SyncEnd, GwsError> {
+    run_sync_until(
+        api,
+        folder_id,
+        dir,
+        overwrite,
+        crate::helpers::shutdown_signal(),
+    )
+    .await
+}
+
+/// Mirror `folder_id` into `dir` until `interrupt` completes, then save the
+/// sync state, also when the walk was aborted part-way or interrupted, so
+/// files already mirrored stay tracked.
+///
+/// Stopping the walk at any await is safe: a download is written to a
+/// temporary file renamed into place only once complete, and a finished
+/// download is recorded in `state` without an await in between.
+async fn run_sync_until(
+    api: &Api,
+    folder_id: &str,
+    dir: &Path,
+    overwrite: bool,
+    interrupt: impl Future<Output = crate::helpers::ShutdownSignal>,
+) -> Result<SyncEnd, GwsError> {
     if api.is_dry_run() {
         list_children(api, folder_id).await?;
         api.plan_note(json!({
@@ -1527,10 +1587,14 @@ async fn run_sync(
             "dir": dir.display().to_string(),
             "state": dir.join(SYNC_STATE_FILE).display().to_string(),
         }))?;
-        return Ok(Value::Null);
+        return Ok(SyncEnd::Done(Value::Null));
     }
     let mut state = SyncState::load(dir, folder_id)?;
-    let walked = sync_walk(api, folder_id, dir, overwrite, &mut state).await;
+    let walked = tokio::select! {
+        biased;
+        walked = sync_walk(api, folder_id, dir, overwrite, &mut state) => walked.map(SyncEnd::Done),
+        signal = interrupt => Ok(SyncEnd::Interrupted(signal)),
+    };
     let saved = state.save().await;
     match (walked, saved) {
         (Ok(report), Ok(())) => Ok(report),
@@ -2804,7 +2868,9 @@ mod tests {
         edit_locally(&p, b"mine");
         mount_one(&server, "A", "a.txt", v2(), b"v2").await;
 
-        let v = run_sync(&api, "ROOT", dir.path(), true).await.unwrap();
+        let v = sync_uninterrupted(&api, "ROOT", dir.path(), true)
+            .await
+            .unwrap();
         assert_eq!(ids(&v, "downloaded"), ["A"], "{v}");
         assert!(ids(&v, "conflicts").is_empty(), "{v}");
         assert_eq!(std::fs::read(&p).unwrap(), b"v2");
