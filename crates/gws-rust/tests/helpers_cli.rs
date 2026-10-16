@@ -2619,6 +2619,57 @@ async fn gmail_outgoing_helpers_reject_control_characters_in_headers() {
     );
 }
 
+/// Zero-width joiner and non-joiner are part of ordinary text (emoji
+/// sequences, Persian and Indic scripts), so a subject or display name that
+/// uses them is sent. Other invisible characters are still refused, and an
+/// email address may contain none of them.
+#[test]
+fn gmail_send_accepts_joiners_in_subject_and_display_names() {
+    let dir = setup();
+    seed(dir.path(), "gmail", "v1", "");
+    let out = gwsr(dir.path())
+        .args([
+            "gmail",
+            "+send",
+            "--to",
+            "Fam\u{200D}ily <a@example.com>",
+            "--cc",
+            "\u{645}\u{6CC}\u{200C}\u{62E}\u{648}\u{627}\u{647}\u{645} <c@example.com>",
+            "--subject",
+            "Family dinner \u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}",
+            "--body",
+            "b",
+            "--dry-run",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    for (flag, value) in [
+        ("--subject", "Hi \u{200B}there"),
+        ("--subject", "Hi \u{2060}there"),
+        ("--to", "a\u{200D}@example.com"),
+        ("--cc", "Name <c\u{200C}@example.com>"),
+    ] {
+        let mut args = vec!["gmail", "+send", "--body", "b", "--dry-run"];
+        if flag != "--to" {
+            args.extend(["--to", "a@example.com"]);
+        }
+        if flag != "--subject" {
+            args.extend(["--subject", "s"]);
+        }
+        args.extend([flag, value]);
+        let out = gwsr(dir.path()).args(&args).output().unwrap();
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(3), "{flag} {value:?}: {stderr}");
+        assert!(stderr.contains(flag), "{flag} {value:?}: {stderr}");
+    }
+}
+
 /// Label names are resolved to IDs with a `users.labels.list` read before
 /// the change: the dry-run plan lists that read first, as a real run sends it.
 #[test]
