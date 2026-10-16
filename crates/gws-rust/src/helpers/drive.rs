@@ -447,25 +447,52 @@ fn determine_filename(file_path: &str) -> Result<String, GwsError> {
         })
 }
 
-/// Google-native type to convert an uploaded file into, by source MIME type.
+/// Google-native type to convert an uploaded file into, by source MIME type
+/// (the Docs, Sheets and Slides import formats Drive lists in
+/// `about.importFormats`). A media type is case-insensitive and its
+/// parameters (`; charset=utf-8`) do not change the format, so only the
+/// lowercased essence is compared: `mime_guess2` spells the macro-enabled
+/// Office types `macroEnabled`, Drive `macroenabled`.
 fn conversion_target(content_type: &str) -> Option<&'static str> {
-    Some(match content_type {
+    let essence = content_type
+        .split(';')
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
+    Some(match essence.as_str() {
         "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        | "application/vnd.openxmlformats-officedocument.wordprocessingml.template"
+        | "application/vnd.ms-word.document.macroenabled.12"
+        | "application/vnd.ms-word.template.macroenabled.12"
         | "application/msword"
         | "application/vnd.oasis.opendocument.text"
+        | "application/x-vnd.oasis.opendocument.text"
         | "application/rtf"
         | "text/rtf"
+        | "text/richtext"
         | "text/plain"
         | "text/markdown"
+        | "text/x-markdown"
         | "text/html" => "application/vnd.google-apps.document",
         "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        | "application/vnd.openxmlformats-officedocument.spreadsheetml.template"
+        | "application/vnd.ms-excel.sheet.macroenabled.12"
+        | "application/vnd.ms-excel.template.macroenabled.12"
         | "application/vnd.ms-excel"
         | "application/vnd.oasis.opendocument.spreadsheet"
+        | "application/x-vnd.oasis.opendocument.spreadsheet"
         | "text/csv"
         | "text/tab-separated-values" => "application/vnd.google-apps.spreadsheet",
         "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+        | "application/vnd.openxmlformats-officedocument.presentationml.template"
+        | "application/vnd.openxmlformats-officedocument.presentationml.slideshow"
+        | "application/vnd.ms-powerpoint.presentation.macroenabled.12"
+        | "application/vnd.ms-powerpoint.template.macroenabled.12"
+        | "application/vnd.ms-powerpoint.slideshow.macroenabled.12"
         | "application/vnd.ms-powerpoint"
-        | "application/vnd.oasis.opendocument.presentation" => {
+        | "application/vnd.oasis.opendocument.presentation"
+        | "application/x-vnd.oasis.opendocument.presentation" => {
             "application/vnd.google-apps.presentation"
         }
         _ => return None,
@@ -1887,6 +1914,46 @@ mod tests {
             convert: true,
         };
         assert!(build_metadata(&args).is_err());
+    }
+
+    /// `--convert` compares media types case-insensitively and without
+    /// parameters, and knows the macro-enabled, template and slideshow Office
+    /// types Drive imports (as detected from their extensions).
+    #[test]
+    fn conversion_target_ignores_case_and_parameters_and_knows_office_variants() {
+        for (content_type, target) in [
+            ("text/csv; charset=utf-8", SHEET),
+            ("Text/CSV", SHEET),
+            ("TEXT/PLAIN;charset=UTF-8", DOC),
+        ] {
+            assert_eq!(
+                conversion_target(content_type),
+                Some(target),
+                "{content_type}"
+            );
+        }
+        for (file, target) in [
+            ("a.xlsm", SHEET),
+            ("a.xltx", SHEET),
+            ("a.xltm", SHEET),
+            ("a.docm", DOC),
+            ("a.dotx", DOC),
+            ("a.dotm", DOC),
+            ("a.pptm", SLIDES),
+            ("a.potx", SLIDES),
+            ("a.potm", SLIDES),
+            ("a.ppsx", SLIDES),
+            ("a.ppsm", SLIDES),
+        ] {
+            let detected = mime_guess2::from_path(file).first().unwrap().to_string();
+            assert_eq!(
+                conversion_target(&detected),
+                Some(target),
+                "{file}: {detected}"
+            );
+        }
+        assert_eq!(conversion_target("application/pdf"), None);
+        assert_eq!(conversion_target("text/csvx"), None);
     }
 
     #[tokio::test]

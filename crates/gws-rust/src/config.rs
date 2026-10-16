@@ -219,6 +219,12 @@ pub fn resolve(file: Option<&ConfigFile>, origin: &Path, env: &Env) -> Result<Se
     if let Some(dir) = &file.log_file {
         check_log_dir(dir, &origin)?;
     }
+    // Read by auth only when neither --profile nor GWSR_PROFILE is set, but
+    // checked here so an invalid name fails every command, overridden or not.
+    if let Some(name) = &file.profile {
+        crate::auth::profiles::validate_profile_name(name)
+            .map_err(|e| GwsError::Config(format!("invalid profile in {origin}: {e}")))?;
+    }
 
     let format = env.format.or(file_format).unwrap_or_default();
     let json_style = env.json_style.or(file_json_style).unwrap_or_default();
@@ -478,6 +484,10 @@ log_file = '{ABS_LOG_DIR}'
             // log directory would follow the working directory.
             ("log_file = \"logs\"", &[]),
             ("log_file = \"logs\"", &[("GWSR_LOG_FILE", ABS_LOG_DIR)]),
+            // `--profile` and GWSR_PROFILE rank above the key; it is checked
+            // anyway, and for commands that never read it.
+            ("profile = \"../other\"", &[]),
+            ("profile = \"Work\"", &[("GWSR_PROFILE", "work")]),
         ];
         for (text, env) in cases {
             let file = parse_config(&format!("{text}\n"), &origin()).unwrap();

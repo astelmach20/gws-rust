@@ -39,16 +39,50 @@ else
   echo "No Rust or Cargo changes; changeset not required."
 fi
 
-# 3. Changesets must name the gws-rust package and nothing else.
+# 3. Changesets must have front matter that `changeset version` accepts, naming the gws-rust
+#    package and nothing else with a valid bump type. Anything this cannot read is an error: a
+#    changeset that passes here but fails to parse breaks the release job on main.
+# shellcheck disable=SC2016 # the single-quoted program is awk, not shell
+frontmatter_awk='
+  { sub(/\r$/, "") }
+  state == 0 && /^[[:space:]]*$/ { next }
+  state == 0 {
+    if ($0 !~ /^---[[:space:]]*$/) exit
+    state = 1; next
+  }
+  state == 1 && /^---[[:space:]]*$/ { state = 2; exit }
+  state == 1 && (/^[[:space:]]*$/ || /^[[:space:]]*#/) { next }
+  state == 1 {
+    line = $0
+    if (match(line, /^("[^"]+"|'\''[^'\'']+'\''|[^"'\'':#[:space:]][^:#]*)[[:space:]]*:[[:space:]]*/)) {
+      key = substr(line, 1, RLENGTH); value = substr(line, RLENGTH + 1)
+      sub(/[[:space:]]*:[[:space:]]*$/, "", key)
+      sub(/[[:space:]]+(#.*)?$/, "", value)
+      if (key ~ /^["'\'']/) key = substr(key, 2, length(key) - 2)
+      if (value ~ /^"[^"]*"$/ || value ~ /^'\''[^'\'']*'\''$/) value = substr(value, 2, length(value) - 2)
+      if (value ~ /^(major|minor|patch|none)$/) { print "package\t" key; next }
+      print "error\tinvalid bump type \"" value "\" for \"" key "\"; use major, minor, patch or none"
+      next
+    }
+    print "error\tunreadable front matter line: " line
+  }
+  END {
+    if (state == 0) print "error\tmissing front matter: the file must start with a --- line"
+    if (state == 1) print "error\tfront matter is not closed with a --- line"
+  }
+'
 while IFS= read -r file; do
   [[ -z "$file" || "$file" == .changeset/README.md ]] && continue
   # Front matter lines look like:  "gws-rust": patch
-  while IFS= read -r pkg; do
-    if [[ "$pkg" != gws-rust ]]; then
-      echo "::error file=${file}::Unknown package '${pkg}' in changeset; the only package is \"gws-rust\"."
+  while IFS=$'\t' read -r kind detail; do
+    if [[ "$kind" == error ]]; then
+      echo "::error file=${file}::Invalid changeset: ${detail}."
+      status=1
+    elif [[ "$detail" != gws-rust ]]; then
+      echo "::error file=${file}::Unknown package '${detail}' in changeset; the only package is \"gws-rust\"."
       status=1
     fi
-  done < <(awk '/^---$/ { n++; next } n == 1' "$file" | sed -nE 's/^["'\'']?([^"'\'':]+)["'\'']?:[[:space:]]*(major|minor|patch)[[:space:]]*$/\1/p')
+  done < <(awk "$frontmatter_awk" "$file")
 done < <(grep -E '^\.changeset/[^/]+\.md$' <<<"$changed" || true)
 
 if [[ "$status" -eq 0 ]]; then
