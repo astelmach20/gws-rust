@@ -45,9 +45,10 @@ gwsr docs +read --document-id DOC_ID --output - | less
 
 ## Tips
 
-- Read-only. Prints JSON {documentId, title, bodyFormat, body} by default.
+- Read-only. Prints JSON {documentId, title, bodyFormat, body, tabs} by default.
 - Headings, lists, bold/italic/strikethrough, inline code, links and tables are rendered; images appear as [image] placeholders.
-- Only the first tab of multi-tab documents is read.
+- Every tab is read, child tabs after their parent. With more than one tab, each starts with a '=== Tab: Parent > Child ===' line, and the JSON output lists them in 'tabs' (tabId, title, parentTabId).
+- --body-format raw prints the document with includeTabsContent: the content is under 'tabs', not 'body'.
 
 ## See Also
 

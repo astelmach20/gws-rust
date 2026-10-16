@@ -44,6 +44,7 @@ gwsr docs +replace --document-id DOC_ID --find 'DRAFT' --replace-with '' --match
 
 ## Tips
 
+- Replaces in every tab of a multi-tab document.
 - Prints occurrencesChanged; 0 means nothing matched.
 
 ## See Also

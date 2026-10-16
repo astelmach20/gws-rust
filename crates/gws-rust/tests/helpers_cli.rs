@@ -210,6 +210,121 @@ fn docs_markdown_write_dry_run_builds_native_requests() {
     );
 }
 
+/// A paragraph structural element holding `text`, in the Docs API
+/// `StructuralElement` shape.
+fn docs_paragraph(start: u64, text: &str) -> Value {
+    json!({
+        "startIndex": start,
+        "endIndex": start + text.len() as u64,
+        "paragraph": {"elements": [{"textRun": {"content": text}}]}
+    })
+}
+
+/// `+read` asks `documents.get` for every tab (`includeTabsContent=true`) and
+/// renders all of them, child tabs included. Without that parameter the API
+/// returns only the first tab's content in the legacy `body` field, so the
+/// other tabs were silently dropped.
+/// <https://developers.google.com/workspace/docs/api/how-tos/tabs>
+#[tokio::test(flavor = "multi_thread")]
+async fn docs_read_includes_every_tab() {
+    use wiremock::matchers::{method, path, query_param};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    let section = json!({"endIndex": 1, "sectionBreak": {}});
+    // The documented response with includeTabsContent=true: `tabs` populated,
+    // the legacy text fields on the document left empty.
+    Mock::given(method("GET"))
+        .and(path("/v1/documents/DOC"))
+        .and(query_param("includeTabsContent", "true"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "documentId": "DOC",
+            "title": "Plan",
+            "tabs": [
+                {
+                    "tabProperties": {"tabId": "t.0", "title": "Overview", "index": 0},
+                    "documentTab": {"body": {"content": [
+                        section, docs_paragraph(1, "First tab text\n")
+                    ]}}
+                },
+                {
+                    "tabProperties": {"tabId": "t.1", "title": "Details", "index": 1},
+                    "documentTab": {"body": {"content": [
+                        section, docs_paragraph(1, "Second tab text\n")
+                    ]}},
+                    "childTabs": [{
+                        "tabProperties": {
+                            "tabId": "t.2", "title": "Appendix", "index": 0,
+                            "parentTabId": "t.1", "nestingLevel": 1
+                        },
+                        "documentTab": {"body": {"content": [
+                            section, docs_paragraph(1, "Child tab text\n")
+                        ]}}
+                    }]
+                }
+            ]
+        })))
+        .mount(&server)
+        .await;
+    // Without the parameter: the first tab only, in `body`.
+    Mock::given(method("GET"))
+        .and(path("/v1/documents/DOC"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "documentId": "DOC",
+            "title": "Plan",
+            "body": {"content": [section, docs_paragraph(1, "First tab text\n")]}
+        })))
+        .mount(&server)
+        .await;
+
+    let dir = setup();
+    for format in ["text", "markdown"] {
+        let out = gwsr(dir.path())
+            .env("GWSR_TOKEN", "test-token")
+            .env("GWSR_API_BASE_URL", server.uri())
+            .args([
+                "docs",
+                "+read",
+                "--document-id",
+                "DOC",
+                "--body-format",
+                format,
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let v = stdout_json(&out);
+        let body = v["body"].as_str().unwrap();
+        let first = body.find("First tab text").unwrap_or(usize::MAX);
+        let second = body.find("Second tab text").unwrap_or(usize::MAX);
+        let child = body.find("Child tab text").unwrap_or(usize::MAX);
+        assert!(
+            first < second && second < child && child != usize::MAX,
+            "every tab, in document order ({format}): {body}"
+        );
+        for header in [
+            "=== Tab: Overview ===",
+            "=== Tab: Details ===",
+            "=== Tab: Details > Appendix ===",
+        ] {
+            assert!(body.contains(header), "{header} ({format}): {body}");
+        }
+        assert_eq!(
+            v["tabs"],
+            json!([
+                {"tabId": "t.0", "title": "Overview"},
+                {"tabId": "t.1", "title": "Details"},
+                {"tabId": "t.2", "title": "Appendix", "parentTabId": "t.1"}
+            ]),
+            "{v}"
+        );
+    }
+}
+
 #[test]
 fn docs_helpers_validate_input_before_auth() {
     // No credentials exist here. Input the helper can reject on its own is a
