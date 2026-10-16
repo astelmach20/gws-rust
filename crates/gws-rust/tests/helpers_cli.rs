@@ -108,12 +108,19 @@ fn drive_export_dry_run_prints_json_plan() {
     );
     let v = stdout_json(&out);
     assert_eq!(v["dry_run"], true);
+    // The metadata read a real run sends first, then the export.
+    assert_eq!(v["requests"].as_array().unwrap().len(), 2, "{v}");
+    assert_eq!(v["requests"][0]["method"], "GET");
     assert_eq!(
         v["requests"][0]["url"],
+        "https://www.googleapis.com/drive/v3/files/DOC-1_a"
+    );
+    assert_eq!(
+        v["requests"][1]["url"],
         "https://www.googleapis.com/drive/v3/files/DOC-1_a/export"
     );
     assert_eq!(
-        v["requests"][0]["query_params"]["mimeType"],
+        v["requests"][1]["query_params"]["mimeType"],
         "application/pdf"
     );
 }
