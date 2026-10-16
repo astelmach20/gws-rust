@@ -132,7 +132,12 @@ fn main() -> ExitCode {
     let result = runtime.block_on(dispatch(cli, &args, &settings, &prescan));
     // Stop background tasks, then flush file logs before exiting.
     drop(runtime);
-    let code = finish(result, human);
+    let code = match (helpers::exit_signal(), &result) {
+        // The command stopped on a signal after its cleanup (`drive +sync`
+        // saved its state): exit like a process stopped by that signal.
+        (Some(signal), Ok(())) => ExitCode::from(signal.exit_code()),
+        _ => finish(result, human),
+    };
     drop(log_guard);
     code
 }

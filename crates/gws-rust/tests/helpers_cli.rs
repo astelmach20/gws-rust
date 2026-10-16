@@ -1914,6 +1914,118 @@ async fn drive_sync_keeps_local_files_and_exits_with_sync_conflict() {
     assert_eq!(stdout_json(&out)["unchanged"].as_array().unwrap().len(), 1);
 }
 
+// --- drive +sync interrupted by a signal ---
+
+/// `drive +sync` stopped by SIGINT or SIGTERM saves the sync state of the
+/// files it finished and exits 130 / 143, so the next run does not report
+/// them as conflicts. The signal is sent once the second download has
+/// reached the server, which only happens after the first file was
+/// written and recorded; that download never answers, so the run cannot
+/// finish first.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn drive_sync_interrupted_by_a_signal_saves_its_state() {
+    use wiremock::matchers::{method, path, query_param};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/drive/v3/files"))
+        .and(query_param("q", "'ROOT' in parents and trashed = false"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"files": [
+            {"id": "A", "name": "a.txt", "mimeType": "text/plain",
+             "modifiedTime": "2024-01-01T00:00:00Z", "version": "3", "size": "6"},
+            {"id": "B", "name": "b.txt", "mimeType": "text/plain",
+             "modifiedTime": "2024-01-01T00:00:00Z", "version": "3", "size": "6"}
+        ]})))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/drive/v3/files/A"))
+        .and(query_param("alt", "media"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(b"remote".to_vec()))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/drive/v3/files/B"))
+        .and(query_param("alt", "media"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_bytes(b"remote".to_vec())
+                .set_delay(std::time::Duration::from_secs(600)),
+        )
+        .mount(&server)
+        .await;
+
+    for (signal, code) in [("INT", 130), ("TERM", 143)] {
+        let dir = setup();
+        let mirror = dir.path().join("mirror");
+        let mut child = std::process::Command::new(assert_cmd::cargo::cargo_bin("gwsr"));
+        child
+            .env_clear()
+            .env("GWSR_CONFIG_DIR", dir.path())
+            .env("GWSR_CACHE_DIR", dir.path().join("cache"))
+            .env("HOME", dir.path())
+            .env("GWSR_TOKEN", "test-token")
+            .env("GWSR_API_BASE_URL", server.uri())
+            .current_dir(dir.path());
+        for key in ["SSL_CERT_FILE", "NIX_SSL_CERT_FILE"] {
+            if let Some(value) = std::env::var_os(key) {
+                child.env(key, value);
+            }
+        }
+        let mut child = child
+            .args(["drive", "+sync", "--folder-id", "ROOT", "--dir", "mirror"])
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+
+        // Wait (bounded) until this run asks for B; earlier runs' requests
+        // are counted before it starts.
+        let b_requests = |reqs: &[wiremock::Request]| {
+            reqs.iter()
+                .filter(|r| r.url.path() == "/drive/v3/files/B")
+                .count()
+        };
+        let before = b_requests(&server.received_requests().await.unwrap());
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        while b_requests(&server.received_requests().await.unwrap()) == before {
+            if let Some(status) = child.try_wait().unwrap() {
+                let out = child.wait_with_output().unwrap();
+                panic!(
+                    "gwsr exited ({status}) before downloading B: {}",
+                    String::from_utf8_lossy(&out.stderr)
+                );
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "gwsr never requested B"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+
+        let kill = std::process::Command::new("kill")
+            .arg(format!("-{signal}"))
+            .arg(child.id().to_string())
+            .status()
+            .unwrap();
+        assert!(kill.success());
+        let out = child.wait_with_output().unwrap();
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(code), "SIG{signal}: {stderr}");
+        assert!(stderr.contains("interrupted"), "SIG{signal}: {stderr}");
+        assert!(out.stdout.is_empty(), "SIG{signal}: stdout must stay empty");
+        assert_eq!(std::fs::read(mirror.join("a.txt")).unwrap(), b"remote");
+        assert!(!mirror.join("b.txt").exists(), "SIG{signal}");
+        let state: Value =
+            serde_json::from_slice(&std::fs::read(mirror.join(".gwsr-sync.json")).unwrap())
+                .unwrap();
+        assert_eq!(state["files"]["A"]["path"], "a.txt", "SIG{signal}: {state}");
+        assert!(state["files"].get("B").is_none(), "SIG{signal}: {state}");
+    }
+}
+
 /// A helper that writes straight to stdout (`--output -` payloads, `gmail
 /// +read`) ends quietly with status 0 when the reader has gone away
 /// (`gwsr ... | head`), like every other command, instead of reporting an
