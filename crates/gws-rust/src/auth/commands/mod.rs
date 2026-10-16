@@ -266,6 +266,10 @@ pub async fn handle_auth_command(
     let Some(matches) = parse_or_help(auth_command(), "auth", args)? else {
         return Ok(());
     };
+    let argv: Vec<String> = std::iter::once("auth".to_string())
+        .chain(args.iter().cloned())
+        .collect();
+    crate::cli_args::reject_repeated_globals(&auth_command(), &argv)?;
     if dry_run {
         check_dry_run(matches.subcommand_name())?;
     }
