@@ -574,48 +574,20 @@ fn resolve_method_from_matches<'a>(
         ));
     }
 
-    // A method declared outside any resource: ["tokeninfo"]
-    if let [method_name] = path.as_slice()
-        && let Some(method) = doc.methods.get(*method_name)
-    {
-        return Ok((method, current_matches));
+    // ["tokeninfo"], ["files", "list"] or ["files", "permissions", "list"],
+    // as command names (which differ from Discovery names where those
+    // collide; see `commands::subcommand_names`).
+    match commands::resolve_command_path(doc, &path) {
+        Some(commands::Node::Method(_, method)) => Ok((method, current_matches)),
+        Some(commands::Node::Resource(..)) => Err(GwsError::Validation(format!(
+            "'{}' is a resource, not a method; run it with --help to see its methods",
+            path.join(" ")
+        ))),
+        None => Err(GwsError::Validation(format!(
+            "'{}' is not a method of this API",
+            path.join(" ")
+        ))),
     }
-
-    // path looks like ["files", "list"] or ["files", "permissions", "list"]
-    // Walk the Discovery Document resources to find the method
-    let resource_name = path[0];
-    let resource = doc
-        .resources
-        .get(resource_name)
-        .ok_or_else(|| GwsError::Validation(format!("Resource '{resource_name}' not found")))?;
-
-    let mut current_resource = resource;
-
-    // Navigate sub-resources (everything except the last element, which is the method)
-    for &name in &path[1..path.len() - 1] {
-        // Check if this is a sub-resource
-        if let Some(sub) = current_resource.resources.get(name) {
-            current_resource = sub;
-        } else {
-            return Err(GwsError::Validation(format!(
-                "Sub-resource '{name}' not found"
-            )));
-        }
-    }
-
-    // The last element is the method name
-    let method_name = path[path.len() - 1];
-
-    // Check if this is a method on the current resource
-    if let Some(method) = current_resource.methods.get(method_name) {
-        return Ok((method, current_matches));
-    }
-
-    // Maybe it's a resource that has methods — need one more subcommand
-    Err(GwsError::Validation(format!(
-        "Method '{method_name}' not found on resource. Available methods: {:?}",
-        current_resource.methods.keys().collect::<Vec<_>>()
-    )))
 }
 
 #[cfg(test)]

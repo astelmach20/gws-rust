@@ -63,7 +63,11 @@ pub async fn handle_schema_command(
             return Ok(output);
         }
         // A method declared outside any resource (e.g. `oauth2:v2.tokeninfo`).
-        if let Some(method) = doc.methods.get(schema_name) {
+        if let Some(method) = doc
+            .methods
+            .get(schema_name)
+            .or_else(|| crate::commands::command_method(&doc, &[schema_name]))
+        {
             let mut output = build_schema_output(&doc, method);
             if resolve_refs {
                 let mut seen = std::collections::HashSet::new();
@@ -87,7 +91,10 @@ pub async fn handle_schema_command(
     let resource_path = &parts[1..parts.len() - 1];
     let method_name = parts[parts.len() - 1];
 
-    let method = find_method(&doc, resource_path, method_name)?;
+    let method = match find_method(&doc, resource_path, method_name) {
+        Ok(method) => method,
+        Err(e) => crate::commands::command_method(&doc, &parts[1..]).ok_or(e)?,
+    };
 
     let mut output = build_schema_output(&doc, method);
     if resolve_refs {

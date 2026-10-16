@@ -1186,9 +1186,8 @@ fn lookup_method_description(
     resource_name: &str,
     method_name: &str,
 ) -> Option<String> {
-    let resource = doc.resources.get(resource_name)?;
-    // Try direct method lookup first
-    if let Some(method) = resource.methods.get(method_name)
+    // Command names, which differ from Discovery names where those collide.
+    if let Some(method) = crate::commands::command_method(doc, &[resource_name, method_name])
         && let Some(desc) = &method.description
     {
         let one_line = desc.split_whitespace().collect::<Vec<_>>().join(" ");

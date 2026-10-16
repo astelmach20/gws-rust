@@ -113,6 +113,8 @@ gwsr <service> +<helper> [flags]
 
 `--help` works at every level (`gwsr drive --help`, `gwsr drive files --help`, `gwsr drive files list --help`) and prints to stdout. Method help groups its flags under Request, Output, Pagination and Upload headings. Pagination, upload, `--wait` and `--yes` flags appear only on methods where they apply. Methods Google marks deprecated are hidden.
 
+Commands use the Discovery names, except where two would clash. A few APIs have a method and a resource with the same name at one level, such as `apigee:v1 organizations developers attributes`. In that case the method keeps the name and the resource becomes `<name>-resource` (`gwsr apigee:v1 organizations developers attributes-resource list`). A method or resource named `help` would clash with the built-in `help` command, so it becomes `help-method` or `help-resource`. If the new name is also taken, a number is added (`-2`, `-3` and so on). `gwsr schema` and `gwsr batch` accept either the Discovery path or the command path, and `gwsr commands` and completions list the command names.
+
 ### Services
 
 | Service | API | | Service | API |
