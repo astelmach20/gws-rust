@@ -1028,9 +1028,9 @@ async fn update(api: &Api, m: &ArgMatches, tz: &TzInfo) -> Result<Value, GwsErro
             patch.insert(field.into(), json!(v));
         }
     }
-    // Offset times without --timezone carry no zone of their own. A PATCH
-    // replaces `start`/`end` whole, so each end keeps the event's current
-    // `timeZone` (recurring events need one), which needs the current event.
+    // Offset times without --timezone carry no zone of their own, so each
+    // end states the event's current `timeZone` (recurring events need one),
+    // which needs the current event.
     let mut offset_time = false;
     let mut local_time = false;
     for (name, label) in [("start", "--start"), ("end", "--end")] {
@@ -1133,11 +1133,11 @@ async fn update(api: &Api, m: &ArgMatches, tz: &TzInfo) -> Result<Value, GwsErro
         };
         patch.insert(
             "start".into(),
-            start.to_event_time(zone.or_else(|| current_zone("start"))),
+            patch_event_time(&start, zone.or_else(|| current_zone("start"))),
         );
         patch.insert(
             "end".into(),
-            end.to_event_time(zone.or_else(|| current_zone("end"))),
+            patch_event_time(&end, zone.or_else(|| current_zone("end"))),
         );
     }
 
@@ -1185,6 +1185,21 @@ async fn update(api: &Api, m: &ArgMatches, tz: &TzInfo) -> Result<Value, GwsErro
             .json(Value::Object(patch)),
     )
     .await
+}
+
+/// `EventDateTime` JSON for a PATCH. The API merges a patched `start`/`end`
+/// into the event's current one, so the field of the other kind is cleared:
+/// `dateTime` for an all-day date, `date` for a time. Without that, switching
+/// a timed event to all-day (or back) left both fields set.
+fn patch_event_time(when: &When, tz: Option<&str>) -> Value {
+    let mut v = when.to_event_time(tz);
+    let other = if matches!(when, When::Date(_)) {
+        "dateTime"
+    } else {
+        "date"
+    };
+    v[other] = Value::Null;
+    v
 }
 
 // ── +delete / +rsvp ──────────────────────────────────────────────────
@@ -2069,7 +2084,7 @@ mod tests {
         let body: Value = serde_json::from_slice(&patch.body).unwrap();
         assert_eq!(
             body["end"],
-            json!({"dateTime": "2026-03-18T15:30:00", "timeZone": "America/Denver"}),
+            json!({"dateTime": "2026-03-18T15:30:00", "timeZone": "America/Denver", "date": null}),
             "{body}"
         );
     }
@@ -2110,9 +2125,8 @@ mod tests {
         serde_json::from_slice(&patch.body).unwrap()
     }
 
-    /// Offset times without `--timezone` keep each end's current time zone:
-    /// the PATCH replaces `start`/`end` whole, so leaving `timeZone` out
-    /// moved the event out of its zone (and recurring events need one).
+    /// Offset times without `--timezone` keep each end's current time zone
+    /// (recurring events need one).
     #[tokio::test]
     async fn update_offset_times_keep_the_event_time_zones() {
         for args in [
@@ -2133,6 +2147,83 @@ mod tests {
             );
             assert_eq!(body["end"]["timeZone"], "Europe/Paris", "{args:?}: {body}");
         }
+    }
+
+    /// Run `+update` against an event with the given current `start`/`end`;
+    /// return the PATCH body.
+    async fn update_patch_of(current: Value, args: &[&str]) -> Value {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/calendars/primary/events/E1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(current))
+            .mount(&server)
+            .await;
+        Mock::given(method("PATCH"))
+            .and(path("/calendars/primary/events/E1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id": "E1"})))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let api = api(&server.uri(), "");
+        let mut argv = vec!["gwsr", "+update", "--event-id", "E1"];
+        argv.extend_from_slice(args);
+        let m = parse(&argv);
+        update(
+            &api,
+            m.subcommand_matches("+update").unwrap(),
+            &tz("UTC", false),
+        )
+        .await
+        .unwrap();
+        let reqs = server.received_requests().await.unwrap();
+        let patch = reqs.iter().find(|r| r.method.as_str() == "PATCH").unwrap();
+        serde_json::from_slice(&patch.body).unwrap()
+    }
+
+    /// The API merges a patched `start`/`end` into the current one, so
+    /// switching between all-day and timed must clear the other field:
+    /// otherwise the event is left with both `date` and `dateTime`.
+    #[tokio::test]
+    async fn update_switching_all_day_and_timed_clears_the_other_field() {
+        let body = update_patch_of(
+            json!({
+                "start": {"dateTime": "2026-03-18T14:00:00-06:00", "timeZone": "America/Denver"},
+                "end": {"dateTime": "2026-03-18T15:00:00-06:00", "timeZone": "America/Denver"}
+            }),
+            &["--start", "2026-03-18", "--end", "2026-03-19"],
+        )
+        .await;
+        assert_eq!(
+            body["start"],
+            json!({"date": "2026-03-18", "dateTime": null}),
+            "{body}"
+        );
+        assert_eq!(
+            body["end"],
+            json!({"date": "2026-03-19", "dateTime": null}),
+            "{body}"
+        );
+
+        let body = update_patch_of(
+            json!({"start": {"date": "2026-03-18"}, "end": {"date": "2026-03-19"}}),
+            &[
+                "--start",
+                "2026-03-18T09:00:00Z",
+                "--end",
+                "2026-03-18T10:00:00Z",
+            ],
+        )
+        .await;
+        assert_eq!(
+            body["start"],
+            json!({"dateTime": "2026-03-18T09:00:00+00:00", "date": null}),
+            "{body}"
+        );
+        assert_eq!(
+            body["end"],
+            json!({"dateTime": "2026-03-18T10:00:00+00:00", "date": null}),
+            "{body}"
+        );
     }
 
     /// An explicit `--timezone` still wins over the event's own zone.
