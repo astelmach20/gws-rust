@@ -317,11 +317,15 @@ mod tests {
     #[tokio::test]
     async fn block_mode_sends_nothing_when_model_armor_is_unreachable() {
         let gmail = gmail_expecting(0).await;
-        // A port that was bound and released again: connection refused.
+        // A port nobody listens on: connection refused. On Linux a socket
+        // that is bound but never listens holds it for the whole test, so a
+        // parallel test's server can't take it; macOS drops connections to
+        // such a socket instead of refusing them, so it binds and releases.
         // (Dropped wiremock servers go back to a pool and keep listening.)
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let addr = listener.local_addr().unwrap();
-        drop(listener);
+        let reserved = tokio::net::TcpSocket::new_v4().unwrap();
+        reserved.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let addr = reserved.local_addr().unwrap();
+        let _reserved = cfg!(target_os = "linux").then_some(reserved);
         let client = ModelArmorClient::for_test(&format!("http://{addr}"));
         let err = deliver_with(
             Some(&mock_api(&gmail)),

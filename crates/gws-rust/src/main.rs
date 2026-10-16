@@ -390,7 +390,7 @@ async fn dispatch(
             emit_value(&value, format)?;
         }
         TopCommand::Commands { services } => {
-            let inventory = inventory::build(&services).await?;
+            let inventory = inventory::build(&services, cli.global.api_version.as_deref()).await?;
             match format {
                 // Tabular formats get one row per command.
                 OutputFormat::Table | OutputFormat::Csv => {

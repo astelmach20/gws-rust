@@ -127,6 +127,25 @@ pub fn encode_path_segment(s: &str) -> String {
 /// removed before parsing, and `\` separates path segments in http(s) URLs,
 /// so `a/.<TAB>./b` and `a/..\b` hide dot segments too.
 pub fn reject_dot_segments(url: &str) -> Result<(), GwsError> {
+    let path = url_path(url);
+    let is_dot_segment = |segment: &str| {
+        let decoded = segment.replace("%2E", ".").replace("%2e", ".");
+        decoded == "." || decoded == ".."
+    };
+    if path.split(['/', '\\']).any(is_dot_segment) {
+        return Err(GwsError::Validation(format!(
+            "Refusing to send a request whose URL path has a '.' or '..' dot segment \
+             (an ID or resource name of '.' or '..'), which would address a different \
+             resource: {url}"
+        )));
+    }
+    Ok(())
+}
+
+/// The path of `url` as the WHATWG parser used by `reqwest` sees it: ASCII
+/// tab, CR and LF removed, from the first `/` or `\` after the authority up
+/// to the query or fragment.
+fn url_path(url: &str) -> String {
     let stripped: String = url
         .chars()
         .filter(|c| !matches!(c, '\t' | '\n' | '\r'))
@@ -137,18 +156,30 @@ pub fn reject_dot_segments(url: &str) -> Result<(), GwsError> {
     let path_and_rest = after_scheme
         .find(['/', '\\'])
         .map_or("", |start| &after_scheme[start..]);
-    let path = path_and_rest
+    path_and_rest
         .split(['?', '#'])
         .next()
-        .unwrap_or(path_and_rest);
-    let is_dot_segment = |segment: &str| {
-        let decoded = segment.replace("%2E", ".").replace("%2e", ".");
-        decoded == "." || decoded == ".."
-    };
-    if path.split(['/', '\\']).any(is_dot_segment) {
+        .unwrap_or(path_and_rest)
+        .to_string()
+}
+
+/// Reject a URL whose path has an empty segment (`calendars//events`, or a
+/// trailing `/` as in `events/`), other than the bare root `/`.
+///
+/// An empty segment is what an empty ID (`--event-id ""`) leaves in a URL
+/// built as `.../events/{id}`. The request would address a different
+/// resource than the one named: `DELETE .../events/` names the collection,
+/// and `GET .../messages/` the message list instead of one message.
+pub fn reject_empty_path_segments(url: &str) -> Result<(), GwsError> {
+    let path = url_path(url);
+    if path.is_empty() || path == "/" {
+        return Ok(());
+    }
+    let segments = path.strip_prefix(['/', '\\']).unwrap_or(&path);
+    if segments.split(['/', '\\']).any(str::is_empty) {
         return Err(GwsError::Validation(format!(
-            "Refusing to send a request whose URL path has a '.' or '..' dot segment \
-             (an ID or resource name of '.' or '..'), which would address a different \
+            "Refusing to send a request whose URL path has an empty segment \
+             (an empty ID or resource name), which would address a different \
              resource: {url}"
         )));
     }
@@ -410,6 +441,35 @@ mod tests {
             assert!(result.is_err(), "{bad:?} was accepted");
         }
         assert!(reject_dot_segments("https://www.googleapis.com/a/b\\c").is_ok());
+    }
+
+    #[test]
+    fn reject_empty_path_segments_catches_empty_ids() {
+        for bad in [
+            "https://www.googleapis.com/calendar/v3/calendars/primary/events/",
+            "https://www.googleapis.com/calendar/v3/calendars//events/E1",
+            "https://gmail.googleapis.com/gmail/v1/users/me/messages/?format=metadata",
+            "https://www.googleapis.com/drive/v3/files/#x",
+            "https://www.googleapis.com//drive/v3/files",
+            "https://www.googleapis.com/drive/v3/files/F1\\\\permissions",
+            "https://www.googleapis.com/drive/v3/files/F1/\\permissions",
+            "http://127.0.0.1:8080/tasks/v1/lists/\t/tasks",
+        ] {
+            let err = reject_empty_path_segments(bad).unwrap_err();
+            assert!(matches!(err, GwsError::Validation(_)), "{bad:?}: {err:?}");
+            assert!(err.to_string().contains("empty segment"), "{bad:?}: {err}");
+        }
+        for ok in [
+            "https://www.googleapis.com/",
+            "https://www.googleapis.com",
+            "https://www.googleapis.com?x=1",
+            "https://www.googleapis.com/drive/v3/files",
+            "https://www.googleapis.com/drive/v3/files?q=a//b",
+            "https://www.googleapis.com/drive/v3/files/F1#a//b",
+            "https://www.googleapis.com/calendar/v3/calendars/a%2F%2Fb/events",
+        ] {
+            assert!(reject_empty_path_segments(ok).is_ok(), "{ok}");
+        }
     }
 
     #[test]
