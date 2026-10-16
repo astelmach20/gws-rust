@@ -95,7 +95,7 @@ pub struct BatchArgs {
     #[arg(value_name = "SERVICE[:VERSION]")]
     pub service: String,
     /// NDJSON file with one call per line (default: stdin)
-    #[arg(long, short = 'i', value_name = "FILE")]
+    #[arg(long, short = 'i', value_name = "FILE", value_hint = clap::ValueHint::FilePath)]
     pub input: Option<String>,
     /// Confirm destructive calls in the batch without prompting
     #[arg(long, short = 'y')]

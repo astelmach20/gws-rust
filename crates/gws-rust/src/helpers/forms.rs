@@ -53,7 +53,8 @@ impl Helper for FormsHelper {
                         .long("output")
                         .short('o')
                         .help("Write CSV to this path, or '-' for CSV on stdout")
-                        .value_name("PATH"),
+                        .value_name("PATH")
+                        .value_hint(clap::ValueHint::AnyPath),
                 )
                 .arg(
                     Arg::new("overwrite")

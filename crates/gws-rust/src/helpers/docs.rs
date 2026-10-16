@@ -54,7 +54,8 @@ fn content_args(cmd: Command, required: bool) -> Command {
         Arg::new("text-file")
             .long("text-file")
             .help("Read the content from a file, or '-' for stdin")
-            .value_name("PATH"),
+            .value_name("PATH")
+            .value_hint(clap::ValueHint::FilePath),
     )
     .group(
         ArgGroup::new("content")
@@ -110,7 +111,7 @@ TIPS:
                         .long("output")
                         .short('o')
                         .help("Write the rendered body to this file, or '-' for raw text on stdout")
-                        .value_name("PATH"),
+                        .value_name("PATH").value_hint(clap::ValueHint::AnyPath),
                 )
                 .arg(
                     Arg::new("overwrite")
