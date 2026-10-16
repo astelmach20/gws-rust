@@ -1,0 +1,8 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 60ef468d66cf7d915c890e455842f936b7a2b415043c52957be3112b572aa46b # shrinks to (s, p) = ("http://localhost.evil.com", BaseParts { scheme: "http", clean: true, google: false, loopback: false, default_port: true })
+cc c5a7883578365c5dfd16fd5065e58a11860848e9a9a12660a95e6b86c4a8dadf # shrinks to s = "\u{202a}"
