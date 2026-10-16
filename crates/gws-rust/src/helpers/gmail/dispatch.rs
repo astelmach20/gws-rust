@@ -266,7 +266,7 @@ mod tests {
 
     fn match_state(state: &str) -> ResponseTemplate {
         ResponseTemplate::new(200)
-            .set_body_json(json!({ "sanitizationResult": { "filterMatchState": state } }))
+            .set_body_json(json!({ "sanitizationResult": { "filterMatchState": state, "invocationResult": "SUCCESS" } }))
     }
 
     #[tokio::test]

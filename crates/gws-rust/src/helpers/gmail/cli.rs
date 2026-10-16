@@ -774,10 +774,10 @@ fn watch_cmd() -> Command {
                 .long("subscription")
                 .help(
                     "Existing Pub/Sub subscription name (skip setup; conflicts with the setup \
-                     flags --project, --topic, --label-ids and --cleanup)",
+                     flags --project, --topic and --cleanup)",
                 )
                 .value_name("NAME")
-                .conflicts_with_all(["project", "topic", "label-ids", "cleanup"]),
+                .conflicts_with_all(["project", "topic", "cleanup"]),
         )
         .arg(
             Arg::new("topic")
@@ -788,7 +788,10 @@ fn watch_cmd() -> Command {
         .arg(
             Arg::new("label-ids")
                 .long("label-ids")
-                .help("Comma-separated Gmail label IDs to watch (e.g., INBOX,UNREAD)")
+                .help(
+                    "Comma-separated Gmail label IDs to watch (e.g., INBOX,UNREAD); only \
+                     messages with one of them are emitted, also with --subscription",
+                )
                 .value_name("LABELS"),
         )
         .arg(

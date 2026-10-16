@@ -120,8 +120,10 @@ fn validate_subscribe_config(config: &SubscribeConfig) -> Result<(), GwsError> {
     Ok(())
 }
 
-/// Decode a Pub/Sub message carrying a CloudEvent. Undecodable data is kept
-/// as `null` with an explicit `dataError` rather than silently dropped.
+/// Decode a Pub/Sub message carrying a CloudEvent. Workspace Events uses the
+/// CloudEvents Pub/Sub binary binding, so the context attributes are
+/// `ce-type`, `ce-source` and `ce-time`. Undecodable data is kept as `null`
+/// with an explicit `dataError` rather than silently dropped.
 fn decode_cloud_event(pubsub_msg: &Value) -> Value {
     let attributes = pubsub_msg
         .get("attributes")
@@ -134,9 +136,9 @@ fn decode_cloud_event(pubsub_msg: &Value) -> Value {
             .map(str::to_string)
     };
     let mut event = json!({
-        "type": attr("type"),
-        "source": attr("source"),
-        "time": attr("time"),
+        "type": attr("ce-type"),
+        "source": attr("ce-source"),
+        "time": attr("ce-time"),
         "attributes": attributes,
         "data": Value::Null,
     });
@@ -303,26 +305,52 @@ impl StreamStep for SubscribeStep<'_> {
                 self.pull_timeout,
             )
             .await?;
-        for m in &received {
+        // The events handled (written or blocked) before any failure. They
+        // are acknowledged even when a later event fails, so Pub/Sub does not
+        // redeliver (and the stream print again) what was already written.
+        let mut handled = Vec::with_capacity(received.len());
+        let mut failure = None;
+        for m in received {
             let event = decode_cloud_event(&m.message);
-            // Fail closed: a block-mode sanitization error aborts before emit/ack.
-            match sanitize_value(self.sanitize, event)
-                .await
-                .map_err(StepError::Transient)?
-            {
-                Sanitized::Pass(v) => self.output(&v).await?,
-                Sanitized::Blocked(r) => emit_diagnostic(
-                    "warning",
-                    "blocked",
-                    json!({ "ackId": m.ack_id, "filterMatchState": r.filter_match_state }),
-                ),
+            // Fail closed: a block-mode sanitization error aborts before this
+            // event is emitted or acknowledged.
+            let result = match sanitize_value(self.sanitize, event).await {
+                Ok(Sanitized::Pass(v)) => self.output(&v).await,
+                Ok(Sanitized::Blocked(r)) => {
+                    emit_diagnostic(
+                        "warning",
+                        "blocked",
+                        json!({ "ackId": m.ack_id, "filterMatchState": r.filter_match_state }),
+                    );
+                    Ok(())
+                }
+                Err(e) => Err(StepError::Transient(e)),
+            };
+            if let Err(e) = result {
+                failure = Some(e);
+                break;
             }
+            handled.push(m.ack_id);
         }
         if self.config.no_ack {
-            return Ok(());
+            return failure.map_or(Ok(()), Err);
         }
-        let ack_ids: Vec<String> = received.into_iter().map(|m| m.ack_id).collect();
-        self.pubsub.ack(&self.subscription, &ack_ids).await
+        let acked = self.pubsub.ack(&self.subscription, &handled).await;
+        match (failure, acked) {
+            (None, acked) => acked,
+            (Some(e), Ok(())) => Err(e),
+            // The batch's own failure is the step's error; the failed
+            // acknowledgement (the written events will be redelivered) is
+            // reported beside it.
+            (Some(e), Err(StepError::Transient(ack) | StepError::Fatal(ack))) => {
+                emit_diagnostic(
+                    "error",
+                    "ack_failed",
+                    json!({ "message": ack.to_string(), "ackIds": handled }),
+                );
+                Err(e)
+            }
+        }
     }
 }
 
@@ -647,12 +675,25 @@ mod tests {
 
     #[test]
     fn test_decode_cloud_event() {
+        // Workspace Events publishes CloudEvents in the Pub/Sub binary
+        // binding: the context attributes carry a `ce-` prefix.
         let msg = json!({
-            "attributes": { "type": "google.workspace.chat.message.v1.created", "source": "//chat/spaces/A", "time": "2026-02-13T10:00:00Z" },
+            "attributes": {
+                "ce-type": "google.workspace.chat.message.v1.created",
+                "ce-source": "//workspaceevents.googleapis.com/subscriptions/S",
+                "ce-time": "2026-02-13T10:00:00Z",
+                "ce-specversion": "1.0"
+            },
             "data": base64::engine::general_purpose::STANDARD.encode(r#"{"foo":"bar"}"#)
         });
         let e = decode_cloud_event(&msg);
         assert_eq!(e["type"], "google.workspace.chat.message.v1.created");
+        assert_eq!(
+            e["source"],
+            "//workspaceevents.googleapis.com/subscriptions/S"
+        );
+        assert_eq!(e["time"], "2026-02-13T10:00:00Z");
+        assert_eq!(e["attributes"]["ce-specversion"], "1.0");
         assert_eq!(e["data"]["foo"], "bar");
         assert!(e.get("dataError").is_none());
         let bad = decode_cloud_event(&json!({ "data": "!!!" }));
@@ -749,7 +790,7 @@ mod tests {
             .and(header("authorization", "Bearer test-token"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
                 "receivedMessages": [{ "ackId": "ack-1", "message": {
-                    "attributes": { "type": "t" },
+                    "attributes": { "ce-type": "t" },
                     "data": base64::engine::general_purpose::STANDARD.encode(r#"{"id":"evt-1"}"#)
                 }}]
             })))

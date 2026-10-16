@@ -194,7 +194,13 @@ pub(super) async fn handle_filter(
             }
             let api = super::api::authenticated(&[GMAIL_SETTINGS_SCOPE]).await?;
             api.delete_filter(&id).await?;
-            print(json!({ "deleted": true, "filterId": id }), sub, sanitize).await
+            let format = crate::helpers::http::output_format(sub)?;
+            super::emit_applied(
+                sanitize,
+                &format,
+                json!({ "deleted": true, "filterId": id }),
+            )
+            .await
         }
         Some((other, _)) => Err(GwsError::other(format!("unknown +filter action '{other}'"))),
         None => Err(GwsError::Validation(

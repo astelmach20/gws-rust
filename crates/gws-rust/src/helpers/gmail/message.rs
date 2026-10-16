@@ -284,24 +284,105 @@ pub(super) fn decode_base64url(data: &str) -> Result<Vec<u8>, base64::DecodeErro
     BASE64URL_LENIENT.decode(data)
 }
 
-/// Decode a base64url-encoded text body part.
+/// Decode a base64url-encoded text body part in the charset its
+/// `Content-Type` header names.
 ///
-/// Invalid base64 violates the API contract and is an error. Bodies that are
-/// not valid UTF-8 (legacy charsets) are decoded lossily with an explicit
-/// warning, since the text is still useful for quoting and reading.
-fn decode_text_body(data: &str, mime_label: &str) -> Result<String, GwsError> {
+/// The Gmail API undoes the Content-Transfer-Encoding but not the charset,
+/// so a `charset=iso-8859-1` body arrives as Latin-1 bytes. Invalid base64
+/// violates the API contract and is an error. A missing charset means UTF-8
+/// (US-ASCII is a subset). An unknown charset, or bytes that are invalid in
+/// the named one, are decoded lossily with an explicit warning, since the
+/// text is still useful for quoting and reading.
+fn decode_text_body(
+    data: &str,
+    content_type: Option<&str>,
+    mime_label: &str,
+) -> Result<String, GwsError> {
     let decoded = decode_base64url(data).map_err(|e| {
         GwsError::other(format!("{mime_label} body has invalid base64url data: {e}"))
     })?;
-    match String::from_utf8(decoded) {
-        Ok(s) => Ok(s),
-        Err(e) => {
-            tracing::warn!(
-                "{mime_label} body is not valid UTF-8; invalid bytes were replaced with U+FFFD"
-            );
-            Ok(String::from_utf8_lossy(e.as_bytes()).into_owned())
+    let charset = content_type.and_then(|ct| content_type_param(ct, "charset"));
+    let encoding = match charset.as_deref() {
+        // US-ASCII is a subset of UTF-8. (encoding_rs maps the label to
+        // windows-1252, which would garble UTF-8 text mislabeled as ASCII.)
+        None => encoding_rs::UTF_8,
+        Some(label)
+            if label.eq_ignore_ascii_case("us-ascii") || label.eq_ignore_ascii_case("ascii") =>
+        {
+            encoding_rs::UTF_8
+        }
+        Some(label) => match encoding_rs::Encoding::for_label(label.as_bytes()) {
+            Some(encoding) => encoding,
+            None => {
+                tracing::warn!(
+                    "{mime_label} body has unknown charset {:?}; decoding it as UTF-8",
+                    sanitize_for_terminal(label)
+                );
+                encoding_rs::UTF_8
+            }
+        },
+    };
+    let (text, had_errors) = encoding.decode_without_bom_handling(&decoded);
+    if had_errors {
+        tracing::warn!(
+            "{mime_label} body is not valid {}; invalid bytes were replaced with U+FFFD",
+            encoding.name()
+        );
+    }
+    Ok(text.into_owned())
+}
+
+/// The value of parameter `name` (case-insensitive) in a MIME header such as
+/// `text/plain; charset="iso-8859-1"`, unquoted. Semicolons inside quoted
+/// strings do not split parameters.
+fn content_type_param(header: &str, name: &str) -> Option<String> {
+    let mut segments = Vec::new();
+    let mut current = String::new();
+    let mut in_quotes = false;
+    let mut escaped = false;
+    for c in header.chars() {
+        if escaped {
+            current.push(c);
+            escaped = false;
+            continue;
+        }
+        match c {
+            '\\' if in_quotes => {
+                current.push(c);
+                escaped = true;
+            }
+            '"' => {
+                in_quotes = !in_quotes;
+                current.push(c);
+            }
+            ';' if !in_quotes => segments.push(std::mem::take(&mut current)),
+            _ => current.push(c),
         }
     }
+    segments.push(current);
+    segments.iter().skip(1).find_map(|segment| {
+        let (key, value) = segment.split_once('=')?;
+        if !key.trim().eq_ignore_ascii_case(name) {
+            return None;
+        }
+        let value = value.trim();
+        let value = match value.strip_prefix('"').and_then(|v| v.strip_suffix('"')) {
+            Some(quoted) => {
+                let mut out = String::with_capacity(quoted.len());
+                let mut chars = quoted.chars();
+                while let Some(c) = chars.next() {
+                    if c == '\\' {
+                        out.extend(chars.next());
+                    } else {
+                        out.push(c);
+                    }
+                }
+                out
+            }
+            None => value.to_string(),
+        };
+        Some(value).filter(|v| !v.is_empty())
+    })
 }
 
 /// Synthesize a filename from the part index and MIME type when no filename is present.
@@ -312,6 +393,7 @@ fn synthesize_filename(part_index: usize, mime_type: &str) -> String {
         .nth(1)
         .map(|sub| match sub {
             "jpeg" => "jpg",
+            "plain" => "txt",
             "svg+xml" => "svg",
             "octet-stream" => "bin",
             other => other,
@@ -353,14 +435,17 @@ pub(super) fn get_part_header<'a>(part: &'a Value, name: &str) -> Option<&'a str
 /// and metadata for all attachment/inline parts.
 fn extract_payload_contents(payload: &Value) -> Result<PayloadContents, GwsError> {
     let mut contents = PayloadContents::default();
-    extract_payload_recursive(payload, &mut contents, &mut 0)?;
+    extract_payload_recursive(payload, &mut contents, &mut 0, false)?;
     Ok(contents)
 }
 
+/// `in_embedded_message` is true below a `message/rfc822` node: that subtree
+/// is another message, so its text parts are never this message's body.
 fn extract_payload_recursive(
     part: &Value,
     contents: &mut PayloadContents,
     part_counter: &mut usize,
+    in_embedded_message: bool,
 ) -> Result<(), GwsError> {
     let mime_type = part.get("mimeType").and_then(|v| v.as_str()).unwrap_or("");
 
@@ -382,12 +467,26 @@ fn extract_payload_recursive(
 
     let content_id_header = get_part_header(part, "Content-ID");
 
+    // Gmail gives Content-IDs to regular attachments too (e.g., PDFs), so
+    // the disposition decides between inline and attachment below. An
+    // `attachment` disposition also makes an unnamed text part a file, not
+    // the body.
+    let disposition_header = get_part_header(part, "Content-Disposition");
+    let explicitly_attachment = disposition_header
+        .map(|d| {
+            d.trim_start()
+                .to_ascii_lowercase()
+                .starts_with("attachment")
+        })
+        .unwrap_or(false);
+
     // Primary signal: does this part have fetchable binary data?
     // A part is a file (attachment or inline image) when its bytes are fetchable
-    // by attachment ID, or when it is named and carries its data inline.
+    // by attachment ID, or when it is named, has a Content-ID or is marked as
+    // an attachment, and carries its data inline.
     let part_data = if !attachment_id.is_empty() {
         Some(PartData::AttachmentId(attachment_id.to_string()))
-    } else if !filename.is_empty() || content_id_header.is_some() {
+    } else if !filename.is_empty() || content_id_header.is_some() || explicitly_attachment {
         body_data.map(|d| PartData::Inline(d.to_string()))
     } else {
         None
@@ -395,14 +494,16 @@ fn extract_payload_recursive(
     let is_hydratable = part_data.is_some();
 
     // A body text part has inline body.data, no attachmentId, no filename, and no Content-ID.
-    let body_text_data =
-        body_data.filter(|_| !is_hydratable && filename.is_empty() && content_id_header.is_none());
+    let body_text_data = body_data.filter(|_| {
+        !is_hydratable && !in_embedded_message && filename.is_empty() && content_id_header.is_none()
+    });
 
     if let Some(data) = body_text_data {
+        let content_type = get_part_header(part, "Content-Type");
         if mime_type == "text/plain" && contents.body_text.is_none() {
-            contents.body_text = Some(decode_text_body(data, "text/plain")?);
+            contents.body_text = Some(decode_text_body(data, content_type, "text/plain")?);
         } else if mime_type == "text/html" && contents.body_html.is_none() {
-            contents.body_html = Some(decode_text_body(data, "text/html")?);
+            contents.body_html = Some(decode_text_body(data, content_type, "text/html")?);
         }
     } else if let Some(part_data) = part_data {
         // This part has fetchable data — classify as inline or attachment
@@ -410,14 +511,7 @@ fn extract_payload_recursive(
         *part_counter += 1;
 
         // Classify as inline only when Content-ID is present AND
-        // Content-Disposition is not explicitly "attachment". Gmail gives
-        // Content-IDs to regular attachments too (e.g., PDFs), so Content-ID
-        // alone is not sufficient — we must check disposition.
-        let disposition_header = get_part_header(part, "Content-Disposition");
-        let explicitly_attachment = disposition_header
-            .map(|d| d.to_ascii_lowercase().starts_with("attachment"))
-            .unwrap_or(false);
-
+        // Content-Disposition is not explicitly "attachment".
         // Sanitize Content-ID: strip angle brackets and control characters.
         // Content-ID is sender-controlled; CR/LF could inject MIME headers via
         // mail-builder's MessageId, which writes the value raw inside <...>.
@@ -453,10 +547,13 @@ fn extract_payload_recursive(
         // incorrectly pull the attached message's body text and nested parts into
         // the top-level message.
     } else {
-        // Only recurse into non-hydratable container nodes (multipart/mixed, etc.)
+        // Only recurse into non-hydratable container nodes (multipart/mixed,
+        // etc.). An encapsulated message's files are still collected, but
+        // its text is not this message's body.
+        let embedded = in_embedded_message || mime_type.eq_ignore_ascii_case("message/rfc822");
         if let Some(child_parts) = part.get("parts").and_then(|p| p.as_array()) {
             for child in child_parts {
-                extract_payload_recursive(child, contents, part_counter)?;
+                extract_payload_recursive(child, contents, part_counter, embedded)?;
             }
         }
     }
@@ -767,6 +864,74 @@ mod tests {
         // "Hi" encodes to "SGk=" padded; Gmail may omit the padding.
         let payload = json!({ "mimeType": "text/plain", "body": { "data": "SGk" } });
         assert_eq!(extract_plain_text_body(&payload).unwrap(), "Hi");
+    }
+
+    /// Gmail returns body bytes in the part's own charset; they must be
+    /// decoded with it, not as UTF-8.
+    #[test]
+    fn test_body_is_decoded_in_its_declared_charset() {
+        let latin1 = URL_SAFE.encode([b'c', b'a', b'f', 0xE9]);
+        let payload = json!({
+            "mimeType": "multipart/alternative",
+            "parts": [
+                {
+                    "mimeType": "text/plain",
+                    "headers": [{ "name": "content-type", "value": "text/plain; format=flowed; Charset=\"ISO-8859-1\"" }],
+                    "body": { "data": latin1 }
+                },
+                {
+                    "mimeType": "text/html",
+                    "headers": [{ "name": "Content-Type", "value": "text/html; charset=windows-1252" }],
+                    "body": { "data": URL_SAFE.encode([b'<', b'p', b'>', 0x93, b'q', 0x94, b'<', b'/', b'p', b'>']) }
+                }
+            ]
+        });
+        let contents = extract_payload_contents(&payload).unwrap();
+        assert_eq!(contents.body_text.as_deref(), Some("caf\u{e9}"));
+        assert_eq!(
+            contents.body_html.as_deref(),
+            Some("<p>\u{201c}q\u{201d}</p>")
+        );
+
+        // Shift_JIS for "\u{65e5}\u{672c}" is 93 FA 96 7B.
+        let sjis = json!({
+            "mimeType": "text/plain",
+            "headers": [{ "name": "Content-Type", "value": "text/plain; charset=shift_jis" }],
+            "body": { "data": URL_SAFE.encode([0x93, 0xFA, 0x96, 0x7B]) }
+        });
+        assert_eq!(extract_plain_text_body(&sjis).unwrap(), "\u{65e5}\u{672c}");
+    }
+
+    #[test]
+    fn test_ascii_or_unknown_charset_body_is_decoded_as_utf8() {
+        for ct in [
+            "text/plain; charset=us-ascii",
+            "text/plain; charset=x-unknown-cs",
+            "text/plain",
+        ] {
+            let payload = json!({
+                "mimeType": "text/plain",
+                "headers": [{ "name": "Content-Type", "value": ct }],
+                "body": { "data": URL_SAFE.encode("caf\u{e9}") }
+            });
+            assert_eq!(
+                extract_plain_text_body(&payload).unwrap(),
+                "caf\u{e9}",
+                "{ct}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_content_type_param() {
+        let ct = r#"text/plain; name="a;charset=x.txt"; CHARSET = "utf\-8""#;
+        assert_eq!(content_type_param(ct, "charset").as_deref(), Some("utf-8"));
+        assert_eq!(content_type_param("text/plain", "charset"), None);
+        assert_eq!(content_type_param("text/plain; charset=", "charset"), None);
+        assert_eq!(
+            content_type_param("text/plain;charset=koi8-r", "charset").as_deref(),
+            Some("koi8-r")
+        );
     }
 
     #[test]
@@ -1502,6 +1667,67 @@ mod tests {
             sanitize_remote_filename("   ", 0, "image/png"),
             "part-0.png"
         );
+    }
+
+    /// An unnamed text part marked `Content-Disposition: attachment` is a
+    /// file, not the body: it must not replace the HTML body nor vanish
+    /// from the attachment list.
+    #[test]
+    fn test_unnamed_attachment_disposition_text_part_is_an_attachment() {
+        let payload = json!({
+            "mimeType": "multipart/mixed",
+            "parts": [
+                { "mimeType": "text/html", "body": { "data": URL_SAFE.encode("<p>Real body</p>") } },
+                {
+                    "mimeType": "text/plain",
+                    "headers": [{ "name": "Content-Disposition", "value": "attachment" }],
+                    "body": { "data": URL_SAFE.encode("log line"), "size": 8 }
+                }
+            ]
+        });
+        let contents = extract_payload_contents(&payload).unwrap();
+        assert_eq!(contents.body_text, None);
+        assert_eq!(contents.body_html.as_deref(), Some("<p>Real body</p>"));
+        assert_eq!(contents.parts.len(), 1);
+        assert_eq!(contents.parts[0].filename, "part-0.txt");
+        assert_eq!(
+            contents.parts[0].data,
+            PartData::Inline(URL_SAFE.encode("log line"))
+        );
+    }
+
+    /// A message/rfc822 node Gmail does not expose as one file still holds
+    /// another message: its text must not become the outer message's body.
+    #[test]
+    fn test_embedded_message_text_is_not_the_body() {
+        let payload = json!({
+            "mimeType": "multipart/mixed",
+            "parts": [
+                { "mimeType": "text/html", "body": { "data": URL_SAFE.encode("<p>Outer</p>") } },
+                {
+                    "mimeType": "message/rfc822",
+                    "body": { "size": 0 },
+                    "parts": [{
+                        "mimeType": "multipart/mixed",
+                        "parts": [
+                            { "mimeType": "text/plain", "body": { "data": URL_SAFE.encode("Inner") } },
+                            { "mimeType": "text/html", "body": { "data": URL_SAFE.encode("<p>Inner</p>") } },
+                            {
+                                "mimeType": "application/pdf",
+                                "filename": "inner.pdf",
+                                "body": { "attachmentId": "INNER", "size": 10 }
+                            }
+                        ]
+                    }]
+                }
+            ]
+        });
+        let contents = extract_payload_contents(&payload).unwrap();
+        assert_eq!(contents.body_text, None);
+        assert_eq!(contents.body_html.as_deref(), Some("<p>Outer</p>"));
+        // The embedded message's file stays downloadable.
+        assert_eq!(contents.parts.len(), 1);
+        assert_eq!(contents.parts[0].attachment_id(), Some("INNER"));
     }
 
     #[test]
