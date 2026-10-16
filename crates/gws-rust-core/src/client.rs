@@ -499,7 +499,11 @@ pub async fn send(
             Ok(response) => response,
             Err(Some(err)) => {
                 // Connect errors mean nothing was sent; any method may retry.
-                let retryable = err.is_connect() || (idempotent && err.is_timeout());
+                // An idempotent request also retries a connection that broke
+                // after the request was written (a reset, or a close before
+                // the response), which reqwest reports as a request error.
+                let retryable =
+                    err.is_connect() || (idempotent && (err.is_timeout() || err.is_request()));
                 if retryable && can_retry {
                     earlier_attempt_unknown |= !err.is_connect();
                     tracing::debug!(%method, %url, attempt, error = %err, "retrying after transport error");
@@ -979,6 +983,76 @@ mod tests {
             SendError::Transport { attempts, .. } => assert_eq!(attempts, 4),
             other => panic!("unexpected error: {other}"),
         }
+    }
+
+    /// A local server that accepts each of the first `drops` connections,
+    /// reads the request and closes the socket without answering (a
+    /// connection reset after the request was sent), then answers 200.
+    /// Returns its base URL and the number of connections accepted.
+    async fn dropping_server(drops: u32) -> (String, Arc<AtomicU32>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let accepted = Arc::new(AtomicU32::new(0));
+        let counter = accepted.clone();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    return;
+                };
+                let n = counter.fetch_add(1, Ordering::SeqCst);
+                let mut buf = [0u8; 4096];
+                let read = socket.read(&mut buf).await.unwrap();
+                assert!(read > 0, "no request arrived");
+                if n >= drops {
+                    socket
+                        .write_all(
+                            b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\nconnection: close\r\n\r\nok",
+                        )
+                        .await
+                        .unwrap();
+                }
+            }
+        });
+        (base, accepted)
+    }
+
+    /// A connection reset after the request was written is a connection
+    /// error like any other: an idempotent request is retried, a POST is not
+    /// (it may have reached the server).
+    #[tokio::test]
+    async fn connection_reset_is_retried_only_for_idempotent_requests() {
+        let client = shared_client().unwrap();
+
+        let (base, accepted) = dropping_server(1).await;
+        let url = format!("{base}/r");
+        let sent = send(&fast_policy(), Idempotency::FromMethod, || client.get(&url))
+            .await
+            .unwrap();
+        assert_eq!(sent.response.status(), 200);
+        assert_eq!(sent.attempts, 2);
+        assert!(sent.earlier_attempt_unknown);
+        assert_eq!(accepted.load(Ordering::SeqCst), 2);
+
+        let (base, accepted) = dropping_server(1).await;
+        let url = format!("{base}/r");
+        let err = send(&fast_policy(), Idempotency::FromMethod, || {
+            client.post(&url)
+        })
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                SendError::Transport {
+                    attempts: 1,
+                    retried_allowed: false,
+                    ..
+                }
+            ),
+            "{err}"
+        );
+        assert_eq!(accepted.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]

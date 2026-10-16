@@ -60,8 +60,53 @@ pub(crate) fn pubsub_api_base(endpoints: &gws_rust_core::validate::EndpointPolic
     api_base(endpoints, "https://pubsub.googleapis.com/", "v1")
 }
 
+/// The signal that asked the process to stop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ShutdownSignal {
+    /// SIGINT, or Ctrl-C on any platform.
+    Interrupt,
+    /// SIGTERM (Unix only).
+    Terminate,
+}
+
+impl ShutdownSignal {
+    /// The shell's exit status for a process stopped by this signal: 128
+    /// plus the signal number (SIGINT is 2, SIGTERM is 15). Ctrl-C on
+    /// Windows counts as SIGINT.
+    pub(crate) const fn exit_code(self) -> u8 {
+        match self {
+            ShutdownSignal::Interrupt => 130,
+            ShutdownSignal::Terminate => 143,
+        }
+    }
+
+    /// The signal's conventional name, for messages.
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            ShutdownSignal::Interrupt => "SIGINT",
+            ShutdownSignal::Terminate => "SIGTERM",
+        }
+    }
+
+    const fn to_u8(self) -> u8 {
+        match self {
+            ShutdownSignal::Interrupt => 1,
+            ShutdownSignal::Terminate => 2,
+        }
+    }
+
+    const fn from_u8(value: u8) -> Option<Self> {
+        match value {
+            1 => Some(ShutdownSignal::Interrupt),
+            2 => Some(ShutdownSignal::Terminate),
+            _ => None,
+        }
+    }
+}
+
 /// A one-way shutdown latch: once [`Shutdown::request`] is called, every
-/// current and future [`Shutdown::requested`] completes.
+/// current and future [`Shutdown::requested`] completes with the first
+/// signal requested.
 ///
 /// The request is latched rather than broadcast to whoever happens to be
 /// waiting: a pull loop is not waiting between iterations (while it handles
@@ -69,91 +114,125 @@ pub(crate) fn pubsub_api_base(endpoints: &gws_rust_core::validate::EndpointPolic
 /// it at its next wait instead of being lost.
 struct Shutdown {
     requested: tokio::sync::Notify,
-    latched: std::sync::atomic::AtomicBool,
+    /// `0` until requested, then [`ShutdownSignal::to_u8`] of the signal.
+    latched: std::sync::atomic::AtomicU8,
 }
 
 impl Shutdown {
     const fn new() -> Self {
         Self {
             requested: tokio::sync::Notify::const_new(),
-            latched: std::sync::atomic::AtomicBool::new(false),
+            latched: std::sync::atomic::AtomicU8::new(0),
         }
     }
 
-    fn request(&self) {
-        self.latched
-            .store(true, std::sync::atomic::Ordering::SeqCst);
+    fn request(&self, signal: ShutdownSignal) {
+        // The first signal wins; a later one only wakes the waiters again.
+        if let Err(first) = self.latched.compare_exchange(
+            0,
+            signal.to_u8(),
+            std::sync::atomic::Ordering::SeqCst,
+            std::sync::atomic::Ordering::SeqCst,
+        ) {
+            tracing::debug!(first, "shutdown already requested");
+        }
         self.requested.notify_waiters();
     }
 
-    async fn requested(&self) {
-        let notified = self.requested.notified();
-        tokio::pin!(notified);
-        // Register as a waiter before checking the latch, so a request made
-        // between the check and the wait still wakes us.
-        notified.as_mut().enable();
-        if self.latched.load(std::sync::atomic::Ordering::SeqCst) {
-            return;
+    async fn requested(&self) -> ShutdownSignal {
+        loop {
+            let notified = self.requested.notified();
+            tokio::pin!(notified);
+            // Register as a waiter before checking the latch, so a request
+            // made between the check and the wait still wakes us.
+            notified.as_mut().enable();
+            let latched = self.latched.load(std::sync::atomic::Ordering::SeqCst);
+            if let Some(signal) = ShutdownSignal::from_u8(latched) {
+                return signal;
+            }
+            notified.await;
         }
-        notified.await;
     }
 }
 
-/// Returns a future that completes when a shutdown signal has been received.
+/// Returns a future that completes with the signal once a shutdown signal
+/// has been received.
 ///
 /// On Unix this listens for both SIGINT (Ctrl+C) and SIGTERM; on other
-/// platforms only SIGINT is handled. Used by long-running pull loops
+/// platforms only Ctrl+C is handled. Used by long-running pull loops
 /// (`gmail::watch`, `events::subscribe`) to exit cleanly under container
-/// orchestrators (Kubernetes, Docker, systemd) that send SIGTERM.
+/// orchestrators (Kubernetes, Docker, systemd) that send SIGTERM, and by
+/// `drive +sync` to save its state before exiting.
 ///
-/// The signal handler is registered once in a background task on first call
-/// so it remains active for the lifetime of the process, and the signal is
-/// latched: one received while no loop is waiting (between iterations) still
-/// completes the next call.
-pub(crate) async fn shutdown_signal() {
+/// On Unix the handlers are installed synchronously on the first poll, so a
+/// signal sent once the caller is waiting never meets the default
+/// disposition (which would kill the process). They stay active for the
+/// lifetime of the process, and the signal is latched: one received while
+/// no loop is waiting (between iterations) still completes the next call.
+pub(crate) async fn shutdown_signal() -> ShutdownSignal {
     use std::sync::Once;
 
     static SHUTDOWN: Shutdown = Shutdown::new();
     static LISTEN: Once = Once::new();
 
     LISTEN.call_once(|| {
-        tokio::spawn(async move {
-            #[cfg(unix)]
-            {
-                use tokio::signal::unix::{SignalKind, signal};
-                match signal(SignalKind::terminate()) {
-                    Ok(mut sigterm) => {
-                        tokio::select! {
-                            res = tokio::signal::ctrl_c() => {
-                                if let Err(e) = res {
-                                    tracing::error!("could not listen for Ctrl+C: {e}; shutting down");
-                                }
-                            }
-                            Some(_) = sigterm.recv() => {}
-                        }
-                    }
-                    Err(e) => {
+        #[cfg(unix)]
+        {
+            use tokio::signal::unix::{SignalKind, signal};
+            let sigint = signal(SignalKind::interrupt());
+            let sigterm = signal(SignalKind::terminate());
+            tokio::spawn(async move {
+                let received = match (sigint, sigterm) {
+                    (Ok(mut sigint), Ok(mut sigterm)) => tokio::select! {
+                        Some(()) = sigint.recv() => ShutdownSignal::Interrupt,
+                        Some(()) = sigterm.recv() => ShutdownSignal::Terminate,
+                        // Both streams ended: the runtime is shutting down.
+                        else => ShutdownSignal::Interrupt,
+                    },
+                    (Ok(mut sigint), Err(e)) => {
                         tracing::warn!(
                             "could not register SIGTERM handler: {e}. \
                              Listening for Ctrl+C only."
                         );
-                        if let Err(e) = tokio::signal::ctrl_c().await {
-                            tracing::error!("could not listen for Ctrl+C: {e}; shutting down");
+                        if sigint.recv().await.is_none() {
+                            tracing::debug!("SIGINT stream ended");
                         }
+                        ShutdownSignal::Interrupt
                     }
-                }
-            }
-            #[cfg(not(unix))]
-            {
+                    (Err(e), _) => {
+                        tracing::error!("could not listen for Ctrl+C: {e}; shutting down");
+                        ShutdownSignal::Interrupt
+                    }
+                };
+                SHUTDOWN.request(received);
+            });
+        }
+        #[cfg(not(unix))]
+        {
+            tokio::spawn(async move {
                 if let Err(e) = tokio::signal::ctrl_c().await {
                     tracing::error!("could not listen for Ctrl+C: {e}; shutting down");
                 }
-            }
-            SHUTDOWN.request();
-        });
+                SHUTDOWN.request(ShutdownSignal::Interrupt);
+            });
+        }
     });
 
-    SHUTDOWN.requested().await;
+    SHUTDOWN.requested().await
+}
+
+/// Set by a command that stopped early on a signal after finishing its
+/// cleanup (`drive +sync`), so `main` exits with that signal's code.
+static EXIT_SIGNAL: std::sync::OnceLock<ShutdownSignal> = std::sync::OnceLock::new();
+
+/// Make the process exit with `signal`'s code once the command returns.
+pub(crate) fn exit_for_signal(signal: ShutdownSignal) {
+    EXIT_SIGNAL.get_or_init(|| signal);
+}
+
+/// The signal a command asked to exit for, if any.
+pub(crate) fn exit_signal() -> Option<ShutdownSignal> {
+    EXIT_SIGNAL.get().copied()
 }
 
 /// A trait for service-specific CLI helpers that inject custom commands.
@@ -247,10 +326,11 @@ mod tests {
     #[tokio::test]
     async fn a_shutdown_requested_between_waits_is_not_lost() {
         let shutdown = Shutdown::new();
-        shutdown.request();
-        tokio::time::timeout(std::time::Duration::from_secs(5), shutdown.requested())
+        shutdown.request(ShutdownSignal::Terminate);
+        let got = tokio::time::timeout(std::time::Duration::from_secs(5), shutdown.requested())
             .await
             .expect("a latched shutdown completes later waits");
+        assert_eq!(got, ShutdownSignal::Terminate);
         // A waiter registered before the request is woken too.
         let shutdown = std::sync::Arc::new(Shutdown::new());
         let waiter = tokio::spawn({
@@ -258,11 +338,22 @@ mod tests {
             async move { shutdown.requested().await }
         });
         tokio::task::yield_now().await;
-        shutdown.request();
-        tokio::time::timeout(std::time::Duration::from_secs(5), waiter)
+        shutdown.request(ShutdownSignal::Interrupt);
+        let got = tokio::time::timeout(std::time::Duration::from_secs(5), waiter)
             .await
             .expect("a waiting loop is woken")
             .unwrap();
+        assert_eq!(got, ShutdownSignal::Interrupt);
+        // The first signal is the one reported.
+        shutdown.request(ShutdownSignal::Terminate);
+        assert_eq!(shutdown.requested().await, ShutdownSignal::Interrupt);
+    }
+
+    /// The exit codes follow the shell's 128 + signal number convention.
+    #[test]
+    fn shutdown_signal_exit_codes_follow_the_shell_convention() {
+        assert_eq!(ShutdownSignal::Interrupt.exit_code(), 130);
+        assert_eq!(ShutdownSignal::Terminate.exit_code(), 143);
     }
 
     /// Every helper key is the API name of a registered service, so no entry
