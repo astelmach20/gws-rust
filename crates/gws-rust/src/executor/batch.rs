@@ -298,7 +298,7 @@ pub(crate) fn parse_calls<'a>(
                 "duplicate id \"{id}\"; every call needs a unique id (lines without one get their position)"
             )));
         }
-        let impact = crate::confirm::method_impact(method, &params);
+        let impact = crate::confirm::method_impact(method, &params, body.as_ref());
         calls.push(BatchCall {
             id,
             method,
@@ -589,7 +589,7 @@ pub(crate) async fn run_batch(
 ) -> Result<(), GwsError> {
     let destructive: Vec<&str> = calls
         .iter()
-        .filter(|c| super::is_destructive(c.method))
+        .filter(|c| c.impact == Some(crate::confirm::Impact::Destructive))
         .map(|c| c.id.as_str())
         .collect();
     let outbound: Vec<&str> = calls
