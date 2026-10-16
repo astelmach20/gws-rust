@@ -340,6 +340,42 @@ async fn setup(
             parse_history_id(&profile, "Gmail profile")?,
         ));
     }
+    let mut created = Vec::new();
+    match create_and_watch(config, pubsub, gmail, &mut created).await {
+        Ok(started) => Ok(started),
+        Err(e) => {
+            // Subscription before the topic it is attached to.
+            created.reverse();
+            Err(roll_back(pubsub, &created, e).await)
+        }
+    }
+}
+
+/// Delete the Pub/Sub resources this run created when a later setup step
+/// failed: nothing will ever read from or publish to them. A `--topic` the
+/// user passed is never in `names`. A failed deletion is reported (naming
+/// what is left behind) alongside the original error, which is returned.
+async fn roll_back(pubsub: &PubSubClient, names: &[String], error: GwsError) -> GwsError {
+    let names: Vec<&str> = names.iter().map(String::as_str).collect();
+    if let Err(c) = cleanup_resources(pubsub, &names).await {
+        emit_diagnostic(
+            "error",
+            "cleanup_failed",
+            json!({ "message": c.to_string(), "resources": names }),
+        );
+    }
+    error
+}
+
+/// Create the topic (unless `--topic` is given) and the subscription, then
+/// start the Gmail watch. Each resource is pushed to `created` as soon as it
+/// exists, so a later failure can roll it back.
+async fn create_and_watch(
+    config: &WatchConfig,
+    pubsub: &PubSubClient,
+    gmail: &GmailApi,
+    created: &mut Vec<String>,
+) -> Result<(String, Option<Created>, u64), GwsError> {
     let project = config
         .project
         .as_deref()
@@ -351,6 +387,7 @@ async fn setup(
             let t = format!("projects/{project}/topics/gwsr-gmail-watch-{suffix}");
             emit_diagnostic("info", "creating_topic", json!({ "topic": t }));
             pubsub.create_topic(&t).await?;
+            created.push(t.clone());
             pubsub
                 .set_topic_publisher(&t, GMAIL_PUSH_MEMBER)
                 .await
@@ -369,6 +406,7 @@ async fn setup(
         json!({ "subscription": sub }),
     );
     pubsub.create_subscription(&sub, &topic).await?;
+    created.push(sub.clone());
 
     let mut watch_body = json!({ "topicName": topic });
     if !config.label_ids.is_empty() {
@@ -587,6 +625,198 @@ mod tests {
             (10, 5, 10)
         );
         assert_eq!(c.format, "full");
+    }
+
+    // --- Setup rollback: a failed later step deletes what this run created ---
+
+    const TOPIC_RE: &str = r"^/v1/projects/p/topics/gwsr-gmail-watch-[0-9a-f]{8}$";
+    const SUB_RE: &str = r"^/v1/projects/p/subscriptions/gwsr-gmail-watch-[0-9a-f]{8}$";
+
+    fn api_error(code: u16, message: &str) -> ResponseTemplate {
+        ResponseTemplate::new(code).set_body_json(json!({
+            "error": { "code": code, "message": message, "status": "PERMISSION_DENIED" }
+        }))
+    }
+
+    /// Status of each setup call; `None` means it is never made.
+    struct SetupScript {
+        topic: Option<&'static str>,
+        grant: Option<u16>,
+        subscription: Option<u16>,
+        watch: Option<u16>,
+        delete: u16,
+    }
+
+    /// Run `setup` against a mock serving `script`, returning its error and
+    /// the DELETE paths it sent, in order.
+    async fn failed_setup(script: SetupScript) -> (GwsError, Vec<String>) {
+        use wiremock::matchers::path_regex;
+        let server = MockServer::start().await;
+        let ok = || ResponseTemplate::new(200).set_body_json(json!({}));
+        let respond = |code: u16, message: &str| match code {
+            200 => ok(),
+            _ => api_error(code, message),
+        };
+        Mock::given(method("PUT"))
+            .and(path_regex(TOPIC_RE))
+            .respond_with(ok())
+            .expect(u64::from(script.topic.is_none()))
+            .mount(&server)
+            .await;
+        if let Some(code) = script.grant {
+            Mock::given(method("POST"))
+                .and(path_regex(r":setIamPolicy$"))
+                .respond_with(respond(code, "denied"))
+                .expect(1)
+                .mount(&server)
+                .await;
+        }
+        if let Some(code) = script.subscription {
+            Mock::given(method("PUT"))
+                .and(path_regex(SUB_RE))
+                .respond_with(respond(code, "denied"))
+                .expect(1)
+                .mount(&server)
+                .await;
+        }
+        if let Some(code) = script.watch {
+            Mock::given(method("POST"))
+                .and(path("/gmail/v1/users/me/watch"))
+                .respond_with(respond(code, "Invalid topicName"))
+                .expect(1)
+                .mount(&server)
+                .await;
+        }
+        Mock::given(method("DELETE"))
+            .respond_with(respond(script.delete, "cannot delete"))
+            .mount(&server)
+            .await;
+        let config = WatchConfig {
+            project: Some("p".into()),
+            subscription: None,
+            topic: script.topic.map(str::to_string),
+            label_ids: Vec::new(),
+            max_messages: 10,
+            poll_interval: 1,
+            max_failures: 3,
+            format: "full".into(),
+            once: true,
+            cleanup: false,
+            output_dir: None,
+        };
+        let pubsub = PubSubClient::with_base(
+            &Transport::for_test(&server.uri()),
+            &format!("{}/v1", server.uri()),
+        );
+        let gmail = crate::helpers::gmail::test_support::mock_api(&server);
+        let Err(err) = setup(&config, &pubsub, &gmail).await else {
+            panic!("setup must fail");
+        };
+        server.verify().await;
+        let deleted = server
+            .received_requests()
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|r| r.method == wiremock::http::Method::DELETE)
+            .map(|r| r.url.path().to_string())
+            .collect();
+        (err, deleted)
+    }
+
+    fn assert_deleted(deleted: &[String], patterns: &[&str]) {
+        assert_eq!(deleted.len(), patterns.len(), "{deleted:?}");
+        for (got, re) in deleted.iter().zip(patterns) {
+            assert!(
+                regex::Regex::new(re).unwrap().is_match(got),
+                "{got} !~ {re}"
+            );
+        }
+    }
+
+    /// A refused publish grant deletes the topic just created; the grant
+    /// error (with its manual fix) is still the one returned.
+    #[tokio::test]
+    async fn setup_rolls_back_topic_when_grant_fails() {
+        let (err, deleted) = failed_setup(SetupScript {
+            topic: None,
+            grant: Some(403),
+            subscription: None,
+            watch: None,
+            delete: 200,
+        })
+        .await;
+        assert!(err.to_string().contains("add-iam-policy-binding"), "{err}");
+        assert_deleted(&deleted, &[TOPIC_RE]);
+    }
+
+    /// A failed subscription create deletes the topic just created and
+    /// returns the subscription error unchanged.
+    #[tokio::test]
+    async fn setup_rolls_back_topic_when_subscription_fails() {
+        let (err, deleted) = failed_setup(SetupScript {
+            topic: None,
+            grant: Some(200),
+            subscription: Some(403),
+            watch: None,
+            delete: 200,
+        })
+        .await;
+        assert!(matches!(err, GwsError::Api { code: 403, .. }), "{err:?}");
+        assert!(err.to_string().contains("denied"), "{err}");
+        assert_deleted(&deleted, &[TOPIC_RE]);
+    }
+
+    /// A failed users.watch deletes the subscription, then the topic, and
+    /// returns Gmail's error unchanged.
+    #[tokio::test]
+    async fn setup_rolls_back_subscription_and_topic_when_watch_fails() {
+        let (err, deleted) = failed_setup(SetupScript {
+            topic: None,
+            grant: Some(200),
+            subscription: Some(200),
+            watch: Some(400),
+            delete: 200,
+        })
+        .await;
+        assert!(matches!(err, GwsError::Api { code: 400, .. }), "{err:?}");
+        assert!(err.to_string().contains("Invalid topicName"), "{err}");
+        assert_deleted(&deleted, &[SUB_RE, TOPIC_RE]);
+    }
+
+    /// A `--topic` the user passed is never deleted: only the subscription
+    /// this run created is.
+    #[tokio::test]
+    async fn setup_rollback_keeps_a_user_topic() {
+        let (err, deleted) = failed_setup(SetupScript {
+            topic: Some("projects/p/topics/mine"),
+            grant: None,
+            subscription: Some(200),
+            watch: Some(400),
+            delete: 200,
+        })
+        .await;
+        assert!(matches!(err, GwsError::Api { code: 400, .. }), "{err:?}");
+        assert_deleted(&deleted, &[SUB_RE]);
+    }
+
+    /// When the rollback itself fails, the setup error is still returned
+    /// (not the deletion error), after trying every created resource.
+    #[tokio::test]
+    async fn setup_rollback_failure_keeps_the_original_error() {
+        let (err, deleted) = failed_setup(SetupScript {
+            topic: None,
+            grant: Some(200),
+            subscription: Some(200),
+            watch: Some(400),
+            delete: 403,
+        })
+        .await;
+        assert!(matches!(err, GwsError::Api { code: 400, .. }), "{err:?}");
+        let msg = err.to_string();
+        assert!(msg.contains("Invalid topicName"), "{msg}");
+        assert!(!msg.contains("cannot delete"), "{msg}");
+        assert_deleted(&deleted, &[SUB_RE, TOPIC_RE]);
     }
 
     async fn run_once(server: &MockServer, sanitize: &SanitizeConfig) -> Result<u64, GwsError> {
