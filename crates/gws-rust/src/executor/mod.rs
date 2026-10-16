@@ -501,8 +501,8 @@ pub(crate) async fn execute_to(
     // Refuse --wait on an API that cannot be polled before anything is sent:
     // finding out after the operation started would leave it running behind
     // an error.
-    if options.wait.is_some() && operation::find_operations_get(doc).is_none() {
-        return Err(operation::no_operations_get(doc));
+    if options.wait.is_some() {
+        operation::poll_target(doc, &params)?;
     }
 
     if options.dry_run {
@@ -737,7 +737,7 @@ pub(crate) async fn execute_to(
             && operation::is_operation(&value);
         if operation::is_operation(&value) && (options.wait.is_some() || auto_wait) {
             let cfg = options.wait.clone().unwrap_or_default();
-            let done = operation::wait(&transport, doc, value, &cfg).await?;
+            let done = operation::wait(&transport, doc, &params, value, &cfg).await?;
             value = operation::operation_result(done)?;
             if let Some(uri) = value.get("downloadUri").and_then(Value::as_str) {
                 let uri = uri.to_string();

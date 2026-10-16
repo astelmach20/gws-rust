@@ -26,7 +26,7 @@ use serde_json::{Map, Value, json};
 
 use gws_rust_core::client::Idempotency;
 
-use super::url::{UrlTarget, build_url};
+use super::url::{UrlTarget, build_url, extract_template_path_parameters, path_template};
 use crate::discovery::{RestDescription, RestMethod, RestResource};
 use crate::error::GwsError;
 use crate::transport::errors::error_from_response;
@@ -165,6 +165,77 @@ pub(crate) fn no_operations_get(doc: &RestDescription) -> GwsError {
     ))
 }
 
+/// How to poll an operation: the API's `operations.get`, the parameter that
+/// takes the operation's name, and the method's other path parameters.
+pub(crate) struct PollTarget<'a> {
+    method: &'a RestMethod,
+    op_param: String,
+    params: Map<String, Value>,
+}
+
+/// Work out how to poll an operation started by a request with
+/// `request_params`, or refuse.
+///
+/// A nested `operations.get` (storage `b/{bucket}/operations/{operationId}`)
+/// takes the operation in the placeholder that follows `operations/`. Its
+/// other path parameters come from the request's parameters of the same
+/// name. Checked before the request is sent, so `--wait` fails before it
+/// starts an operation it could not poll.
+pub(crate) fn poll_target<'a>(
+    doc: &'a RestDescription,
+    request_params: &Map<String, Value>,
+) -> Result<PollTarget<'a>, GwsError> {
+    let get = find_operations_get(doc).ok_or_else(|| no_operations_get(doc))?;
+    let id = get.id.as_deref().unwrap_or("operations.get");
+    let template = path_template(get);
+    let mut path_params: Vec<&str> = extract_template_path_parameters(template)
+        .into_iter()
+        .collect();
+    path_params.sort_unstable();
+    let op_param = match path_params.as_slice() {
+        [] => get
+            .parameter_order
+            .first()
+            .cloned()
+            .unwrap_or_else(|| "name".to_string()),
+        [only] => (*only).to_string(),
+        many => {
+            let after_operations: Vec<&str> = many
+                .iter()
+                .copied()
+                .filter(|p| {
+                    template.contains(&format!("operations/{{{p}}}"))
+                        || template.contains(&format!("operations/{{+{p}}}"))
+                })
+                .collect();
+            match after_operations.as_slice() {
+                [p] => (*p).to_string(),
+                _ => {
+                    return Err(GwsError::Validation(format!(
+                        "--wait: cannot tell which path parameter of {id} ({template}) takes \
+                         the operation name"
+                    )));
+                }
+            }
+        }
+    };
+    let mut params = Map::new();
+    for p in path_params.into_iter().filter(|p| *p != op_param) {
+        let value = request_params.get(p).ok_or_else(|| {
+            GwsError::Validation(format!(
+                "--wait: polling with {id} ({template}) needs path parameter '{p}', which \
+                 this request does not have"
+            ))
+        })?;
+        params.insert(p.to_string(), value.clone());
+    }
+    Ok(PollTarget {
+        method: get,
+        op_param,
+        params,
+    })
+}
+
 /// Poll `op` until done or the timeout elapses; returns the final operation.
 ///
 /// The request that returned `op` was already accepted, so every failure
@@ -173,6 +244,7 @@ pub(crate) fn no_operations_get(doc: &RestDescription) -> GwsError {
 pub(crate) async fn wait(
     transport: &Transport,
     doc: &RestDescription,
+    request_params: &Map<String, Value>,
     op: Value,
     cfg: &WaitConfig,
 ) -> Result<Value, GwsError> {
@@ -184,7 +256,7 @@ pub(crate) async fn wait(
         .and_then(Value::as_str)
         .ok_or_else(|| GwsError::other(anyhow::anyhow!("operation has no name to poll")))?
         .to_string();
-    poll(transport, doc, op, &name, cfg)
+    poll(transport, doc, request_params, op, &name, cfg)
         .await
         .map_err(|e| polling_failed(e, &name))
 }
@@ -208,27 +280,26 @@ fn polling_failed(err: GwsError, name: &str) -> GwsError {
 async fn poll(
     transport: &Transport,
     doc: &RestDescription,
+    request_params: &Map<String, Value>,
     mut op: Value,
     name: &str,
     cfg: &WaitConfig,
 ) -> Result<Value, GwsError> {
-    let get = find_operations_get(doc).ok_or_else(|| no_operations_get(doc))?;
+    let PollTarget {
+        method: get,
+        op_param,
+        mut params,
+    } = poll_target(doc, request_params)?;
     let name = name.to_string();
-    let param = get
-        .parameter_order
-        .first()
-        .cloned()
-        .unwrap_or_else(|| "name".to_string());
     // With a plain `{name}` segment (drive `operations/{name}`), pass the id,
     // not the full `operations/<id>` resource name.
-    let plain_segment = !get.path.contains(&format!("{{+{param}}}"));
+    let plain_segment = !path_template(get).contains(&format!("{{+{op_param}}}"));
     let value = if plain_segment {
         name.rsplit('/').next().unwrap_or(&name).to_string()
     } else {
         name.clone()
     };
-    let mut params = Map::new();
-    params.insert(param, Value::String(value));
+    params.insert(op_param, Value::String(value));
     let url = build_url(doc, get, &params, UrlTarget::Method, transport.endpoints())?;
 
     let started = Instant::now();
