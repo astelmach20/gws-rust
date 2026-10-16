@@ -355,7 +355,7 @@ fn selects_top_level(mask: &str, field: &str) -> bool {
 
 /// POST/PATCH are retried only when they carry a `requestId` that the API
 /// de-duplicates on (Calendar, Chat, Meet, Pub/Sub, ...).
-fn idempotency(params: &Map<String, Value>, body: &Option<Value>) -> Idempotency {
+pub(crate) fn idempotency(params: &Map<String, Value>, body: &Option<Value>) -> Idempotency {
     let has_request_id = params.contains_key("requestId")
         || body
             .as_ref()
@@ -711,12 +711,7 @@ pub(crate) async fn execute_to(
         }
         let mut value: Value = match serde_json::from_slice(&raw) {
             Ok(v) => v,
-            Err(e) if is_json => {
-                return Err(GwsError::other(anyhow::anyhow!(
-                    "{method_id} returned invalid JSON ({e}); first bytes: {}",
-                    String::from_utf8_lossy(&raw[..raw.len().min(200)])
-                )));
-            }
+            Err(e) if is_json => return Err(invalid_json_error(method_id, &e, &raw, &sanitize)),
             Err(_) if pages > 0 => {
                 return Err(non_json_page(method_id, pages, "(none)", &query, &body));
             }
@@ -959,6 +954,28 @@ fn end_on_empty_response(
         pages_done + 1
     );
     Ok(())
+}
+
+/// The error for a JSON response that does not parse. It quotes the first
+/// bytes of the body to help debugging, except under `--sanitize`: Model
+/// Armor never screened them, so they are withheld rather than written to
+/// stderr unscreened.
+fn invalid_json_error(
+    method_id: &str,
+    e: &serde_json::Error,
+    raw: &[u8],
+    sanitize: &SanitizeConfig,
+) -> GwsError {
+    if sanitize.template.is_some() {
+        return GwsError::other(anyhow::anyhow!(
+            "{method_id} returned invalid JSON ({e}); its content was withheld because \
+             --sanitize is set and it could not be screened"
+        ));
+    }
+    GwsError::other(anyhow::anyhow!(
+        "{method_id} returned invalid JSON ({e}); first bytes: {}",
+        String::from_utf8_lossy(&raw[..raw.len().min(200)])
+    ))
 }
 
 /// Screen a text response inlined into the JSON output with Model Armor, like

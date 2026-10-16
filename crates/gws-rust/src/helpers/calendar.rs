@@ -929,9 +929,11 @@ async fn freebusy(api: &Api, m: &ArgMatches, tz: &TzInfo) -> Result<Value, GwsEr
         .ok_or_else(|| http::other_err(anyhow::anyhow!("freeBusy response has no 'calendars'")))?;
     let mut all_busy = Vec::new();
     let mut failures = Vec::new();
-    // Google's own per-calendar failures, as opposed to a calendar the
-    // caller can't see: retry later rather than fix the input.
-    let mut transient = false;
+    // A failure other than Google's own transient ones (`backendError`,
+    // `internalError`), such as a calendar the caller can't see. Retrying
+    // won't fix it, so one of them makes the whole run a permanent failure
+    // even when other calendars only need a retry.
+    let mut permanent = false;
     for (id, info) in cals {
         if let Some(errors) = info.get("errors").and_then(Value::as_array)
             && !errors.is_empty()
@@ -940,9 +942,11 @@ async fn freebusy(api: &Api, m: &ArgMatches, tz: &TzInfo) -> Result<Value, GwsEr
                 .iter()
                 .filter_map(|e| e.get("reason").and_then(Value::as_str))
                 .collect();
-            transient |= reasons
-                .iter()
-                .any(|r| matches!(*r, "backendError" | "internalError"));
+            // An error without a reason is not known to be transient.
+            permanent |= reasons.len() < errors.len()
+                || reasons
+                    .iter()
+                    .any(|r| !matches!(*r, "backendError" | "internalError"));
             failures.push(format!("{id} ({})", reasons.join(", ")));
             continue;
         }
@@ -964,7 +968,13 @@ async fn freebusy(api: &Api, m: &ArgMatches, tz: &TzInfo) -> Result<Value, GwsEr
             all_busy.push((parse("start")?, parse("end")?));
         }
     }
-    if transient {
+    if permanent {
+        return Err(GwsError::Validation(format!(
+            "Free/busy unavailable for: {} (no access, or not a calendar)",
+            failures.join("; ")
+        )));
+    }
+    if !failures.is_empty() {
         return Err(GwsError::Api {
             code: 503,
             message: format!(
@@ -974,12 +984,6 @@ async fn freebusy(api: &Api, m: &ArgMatches, tz: &TzInfo) -> Result<Value, GwsEr
             reason: "backendError".to_string(),
             enable_url: None,
         });
-    }
-    if !failures.is_empty() {
-        return Err(GwsError::Validation(format!(
-            "Free/busy unavailable for: {} (no access, or not a calendar)",
-            failures.join("; ")
-        )));
     }
     let mut out = json!({
         "timeMin": from.with_timezone(&tz.tz).to_rfc3339(),
@@ -1785,6 +1789,76 @@ mod tests {
         .await
         .unwrap_err();
         assert!(err.to_string().contains("c@x"));
+    }
+
+    /// Several calendars failing at once: the run is retryable (exit 6) only
+    /// when every failure is transient. One calendar the caller can't see
+    /// (`notFound`) outranks another's `backendError`, in either order and
+    /// within one calendar's own errors, because retrying won't fix it.
+    #[tokio::test]
+    async fn freebusy_permanent_calendar_error_outranks_a_transient_one() {
+        let cases = [
+            (
+                json!({
+                    "a@x": {"errors": [{"reason": "backendError"}]},
+                    "b@x": {"errors": [{"reason": "notFound"}]},
+                }),
+                GwsError::EXIT_CODE_VALIDATION,
+            ),
+            (
+                json!({
+                    "a@x": {"errors": [{"reason": "notFound"}]},
+                    "b@x": {"errors": [{"reason": "internalError"}]},
+                }),
+                GwsError::EXIT_CODE_VALIDATION,
+            ),
+            (
+                json!({
+                    "a@x": {"busy": []},
+                    "b@x": {"errors": [{"reason": "backendError"}, {"reason": "notFound"}]},
+                }),
+                GwsError::EXIT_CODE_VALIDATION,
+            ),
+            (
+                json!({
+                    "a@x": {"errors": [{"reason": "backendError"}]},
+                    "b@x": {"errors": [{"reason": "internalError"}]},
+                }),
+                GwsError::EXIT_CODE_API_RETRYABLE,
+            ),
+        ];
+        for (calendars, exit) in cases {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/freeBusy"))
+                .respond_with(
+                    ResponseTemplate::new(200).set_body_json(json!({ "calendars": calendars })),
+                )
+                .mount(&server)
+                .await;
+            let api = api(&server.uri(), "");
+            let m = parse(&[
+                "gwsr",
+                "+freebusy",
+                "--start",
+                "2026-01-05T09:00:00Z",
+                "--end",
+                "2026-01-05T17:00:00Z",
+                "--calendar-id",
+                "a@x",
+                "--calendar-id",
+                "b@x",
+            ]);
+            let err = freebusy(
+                &api,
+                m.subcommand_matches("+freebusy").unwrap(),
+                &tz("UTC", false),
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(err.exit_code(), exit, "{calendars}: {err}");
+            assert!(err.to_string().contains("b@x"), "{calendars}: {err}");
+        }
     }
 
     /// A per-calendar `backendError`/`internalError` is a transient Google

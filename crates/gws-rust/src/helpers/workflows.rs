@@ -24,7 +24,9 @@ use crate::args::dry_run;
 use crate::confirm::{self, Impact, with_yes};
 use crate::error::GwsError;
 use crate::helpers::http::{dry_run_request, output_format};
-use crate::helpers::modelarmor::{SanitizeConfig, require_pass, sanitize_value};
+use crate::helpers::modelarmor::{
+    SanitizeConfig, note_applied_write, require_pass, sanitize_value,
+};
 use crate::transport::Transport;
 use clap::{Arg, ArgMatches, Command};
 use gws_rust_core::client::Idempotency;
@@ -274,6 +276,25 @@ async fn print(
     sanitize: &SanitizeConfig,
 ) -> Result<(), GwsError> {
     crate::output::emit(&render(value, matches, sanitize).await?)?;
+    Ok(())
+}
+
+/// Print the result of a workflow that changed something (created a task,
+/// posted a message). If `--sanitize` withholds it, the error still says
+/// the change was made and names it by the identifiers in `ids`, so it is
+/// not repeated blindly.
+async fn print_applied(
+    value: Value,
+    ids: &Value,
+    matches: &ArgMatches,
+    sanitize: &SanitizeConfig,
+) -> Result<(), GwsError> {
+    let fmt = output_format(matches)?;
+    let value = match sanitize_value(sanitize, value).await.and_then(require_pass) {
+        Ok(v) => v,
+        Err(e) => return Err(note_applied_write(e, ids)),
+    };
+    crate::output::emit(&crate::formatter::format_value(&value, &fmt)?)?;
     Ok(())
 }
 
@@ -745,7 +766,8 @@ async fn handle_email_to_task(
     }
     let rest = authenticated(&[GMAIL_READONLY, TASKS]).await?;
     let out = email_to_task(&rest, &bases, &message_id, &tasklist).await?;
-    print(out, matches, sanitize).await
+    let ids = json!({ "taskId": out["taskId"], "sourceMessageId": out["sourceMessageId"] });
+    print_applied(out, &ids, matches, sanitize).await
 }
 
 // ---------------------------------------------------------------------------
@@ -929,7 +951,8 @@ async fn handle_file_announce(
     let rest = authenticated(&[DRIVE_READONLY, CHAT_MESSAGES_CREATE]).await?;
     let request_id = uuid::Uuid::new_v4().to_string();
     let out = file_announce(&rest, &bases, &file_id, &space, custom, &request_id).await?;
-    print(out, matches, sanitize).await
+    let ids = json!({ "name": out["messageName"] });
+    print_applied(out, &ids, matches, sanitize).await
 }
 
 #[cfg(test)]

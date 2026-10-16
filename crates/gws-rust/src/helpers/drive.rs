@@ -421,7 +421,10 @@ impl UploadArgs {
             None => determine_filename(raw)?,
         };
         let content_type = match optional(m, "mime-type")? {
-            Some(t) => t.to_string(),
+            Some(t) => {
+                check_mime_type(t)?;
+                t.to_string()
+            }
             None => mime_guess2::from_path(&path)
                 .first()
                 .map(|m| m.to_string())
@@ -437,6 +440,25 @@ impl UploadArgs {
     }
 }
 
+/// Validate `--mime-type`, which is sent as the `X-Upload-Content-Type`
+/// header: no control characters (which would otherwise fail only when the
+/// request is built, as a network error) and a `type/subtype` essence.
+fn check_mime_type(value: &str) -> Result<(), GwsError> {
+    crate::validate::reject_dangerous_chars(value, "--mime-type")?;
+    let essence = value.split(';').next().unwrap_or_default().trim();
+    let valid_token = |t: &str| {
+        !t.is_empty()
+            && t.chars()
+                .all(|c| c.is_ascii_alphanumeric() || "!#$&-^_.+".contains(c))
+    };
+    match essence.split_once('/') {
+        Some((kind, sub)) if valid_token(kind) && valid_token(sub) => Ok(()),
+        _ => Err(GwsError::Validation(format!(
+            "--mime-type '{value}' is not a media type (expected type/subtype, e.g. text/csv)"
+        ))),
+    }
+}
+
 fn determine_filename(file_path: &str) -> Result<String, GwsError> {
     Path::new(file_path)
         .file_name()
@@ -449,25 +471,52 @@ fn determine_filename(file_path: &str) -> Result<String, GwsError> {
         })
 }
 
-/// Google-native type to convert an uploaded file into, by source MIME type.
+/// Google-native type to convert an uploaded file into, by source MIME type
+/// (the Docs, Sheets and Slides import formats Drive lists in
+/// `about.importFormats`). A media type is case-insensitive and its
+/// parameters (`; charset=utf-8`) do not change the format, so only the
+/// lowercased essence is compared: `mime_guess2` spells the macro-enabled
+/// Office types `macroEnabled`, Drive `macroenabled`.
 fn conversion_target(content_type: &str) -> Option<&'static str> {
-    Some(match content_type {
+    let essence = content_type
+        .split(';')
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
+    Some(match essence.as_str() {
         "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        | "application/vnd.openxmlformats-officedocument.wordprocessingml.template"
+        | "application/vnd.ms-word.document.macroenabled.12"
+        | "application/vnd.ms-word.template.macroenabled.12"
         | "application/msword"
         | "application/vnd.oasis.opendocument.text"
+        | "application/x-vnd.oasis.opendocument.text"
         | "application/rtf"
         | "text/rtf"
+        | "text/richtext"
         | "text/plain"
         | "text/markdown"
+        | "text/x-markdown"
         | "text/html" => "application/vnd.google-apps.document",
         "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        | "application/vnd.openxmlformats-officedocument.spreadsheetml.template"
+        | "application/vnd.ms-excel.sheet.macroenabled.12"
+        | "application/vnd.ms-excel.template.macroenabled.12"
         | "application/vnd.ms-excel"
         | "application/vnd.oasis.opendocument.spreadsheet"
+        | "application/x-vnd.oasis.opendocument.spreadsheet"
         | "text/csv"
         | "text/tab-separated-values" => "application/vnd.google-apps.spreadsheet",
         "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+        | "application/vnd.openxmlformats-officedocument.presentationml.template"
+        | "application/vnd.openxmlformats-officedocument.presentationml.slideshow"
+        | "application/vnd.ms-powerpoint.presentation.macroenabled.12"
+        | "application/vnd.ms-powerpoint.template.macroenabled.12"
+        | "application/vnd.ms-powerpoint.slideshow.macroenabled.12"
         | "application/vnd.ms-powerpoint"
-        | "application/vnd.oasis.opendocument.presentation" => {
+        | "application/vnd.oasis.opendocument.presentation"
+        | "application/x-vnd.oasis.opendocument.presentation" => {
             "application/vnd.google-apps.presentation"
         }
         _ => return None,
@@ -624,15 +673,7 @@ const SHORTCUT: &str = "application/vnd.google-apps.shortcut";
 fn native_download_error(meta: &Value, file_id: &str, mime: &str) -> Result<GwsError, GwsError> {
     let name = str_field(meta, "name")?;
     if mime == SHORTCUT {
-        let target = meta
-            .get("shortcutDetails")
-            .and_then(|d| d.get("targetId"))
-            .and_then(Value::as_str)
-            .ok_or_else(|| {
-                http::other_err(anyhow::anyhow!(
-                    "Drive response for shortcut '{file_id}' is missing 'shortcutDetails.targetId'"
-                ))
-            })?;
+        let target = shortcut_target(meta, file_id)?;
         return Ok(GwsError::Validation(format!(
             "'{name}' is a shortcut; download its target with `gwsr drive +download --file-id {target}`"
         )));
@@ -650,6 +691,18 @@ fn native_download_error(meta: &Value, file_id: &str, mime: &str) -> Result<GwsE
             formats.join(", ")
         )
     }))
+}
+
+/// The ID of the file a shortcut (`meta`, the metadata of `file_id`) points at.
+fn shortcut_target<'v>(meta: &'v Value, file_id: &str) -> Result<&'v str, GwsError> {
+    meta.get("shortcutDetails")
+        .and_then(|d| d.get("targetId"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            http::other_err(anyhow::anyhow!(
+                "Drive response for shortcut '{file_id}' is missing 'shortcutDetails.targetId'"
+            ))
+        })
 }
 
 struct ExportFormat {
@@ -788,9 +841,19 @@ fn check_export(format: &ExportFormat, source_mime: &str) -> Result<(), GwsError
         .map(|f| f.name)
         .collect();
     if valid.is_empty() {
-        return Err(GwsError::Validation(format!(
-            "Files of type {source_mime} cannot be exported; use +download for regular files"
-        )));
+        // `+download` refuses every Google-native type, so only a regular
+        // file may be sent there.
+        return Err(GwsError::Validation(
+            if source_mime.starts_with("application/vnd.google-apps.") {
+                format!(
+                    "Files of type {source_mime} are Google-native files that cannot be downloaded or exported"
+                )
+            } else {
+                format!(
+                    "Files of type {source_mime} cannot be exported; use +download for regular files"
+                )
+            },
+        ));
     }
     Err(GwsError::Validation(format!(
         "Cannot export {source_mime} as '{}'; valid formats: {}",
@@ -820,7 +883,16 @@ async fn export(
         "export".to_string()
     } else {
         let meta = get_metadata(api, file_id).await?;
-        check_export(format, str_field(&meta, "mimeType")?)?;
+        let mime = str_field(&meta, "mimeType")?;
+        if mime == SHORTCUT {
+            let target = shortcut_target(&meta, file_id)?;
+            return Err(GwsError::Validation(format!(
+                "'{}' is a shortcut; export its target with `gwsr drive +export --file-id {target} --to {}`",
+                str_field(&meta, "name")?,
+                format.name
+            )));
+        }
+        check_export(format, mime)?;
         str_field(&meta, "name")?.to_string()
     };
     let target = resolve_target(output, &name, Some(format.ext), overwrite)?;
@@ -1911,6 +1983,46 @@ mod tests {
         assert!(build_metadata(&args).is_err());
     }
 
+    /// `--convert` compares media types case-insensitively and without
+    /// parameters, and knows the macro-enabled, template and slideshow Office
+    /// types Drive imports (as detected from their extensions).
+    #[test]
+    fn conversion_target_ignores_case_and_parameters_and_knows_office_variants() {
+        for (content_type, target) in [
+            ("text/csv; charset=utf-8", SHEET),
+            ("Text/CSV", SHEET),
+            ("TEXT/PLAIN;charset=UTF-8", DOC),
+        ] {
+            assert_eq!(
+                conversion_target(content_type),
+                Some(target),
+                "{content_type}"
+            );
+        }
+        for (file, target) in [
+            ("a.xlsm", SHEET),
+            ("a.xltx", SHEET),
+            ("a.xltm", SHEET),
+            ("a.docm", DOC),
+            ("a.dotx", DOC),
+            ("a.dotm", DOC),
+            ("a.pptm", SLIDES),
+            ("a.potx", SLIDES),
+            ("a.potm", SLIDES),
+            ("a.ppsx", SLIDES),
+            ("a.ppsm", SLIDES),
+        ] {
+            let detected = mime_guess2::from_path(file).first().unwrap().to_string();
+            assert_eq!(
+                conversion_target(&detected),
+                Some(target),
+                "{file}: {detected}"
+            );
+        }
+        assert_eq!(conversion_target("application/pdf"), None);
+        assert_eq!(conversion_target("text/csvx"), None);
+    }
+
     #[tokio::test]
     async fn upload_uses_shared_drive_resumable_session() {
         let server = MockServer::start().await;
@@ -1944,6 +2056,41 @@ mod tests {
         };
         let v = upload(&api, &args).await.unwrap();
         assert_eq!(v["id"], "NEW");
+    }
+
+    /// `--mime-type` goes into the `X-Upload-Content-Type` header: control
+    /// characters and anything that is not a `type/subtype` media type are
+    /// refused up front, before credentials are loaded.
+    #[test]
+    fn upload_rejects_an_invalid_mime_type() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("r.txt");
+        std::fs::write(&file, "data").unwrap();
+        let file = file.to_str().unwrap();
+        for bad in [
+            "text/plain\r\nX-Evil: 1",
+            "text/plain\n",
+            "plain",
+            "",
+            "text/",
+        ] {
+            let m = matches(&["gwsr", "+upload", "--file", file, "--mime-type", bad]);
+            let (_, sub) = m.subcommand().unwrap();
+            let err = UploadArgs::parse(sub)
+                .err()
+                .unwrap_or_else(|| panic!("{bad:?} accepted"));
+            assert!(matches!(err, GwsError::Validation(_)), "{bad:?}: {err:?}");
+            assert!(err.to_string().contains("--mime-type"), "{err}");
+        }
+        for good in [
+            "text/plain",
+            "text/csv; charset=utf-8",
+            "application/vnd.ms-excel.sheet.macroEnabled.12",
+        ] {
+            let m = matches(&["gwsr", "+upload", "--file", file, "--mime-type", good]);
+            let (_, sub) = m.subcommand().unwrap();
+            assert_eq!(UploadArgs::parse(sub).unwrap().content_type, good);
+        }
     }
 
     #[tokio::test]
@@ -1995,6 +2142,59 @@ mod tests {
         assert!(matches!(err, GwsError::Validation(_)), "{err:?}");
         assert!(!msg.contains("+export"), "{msg}");
         assert!(msg.contains("cannot be downloaded or exported"), "{msg}");
+    }
+
+    /// `+export` of a shortcut points at the shortcut's target, and a
+    /// Google-native type that cannot be exported is not sent to `+download`,
+    /// which refuses it too.
+    #[tokio::test]
+    async fn export_of_a_shortcut_or_non_exportable_native_file_names_a_command_that_works() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/drive/v3/files/SC1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id": "SC1", "name": "Link", "mimeType": "application/vnd.google-apps.shortcut",
+                "shortcutDetails": {"targetId": "TARGET1", "targetMimeType": DOC}
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/drive/v3/files/FORM1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id": "FORM1", "name": "Survey", "mimeType": "application/vnd.google-apps.form"
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/drive/v3/files/PDF1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id": "PDF1", "name": "Paper", "mimeType": "application/pdf"
+            })))
+            .mount(&server)
+            .await;
+        let api = api(&server.uri(), "drive/v3/");
+
+        let err = export(&api, "SC1", "pdf", Some("-"), false)
+            .await
+            .unwrap_err();
+        let msg = err.to_string();
+        assert!(matches!(err, GwsError::Validation(_)), "{err:?}");
+        assert!(msg.contains("+export --file-id TARGET1 --to pdf"), "{msg}");
+        assert!(!msg.contains("+download"), "{msg}");
+
+        let err = export(&api, "FORM1", "pdf", Some("-"), false)
+            .await
+            .unwrap_err();
+        let msg = err.to_string();
+        assert!(matches!(err, GwsError::Validation(_)), "{err:?}");
+        assert!(!msg.contains("+download"), "{msg}");
+        assert!(msg.contains("cannot be downloaded or exported"), "{msg}");
+
+        // A regular file is still sent to +download.
+        let err = export(&api, "PDF1", "pdf", Some("-"), false)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("+download"), "{err}");
     }
 
     #[tokio::test]

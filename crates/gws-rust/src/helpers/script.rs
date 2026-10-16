@@ -67,6 +67,7 @@ EXAMPLES:
 
 TIPS:
   Uploads .gs/.js (server code), .html and appsscript.json (required).
+  Extensions match in any case (Code.GS is pushed as Code).
   Files in sub-directories keep their path (e.g. lib/util.gs -> lib/util).
   Hidden files/directories, node_modules and symlinks are skipped.
   Destructive: this REPLACES ALL files in the project, so it requires --yes
@@ -296,11 +297,25 @@ fn collect_files(root: &Path) -> Result<Vec<Value>, GwsError> {
             root.display()
         )));
     }
-    if !files.contains_key("appsscript") {
-        return Err(GwsError::Validation(format!(
-            "'{}' has no appsscript.json manifest; Apps Script requires it (use +pull to fetch the current one)",
-            root.display()
-        )));
+    // Only `appsscript.json` is the manifest. A root `appsscript.gs` or
+    // `appsscript.html` would take its name without being one, and the API
+    // rejects the push with an unhelpful error.
+    match files.get("appsscript") {
+        Some(f) if f["type"] == "JSON" => {}
+        Some(f) => {
+            return Err(GwsError::Validation(format!(
+                "'{}' would be pushed as the Apps Script file 'appsscript', which is reserved for \
+                 the appsscript.json manifest; rename it and add appsscript.json (use +pull to \
+                 fetch the current one)",
+                f["_path"].as_str().unwrap_or("?")
+            )));
+        }
+        None => {
+            return Err(GwsError::Validation(format!(
+                "'{}' has no appsscript.json manifest; Apps Script requires it (use +pull to fetch the current one)",
+                root.display()
+            )));
+        }
     }
     Ok(files
         .into_values()
@@ -317,18 +332,26 @@ fn collect_files(root: &Path) -> Result<Vec<Value>, GwsError> {
 fn process_file(root: &Path, path: &Path) -> Result<Option<(String, Value)>, GwsError> {
     let rel = path.strip_prefix(root).map_err(http::other_err)?;
     let rel_str = rel.to_string_lossy().replace('\\', "/");
-    let extension = path.extension().and_then(|s| s.to_str()).unwrap_or("");
+    // Match the extension case-insensitively: push replaces every file in
+    // the project, so skipping `Code.GS` would delete `Code` remotely.
+    let extension = path
+        .extension()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
     let stem = rel_str
         .rsplit_once('.')
         .map(|(s, _)| s.to_string())
         .unwrap_or_else(|| rel_str.clone());
-    let (type_val, name) = match extension {
+    let (type_val, name) = match extension.as_str() {
         "gs" | "js" => ("SERVER_JS", stem),
         "html" => ("HTML", stem),
-        "json" if rel_str == "appsscript.json" => ("JSON", "appsscript".to_string()),
+        "json" if stem == "appsscript" => ("JSON", stem),
         _ => return Ok(None),
     };
+    // A leading UTF-8 byte order mark is an encoding signature, not source.
     let source = fs::read_to_string(path)
+        .map(crate::executor::strip_utf8_bom)
         .map_err(|e| GwsError::Validation(format!("Failed to read '{}': {e}", path.display())))?;
     Ok(Some((
         name.clone(),
@@ -676,6 +699,89 @@ mod tests {
             ]
         );
         assert!(files.iter().all(|f| f.get("_path").is_none()));
+    }
+
+    /// A UTF-8 byte order mark (Notepad, PowerShell) is an encoding
+    /// signature, not source: it is not pushed into the manifest JSON or the
+    /// code, so a pushed file matches what `+pull` writes back.
+    #[test]
+    fn collect_files_drops_a_utf8_bom() {
+        let dir = tempdir().unwrap();
+        write(
+            &dir.path().join("appsscript.json"),
+            "\u{feff}{\"timeZone\": \"Etc/UTC\"}",
+        );
+        write(&dir.path().join("Code.gs"), "\u{feff}function a(){}\r\n");
+        write(&dir.path().join("index.html"), "<p>\u{feff}</p>");
+        let files = collect_files(dir.path()).unwrap();
+        let source = |name: &str| {
+            files.iter().find(|f| f["name"] == name).unwrap()["source"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        };
+        assert_eq!(source("appsscript"), "{\"timeZone\": \"Etc/UTC\"}");
+        assert_eq!(source("Code"), "function a(){}\r\n");
+        // Only a leading mark is dropped.
+        assert_eq!(source("index"), "<p>\u{feff}</p>");
+    }
+
+    #[test]
+    fn collect_files_matches_extensions_case_insensitively() {
+        // push replaces the whole project, so a skipped file is deleted
+        // remotely: upper-case extensions must be pushed, not dropped.
+        let dir = tempdir().unwrap();
+        write(&dir.path().join("appsscript.JSON"), "{}");
+        write(&dir.path().join("Code.GS"), "function a(){}");
+        write(&dir.path().join("lib/Util.Js"), "function b(){}");
+        write(&dir.path().join("Index.HTML"), "<p/>");
+        let files = collect_files(dir.path()).unwrap();
+        let mut names: Vec<(String, String)> = files
+            .iter()
+            .map(|f| {
+                (
+                    f["name"].as_str().unwrap().into(),
+                    f["type"].as_str().unwrap().into(),
+                )
+            })
+            .collect();
+        names.sort();
+        assert_eq!(
+            names,
+            vec![
+                ("Code".into(), "SERVER_JS".into()),
+                ("Index".into(), "HTML".into()),
+                ("appsscript".into(), "JSON".into()),
+                ("lib/Util".into(), "SERVER_JS".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn collect_files_refuses_names_differing_only_in_extension_case() {
+        let dir = tempdir().unwrap();
+        write(&dir.path().join("appsscript.json"), "{}");
+        write(&dir.path().join("Code.gs"), "x");
+        write(&dir.path().join("Code.GS"), "y");
+        // Both spellings are one file on a case-insensitive disk.
+        if fs::read_dir(dir.path()).unwrap().count() == 3 {
+            let err = collect_files(dir.path()).unwrap_err().to_string();
+            assert!(err.contains("Two local files map"), "{err}");
+        }
+    }
+
+    #[test]
+    fn collect_files_only_takes_appsscript_json_as_the_manifest() {
+        for other in ["appsscript.gs", "appsscript.js", "appsscript.html"] {
+            let dir = tempdir().unwrap();
+            write(&dir.path().join("Code.gs"), "x");
+            write(&dir.path().join(other), "x");
+            let err = collect_files(dir.path()).unwrap_err().to_string();
+            assert!(
+                err.contains(other) && err.contains("appsscript.json"),
+                "{other}: {err}"
+            );
+        }
     }
 
     #[test]

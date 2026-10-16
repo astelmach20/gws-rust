@@ -51,7 +51,8 @@ pub struct SanitizationResult {
     /// Detailed results from specific filters (PI, Jailbreak, etc.).
     #[serde(default)]
     pub filter_results: Value,
-    /// The final decision based on the policy (e.g., "BLOCK", "ALLOW").
+    /// Whether every filter ran: `SUCCESS`, `PARTIAL` (some filters were
+    /// skipped or failed) or `FAILURE` (all of them were).
     #[serde(default)]
     pub invocation_result: String,
 }
@@ -59,6 +60,31 @@ pub struct SanitizationResult {
 impl SanitizationResult {
     pub fn is_match(&self) -> bool {
         self.filter_match_state == "MATCH_FOUND"
+    }
+
+    /// Whether the result is a verdict at all. A match is one even if some
+    /// filters did not run; "no match" only counts when every filter ran
+    /// (`invocationResult: SUCCESS`). Anything else (filters skipped or
+    /// failed, an unspecified or unknown match state) means the content was
+    /// not screened, which must never read as clean.
+    fn ensure_screened(&self) -> Result<(), GwsError> {
+        if self.is_match()
+            || (self.filter_match_state == "NO_MATCH_FOUND" && self.invocation_result == "SUCCESS")
+        {
+            return Ok(());
+        }
+        let shown = |s: &str| {
+            if s.is_empty() {
+                "missing".to_string()
+            } else {
+                sanitize_for_terminal(s)
+            }
+        };
+        Err(GwsError::other(format!(
+            "Model Armor did not screen the content (filterMatchState: {}, invocationResult: {})",
+            shown(&self.filter_match_state),
+            shown(&self.invocation_result)
+        )))
     }
 }
 
@@ -273,11 +299,13 @@ pub fn parse_sanitize_response(resp: &Value) -> Result<SanitizationResult, GwsEr
     let result = resp
         .get("sanitizationResult")
         .ok_or_else(|| GwsError::other("No sanitizationResult in Model Armor response"))?;
-    serde_json::from_value(result.clone()).map_err(|e| {
+    let result: SanitizationResult = serde_json::from_value(result.clone()).map_err(|e| {
         GwsError::other(format!(
             "Failed to parse Model Armor sanitization result: {e}"
         ))
-    })
+    })?;
+    result.ensure_screened()?;
+    Ok(result)
 }
 
 /// The outcome of sanitizing one output value.
@@ -1031,7 +1059,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_no_match_passes_unchanged() {
-        let body = json!({"sanitizationResult": {"filterMatchState": "NO_MATCH_FOUND"}});
+        let body = json!({"sanitizationResult": {"filterMatchState": "NO_MATCH_FOUND", "invocationResult": "SUCCESS"}});
         let (_s, client) = armor_returning(ResponseTemplate::new(200).set_body_json(body)).await;
         let t = ModelArmorTemplate::parse(TEMPLATE).unwrap();
         let v = require_pass(
@@ -1041,6 +1069,67 @@ mod tests {
         )
         .unwrap();
         assert_eq!(v, json!({"a": 1}));
+    }
+
+    /// "No match" from filters that did not all run is not a clean verdict:
+    /// block mode fails closed and warn mode says the content is unscreened.
+    #[tokio::test]
+    async fn unscreened_results_never_pass_as_clean() {
+        let t = ModelArmorTemplate::parse(TEMPLATE).unwrap();
+        for result in [
+            json!({"filterMatchState": "NO_MATCH_FOUND", "invocationResult": "FAILURE"}),
+            json!({"filterMatchState": "NO_MATCH_FOUND", "invocationResult": "PARTIAL"}),
+            json!({"filterMatchState": "NO_MATCH_FOUND"}),
+            json!({"filterMatchState": "FILTER_MATCH_STATE_UNSPECIFIED", "invocationResult": "SUCCESS"}),
+            json!({"filterMatchState": "SOMETHING_NEW", "invocationResult": "SUCCESS"}),
+        ] {
+            let body = json!({ "sanitizationResult": result });
+            let (_s, client) =
+                armor_returning(ResponseTemplate::new(200).set_body_json(body)).await;
+            let err =
+                sanitize_value_with(&client, &t, &config(SanitizeMode::Block), json!({"a": 1}))
+                    .await
+                    .unwrap_err();
+            assert!(
+                err.to_string().contains("did not screen"),
+                "{result}: {err}"
+            );
+            assert!(
+                err.to_string().contains("output suppressed"),
+                "{result}: {err}"
+            );
+
+            let v = require_pass(
+                sanitize_value_with(&client, &t, &config(SanitizeMode::Warn), json!({"a": 1}))
+                    .await
+                    .unwrap(),
+            )
+            .unwrap();
+            let note = v["_sanitization"]["error"].as_str().unwrap();
+            assert!(note.contains("did not screen"), "{result}: {v}");
+
+            let err = screen_outgoing(&config(SanitizeMode::Block), &json!({}), Some(&client))
+                .await
+                .unwrap_err();
+            assert!(
+                err.to_string().contains("nothing was sent"),
+                "{result}: {err}"
+            );
+        }
+    }
+
+    /// A match is a verdict even when some filters did not run.
+    #[tokio::test]
+    async fn a_partial_invocation_match_still_blocks() {
+        let body = json!({"sanitizationResult": {
+            "filterMatchState": "MATCH_FOUND", "invocationResult": "PARTIAL"
+        }});
+        let (_s, client) = armor_returning(ResponseTemplate::new(200).set_body_json(body)).await;
+        let t = ModelArmorTemplate::parse(TEMPLATE).unwrap();
+        let out = sanitize_value_with(&client, &t, &config(SanitizeMode::Block), json!("x"))
+            .await
+            .unwrap();
+        assert!(matches!(out, Sanitized::Blocked(_)), "{out:?}");
     }
 
     #[tokio::test]
@@ -1093,7 +1182,7 @@ mod tests {
 
     #[tokio::test]
     async fn screen_outgoing_passes_clean_content_and_skips_without_template() {
-        let body = json!({"sanitizationResult": {"filterMatchState": "NO_MATCH_FOUND"}});
+        let body = json!({"sanitizationResult": {"filterMatchState": "NO_MATCH_FOUND", "invocationResult": "SUCCESS"}});
         let (_s, client) = armor_returning(ResponseTemplate::new(200).set_body_json(body)).await;
         let out = screen_outgoing(&config(SanitizeMode::Block), &json!({}), Some(&client))
             .await
