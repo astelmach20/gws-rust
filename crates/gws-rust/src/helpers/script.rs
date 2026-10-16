@@ -328,7 +328,9 @@ fn process_file(root: &Path, path: &Path) -> Result<Option<(String, Value)>, Gws
         "json" if rel_str == "appsscript.json" => ("JSON", "appsscript".to_string()),
         _ => return Ok(None),
     };
+    // A leading UTF-8 byte order mark is an encoding signature, not source.
     let source = fs::read_to_string(path)
+        .map(crate::executor::strip_utf8_bom)
         .map_err(|e| GwsError::Validation(format!("Failed to read '{}': {e}", path.display())))?;
     Ok(Some((
         name.clone(),
@@ -676,6 +678,31 @@ mod tests {
             ]
         );
         assert!(files.iter().all(|f| f.get("_path").is_none()));
+    }
+
+    /// A UTF-8 byte order mark (Notepad, PowerShell) is an encoding
+    /// signature, not source: it is not pushed into the manifest JSON or the
+    /// code, so a pushed file matches what `+pull` writes back.
+    #[test]
+    fn collect_files_drops_a_utf8_bom() {
+        let dir = tempdir().unwrap();
+        write(
+            &dir.path().join("appsscript.json"),
+            "\u{feff}{\"timeZone\": \"Etc/UTC\"}",
+        );
+        write(&dir.path().join("Code.gs"), "\u{feff}function a(){}\r\n");
+        write(&dir.path().join("index.html"), "<p>\u{feff}</p>");
+        let files = collect_files(dir.path()).unwrap();
+        let source = |name: &str| {
+            files.iter().find(|f| f["name"] == name).unwrap()["source"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        };
+        assert_eq!(source("appsscript"), "{\"timeZone\": \"Etc/UTC\"}");
+        assert_eq!(source("Code"), "function a(){}\r\n");
+        // Only a leading mark is dropped.
+        assert_eq!(source("index"), "<p>\u{feff}</p>");
     }
 
     #[test]
