@@ -204,6 +204,37 @@ fn help_subcommand_works_for_static_and_service_commands() {
         .stdout(predicate::str::contains("Usage: gwsr workflow"));
 }
 
+/// Global options given after the `gwsr help` path are fine: they are not
+/// mistaken for words of the service command.
+#[test]
+fn help_subcommand_accepts_global_options_after_a_service_path() {
+    let env = Env::new();
+    env.seed_drive("Lists files.");
+    for args in [
+        &["help", "drive", "files", "list", "--format", "table"][..],
+        &["help", "drive", "--format", "json"],
+        &["help", "drive", "files", "-v"],
+        &["--format", "json", "help", "drive", "files", "--pretty"],
+    ] {
+        let out = env.cmd().args(args).output().unwrap();
+        assert!(out.status.success(), "{args:?}: {}", stderr_of(&out));
+        let path = args
+            .iter()
+            .skip_while(|a| **a != "help")
+            .skip(1)
+            .take_while(|a| !a.starts_with('-'))
+            .copied()
+            .collect::<Vec<_>>()
+            .join(" ");
+        let usage = format!("Usage: gwsr {path} [OPTIONS]");
+        assert!(
+            stdout_of(&out).contains(&usage),
+            "{args:?}: {}",
+            stdout_of(&out)
+        );
+    }
+}
+
 #[test]
 fn bare_service_and_resource_print_help_and_exit_zero() {
     let env = Env::new();
