@@ -173,8 +173,17 @@ async fn post_one_click(url: &reqwest::Url) -> Result<u16, GwsError> {
         .send()
         .await
         // No response (refused, DNS, TLS, timeout) is a network error.
+        // reqwest's message names the full URL, whose path and query often
+        // carry a per-recipient token: name the host only.
         .map_err(|e| {
-            GwsError::Network(format!("One-click unsubscribe request failed: {e}").into())
+            GwsError::Network(
+                format!(
+                    "One-click unsubscribe request to {} failed: {}",
+                    url.host_str().unwrap_or_default(),
+                    e.without_url()
+                )
+                .into(),
+            )
         })?;
     let status = resp.status();
     if status.is_success() {
@@ -387,6 +396,19 @@ mod tests {
         assert!(matches!(err, GwsError::Network(_)), "{err:?}");
         assert_eq!(err.exit_code(), GwsError::EXIT_CODE_NETWORK, "{err:?}");
         assert!(err.to_string().contains("One-click unsubscribe"), "{err}");
+    }
+
+    /// The URL's path and query often carry a per-recipient token: a
+    /// transport error names the host only, like the main client's errors.
+    #[tokio::test]
+    async fn post_error_does_not_include_the_url_path_or_query() {
+        let url = reqwest::Url::parse("http://127.0.0.1:9/u/PATHTOKEN?token=QUERYTOKEN").unwrap();
+        let err = post_one_click(&url).await.unwrap_err();
+        let message = err.to_string();
+        assert!(matches!(err, GwsError::Network(_)), "{err:?}");
+        assert!(message.contains("127.0.0.1"), "{message}");
+        assert!(!message.contains("PATHTOKEN"), "{message}");
+        assert!(!message.contains("QUERYTOKEN"), "{message}");
     }
 
     #[tokio::test]
