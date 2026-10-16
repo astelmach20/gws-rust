@@ -200,6 +200,21 @@ struct UploadPlan {
     data: UploadData,
     mime: String,
     resumable: bool,
+    /// `uploadType=media`: the file alone, for a simple endpoint documented
+    /// with `multipart: false`.
+    media: bool,
+}
+
+impl UploadPlan {
+    fn protocol(&self) -> &'static str {
+        if self.resumable {
+            "resumable"
+        } else if self.media {
+            "media"
+        } else {
+            "multipart"
+        }
+    }
 }
 
 async fn plan_upload(
@@ -234,10 +249,31 @@ async fn plan_upload(
         }
         UploadMode::Auto => supports_resumable && data.len() > upload::RESUMABLE_THRESHOLD,
     };
+    // A simple endpoint documented with `multipart: false` takes only the
+    // file (`uploadType=media`). Metadata then needs the resumable protocol.
+    let media_only = method
+        .media_upload
+        .as_ref()
+        .and_then(|m| m.protocols.as_ref())
+        .and_then(|p| p.simple.as_ref())
+        .is_some_and(|p| p.multipart == Some(false));
+    let (resumable, media) = match (resumable, media_only, body) {
+        (false, true, Some(_)) if supports_resumable => (true, false),
+        (false, true, Some(_)) => {
+            return Err(GwsError::Validation(format!(
+                "{} takes only the file on its simple upload endpoint (uploadType=media) and \
+                 has no resumable upload for metadata; remove --json",
+                method.id.as_deref().unwrap_or("this method")
+            )));
+        }
+        (false, true, None) => (false, true),
+        _ => (resumable, false),
+    };
     Ok(UploadPlan {
         data,
         mime,
         resumable,
+        media,
     })
 }
 
@@ -461,12 +497,7 @@ pub(crate) async fn execute_to(
         // Show the query exactly as send_upload will send it.
         let mut query_params = request_url.query.clone();
         if let Some(p) = &upload_plan {
-            let protocol = if p.resumable {
-                "resumable"
-            } else {
-                "multipart"
-            };
-            query_params.push(("uploadType".to_string(), protocol.to_string()));
+            query_params.push(("uploadType".to_string(), p.protocol().to_string()));
         }
         let info = json!({
             "dry_run": true,
@@ -475,7 +506,7 @@ pub(crate) async fn execute_to(
             "query_params": query_params,
             "body": body,
             "upload": upload_plan.as_ref().map(|p| json!({
-                "protocol": if p.resumable { "resumable" } else { "multipart" },
+                "protocol": p.protocol(),
                 "bytes": p.data.len(),
                 "contentType": p.mime,
             })),
@@ -971,6 +1002,18 @@ async fn send_upload(
                 media_mime: &plan.mime,
                 chunk_size: options.upload_chunk_size,
             },
+        )
+        .await
+    } else if plan.media {
+        query.push(("uploadType".to_string(), "media".to_string()));
+        upload::send_media(
+            transport,
+            http.clone(),
+            url,
+            &query,
+            &plan.data,
+            &plan.mime,
+            idem,
         )
         .await
     } else {
