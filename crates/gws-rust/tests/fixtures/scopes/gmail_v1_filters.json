@@ -1,0 +1,117 @@
+{
+  "batchPath": "batch",
+  "discoveryVersion": "v1",
+  "id": "gmail:v1",
+  "kind": "discovery#restDescription",
+  "name": "gmail",
+  "resources": {
+    "users": {
+      "resources": {
+        "labels": {
+          "methods": {
+            "list": {
+              "flatPath": "gmail/v1/users/{userId}/labels",
+              "httpMethod": "GET",
+              "id": "gmail.users.labels.list",
+              "parameterOrder": [
+                "userId"
+              ],
+              "parameters": {
+                "userId": {
+                  "location": "path",
+                  "required": true,
+                  "type": "string"
+                }
+              },
+              "path": "gmail/v1/users/{userId}/labels",
+              "scopes": [
+                "https://mail.google.com/",
+                "https://www.googleapis.com/auth/gmail.labels",
+                "https://www.googleapis.com/auth/gmail.metadata",
+                "https://www.googleapis.com/auth/gmail.modify",
+                "https://www.googleapis.com/auth/gmail.readonly"
+              ]
+            }
+          }
+        },
+        "settings": {
+          "resources": {
+            "filters": {
+              "methods": {
+                "create": {
+                  "flatPath": "gmail/v1/users/{userId}/settings/filters",
+                  "httpMethod": "POST",
+                  "id": "gmail.users.settings.filters.create",
+                  "parameterOrder": [
+                    "userId"
+                  ],
+                  "parameters": {
+                    "userId": {
+                      "location": "path",
+                      "required": true,
+                      "type": "string"
+                    }
+                  },
+                  "path": "gmail/v1/users/{userId}/settings/filters",
+                  "scopes": [
+                    "https://www.googleapis.com/auth/gmail.settings.basic"
+                  ]
+                },
+                "delete": {
+                  "flatPath": "gmail/v1/users/{userId}/settings/filters/{id}",
+                  "httpMethod": "DELETE",
+                  "id": "gmail.users.settings.filters.delete",
+                  "parameterOrder": [
+                    "userId",
+                    "id"
+                  ],
+                  "parameters": {
+                    "id": {
+                      "location": "path",
+                      "required": true,
+                      "type": "string"
+                    },
+                    "userId": {
+                      "location": "path",
+                      "required": true,
+                      "type": "string"
+                    }
+                  },
+                  "path": "gmail/v1/users/{userId}/settings/filters/{id}",
+                  "scopes": [
+                    "https://www.googleapis.com/auth/gmail.settings.basic"
+                  ]
+                },
+                "list": {
+                  "flatPath": "gmail/v1/users/{userId}/settings/filters",
+                  "httpMethod": "GET",
+                  "id": "gmail.users.settings.filters.list",
+                  "parameterOrder": [
+                    "userId"
+                  ],
+                  "parameters": {
+                    "userId": {
+                      "location": "path",
+                      "required": true,
+                      "type": "string"
+                    }
+                  },
+                  "path": "gmail/v1/users/{userId}/settings/filters",
+                  "scopes": [
+                    "https://mail.google.com/",
+                    "https://www.googleapis.com/auth/gmail.modify",
+                    "https://www.googleapis.com/auth/gmail.readonly",
+                    "https://www.googleapis.com/auth/gmail.settings.basic"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "rootUrl": "https://gmail.googleapis.com/",
+  "servicePath": "",
+  "version": "v1"
+}
