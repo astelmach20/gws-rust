@@ -458,8 +458,10 @@ pub(crate) fn into_gws(e: StepError) -> GwsError {
     }
 }
 
-/// Delete created Pub/Sub resources, reporting every failure. Returns an
-/// error listing the resources that could not be deleted.
+/// Delete created Pub/Sub resources, reporting every failure. Returns the
+/// first failure's error, with its own class (a refused permission exits 1,
+/// a lost connection 10), naming any later failures too. Each error already
+/// names its resource.
 pub(crate) async fn cleanup_resources(
     client: &PubSubClient,
     names: &[&str],
@@ -468,17 +470,23 @@ pub(crate) async fn cleanup_resources(
     for name in names {
         match client.delete(name).await {
             Ok(()) => emit_diagnostic("info", "deleted", json!({ "resource": name })),
-            Err(e) => failed.push(format!("{name} ({e})")),
+            Err(e) => failed.push(e),
         }
     }
-    if failed.is_empty() {
-        Ok(())
+    let mut failed = failed.into_iter();
+    let Some(first) = failed.next() else {
+        return Ok(());
+    };
+    let later: Vec<String> = failed.map(|e| e.to_string()).collect();
+    let context = if later.is_empty() {
+        "Failed to delete Pub/Sub resources".to_string()
     } else {
-        Err(GwsError::other(format!(
-            "Failed to delete Pub/Sub resources: {}",
-            failed.join("; ")
-        )))
-    }
+        format!(
+            "Failed to delete Pub/Sub resources (also: {})",
+            later.join("; ")
+        )
+    };
+    Err(crate::helpers::modelarmor::prefix_message(first, &context))
 }
 
 #[cfg(test)]
@@ -732,6 +740,38 @@ mod tests {
             .await
             .unwrap();
         assert!(got.is_empty());
+    }
+
+    /// A failed deletion is an API outcome with its own class (a refused
+    /// permission exits 1), not an internal error (5); every failure is
+    /// still named.
+    #[tokio::test]
+    async fn cleanup_failure_keeps_the_api_error_class() {
+        let server = MockServer::start().await;
+        Mock::given(method("DELETE"))
+            .and(path("/subscriptions/s"))
+            .respond_with(ResponseTemplate::new(403).set_body_json(json!({
+                "error": {"code": 403, "message": "denied", "status": "PERMISSION_DENIED"}
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("DELETE"))
+            .and(path("/topics/t"))
+            .respond_with(ResponseTemplate::new(404).set_body_json(json!({
+                "error": {"code": 404, "message": "no such topic", "status": "NOT_FOUND"}
+            })))
+            .mount(&server)
+            .await;
+        let client = PubSubClient::with_base(&Transport::for_test(&server.uri()), &server.uri());
+        let err = cleanup_resources(&client, &["subscriptions/s", "topics/t"])
+            .await
+            .unwrap_err();
+        assert!(matches!(err, GwsError::Api { code: 403, .. }), "{err:?}");
+        assert_eq!(err.exit_code(), GwsError::EXIT_CODE_API, "{err:?}");
+        let msg = err.to_string();
+        for needle in ["subscriptions/s", "denied", "topics/t", "no such topic"] {
+            assert!(msg.contains(needle), "{needle}: {msg}");
+        }
     }
 
     #[tokio::test]
