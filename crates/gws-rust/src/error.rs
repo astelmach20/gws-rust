@@ -301,6 +301,16 @@ fn api_hint(
              the current state and adjust the request; retrying unchanged will fail again."
                 .to_string(),
         ),
+        // The token endpoint (or something in front of it) answered without
+        // an OAuth error: its status, even a 401, says nothing about the
+        // credentials, so the 401 "sign in again" hint below does not apply.
+        "tokenEndpointError" => Some(
+            "The OAuth token endpoint's answer was no verdict on your credentials, so \
+             signing in again will not help. A proxy or captive portal between gwsr and \
+             Google often answers this way: check the network path (HTTPS_PROXY, a Wi-Fi \
+             sign-in page) before running the command again."
+                .to_string(),
+        ),
         _ if code == 429 => Some(
             "Rate limited by Google. Retry after an exponential backoff. Exit code 6 \
              marks retryable errors."
@@ -778,6 +788,33 @@ mod tests {
         );
         assert!(hint_for(&api(404, "notFound"), &ctx).is_none());
         assert!(hint_for(&GwsError::Validation("x".into()), &ctx).is_none());
+    }
+
+    /// A token-endpoint 401 without an OAuth error (a proxy's answer) says
+    /// the credentials were not rejected; its hint must not tell the user to
+    /// sign in again, as the hint for an API's 401 does.
+    #[test]
+    fn token_endpoint_failure_hint_does_not_say_sign_in_again() {
+        let ctx = ErrorContext::default();
+        for status in [401, 403, 407, 501] {
+            let err = GwsError::from(crate::auth::AuthError::TokenEndpointFailed {
+                status,
+                detail: "<html>Proxy</html>".into(),
+            });
+            assert!(
+                err.to_string().contains("credentials were not rejected"),
+                "{err}"
+            );
+            let hint = hint_for(&err, &ctx).unwrap_or_default();
+            assert!(
+                hint.contains("no verdict on your credentials"),
+                "{status}: {hint}"
+            );
+            assert!(!hint.contains("was rejected"), "{status}: {hint}");
+        }
+        // An API's own 401 still says to sign in again.
+        let api_401 = hint_for(&api(401, "authError"), &ctx).unwrap();
+        assert!(api_401.contains("Sign in again"), "{api_401}");
     }
 
     /// `--timeout`, `--no-quota-project` and `--page-delay` exist only on
