@@ -914,10 +914,13 @@ async fn export(
 // ── +move ────────────────────────────────────────────────────────────
 
 async fn move_file(api: &Api, file_id: &str, folder_id: &str) -> Result<Value, GwsError> {
+    let meta = get_metadata(api, file_id).await?;
     let (dest, current_parents) = if api.is_dry_run() {
+        // Plan the destination lookup too, so the plan lists every request
+        // a real run sends; the file's parents and the real ID are unknown.
+        folder_lookup(api, folder_id).await?;
         (folder_id.to_string(), "<current parents>".to_string())
     } else {
-        let meta = get_metadata(api, file_id).await?;
         let parents: Vec<&str> = meta
             .get("parents")
             .and_then(Value::as_array)
@@ -953,14 +956,19 @@ async fn move_file(api: &Api, file_id: &str, folder_id: &str) -> Result<Value, G
 /// The real ID of the folder `folder_id` names, which may be an alias
 /// (`root`, the user's My Drive).
 async fn folder_real_id(api: &Api, folder_id: &str) -> Result<String, GwsError> {
-    let meta = api
-        .send(
-            ApiRequest::get(api.url(&format!("files/{}", encode_path_segment(folder_id))))
-                .query("supportsAllDrives", "true")
-                .query("fields", "id"),
-        )
-        .await?;
+    let meta = folder_lookup(api, folder_id).await?;
     Ok(str_field(&meta, "id")?.to_string())
+}
+
+/// `files.get` of the folder `folder_id` names, for its real ID (`Null` in
+/// a dry run, which only plans the request).
+async fn folder_lookup(api: &Api, folder_id: &str) -> Result<Value, GwsError> {
+    api.send(
+        ApiRequest::get(api.url(&format!("files/{}", encode_path_segment(folder_id))))
+            .query("supportsAllDrives", "true")
+            .query("fields", "id"),
+    )
+    .await
 }
 
 // ── +share ───────────────────────────────────────────────────────────
@@ -2391,6 +2399,28 @@ mod tests {
             .await;
         let api = super::super::http::test_support::api(&server.uri(), "drive/v3/");
         move_file(&api, "F1", "root").await.unwrap();
+    }
+
+    /// A real `+move` reads the file's parents and the destination's real ID
+    /// before the PATCH; the dry-run plan lists both GETs first.
+    #[tokio::test]
+    async fn move_dry_run_plans_the_parent_and_destination_reads() {
+        let api = dry_api("drive/v3/");
+        move_file(&api, "F1", "root").await.unwrap();
+        let plan = api.planned();
+        let methods: Vec<&str> = plan.iter().filter_map(|p| p["method"].as_str()).collect();
+        assert_eq!(methods, ["GET", "GET", "PATCH"], "{plan:?}");
+        assert!(
+            plan[0]["url"].as_str().unwrap().ends_with("/files/F1"),
+            "{plan:?}"
+        );
+        assert_eq!(plan[0]["query_params"]["fields"], FILE_FIELDS, "{plan:?}");
+        assert!(
+            plan[1]["url"].as_str().unwrap().ends_with("/files/root"),
+            "{plan:?}"
+        );
+        assert_eq!(plan[1]["query_params"]["fields"], "id", "{plan:?}");
+        assert_eq!(plan[2]["query_params"]["addParents"], "root", "{plan:?}");
     }
 
     #[test]
