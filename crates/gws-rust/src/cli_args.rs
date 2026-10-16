@@ -255,7 +255,7 @@ pub enum DevCommand {
     /// Generate man pages for the static commands
     Man {
         /// Directory to write `*.1` files into (created if missing)
-        #[arg(long, value_name = "DIR", required = true)]
+        #[arg(long, value_name = "DIR", value_hint = clap::ValueHint::DirPath, required = true)]
         output_dir: String,
     },
 }

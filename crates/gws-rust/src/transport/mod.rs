@@ -40,8 +40,10 @@ use crate::error::GwsError;
 /// Tracks what authentication method was used for the request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AuthMethod {
-    /// OAuth2 bearer token.
+    /// OAuth2 bearer token that is refreshed once after a 401.
     OAuth,
+    /// A fixed bearer token (`GWSR_TOKEN`) that gwsr cannot refresh.
+    FixedToken,
     /// No authentication was provided.
     None,
 }
@@ -51,8 +53,8 @@ pub enum AuthMethod {
 pub enum Credentials {
     /// Unauthenticated requests.
     None,
-    /// A fixed access token that cannot be refreshed.
-    #[cfg(test)]
+    /// A fixed access token that cannot be refreshed (`GWSR_TOKEN`): a 401
+    /// is final.
     Static(String),
     /// A token that is refreshed through `provider` when the API answers 401.
     Refreshable {
@@ -65,7 +67,6 @@ impl std::fmt::Debug for Credentials {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let kind = match self {
             Credentials::None => "None",
-            #[cfg(test)]
             Credentials::Static(_) => "Static(<redacted>)",
             Credentials::Refreshable { .. } => "Refreshable(<redacted>)",
         };
@@ -77,20 +78,28 @@ impl Credentials {
     pub(crate) fn auth_method(&self) -> AuthMethod {
         match self {
             Credentials::None => AuthMethod::None,
-            _ => AuthMethod::OAuth,
+            Credentials::Static(_) => AuthMethod::FixedToken,
+            Credentials::Refreshable { .. } => AuthMethod::OAuth,
         }
     }
 
-    /// A refreshable token for `scopes`. Only a complete absence of
-    /// credentials ([`crate::auth::AuthError::NoCredentials`]) falls back to
+    /// A token for `scopes`: refreshable, unless the source is a fixed token
+    /// (`GWSR_TOKEN`). Only a complete absence of credentials
+    /// ([`crate::auth::AuthError::NoCredentials`]) falls back to
     /// unauthenticated requests; every other failure is reported.
     pub(crate) async fn for_scopes(scopes: &[String]) -> Result<Self, GwsError> {
         let scopes: Vec<&str> = scopes.iter().map(String::as_str).collect();
         match crate::auth::get_token(&scopes).await {
-            Ok(token) => Ok(Credentials::Refreshable {
-                token,
-                provider: Arc::new(crate::auth::token_provider(&scopes)),
-            }),
+            Ok(token) => {
+                if crate::auth::active_source_can_refresh().map_err(crate::auth::to_gws_error)? {
+                    Ok(Credentials::Refreshable {
+                        token,
+                        provider: Arc::new(crate::auth::token_provider(&scopes)),
+                    })
+                } else {
+                    Ok(Credentials::Static(token))
+                }
+            }
             Err(e)
                 if matches!(
                     e.downcast_ref::<crate::auth::AuthError>(),
@@ -150,7 +159,6 @@ impl Transport {
     ) -> Result<Self, GwsError> {
         let (token, provider) = match credentials {
             Credentials::None => (None, None),
-            #[cfg(test)]
             Credentials::Static(t) => (Some(t.clone()), None),
             Credentials::Refreshable { token, provider } => {
                 (Some(token.clone()), Some(provider.clone()))
@@ -232,10 +240,10 @@ impl Transport {
     }
 
     pub(crate) fn auth_method(&self) -> Result<AuthMethod, GwsError> {
-        Ok(if self.current_token()?.is_some() {
-            AuthMethod::OAuth
-        } else {
-            AuthMethod::None
+        Ok(match (self.current_token()?, &self.shared.provider) {
+            (None, _) => AuthMethod::None,
+            (Some(_), None) => AuthMethod::FixedToken,
+            (Some(_), Some(_)) => AuthMethod::OAuth,
         })
     }
 

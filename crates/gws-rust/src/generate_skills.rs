@@ -92,7 +92,7 @@ struct SkillIndexEntry {
 #[derive(Debug, Clone, clap::Args)]
 pub struct GenerateSkillsArgs {
     /// Directory the skill folders are written into (relative paths resolve against the current directory).
-    #[arg(long, value_name = "DIR", required = true)]
+    #[arg(long, value_name = "DIR", value_hint = clap::ValueHint::DirPath, required = true)]
     pub output_dir: String,
 
     /// Only generate the named skills. Repeatable. Each value must match exactly:
@@ -103,7 +103,7 @@ pub struct GenerateSkillsArgs {
     pub filters: Vec<String>,
 
     /// Also write a Markdown skills index to this path (e.g. docs/skills.md).
-    #[arg(long, value_name = "PATH")]
+    #[arg(long, value_name = "PATH", value_hint = clap::ValueHint::AnyPath)]
     pub index: Option<String>,
 }
 

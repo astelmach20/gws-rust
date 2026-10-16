@@ -4333,3 +4333,43 @@ async fn require_confirm_gates_chat_space_member_adds() {
     cmd("0").args(add).assert().success();
     assert_eq!(server.received_requests().await.unwrap().len(), 2);
 }
+
+/// `GWSR_TOKEN` is a fixed access token: gwsr cannot mint a new one, so a 401
+/// is final. The request is sent once (no "refresh" that resends the same
+/// rejected token), and the error is an auth error (exit 2) that says the
+/// token expired or was revoked.
+#[tokio::test(flavor = "multi_thread")]
+async fn static_token_rejected_with_401_is_not_resent() {
+    use wiremock::matchers::any;
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    Mock::given(any())
+        .respond_with(ResponseTemplate::new(401).set_body_json(json!({
+            "error": {"code": 401,
+                      "message": "Request had invalid authentication credentials.",
+                      "errors": [{"reason": "authError"}],
+                      "status": "UNAUTHENTICATED"}
+        })))
+        .mount(&server)
+        .await;
+    let env = Env::new();
+    env.seed_drive("List files.");
+    let out = env
+        .cmd()
+        .env("GWSR_TOKEN", "test-token")
+        .env("GWSR_API_BASE_URL", server.uri())
+        .args(["drive", "files", "list"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2), "{}", stderr_of(&out));
+    assert_eq!(
+        server.received_requests().await.unwrap().len(),
+        1,
+        "a rejected GWSR_TOKEN must not be sent again"
+    );
+    let err = stderr_error(&out);
+    let message = err["error"]["message"].as_str().unwrap();
+    assert!(message.contains("GWSR_TOKEN"), "{err}");
+    assert!(message.contains("expired or was revoked"), "{err}");
+}

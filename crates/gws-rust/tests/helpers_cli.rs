@@ -88,6 +88,48 @@ fn stdout_json(out: &std::process::Output) -> Value {
     })
 }
 
+/// Without `--output`, a real run names the local file after the Drive file,
+/// which a dry run does not know: the plan shows a placeholder, never a made-up
+/// `download` or `export.pdf` that a directory of that name would refuse.
+#[test]
+fn drive_download_export_dry_run_without_output_shows_placeholder_name() {
+    let dir = setup();
+    std::fs::create_dir(dir.path().join("download")).unwrap();
+    std::fs::create_dir(dir.path().join("export.pdf")).unwrap();
+    for (args, name) in [
+        (
+            &["drive", "+download", "--file-id", "F1", "--dry-run"][..],
+            "<file name>",
+        ),
+        (
+            &[
+                "drive",
+                "+export",
+                "--file-id",
+                "F1",
+                "--to",
+                "pdf",
+                "--dry-run",
+            ][..],
+            "<file name>.pdf",
+        ),
+    ] {
+        let out = gwsr(dir.path()).args(args).output().unwrap();
+        assert!(
+            out.status.success(),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let v = stdout_json(&out);
+        let output = v["requests"][1]["output"].as_str().unwrap();
+        assert_eq!(
+            Path::new(output).file_name().and_then(|n| n.to_str()),
+            Some(name),
+            "{args:?}: {v}"
+        );
+    }
+}
+
 #[test]
 fn drive_export_dry_run_prints_json_plan() {
     let dir = setup();
@@ -1667,8 +1709,9 @@ async fn dot_segment_path_parameters_are_rejected_before_sending() {
 }
 
 /// An empty ID leaves an empty path segment, so `--event-id ""` would
-/// DELETE `events/` (the collection) and `--message-id ""` would GET the
-/// message list: helpers and workflows refuse it, real run and dry run alike.
+/// DELETE `events/` (the collection), `--message-id ""` would GET the
+/// message list, and `--document-id ""` would POST `documents/:batchUpdate`:
+/// helpers and workflows refuse it, real run and dry run alike.
 #[tokio::test(flavor = "multi_thread")]
 async fn empty_path_ids_are_rejected_before_sending() {
     use wiremock::{Mock, MockServer, ResponseTemplate, matchers::any};
@@ -1688,7 +1731,7 @@ async fn empty_path_ids_are_rejected_before_sending() {
             .output()
             .unwrap()
     };
-    let cases: [&[&str]; 6] = [
+    let cases: [&[&str]; 10] = [
         &["calendar", "+delete", "--event-id", "", "--yes"],
         &["calendar", "+delete", "--event-id", "", "--dry-run"],
         &[
@@ -1706,6 +1749,35 @@ async fn empty_path_ids_are_rejected_before_sending() {
             "workflow",
             "+email-to-task",
             "--message-id",
+            "",
+            "--dry-run",
+        ],
+        // An empty ID in front of a custom verb leaves `documents/:batchUpdate`.
+        &["docs", "+write", "--document-id", "", "--text", "hi"],
+        &[
+            "script",
+            "+run",
+            "--script-id",
+            "",
+            "--function",
+            "f",
+            "--dry-run",
+        ],
+        &[
+            "sheets",
+            "+clear",
+            "--spreadsheet-id",
+            "S1",
+            "--range",
+            "",
+            "--yes",
+        ],
+        &[
+            "sheets",
+            "+clear",
+            "--spreadsheet-id",
+            "S1",
+            "--range",
             "",
             "--dry-run",
         ],
@@ -2544,6 +2616,111 @@ async fn gmail_outgoing_helpers_reject_control_characters_in_headers() {
         out.status.success(),
         "{}",
         String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// Label names are resolved to IDs with a `users.labels.list` read before
+/// the change: the dry-run plan lists that read first, as a real run sends it.
+#[test]
+fn gmail_label_dry_runs_list_the_labels_read() {
+    let dir = setup();
+    seed(dir.path(), "gmail", "v1", "");
+    let plan = |args: &[&str]| {
+        let out = gwsr(dir.path()).args(args).output().unwrap();
+        assert!(
+            out.status.success(),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let plan = stdout_json(&out);
+        plan["requests"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| {
+                format!(
+                    "{} {}",
+                    r["method"].as_str().unwrap(),
+                    r["url"].as_str().unwrap()
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    let labels = "GET https://gmail.googleapis.com/gmail/v1/users/me/labels";
+
+    let requests = plan(&[
+        "gmail",
+        "+label",
+        "--message-id",
+        "m1",
+        "--add",
+        "Receipts",
+        "--dry-run",
+    ]);
+    assert_eq!(
+        requests,
+        [
+            labels,
+            "POST https://gmail.googleapis.com/gmail/v1/users/me/messages/m1/modify"
+        ]
+    );
+
+    let requests = plan(&[
+        "gmail",
+        "+filter",
+        "create",
+        "--from",
+        "boss@example.com",
+        "--add-label",
+        "Receipts",
+        "--dry-run",
+    ]);
+    assert_eq!(
+        requests,
+        [
+            labels,
+            "POST https://gmail.googleapis.com/gmail/v1/users/me/settings/filters"
+        ]
+    );
+
+    // `--archive` removes INBOX, which is resolved like any label name.
+    let requests = plan(&[
+        "gmail",
+        "+filter",
+        "create",
+        "--from",
+        "boss@example.com",
+        "--archive",
+        "--dry-run",
+    ]);
+    assert_eq!(
+        requests,
+        [
+            labels,
+            "POST https://gmail.googleapis.com/gmail/v1/users/me/settings/filters"
+        ]
+    );
+
+    // Without labels to resolve, a real run reads no labels.
+    let requests = plan(&[
+        "gmail",
+        "+filter",
+        "create",
+        "--from",
+        "boss@example.com",
+        "--forward",
+        "fwd@example.com",
+        "--yes",
+        "--dry-run",
+    ]);
+    assert_eq!(
+        requests,
+        ["POST https://gmail.googleapis.com/gmail/v1/users/me/settings/filters"]
+    );
+    let requests = plan(&["gmail", "+archive", "--message-id", "m1", "--dry-run"]);
+    assert_eq!(
+        requests,
+        ["POST https://gmail.googleapis.com/gmail/v1/users/me/messages/m1/modify"]
     );
 }
 
