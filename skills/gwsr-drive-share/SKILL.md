@@ -23,8 +23,10 @@ Grant access to a file or folder
 ## Usage
 
 ```bash
-gwsr drive +share --file-id <ID> --role <ROLE>
+gwsr drive +share --file-id <ID> --role <ROLE> --email <EMAIL>
 ```
+
+Requires one of: `--email <EMAIL>`, `--domain <DOMAIN>`, `--anyone`.
 
 ## Flags
 
@@ -32,10 +34,10 @@ gwsr drive +share --file-id <ID> --role <ROLE>
 |------|----------|---------|-------------|
 | `--file-id` | ✓ | — | Drive file ID |
 | `--role` | ✓ | — | Role to grant (required; there is no default) |
-| `--email` | — | — | Grant to this user (or group, with --group) |
+| `--email` | one | — | Grant to this user (or group, with --group) |
 | `--group` | — | — | Treat --email as a Google Group address |
-| `--domain` | — | — | Grant to everyone in this domain |
-| `--anyone` | — | — | Grant to anyone with the link |
+| `--domain` | one | — | Grant to everyone in this domain |
+| `--anyone` | one | — | Grant to anyone with the link |
 | `--no-notify` | — | — | Do not send a notification email |
 | `--message` | — | — | Custom message for the notification email |
 | `--yes` | — | — | Confirm this action without prompting (required when not on a terminal) |

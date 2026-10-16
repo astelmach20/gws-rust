@@ -23,15 +23,17 @@ Renew or reactivate Workspace Events subscriptions
 ## Usage
 
 ```bash
-gwsr events +renew
+gwsr events +renew --subscription-id <ID>
 ```
+
+Requires one of: `--subscription-id <ID>`, `--all`.
 
 ## Flags
 
 | Flag | Required | Default | Description |
 |------|----------|---------|-------------|
-| `--subscription-id` | — | — | Subscription to renew (subscriptions/SUB_ID or SUB_ID) |
-| `--all` | — | — | Renew every subscription for --event-types that expires within --within (with --reactivate: every SUSPENDED one) |
+| `--subscription-id` | one | — | Subscription to renew (subscriptions/SUB_ID or SUB_ID) |
+| `--all` | one | — | Renew every subscription for --event-types that expires within --within (with --reactivate: every SUSPENDED one) |
 | `--event-types` | — | — | Comma-separated event types (required with --all; selects the OAuth scope) |
 | `--within` | — | 1h | Time window for --all renewals (e.g., 30m, 1h, 2d); ignored with --reactivate |
 | `--reactivate` | — | — | Reactivate a SUSPENDED subscription instead of extending its expiry |

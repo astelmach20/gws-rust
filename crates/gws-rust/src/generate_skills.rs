@@ -860,6 +860,34 @@ fn is_confirmation_gated(cmd: &Command) -> bool {
         || cmd.get_subcommands().any(is_confirmation_gated)
 }
 
+/// One argument as the usage line shows it: ` --long <VALUE>`, ` --flag`
+/// for a switch, or ` <id>` for a positional.
+fn arg_usage(arg: &clap::Arg) -> String {
+    let Some(long) = arg.get_long() else {
+        return format!(" <{}>", arg.get_id().as_str());
+    };
+    if !arg.get_action().takes_values() {
+        return format!(" --{long}");
+    }
+    let val_name = arg
+        .get_value_names()
+        .and_then(|v| v.first())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| "VALUE".to_string());
+    format!(" --{long} <{val_name}>")
+}
+
+/// How many members of a required group must be given: `one` (exclusive)
+/// or `at least one` (`multiple`).
+fn group_quantifier(group: &clap::ArgGroup) -> &'static str {
+    // `ArgGroup::is_multiple` takes `&mut self`.
+    if group.clone().is_multiple() {
+        "at least one"
+    } else {
+        "one"
+    }
+}
+
 /// The usage line (`invocation` plus its required arguments) and the flags
 /// table of one runnable helper command; the table heading is at `level`
 /// (`##` for a helper, `####` for a subcommand of a helper group).
@@ -873,21 +901,38 @@ fn push_usage_and_flags(out: &mut String, invocation: &str, cmd: &Command, level
         .collect();
     for arg in &args {
         if arg.is_required_set() {
-            if let Some(long) = arg.get_long() {
-                let val_name = arg
-                    .get_value_names()
-                    .and_then(|v| v.first())
-                    .map(|s| s.to_string())
-                    .unwrap_or_else(|| "VALUE".to_string());
-                out.push_str(&format!(" --{long} <{val_name}>"));
-            } else {
-                let id = arg.get_id().as_str();
-                out.push_str(&format!(" <{id}>"));
-            }
+            out.push_str(&arg_usage(arg));
+        }
+    }
+    // A required group (`--message-id` or `--thread-id`) is satisfied by any
+    // of its members: show the first, so the usage line runs, and name the
+    // alternatives below it.
+    let groups: Vec<&clap::ArgGroup> = cmd.get_groups().filter(|g| g.is_required_set()).collect();
+    for group in &groups {
+        if let Some(first) = group
+            .get_args()
+            .find_map(|id| args.iter().find(|a| a.get_id() == id))
+        {
+            out.push_str(&arg_usage(first));
         }
     }
 
     out.push_str("\n```\n\n");
+
+    for group in &groups {
+        let members: Vec<String> = group
+            .get_args()
+            .map(|id| match args.iter().find(|a| a.get_id() == id) {
+                Some(a) => format!("`{}`", arg_usage(a).trim_start()),
+                None => format!("`{id}`"),
+            })
+            .collect();
+        out.push_str(&format!(
+            "Requires {} of: {}.\n\n",
+            group_quantifier(group),
+            members.join(", ")
+        ));
+    }
 
     // Flags table
     if !args.is_empty() {
@@ -902,7 +947,14 @@ fn push_usage_and_flags(out: &mut String, invocation: &str, cmd: &Command, level
                 format!("`<{}>`", arg.get_id().as_str())
             };
 
-            let required = if arg.is_required_set() { "✓" } else { "—" };
+            let group = groups
+                .iter()
+                .find(|g| g.get_args().any(|id| id == arg.get_id()));
+            let required = match group {
+                _ if arg.is_required_set() => "✓",
+                Some(g) => group_quantifier(g),
+                None => "—",
+            };
 
             // Get default value
             let default = arg
@@ -1911,6 +1963,29 @@ mod tests {
             entry,
             &product_name_from_title("Gmail API"),
         )
+    }
+
+    /// A helper whose required input is a group (`--message-id` or
+    /// `--thread-id`) shows a runnable usage line and names the alternatives,
+    /// instead of a bare `gwsr gmail +archive` that clap rejects.
+    #[test]
+    fn helper_usage_includes_required_groups() {
+        let md = render_gmail_helper("+archive");
+        assert!(
+            md.contains("```bash\ngwsr gmail +archive --message-id <ID>\n```"),
+            "{md}"
+        );
+        assert!(
+            md.contains("Requires at least one of: `--message-id <ID>`, `--thread-id <ID|URL>`."),
+            "{md}"
+        );
+        assert!(md.contains("| `--message-id` | at least one | — |"), "{md}");
+
+        let md = render_gmail_helper("+label");
+        assert!(
+            md.contains("```bash\ngwsr gmail +label --add <LABEL> --message-id <ID>\n```"),
+            "{md}"
+        );
     }
 
     /// A tip wrapped over several help lines is one bullet in the skill, not
