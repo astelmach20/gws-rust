@@ -28,26 +28,52 @@ pub(super) fn required_str(matches: &ArgMatches, name: &str) -> Result<String, G
     Ok(crate::args::required(matches, name)?.to_string())
 }
 
+/// Zero-width non-joiner and joiner: invisible, but part of ordinary text
+/// (Persian and Indic scripts, emoji sequences such as 👨‍👩‍👧).
+fn is_joiner(c: char) -> bool {
+    matches!(c, '\u{200C}' | '\u{200D}')
+}
+
+/// Reject control characters and invisible or bidi Unicode in text written
+/// into a message header, except the joiners natural-language text uses.
+fn reject_dangerous_header_chars(value: &str, flag: &str) -> Result<(), GwsError> {
+    let checked: String = value.chars().filter(|&c| !is_joiner(c)).collect();
+    crate::validate::reject_dangerous_chars(&checked, flag)
+}
+
+/// Reject any invisible Unicode, joiners included, in the address part of a
+/// mailbox: unlike a display name, an address has no use for them.
+fn reject_invisible_in_addresses(mailboxes: &[Mailbox], flag: &str) -> Result<(), GwsError> {
+    for mailbox in mailboxes {
+        crate::validate::reject_dangerous_chars(&mailbox.email, flag)?;
+    }
+    Ok(())
+}
+
 /// Read a required free-text value that is written into a message header
 /// (`--subject`). Control characters (CR/LF included) and invisible or bidi
 /// Unicode are rejected rather than encoded or stripped: the argument may come
 /// from an LLM, and a header that differs from what was asked for must fail.
+/// Zero-width joiners are the exception (see [`is_joiner`]).
 pub(super) fn required_header_text(matches: &ArgMatches, name: &str) -> Result<String, GwsError> {
     let value = required_str(matches, name)?;
-    crate::validate::reject_dangerous_chars(&value, &format!("--{name}"))?;
+    reject_dangerous_header_chars(&value, &format!("--{name}"))?;
     Ok(value)
 }
 
 /// Read a required comma-separated mailbox list (`--to`), rejecting control
 /// characters and invisible Unicode, which would otherwise be stripped from
-/// the addresses and display names without a word.
+/// the addresses and display names without a word. Display names may use
+/// zero-width joiners; addresses may not.
 pub(super) fn required_mailboxes(
     matches: &ArgMatches,
     name: &str,
 ) -> Result<Vec<Mailbox>, GwsError> {
     let value = required_str(matches, name)?;
-    crate::validate::reject_dangerous_chars(&value, &format!("--{name}"))?;
+    let flag = format!("--{name}");
+    reject_dangerous_header_chars(&value, &flag)?;
     let mailboxes = Mailbox::parse_list(&value);
+    reject_invisible_in_addresses(&mailboxes, &flag)?;
     if mailboxes.is_empty() {
         return Err(GwsError::Validation(format!(
             "--{name} must specify at least one recipient"
@@ -108,8 +134,11 @@ pub(super) fn parse_optional_mailboxes(
     let Some(value) = parse_optional_trimmed(matches, name)? else {
         return Ok(None);
     };
-    crate::validate::reject_dangerous_chars(&value, &format!("--{name}"))?;
-    Ok(Some(Mailbox::parse_list(&value)).filter(|v| !v.is_empty()))
+    let flag = format!("--{name}");
+    reject_dangerous_header_chars(&value, &flag)?;
+    let mailboxes = Mailbox::parse_list(&value);
+    reject_invisible_in_addresses(&mailboxes, &flag)?;
+    Ok(Some(mailboxes).filter(|v| !v.is_empty()))
 }
 
 /// Collect a repeatable, comma-separable list argument (`--x a,b --x c`).
@@ -932,6 +961,36 @@ mod tests {
             version: "v1".to_string(),
             ..Default::default()
         })
+    }
+
+    #[test]
+    fn header_text_allows_joiners_but_not_other_invisible_characters() {
+        for ok in [
+            "\u{1F468}\u{200D}\u{1F469}",
+            "\u{645}\u{6CC}\u{200C}\u{62E}",
+            "Café",
+        ] {
+            assert!(
+                reject_dangerous_header_chars(ok, "--subject").is_ok(),
+                "{ok:?}"
+            );
+        }
+        for bad in [
+            "a\u{200B}b",
+            "a\u{202E}b",
+            "a\u{2060}b",
+            "a\r\nb",
+            "\u{200D}\n",
+        ] {
+            assert!(
+                reject_dangerous_header_chars(bad, "--subject").is_err(),
+                "{bad:?}"
+            );
+        }
+        let joined = Mailbox::parse_list("Fam\u{200D}ily <a@example.com>");
+        assert!(reject_invisible_in_addresses(&joined, "--to").is_ok());
+        let hidden = Mailbox::parse_list("Name <a\u{200C}@example.com>");
+        assert!(reject_invisible_in_addresses(&hidden, "--to").is_err());
     }
 
     /// The `+filter` tip names a login that grants the scope every `+filter`
