@@ -69,7 +69,10 @@ pub(super) async fn fetch_original_parts(
 
         attachments.push(Attachment {
             filename: part.filename.clone(),
-            content_type: part.content_type.clone(),
+            content_type: match &part.charset {
+                Some(charset) => format!("{}; charset=\"{charset}\"", part.content_type),
+                None => part.content_type.clone(),
+            },
             data,
             // Only an inline image goes beside the HTML body; any other
             // inline part (an Apple Mail PDF) is sent as a regular attachment.
@@ -365,6 +368,7 @@ mod tests {
         let part = |filename: &str, content_type: &str| OriginalPart {
             filename: filename.to_string(),
             content_type: content_type.to_string(),
+            charset: None,
             size: 2,
             data: PartData::Inline(crate::helpers::gmail::test_support::base64url("hi")),
             content_id: Some(format!("{filename}@example.com")),

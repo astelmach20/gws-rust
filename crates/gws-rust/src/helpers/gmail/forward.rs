@@ -1017,6 +1017,65 @@ mod tests {
         assert!(!raw.contains("Content-ID"));
     }
 
+    /// Gmail's `mimeType` has no parameters. A forwarded text attachment
+    /// keeps the charset its `Content-Type` header names, or its bytes are
+    /// read as US-ASCII (RFC 2046 §4.1.2) and shown garbled.
+    #[tokio::test]
+    async fn forwarded_text_attachment_keeps_its_charset() {
+        let msg = json!({
+            "id": "m1",
+            "payload": {
+                "mimeType": "multipart/mixed",
+                "headers": [
+                    { "name": "From", "value": "alice@example.com" },
+                    { "name": "Subject", "value": "Notes" },
+                    { "name": "Message-ID", "value": "<m1@example.com>" }
+                ],
+                "parts": [
+                    { "mimeType": "text/plain", "body": { "data": crate::helpers::gmail::test_support::base64url("See attached.") } },
+                    {
+                        "mimeType": "text/plain",
+                        "filename": "notes.txt",
+                        "headers": [
+                            { "name": "Content-Type", "value": "text/plain; charset=\"windows-1252\"; name=\"notes.txt\"" },
+                            { "name": "Content-Disposition", "value": "attachment; filename=\"notes.txt\"" }
+                        ],
+                        "body": { "data": base64::engine::general_purpose::URL_SAFE.encode(b"caf\xe9"), "size": 4 }
+                    },
+                    {
+                        "mimeType": "application/pdf",
+                        "filename": "a.pdf",
+                        "headers": [
+                            { "name": "Content-Type", "value": "application/pdf; charset=\"x\\\"y\"; name=\"a.pdf\"" }
+                        ],
+                        "body": { "data": crate::helpers::gmail::test_support::base64url("%PDF"), "size": 4 }
+                    }
+                ]
+            }
+        });
+        let original = parse_original_message(&msg).unwrap();
+        let server = wiremock::MockServer::start().await;
+        let api = crate::helpers::gmail::test_support::mock_api(&server);
+        let attachments = fetch_original_parts(&api, "m1", &original.parts, 0)
+            .await
+            .unwrap();
+        assert_eq!(
+            attachments[0].content_type,
+            "text/plain; charset=\"windows-1252\""
+        );
+        // A charset that is not a MIME token is not written back.
+        assert_eq!(attachments[1].content_type, "application/pdf");
+
+        let mb = mail_builder::MessageBuilder::new()
+            .to(MbAddress::new_address(None::<&str>, "bob@example.com"))
+            .subject("Fwd: Notes");
+        let raw = finalize_message(mb, "body", false, &attachments).unwrap();
+        assert!(
+            raw.contains("Content-Type: text/plain; charset=\"windows-1252\"\r\n"),
+            "{raw}"
+        );
+    }
+
     // --- include_original_part filter matrix ---
 
     fn make_part(inline: bool) -> OriginalPart {
@@ -1030,6 +1089,7 @@ mod tests {
             } else {
                 None
             },
+            charset: None,
         }
     }
 

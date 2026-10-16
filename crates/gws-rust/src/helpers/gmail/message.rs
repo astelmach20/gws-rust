@@ -35,6 +35,10 @@ pub(super) struct OriginalPart {
     /// When present, the part is an inline image referenced via `cid:` URLs in the HTML body.
     /// When absent, the part is a regular file attachment.
     pub content_id: Option<String>,
+    /// The `charset` parameter of the part's `Content-Type` header, when it
+    /// is a valid MIME token. Gmail's `mimeType` leaves it out, but a text
+    /// attachment is unreadable without it once forwarded.
+    pub charset: Option<String>,
 }
 
 /// Source of an original part's bytes.
@@ -414,6 +418,25 @@ fn content_type_param(header: &str, name: &str) -> Option<String> {
     })
 }
 
+/// The `charset` parameter of an attachment's `Content-Type`, kept only when
+/// it is an RFC 2045 token: the value is sender-controlled and is written back
+/// into the forwarded part's header.
+fn part_charset(content_type: Option<&str>) -> Option<String> {
+    let charset = content_type_param(content_type?, "charset")?;
+    let is_token = charset
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`{|}~".contains(&b));
+    if is_token {
+        Some(charset)
+    } else {
+        tracing::warn!(
+            "ignoring attachment charset {:?}: not a valid MIME token",
+            sanitize_for_terminal(&charset)
+        );
+        None
+    }
+}
+
 /// Synthesize a filename from the part index and MIME type when no filename is present.
 /// e.g., `"image/png"` at index 1 → `"part-1.png"`.
 fn synthesize_filename(part_index: usize, mime_type: &str) -> String {
@@ -718,6 +741,7 @@ fn extract_payload_recursive(
             size: body_size,
             data: part_data,
             content_id,
+            charset: part_charset(get_part_header(part, "Content-Type")),
         });
         // Do NOT recurse into hydratable parts. A message/rfc822 attachment or
         // other encapsulated multipart has its own MIME subtree — recursing would
