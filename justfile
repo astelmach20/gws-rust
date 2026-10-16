@@ -27,8 +27,8 @@ fmt:
 clippy:
     cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 
-# Formatting, clippy, unused dependencies, shell scripts and workflows
-lint: fmt-check clippy machete shellcheck workflows
+# Formatting, clippy, unused dependencies, crate package contents, shell scripts and workflows
+lint: fmt-check clippy machete crate-package shellcheck workflows
 
 # Rust tests
 test:
@@ -50,6 +50,10 @@ deny:
 # Unused dependencies
 machete:
     cargo machete
+
+# Check that every crate package ships LICENSE and NOTICE
+crate-package:
+    scripts/check-crate-package.sh
 
 # Lint shell scripts
 shellcheck:

@@ -209,12 +209,15 @@ fn find_method_by_id<'a>(doc: &'a RestDescription, id: &str) -> Option<&'a RestM
 /// A leading API name is optional, but a name that starts like the API may
 /// also be a plain resource path: in the `tasks` API, `tasks.list` is the
 /// `tasks` resource's `list` (as `forms.get` is in `forms`, `people.get` in
-/// `people`). The name without the prefix is tried first, then as given.
+/// `people`). The name without the prefix is tried first, then as given;
+/// Discovery names first, then command names.
 fn find_method_by_path<'a>(doc: &'a RestDescription, name: &str) -> Option<&'a RestMethod> {
     let prefix = format!("{}.", doc.name);
-    name.strip_prefix(&prefix)
-        .and_then(|rest| find_method_by_resource_path(doc, rest))
+    let rest = name.strip_prefix(&prefix);
+    rest.and_then(|rest| find_method_by_resource_path(doc, rest))
         .or_else(|| find_method_by_resource_path(doc, name))
+        .or_else(|| rest.and_then(|rest| find_method_by_command_path(doc, rest)))
+        .or_else(|| find_method_by_command_path(doc, name))
 }
 
 /// Resolve `resource[.subresource].method`, or a bare top-level method.
@@ -237,6 +240,13 @@ fn find_method_by_resource_path<'a>(
         current = Some(map.get(*r)?);
     }
     current?.methods.get(*method_name)
+}
+
+/// Resolve `resource[.subresource].method` as command names, which differ
+/// from Discovery names where those collide (`items-resource.list`).
+fn find_method_by_command_path<'a>(doc: &'a RestDescription, name: &str) -> Option<&'a RestMethod> {
+    let path: Vec<&str> = name.split('.').collect();
+    crate::commands::command_method(doc, &path)
 }
 
 /// Parse and validate NDJSON calls.
@@ -771,11 +781,22 @@ pub(crate) async fn run_batch(
                     break;
                 }
             };
-            emitter.page(
+            if let Err(e) = emitter.page(
                 &json!({"id": call.id, "status": part.status, "body": body}),
                 &format,
                 &mut pages,
-            )?;
+            ) {
+                // A `--jq`/format or write failure: this call and the rest
+                // of its group were applied, but their results are lost.
+                let mut unprinted = withheld;
+                unprinted.extend(chunk[index..].iter().map(|c| c.id.as_str()));
+                return Err(batch_stopped(
+                    e,
+                    &unprinted,
+                    "sent and answered, but the result was not printed",
+                    not_sent,
+                ));
+            }
         }
         if let Some(err) = first_error {
             return Err(batch_stopped(
@@ -882,6 +903,28 @@ mod tests {
         assert!(find_method(&doc, "about").is_some());
         assert!(find_method(&doc, "drive.about").is_some());
         assert!(find_method(&doc, "about.get").is_none());
+    }
+
+    /// A method under a resource renamed for a name collision is found by
+    /// its Discovery path and by its command path.
+    #[test]
+    fn method_lookup_by_command_names() {
+        let mut doc = drive_doc("https://www.googleapis.com/");
+        doc.methods.insert(
+            "files".into(),
+            RestMethod {
+                id: Some("drive.files".into()),
+                http_method: "GET".into(),
+                ..Default::default()
+            },
+        );
+        let get = |name: &str| find_method(&doc, name).and_then(|m| m.id.as_deref());
+        assert_eq!(get("files"), Some("drive.files"));
+        let by_discovery = get("files.get");
+        assert!(by_discovery.is_some());
+        assert_eq!(get("files-resource.get"), by_discovery);
+        assert_eq!(get("drive.files-resource.get"), by_discovery);
+        assert_eq!(get("files-resource"), None);
     }
 
     /// In the `tasks` API (like `forms` and `people`) a resource has the

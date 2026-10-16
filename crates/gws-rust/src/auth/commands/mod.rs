@@ -318,7 +318,16 @@ fn leaf_matches(m: &clap::ArgMatches) -> &clap::ArgMatches {
     }
 }
 
-/// Convert an [`super::AuthError`] (or any error) into a CLI error.
+/// Whether the stored file `path` (a profile's `credentials.enc`) exists.
+///
+/// Only "not found" means absent: a path that cannot be inspected (an
+/// unsearchable profile directory, a symlink loop) is an error, never a
+/// profile that is not logged in.
+pub(super) fn stored_file_exists(path: &std::path::Path) -> Result<bool, GwsError> {
+    path.try_exists()
+        .map_err(|e| GwsError::CredentialStore(format!("cannot inspect '{}': {e}", path.display())))
+}
+
 /// Print a command's JSON result to stdout in the configured format.
 pub(crate) fn print_json(value: &serde_json::Value) -> Result<(), GwsError> {
     crate::formatter::emit_default(value)

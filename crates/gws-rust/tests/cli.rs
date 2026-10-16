@@ -586,6 +586,111 @@ fn media_download_service_dry_run_url() {
     );
 }
 
+/// A Discovery document whose names collide as subcommands: a top-level
+/// method named like a resource, a method and a sub-resource of the same
+/// name under one resource, and a method and a resource named `help`
+/// (clap's own help subcommand). Real APIs do this (`apigee:v1`,
+/// `aiplatform:v1`, `connectors:v2`, `identitytoolkit:v1`).
+fn colliding_doc() -> Value {
+    let get = |id: &str, path: &str| json!({"id": id, "httpMethod": "GET", "path": path});
+    json!({
+        "name": "clash",
+        "version": "v1",
+        "rootUrl": "https://clash.googleapis.com/",
+        "servicePath": "",
+        "methods": {
+            "items": get("clash.items", "items:summary"),
+            "help": get("clash.help", "help")
+        },
+        "resources": {
+            "items": {
+                "methods": {
+                    "list": get("clash.items.list", "items"),
+                    "labels": get("clash.items.labels", "items:labels")
+                },
+                "resources": {
+                    "labels": {"methods": {"list": get("clash.items.labels.list", "items/labels")}},
+                    "help": {"methods": {"list": get("clash.items.help.list", "items/help")}}
+                }
+            }
+        }
+    })
+}
+
+/// Colliding names never panic the command builder, and every method stays
+/// reachable: a method keeps its name, a resource that shares it gets
+/// `-resource` appended, and a name clap reserves (`help`) gets
+/// `-method`/`-resource`.
+#[test]
+fn colliding_discovery_names_keep_every_method_reachable() {
+    let env = Env::new();
+    env.seed_doc(&colliding_doc());
+
+    let cases: &[(&[&str], &str)] = &[
+        (&["items"], "items:summary"),
+        (&["help-method"], "help"),
+        (&["items-resource", "list"], "items"),
+        (&["items-resource", "labels"], "items:labels"),
+        (
+            &["items-resource", "labels-resource", "list"],
+            "items/labels",
+        ),
+        (&["items-resource", "help-resource", "list"], "items/help"),
+    ];
+    for (path, url_path) in cases {
+        let out = env
+            .cmd()
+            .arg("clash:v1")
+            .args(*path)
+            .arg("--dry-run")
+            .assert()
+            .success()
+            .get_output()
+            .clone();
+        let plan: Value = serde_json::from_str(stdout_of(&out).trim()).unwrap();
+        assert_eq!(
+            plan["url"],
+            format!("https://clash.googleapis.com/{url_path}"),
+            "{path:?}"
+        );
+    }
+
+    let help = env
+        .cmd()
+        .args(["clash:v1", "--help"])
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+    let help = stdout_of(&help);
+    for name in ["items", "items-resource", "help-method"] {
+        assert!(help.contains(&format!("  {name} ")), "{name}: {help}");
+    }
+    // clap's `help` subcommand still prints help.
+    env.cmd()
+        .args(["clash:v1", "help", "items-resource"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("labels-resource"));
+
+    // `gwsr schema` accepts the Discovery names and the command names.
+    for path in [
+        "clash:v1.items.labels.list",
+        "clash:v1.items-resource.labels-resource.list",
+    ] {
+        env.cmd()
+            .args(["schema", path])
+            .assert()
+            .success()
+            .stdout(predicate::str::contains("\"path\":\"items/labels\""));
+    }
+    env.cmd()
+        .args(["schema", "clash:v1.help-method"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"path\":\"help\""));
+}
+
 /// API versions may contain dots (`<api>:v3.4`): `gwsr schema` must keep
 /// them in the service spec instead of splitting the version apart, so the
 /// path printed in method help is one that runs.
@@ -3025,6 +3130,74 @@ async fn batch_stopped_by_model_armor_names_withheld_and_unsent_calls() {
     assert!(
         stderr.contains("no result for call(s) 1, 2, 3"),
         "the error does not name the calls whose results were withheld: {stderr}"
+    );
+    assert!(
+        stderr.contains("call(s) 101 not sent"),
+        "the error does not name the calls never sent: {stderr}"
+    );
+    assert_eq!(server.received_requests().await.unwrap().len(), 1);
+}
+
+/// When printing a result fails part-way through a batch (here a `--jq`
+/// error on the first result line), the rest of that group was already
+/// applied but is never printed, and the later groups are not sent. The
+/// error must say which calls are which, as it does when Model Armor
+/// withholds a result.
+#[tokio::test(flavor = "multi_thread")]
+async fn batch_stopped_by_a_print_failure_names_unprinted_and_unsent_calls() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    let mut parts = String::new();
+    for id in 1..=100 {
+        parts.push_str(&format!(
+            "--b\r\nContent-Type: application/http\r\nContent-ID: <response-item-{id}>\r\n\r\n\
+             HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{{\"id\":\"m{id}\"}}\r\n"
+        ));
+    }
+    parts.push_str("--b--\r\n");
+    Mock::given(method("POST"))
+        .and(path("/batch/gmail/v1"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_raw(parts.into_bytes(), "multipart/mixed; boundary=b"),
+        )
+        .mount(&server)
+        .await;
+    let env = Env::new();
+    seed_gmail_get(&env);
+    let input: String = (1..=101)
+        .map(|i| {
+            format!(
+                "{{\"method\":\"users.messages.get\",\"params\":{{\"userId\":\"me\",\"id\":\"m{i}\"}}}}\n"
+            )
+        })
+        .collect();
+    let out = env
+        .cmd()
+        .env("GWSR_TOKEN", "test-token")
+        .env("GWSR_API_BASE_URL", server.uri())
+        .args([
+            "batch",
+            "gmail",
+            "--jq",
+            r#"if .id == "2" then error("boom") else .id end"#,
+        ])
+        .write_stdin(input)
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    assert_eq!(stdout_of(&out).trim(), "1");
+    let stderr = stderr_of(&out);
+    assert!(stderr.contains("boom"), "{stderr}");
+    assert!(
+        stderr.contains("no result for call(s) 2, 3, 4"),
+        "the error does not name the applied calls whose results were not printed: {stderr}"
+    );
+    assert!(
+        !stderr.contains("call(s) 1,"),
+        "the printed call is named: {stderr}"
     );
     assert!(
         stderr.contains("call(s) 101 not sent"),

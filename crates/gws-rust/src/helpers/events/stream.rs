@@ -168,9 +168,28 @@ impl StreamOptions {
     }
 }
 
-/// One iteration of a pull loop.
+/// One iteration of a pull loop: a pull, then the handling of what it
+/// received.
+///
+/// A shutdown signal cancels only [`StreamStep::pull`]. Once messages are
+/// received, [`StreamStep::handle`] runs to the end: it may print some of
+/// them and must then acknowledge those, or Pub/Sub redelivers what was
+/// already printed. To stop promptly, `handle` checks
+/// [`crate::helpers::shutdown_signal`] itself between messages (see
+/// [`interruptible`]).
 pub(crate) trait StreamStep {
-    async fn step(&mut self) -> Result<(), StepError>;
+    async fn pull(&mut self) -> Result<Vec<ReceivedMessage>, StepError>;
+    async fn handle(&mut self, received: Vec<ReceivedMessage>) -> Result<(), StepError>;
+}
+
+/// Run `work` unless a shutdown signal arrives first (or arrived already):
+/// `None` means it was cancelled by the signal.
+pub(crate) async fn interruptible<T>(work: impl std::future::Future<Output = T>) -> Option<T> {
+    tokio::select! {
+        biased;
+        _ = crate::helpers::shutdown_signal() => None,
+        r = work => Some(r),
+    }
 }
 
 /// Sleep for `d`, returning `false` if a shutdown signal arrived first.
@@ -192,19 +211,24 @@ pub(crate) async fn run_stream<S: StreamStep>(
 ) -> Result<(), GwsError> {
     let mut budget = FailureBudget::new(opts.max_failures, opts.backoff_base, opts.backoff_cap);
     loop {
-        let result = tokio::select! {
-            // A signal latched before the stream started (during setup) stops
-            // it before the first pull.
-            biased;
-            _ = crate::helpers::shutdown_signal() => {
-                emit_diagnostic("info", "shutdown", json!({}));
-                return Ok(());
-            }
-            r = step.step() => r,
+        // A signal latched before the stream started (during setup) stops
+        // it before the first pull. Only the pull is cancelled: messages it
+        // received are handled (and what was printed acknowledged).
+        let Some(pulled) = interruptible(step.pull()).await else {
+            emit_diagnostic("info", "shutdown", json!({}));
+            return Ok(());
+        };
+        let result = match pulled {
+            Ok(received) => step.handle(received).await,
+            Err(e) => Err(e),
         };
         match result {
             Ok(()) => {
                 budget.record_success();
+                if crate::helpers::shutdown_requested() {
+                    emit_diagnostic("info", "shutdown", json!({}));
+                    return Ok(());
+                }
                 if opts.once {
                     return Ok(());
                 }
@@ -583,9 +607,16 @@ mod tests {
     }
 
     impl StreamStep for Scripted {
-        async fn step(&mut self) -> Result<(), StepError> {
+        async fn pull(&mut self) -> Result<Vec<ReceivedMessage>, StepError> {
             self.calls += 1;
-            self.results.pop_front().unwrap_or(Ok(()))
+            self.results
+                .pop_front()
+                .unwrap_or(Ok(()))
+                .map(|()| Vec::new())
+        }
+
+        async fn handle(&mut self, _received: Vec<ReceivedMessage>) -> Result<(), StepError> {
+            Ok(())
         }
     }
 

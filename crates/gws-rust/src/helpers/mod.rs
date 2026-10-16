@@ -238,6 +238,11 @@ pub(crate) async fn shutdown_signal() -> ShutdownSignal {
     SHUTDOWN.requested().await
 }
 
+/// Whether a shutdown signal has been received (without waiting for one).
+pub(crate) fn shutdown_requested() -> bool {
+    SHUTDOWN.latched.load(std::sync::atomic::Ordering::SeqCst) != 0
+}
+
 /// Set by a command that stopped early on a signal after finishing its
 /// cleanup (`drive +sync`), so `main` exits with that signal's code.
 static EXIT_SIGNAL: std::sync::OnceLock<ShutdownSignal> = std::sync::OnceLock::new();

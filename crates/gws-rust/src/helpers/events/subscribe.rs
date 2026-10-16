@@ -16,8 +16,8 @@
 //! subscription and stream CloudEvents as NDJSON.
 
 use super::stream::{
-    PubSubClient, StepError, StreamOptions, StreamPrinter, StreamStep, cleanup_resources,
-    emit_diagnostic, run_stream,
+    PubSubClient, ReceivedMessage, StepError, StreamOptions, StreamPrinter, StreamStep,
+    cleanup_resources, emit_diagnostic, interruptible, run_stream,
 };
 use super::{PUBSUB_SCOPE, parse_event_types, scopes_for_event_types, workspace_events_api_base};
 
@@ -325,25 +325,33 @@ async fn write_event_file(
 }
 
 impl StreamStep for SubscribeStep<'_> {
-    async fn step(&mut self) -> Result<(), StepError> {
-        let received = self
-            .pubsub
+    async fn pull(&mut self) -> Result<Vec<ReceivedMessage>, StepError> {
+        self.pubsub
             .pull(
                 &self.subscription,
                 self.config.max_messages,
                 self.pull_timeout,
             )
-            .await?;
-        // The events handled (written or blocked) before any failure. They
-        // are acknowledged even when a later event fails, so Pub/Sub does not
-        // redeliver (and the stream print again) what was already written.
+            .await
+    }
+
+    async fn handle(&mut self, received: Vec<ReceivedMessage>) -> Result<(), StepError> {
+        // The events handled (written or blocked) before any failure or
+        // shutdown signal. They are acknowledged even when a later event
+        // fails or the stream is stopped, so Pub/Sub does not redeliver (and
+        // the stream print again) what was already written.
         let mut handled = Vec::with_capacity(received.len());
         let mut failure = None;
         for m in received {
             let event = decode_cloud_event(&m.message);
+            // A signal stops the batch before the next event is screened or
+            // printed; that event and the rest stay unacknowledged.
+            let Some(screened) = interruptible(sanitize_value(self.sanitize, event)).await else {
+                break;
+            };
             // Fail closed: a block-mode sanitization error aborts before this
             // event is emitted or acknowledged.
-            let result = match sanitize_value(self.sanitize, event).await {
+            let result = match screened {
                 Ok(Sanitized::Pass(v)) => self.output(&v).await,
                 Ok(Sanitized::Blocked(r)) => {
                     emit_diagnostic(

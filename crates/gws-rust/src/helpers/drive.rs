@@ -406,7 +406,9 @@ struct UploadArgs {
     name: String,
     folder_id: Option<String>,
     content_type: String,
-    convert: bool,
+    /// Google-native type to convert into (`--convert`), resolved at parse
+    /// time so an unconvertible type is refused before credentials load.
+    convert_to: Option<&'static str>,
 }
 
 impl UploadArgs {
@@ -432,12 +434,21 @@ impl UploadArgs {
                 .map(|m| m.to_string())
                 .unwrap_or_else(|| "application/octet-stream".to_string()),
         };
+        let convert_to = if flag(m, "convert")? {
+            Some(conversion_target(&content_type).ok_or_else(|| {
+                GwsError::Validation(format!(
+                    "--convert: no Google format accepts '{content_type}' (pass --mime-type if detection was wrong)"
+                ))
+            })?)
+        } else {
+            None
+        };
         Ok(Self {
             path,
             name,
             folder_id: optional(m, "folder-id")?.map(str::to_string),
             content_type,
-            convert: flag(m, "convert")?,
+            convert_to,
         })
     }
 }
@@ -525,21 +536,15 @@ fn conversion_target(content_type: &str) -> Option<&'static str> {
     })
 }
 
-fn build_metadata(args: &UploadArgs) -> Result<Value, GwsError> {
+fn build_metadata(args: &UploadArgs) -> Value {
     let mut metadata = json!({ "name": args.name });
     if let Some(parent) = &args.folder_id {
         metadata["parents"] = json!([parent]);
     }
-    if args.convert {
-        let target = conversion_target(&args.content_type).ok_or_else(|| {
-            GwsError::Validation(format!(
-                "--convert: no Google format accepts '{}' (pass --mime-type if detection was wrong)",
-                args.content_type
-            ))
-        })?;
+    if let Some(target) = args.convert_to {
         metadata["mimeType"] = json!(target);
     }
-    Ok(metadata)
+    metadata
 }
 
 async fn upload(api: &Api, args: &UploadArgs) -> Result<Value, GwsError> {
@@ -547,7 +552,7 @@ async fn upload(api: &Api, args: &UploadArgs) -> Result<Value, GwsError> {
         .query("uploadType", "resumable")
         .query("supportsAllDrives", "true")
         .query("fields", FILE_FIELDS)
-        .json(build_metadata(args)?);
+        .json(build_metadata(args));
     api.upload_resumable(init, &args.path, &args.content_type)
         .await
 }
@@ -2062,23 +2067,41 @@ mod tests {
             name: "a".into(),
             folder_id: Some("F".into()),
             content_type: "text/csv".into(),
-            convert: true,
+            convert_to: Some(SHEET),
         };
-        let meta = build_metadata(&args).unwrap();
+        let meta = build_metadata(&args);
         assert_eq!(meta["parents"][0], "F");
         assert_eq!(meta["mimeType"], SHEET);
     }
 
+    /// `--convert` of a type no Google format imports is a validation error
+    /// raised while parsing, before credentials are loaded: without
+    /// credentials it must exit 3, not 2.
     #[test]
-    fn metadata_conversion_unsupported_type_fails() {
-        let args = UploadArgs {
-            path: PathBuf::from("a.bin"),
-            name: "a".into(),
-            folder_id: None,
-            content_type: "application/octet-stream".into(),
-            convert: true,
-        };
-        assert!(build_metadata(&args).is_err());
+    fn upload_convert_of_unsupported_type_fails_at_parse() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("a.bin");
+        std::fs::write(&file, "data").unwrap();
+        let file = file.to_str().unwrap();
+        let m = matches(&["gwsr", "+upload", "--file", file, "--convert"]);
+        let (_, sub) = m.subcommand().unwrap();
+        let err = UploadArgs::parse(sub)
+            .err()
+            .expect("unconvertible type accepted");
+        assert!(matches!(err, GwsError::Validation(_)), "{err:?}");
+        assert!(err.to_string().contains("--convert"), "{err}");
+
+        let csv = dir.path().join("a.csv");
+        std::fs::write(&csv, "a,b").unwrap();
+        let m = matches(&[
+            "gwsr",
+            "+upload",
+            "--file",
+            csv.to_str().unwrap(),
+            "--convert",
+        ]);
+        let (_, sub) = m.subcommand().unwrap();
+        assert_eq!(UploadArgs::parse(sub).unwrap().convert_to, Some(SHEET));
     }
 
     /// `--convert` compares media types case-insensitively and without
@@ -2150,7 +2173,7 @@ mod tests {
             name: "r.txt".into(),
             folder_id: Some("SD_FOLDER".into()),
             content_type: "text/plain".into(),
-            convert: false,
+            convert_to: None,
         };
         let v = upload(&api, &args).await.unwrap();
         assert_eq!(v["id"], "NEW");
