@@ -17,7 +17,7 @@
 //! Every call sets `supportsAllDrives=true` so Shared Drive items work.
 
 use super::Helper;
-use super::http::{self, Api, ApiRequest, OutputTarget, safe_filename};
+use super::http::{self, Api, ApiRequest, OutputTarget, case_insensitive_key, safe_filename};
 use crate::args::{flag, optional, required};
 use crate::confirm::{self, Impact, with_yes};
 use crate::error::GwsError;
@@ -1052,6 +1052,10 @@ async fn list_children(api: &Api, folder_id: &str) -> Result<Vec<Value>, GwsErro
 /// maps to it: `safe_filename` strips leading dots from Drive names, and a
 /// disambiguated name starts with the item's ID.
 const SYNC_STATE_FILE: &str = ".gwsr-sync.json";
+/// Lock file `+sync` holds in the root of `--dir` for the whole run, so two
+/// runs on one directory cannot overwrite each other's state. Like
+/// [`SYNC_STATE_FILE`], no Drive item maps to it.
+const SYNC_LOCK_FILE: &str = ".gwsr-sync.lock";
 /// Schema version of [`SYNC_STATE_FILE`]. A file with any other version is
 /// treated like a corrupt one.
 const SYNC_STATE_VERSION: u32 = 1;
@@ -1468,21 +1472,22 @@ enum SyncKind {
 ///
 /// Names are compared case-insensitively: Drive names are case-sensitive,
 /// but the default macOS and Windows file systems are not, so `Report.txt`
-/// and `report.txt` would otherwise share one local file.
+/// and `report.txt` would otherwise share one local file (see
+/// [`case_insensitive_key`]).
 fn disambiguate(children: &[(&str, &str)]) -> Result<Vec<String>, GwsError> {
     let mut claims: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
     for &(_, name) in children {
-        *claims.entry(name.to_lowercase()).or_insert(0) += 1;
+        *claims.entry(case_insensitive_key(name)).or_insert(0) += 1;
     }
     let mut used = std::collections::HashSet::new();
     let mut out = Vec::with_capacity(children.len());
     for &(id, name) in children {
-        let local = if matches!(claims.get(&name.to_lowercase()), Some(&n) if n > 1) {
+        let local = if matches!(claims.get(&case_insensitive_key(name)), Some(&n) if n > 1) {
             safe_filename(&format!("{id}-{name}"), id)
         } else {
             name.to_string()
         };
-        if !used.insert(local.to_lowercase()) {
+        if !used.insert(case_insensitive_key(&local)) {
             return Err(GwsError::other(anyhow::anyhow!(
                 "cannot sync: more than one Drive item in the same folder maps to the local name '{local}' (item '{id}'); rename one in Drive"
             )));
@@ -1603,6 +1608,7 @@ async fn run_sync_until(
         }))?;
         return Ok(SyncEnd::Done(Value::Null));
     }
+    let _lock = lock_sync_dir(dir)?;
     let mut state = SyncState::load(dir, folder_id)?;
     let walked = tokio::select! {
         biased;
@@ -1620,6 +1626,30 @@ async fn run_sync_until(
             Err(err)
         }
     }
+}
+
+/// Take the `+sync` lock of `dir` (created if missing), or fail at once when
+/// another run holds it. It is released when the returned lock is dropped,
+/// also when the process dies.
+fn lock_sync_dir(dir: &Path) -> Result<crate::fs_util::FileLock, GwsError> {
+    std::fs::create_dir_all(dir).map_err(|e| {
+        GwsError::other(anyhow::anyhow!(
+            "cannot create the sync directory '{}': {e}",
+            dir.display()
+        ))
+    })?;
+    let file = dir.join(SYNC_LOCK_FILE);
+    crate::fs_util::FileLock::acquire(&file, std::time::Duration::ZERO).map_err(|e| {
+        if e.kind() == std::io::ErrorKind::TimedOut {
+            GwsError::Validation(format!(
+                "another drive +sync is running in '{}' (it holds '{}'); wait for it to finish",
+                dir.display(),
+                file.display()
+            ))
+        } else {
+            GwsError::other(anyhow::anyhow!("cannot lock '{}': {e}", file.display()))
+        }
+    })
 }
 
 async fn sync_walk(
@@ -2548,9 +2578,32 @@ mod tests {
         }
         assert_eq!(
             layouts[0],
-            [SYNC_STATE_FILE, "P-a.txt", "Q-a.txt", "unique.txt"]
+            [
+                SYNC_STATE_FILE,
+                SYNC_LOCK_FILE,
+                "P-a.txt",
+                "Q-a.txt",
+                "unique.txt"
+            ]
         );
         assert_eq!(layouts[0], layouts[1]);
+    }
+
+    /// `ας.txt` and `ασ.txt` (final and medial sigma) are two Drive names
+    /// but one file on APFS and NTFS, which upper-case both to `ΑΣ.TXT`;
+    /// `to_lowercase` alone leaves them apart, so the second download
+    /// replaced the first. The same holds for `ſ` (long s) and `s`.
+    #[test]
+    fn disambiguate_merges_names_case_insensitive_disks_merge() {
+        for (a, b) in [
+            ("\u{3b1}\u{3c2}.txt", "\u{3b1}\u{3c3}.txt"),
+            ("\u{17f}.txt", "s.txt"),
+        ] {
+            let names = disambiguate(&[("A", a), ("B", b)]).unwrap();
+            assert_eq!(names, vec![format!("A-{a}"), format!("B-{b}")]);
+        }
+        let names = disambiguate(&[("A", "a.txt"), ("B", "b.txt")]).unwrap();
+        assert_eq!(names, vec!["a.txt", "b.txt"]);
     }
 
     #[tokio::test]
@@ -2570,7 +2623,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let err = sync(&api, "ROOT", dir.path()).await.unwrap_err();
         assert!(err.to_string().contains("P-a.txt"), "{err}");
-        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+        // Nothing but the lock file: no Drive item was written.
+        let names: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(names, [SYNC_LOCK_FILE], "{names:?}");
     }
 
     /// File systems cap a name at 255 bytes, not characters: a long non-ASCII
@@ -2863,8 +2921,8 @@ mod tests {
         assert!(ids(&v, "downloaded").is_empty(), "{v}");
         assert_eq!(v["unchanged"].as_array().unwrap().len(), 1, "{v}");
         assert!(sync_failure(&v).is_none());
-        // The state file is never mirrored or reported as a Drive item.
-        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 2);
+        // The state and lock files are never mirrored or reported as a Drive item.
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 3);
     }
 
     #[tokio::test]
@@ -3016,6 +3074,31 @@ mod tests {
             assert_eq!(state["files"]["A"]["path"], "y.txt", "{state}");
             assert_eq!(state["files"]["B"]["path"], "x.txt", "{state}");
         }
+    }
+
+    /// Two runs on one directory would each load the state, then the one
+    /// saving last would drop what the other recorded. A second run is
+    /// refused while the first holds the directory, before touching anything.
+    #[tokio::test]
+    async fn sync_refuses_a_directory_another_sync_is_using() {
+        let server = MockServer::start().await;
+        let api = api(&server.uri(), "drive/v3/");
+        let dir = tempfile::tempdir().unwrap();
+        mount_one(&server, "A", "a.txt", v1(), b"v1").await;
+        let held = crate::fs_util::FileLock::acquire(
+            &dir.path().join(SYNC_LOCK_FILE),
+            std::time::Duration::from_secs(1),
+        )
+        .unwrap();
+        let err = sync(&api, "ROOT", dir.path()).await.unwrap_err();
+        assert!(err.to_string().contains("another"), "{err}");
+        assert!(!dir.path().join("a.txt").exists());
+        assert!(!dir.path().join(SYNC_STATE_FILE).exists());
+        assert!(server.received_requests().await.unwrap().is_empty());
+        drop(held);
+        // Released: the next run goes ahead.
+        let v = sync(&api, "ROOT", dir.path()).await.unwrap();
+        assert_eq!(ids(&v, "downloaded"), ["A"], "{v}");
     }
 
     /// A file with two parents inside the synced tree is listed in both

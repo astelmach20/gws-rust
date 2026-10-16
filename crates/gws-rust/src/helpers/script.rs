@@ -408,8 +408,9 @@ fn local_path_for(name: &str, file_type: &str) -> Result<PathBuf, GwsError> {
 }
 
 /// Record every prefix of `relative` (each directory and the file itself)
-/// under its lowercase form, and refuse two spellings that differ only in
-/// case. They are distinct Apps Script names but the same path on
+/// under its [`case_insensitive_key`](crate::helpers::http::case_insensitive_key),
+/// and refuse two spellings that differ only in case (or Unicode
+/// normalization). They are distinct Apps Script names but the same path on
 /// case-insensitive disks (macOS, Windows), where one file would silently
 /// replace the other, or two directories would merge and `+push` would
 /// rename files. The name maps back to the path on `+push`, so the file
@@ -421,12 +422,12 @@ fn claim_case_insensitively(
     let mut prefix = PathBuf::new();
     for component in relative.components() {
         prefix.push(component);
-        let key = prefix.to_string_lossy().to_lowercase();
+        let key = crate::helpers::http::case_insensitive_key(&prefix.to_string_lossy());
         match claimed.get(&key) {
             Some(existing) if *existing != prefix => {
                 return Err(GwsError::Validation(format!(
-                    "Apps Script files '{}' and '{}' differ only in case and would \
-                     overwrite each other on a case-insensitive disk; rename one in the \
+                    "Apps Script files '{}' and '{}' differ only in case (or Unicode \
+                     normalization) and would overwrite each other on a case-insensitive disk; rename one in the \
                      Apps Script editor (nothing was written)",
                     existing.display(),
                     prefix.display()
@@ -952,7 +953,14 @@ mod tests {
     /// one file would silently replace the other. Refuse before writing.
     #[tokio::test]
     async fn pull_refuses_names_differing_only_in_case() {
-        for (a, b) in [("Code", "code"), ("lib/a", "Lib/b")] {
+        for (a, b) in [
+            ("Code", "code"),
+            ("lib/a", "Lib/b"),
+            // Final and medial sigma: one name on APFS and NTFS, though
+            // `to_lowercase` keeps them apart.
+            ("\u{3b1}\u{3c2}", "\u{3b1}\u{3c3}"),
+            ("caf\u{e9}", "cafe\u{301}"),
+        ] {
             let server = MockServer::start().await;
             Mock::given(method("GET"))
                 .and(path("/v1/projects/S_1/content"))

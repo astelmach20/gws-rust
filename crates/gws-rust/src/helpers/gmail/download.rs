@@ -76,11 +76,9 @@ fn truncate_filename(name: &str) -> String {
 }
 
 /// How a file system that ignores case and Unicode normalization (APFS,
-/// NTFS) compares names: NFC, then lowercase.
+/// NTFS) compares names.
 fn collision_key(name: &str) -> String {
-    icu_normalizer::ComposingNormalizerBorrowed::new_nfc()
-        .normalize(name)
-        .to_lowercase()
+    crate::helpers::http::case_insensitive_key(name)
 }
 
 /// Make `name` unique within `taken` by appending " (n)" before the extension.
@@ -347,6 +345,16 @@ mod tests {
         assert_eq!(dedupe("a.pdf", &mut taken), "a (2).pdf");
         assert_eq!(dedupe("noext", &mut taken), "noext");
         assert_eq!(dedupe("noext", &mut taken), "noext (1)");
+        // `ας` and `ασ` (final and medial sigma) are one name on APFS and
+        // NTFS, though `to_lowercase` keeps them apart.
+        assert_eq!(
+            dedupe("\u{3b1}\u{3c2}.txt", &mut taken),
+            "\u{3b1}\u{3c2}.txt"
+        );
+        assert_eq!(
+            dedupe("\u{3b1}\u{3c3}.txt", &mut taken),
+            "\u{3b1}\u{3c3} (1).txt"
+        );
     }
 
     #[test]

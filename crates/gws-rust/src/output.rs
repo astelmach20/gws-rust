@@ -63,10 +63,38 @@ pub(crate) fn stderr_is_terminal() -> bool {
 
 // ── Color ─────────────────────────────────────────────────────────────
 
-/// Returns true when stderr is connected to an interactive terminal and
-/// `NO_COLOR` is not set, meaning ANSI color codes will be visible.
+/// Returns true when stderr is connected to an interactive terminal that
+/// renders ANSI color codes and `NO_COLOR` is not set.
 pub(crate) fn stderr_supports_color() -> bool {
-    stderr_is_terminal() && std::env::var_os("NO_COLOR").is_none()
+    color_enabled(
+        stderr_is_terminal(),
+        std::env::var_os("NO_COLOR").is_some(),
+        console_renders_ansi,
+    )
+}
+
+/// Whether to color: a terminal, no `NO_COLOR`, and a console that turns
+/// escape sequences into color (asked last, since asking may change the
+/// console's mode).
+fn color_enabled(terminal: bool, no_color: bool, renders_ansi: impl FnOnce() -> bool) -> bool {
+    terminal && !no_color && renders_ansi()
+}
+
+/// A Windows console prints escape sequences as literal text (`←[1;31m`)
+/// unless virtual terminal processing is enabled, which the classic console
+/// host does not do for programs it starts. crossterm enables it once and
+/// reports whether the console can show ANSI (true for Windows Terminal,
+/// for consoles that accepted the mode, and for terminals such as mintty
+/// that set `TERM`).
+#[cfg(windows)]
+fn console_renders_ansi() -> bool {
+    crossterm::ansi_support::supports_ansi()
+}
+
+/// Unix terminals render ANSI sequences.
+#[cfg(not(windows))]
+fn console_renders_ansi() -> bool {
+    true
 }
 
 /// Wrap `text` in ANSI bold + the given color code, resetting afterwards.
@@ -222,6 +250,20 @@ mod tests {
         assert_eq!(paint("hello", "31", true), "\x1b[1;31mhello\x1b[0m");
         // Non-numeric colour codes are never interpolated.
         assert_eq!(paint("hello", "31m;evil", true), "hello");
+    }
+
+    /// A console that cannot render ANSI (a Windows console without virtual
+    /// terminal processing) gets plain text, not `←[1;31merror←[0m`.
+    #[test]
+    fn color_needs_a_console_that_renders_ansi() {
+        assert!(color_enabled(true, false, || true));
+        assert!(!color_enabled(true, false, || false));
+        assert!(!color_enabled(false, false, || true));
+        assert!(!color_enabled(true, true, || true));
+        // The console is not asked (or switched into VT mode) when color is
+        // off anyway.
+        assert!(!color_enabled(false, false, || unreachable!()));
+        assert!(!color_enabled(true, true, || unreachable!()));
     }
 
     struct ClosedPipe;
