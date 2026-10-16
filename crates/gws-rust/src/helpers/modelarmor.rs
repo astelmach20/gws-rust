@@ -279,18 +279,30 @@ impl ModelArmorClient {
         text: &str,
     ) -> Result<SanitizationResult, GwsError> {
         let body = json!({ method.data_field(): { "text": text } });
-        let resp = self
-            .rest
+        let resp = self.sanitize_raw(template, method, &body).await?;
+        parse_sanitize_response(&resp)
+    }
+
+    /// POST a sanitize request body and return the raw response.
+    ///
+    /// Sanitizing only screens the text: it creates and changes nothing, so
+    /// the call is idempotent and is retried on timeouts and 5xx like a GET.
+    pub(crate) async fn sanitize_raw(
+        &self,
+        template: &ModelArmorTemplate,
+        method: SanitizeMethod,
+        body: &Value,
+    ) -> Result<Value, GwsError> {
+        self.rest
             .json(
                 Method::POST,
                 &self.url(template, method),
                 &[],
-                Some(&body),
+                Some(body),
                 Idempotency::Idempotent,
                 "Model Armor sanitization failed",
             )
-            .await?;
-        parse_sanitize_response(&resp)
+            .await
     }
 }
 
@@ -713,26 +725,37 @@ TIPS:
 async fn handle_sanitize(matches: &ArgMatches, method: SanitizeMethod) -> Result<(), GwsError> {
     let template = ModelArmorTemplate::parse(&required(matches, "template")?)?;
     let body = parse_sanitize_args(matches, method.data_field())?;
-    let url = template.method_url(method);
-    model_armor_post(matches, &url, &body).await
+    if crate::args::dry_run(matches)? {
+        return print_post_dry_run(matches, &template.method_url(method), &body);
+    }
+    let client = ModelArmorClient::authenticated().await?;
+    let resp = client.sanitize_raw(&template, method, &body).await?;
+    crate::helpers::http::print_value(matches, &resp)
 }
 
 fn required(matches: &ArgMatches, name: &str) -> Result<String, GwsError> {
     Ok(crate::args::required(matches, name)?.to_string())
 }
 
-/// POST a JSON body to a Model Armor endpoint and print the response.
+/// Print the `--dry-run` plan for a POST to a Model Armor endpoint.
+fn print_post_dry_run(matches: &ArgMatches, url: &str, body: &Value) -> Result<(), GwsError> {
+    crate::helpers::http::print_dry_run(
+        matches,
+        vec![crate::helpers::http::dry_run_request(
+            "POST",
+            url,
+            &[],
+            Some(body),
+        )],
+    )
+}
+
+/// POST a JSON body to a Model Armor endpoint and print the response. The
+/// request is not retried once it may have reached the server (it creates a
+/// resource).
 async fn model_armor_post(matches: &ArgMatches, url: &str, body: &Value) -> Result<(), GwsError> {
     if crate::args::dry_run(matches)? {
-        return crate::helpers::http::print_dry_run(
-            matches,
-            vec![crate::helpers::http::dry_run_request(
-                "POST",
-                url,
-                &[],
-                Some(body),
-            )],
-        );
+        return print_post_dry_run(matches, url, body);
     }
     let client = ModelArmorClient::authenticated().await?;
     let resp = client
@@ -978,6 +1001,39 @@ mod tests {
             .await;
         let client = ModelArmorClient::for_test(&server.uri());
         (server, client)
+    }
+
+    /// `+sanitize-prompt` / `+sanitize-response` only screen text, so a 5xx
+    /// is retried like any idempotent call instead of failing the command.
+    #[tokio::test]
+    async fn sanitize_raw_retries_a_server_error() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path(format!("/{TEMPLATE}:sanitizeModelResponse")))
+            .respond_with(ResponseTemplate::new(503))
+            .up_to_n_times(1)
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path(format!("/{TEMPLATE}:sanitizeModelResponse")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "sanitizationResult": { "filterMatchState": "NO_MATCH_FOUND" }
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let client = ModelArmorClient::for_test(&server.uri());
+        let t = ModelArmorTemplate::parse(TEMPLATE).unwrap();
+        let body = json!({ "modelResponseData": { "text": "hello" } });
+        let resp = client
+            .sanitize_raw(&t, SanitizeMethod::ModelResponse, &body)
+            .await
+            .unwrap();
+        assert_eq!(
+            resp["sanitizationResult"]["filterMatchState"],
+            "NO_MATCH_FOUND"
+        );
     }
 
     /// SEC-14: block mode fails closed when Model Armor errors.
