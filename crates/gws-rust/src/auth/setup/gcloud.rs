@@ -23,6 +23,8 @@ use anyhow::Context;
 use secrecy::SecretString;
 use tokio::process::Command;
 
+use crate::child::async_command;
+
 const LIST_PROJECTS_TIMEOUT: Duration = Duration::from_secs(20);
 const ENABLE_CONCURRENCY: usize = 5;
 
@@ -86,7 +88,7 @@ impl Gcloud {
     }
 
     fn cmd(&self) -> Command {
-        let mut cmd = Command::new(&self.bin);
+        let mut cmd = async_command(&self.bin);
         cmd.env("CLOUDSDK_CORE_DISABLE_PROMPTS", "1")
             .kill_on_drop(true);
         cmd
@@ -392,7 +394,7 @@ mod tests {
     /// ("Text file busy").
     fn fake_gcloud(dir: &std::path::Path, script: &str) -> Gcloud {
         let path = dir.join("gcloud");
-        let status = std::process::Command::new("/bin/sh")
+        let status = crate::child::command("/bin/sh")
             .args(["-c", r#"printf '%s\n' "$1" > "$2" && chmod 755 "$2""#, "sh"])
             .arg(format!("#!/bin/sh\n{script}"))
             .arg(&path)

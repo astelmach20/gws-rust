@@ -19,6 +19,8 @@
 //! runs with `--dry-run` or is expected to fail before any request is sent.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+// Tests start gwsr and helper programs with environments they set themselves.
+#![allow(clippy::disallowed_methods)]
 
 use assert_cmd::Command;
 use serde_json::{Value, json};

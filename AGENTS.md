@@ -120,6 +120,7 @@ The repository is a Cargo workspace with two crates, plus the npm launcher in `n
 | `completions.rs` | Dynamic shell completions and `dev man` |
 | `generate_skills.rs` | `gwsr dev generate-skills` (reads `crates/gws-rust/registry/personas.toml`, `recipes.toml`) |
 | `logging.rs`, `hardening.rs`, `fs_util.rs`, `timezone.rs`, `text.rs` | Logging, process hardening, secret-file I/O, account time zone, text utilities |
+| `child.rs` | Child processes (`gcloud`, the browser opener), started without any `GWSR_*` variable |
 | `helpers/` | `+verb` helpers per service. `http.rs` has `Api`, the helper REST client (dry-run planning, pagination, sanitization) and `OutputTarget`. Gmail is in `helpers/gmail/`, Workspace Events in `helpers/events/` |
 
 Tests: unit tests sit next to the code; CLI integration tests are in `crates/gws-rust/tests/{cli.rs,helpers_cli.rs}` (assert_cmd, insta, wiremock); property tests are in `crates/gws-rust-core/tests/validate_props.rs`.
@@ -149,6 +150,7 @@ To add or change an environment variable, edit `env.rs` only: add a `REGISTRY` e
 | Enum flags | clap `value_parser` / `PossibleValuesParser` |
 | Free text shown on a terminal | `output::sanitize_for_terminal()` |
 | API base URLs | `validate::validate_api_base_with()` / `EndpointPolicy` from `env::get()?.endpoint_policy()` (enforces the token-host policy) |
+| Starting another program | `crate::child::command` / `async_command` (withholds every `GWSR_*` variable; `Command::new` is disallowed by clippy) |
 | Destructive or outbound actions | `confirm::confirm(matches, Impact::…, "what will happen")`, and register `-y/--yes` with `confirm::with_yes()` |
 
 The binary's path validators (`crate::validate`) apply the validated `GWSR_RESTRICT_PATHS`. By default any path is allowed; `cwd` confines paths to the current directory. Either way they resolve symlinks and reject control characters.
