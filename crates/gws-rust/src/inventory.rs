@@ -177,19 +177,52 @@ fn select_services(names: &[String]) -> Result<Vec<&'static ServiceEntry>, GwsEr
         .collect()
 }
 
+/// The API version to list for each of `entries`: `api_version`
+/// (`--api-version`) when given, else each service's default.
+///
+/// The flag picks one version, so it needs the services named: applied to
+/// every registered service it would ask for a version most of them do not
+/// have.
+fn versions(
+    entries: &[&'static ServiceEntry],
+    names: &[String],
+    api_version: Option<&str>,
+) -> Result<Vec<String>, GwsError> {
+    if api_version.is_some() && names.is_empty() {
+        return Err(GwsError::Validation(
+            "--api-version needs the services to list, e.g. `gwsr commands drive --api-version v2`"
+                .to_string(),
+        ));
+    }
+    entries
+        .iter()
+        .map(|e| {
+            crate::services::resolve_service_spec(e.aliases[0], api_version).map(|r| r.version)
+        })
+        .collect()
+}
+
 /// Build the full inventory (fetches Discovery documents as needed).
-pub async fn build(names: &[String]) -> Result<Value, GwsError> {
+/// `api_version` (`--api-version`) lists that version of the named services.
+pub async fn build(names: &[String], api_version: Option<&str>) -> Result<Value, GwsError> {
     let entries = select_services(names)?;
+    let versions = versions(&entries, names, api_version)?;
     let docs = futures_util::future::try_join_all(
         entries
             .iter()
-            .map(|e| crate::service::load_document(e.api_name, e.version)),
+            .zip(&versions)
+            .map(|(e, version)| crate::service::load_document(e.api_name, version)),
     )
     .await?;
     let services: Vec<Value> = entries
         .iter()
         .zip(&docs)
-        .map(|(entry, doc)| service_inventory(entry, doc))
+        .zip(&versions)
+        .map(|((entry, doc), version)| {
+            let mut inventory = service_inventory(entry, doc);
+            inventory["version"] = json!(version);
+            inventory
+        })
         .collect();
     Ok(json!({
         "gwsr_version": env!("CARGO_PKG_VERSION"),
@@ -355,6 +388,22 @@ mod tests {
     fn unknown_service_is_rejected() {
         assert!(select_services(&["nope".into()]).is_err());
         assert_eq!(select_services(&["drive".into()]).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn api_version_applies_to_the_named_services() {
+        let drive = select_services(&["drive".into()]).unwrap();
+        assert_eq!(
+            versions(&drive, &["drive".into()], Some("v2")).unwrap(),
+            ["v2"]
+        );
+        assert_eq!(versions(&drive, &["drive".into()], None).unwrap(), ["v3"]);
+        // Without named services the flag would apply to every API.
+        let all = select_services(&[]).unwrap();
+        let err = versions(&all, &[], Some("v2")).unwrap_err();
+        assert!(matches!(err, GwsError::Validation(_)), "{err:?}");
+        // The version is validated like everywhere else.
+        assert!(versions(&drive, &["drive".into()], Some("../v2")).is_err());
     }
 
     #[test]

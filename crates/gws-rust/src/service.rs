@@ -31,6 +31,22 @@ pub fn synthetic_document(api_name: &str) -> Option<RestDescription> {
     })
 }
 
+/// Refuse a synthetic service in a command that works on Discovery methods
+/// and schemas (`gwsr schema`, `gwsr batch`).
+///
+/// A synthetic service has only helpers and no document to fetch: asking the
+/// network for one fails with a misleading Discovery error (exit 4), or
+/// offline with a network error, instead of saying the request cannot work.
+pub fn require_discovery_api(api_name: &str, command: &str) -> Result<(), GwsError> {
+    if synthetic_document(api_name).is_some() {
+        return Err(GwsError::Validation(format!(
+            "'{api_name}' has no Discovery document (its commands are +helpers), so \
+             `gwsr {command}` cannot use it; run `gwsr {api_name} --help` to see its commands"
+        )));
+    }
+    Ok(())
+}
+
 /// Fetch (or read from cache) the Discovery document for `api_name/version`.
 pub async fn load_document(api_name: &str, version: &str) -> Result<RestDescription, GwsError> {
     if let Some(doc) = synthetic_document(api_name) {

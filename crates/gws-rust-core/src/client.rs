@@ -628,6 +628,37 @@ mod tests {
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
 
+    /// A loopback port that refuses connections. Binding a listener and
+    /// dropping it frees the port, and a server started by a test running in
+    /// parallel can pick it up and answer. On Linux a socket that is bound
+    /// but never listens keeps the port while still refusing connections, so
+    /// the returned guard holds it for as long as it lives. (macOS drops the
+    /// connection attempt instead of refusing it, so it keeps the bind-drop.)
+    pub(crate) fn refused_port() -> (Option<tokio::net::TcpSocket>, u16) {
+        if cfg!(target_os = "linux") {
+            let socket = tokio::net::TcpSocket::new_v4().unwrap();
+            socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+            let port = socket.local_addr().unwrap().port();
+            return (Some(socket), port);
+        }
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        (None, l.local_addr().unwrap().port())
+    }
+
+    /// Connecting to the port is refused, and on Linux no other listener can
+    /// take it while the guard lives.
+    #[tokio::test]
+    async fn refused_port_refuses_and_stays_reserved() {
+        let (reserved, port) = refused_port();
+        if reserved.is_some() {
+            assert!(std::net::TcpListener::bind(("127.0.0.1", port)).is_err());
+        }
+        let err = tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::ConnectionRefused);
+    }
+
     fn fast_policy() -> RetryPolicy {
         RetryPolicy {
             max_attempts: 4,
@@ -1033,11 +1064,7 @@ mod tests {
 
     #[tokio::test]
     async fn connection_refused_is_reported_with_attempts() {
-        // Bind then drop a listener to get a port nothing listens on.
-        let port = {
-            let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-            l.local_addr().unwrap().port()
-        };
+        let (_reserved, port) = refused_port();
         let client = shared_client().unwrap();
         let url = format!("http://127.0.0.1:{port}/r");
         let err = send(&fast_policy(), Idempotency::FromMethod, || {
@@ -1056,10 +1083,7 @@ mod tests {
     /// error message or a debug log through it.
     #[tokio::test]
     async fn transport_error_does_not_echo_the_query_string() {
-        let port = {
-            let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-            l.local_addr().unwrap().port()
-        };
+        let (_reserved, port) = refused_port();
         let client = shared_client().unwrap();
         let url = format!("http://127.0.0.1:{port}/r?key=FAKE-api-key&q=private-term");
         let err = send(&fast_policy(), Idempotency::FromMethod, || client.get(&url))
