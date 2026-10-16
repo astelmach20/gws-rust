@@ -53,7 +53,7 @@ gwsr <service> [<resource> [<method>]] --help
 | `-o PATH` / `-o -` | Write a binary response to a file / raw to stdout |
 | `--wait` | Poll a long-running operation until it finishes |
 | `--dry-run` | Print the request instead of sending it |
-| `-y, --yes` | Confirm a destructive action (only after the user agrees) |
+| `-y, --yes` | Confirm a destructive action, or an outbound one when `GWSR_REQUIRE_CONFIRM=1` (only after the user agrees) |
 | `--sanitize TEMPLATE` | Screen the response with Model Armor |
 | `--profile NAME` | Use another credential profile |
 

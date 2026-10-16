@@ -33,7 +33,7 @@ gwsr calendar +delete --event-id <ID>
 | `--calendar-id` | — | primary | Calendar ID |
 | `--event-id` | ✓ | — | Event ID |
 | `--send-updates` | — | all | Who gets email notifications |
-| `--yes` | — | — | Confirm this action without prompting (required when not on a terminal) |
+| `--yes` | — | — | Confirm without prompting. When stdin or stderr is not a terminal, destructive actions require it; outbound ones (send, share, notify, run code) only when GWSR_REQUIRE_CONFIRM=1 |
 
 ## Examples
 

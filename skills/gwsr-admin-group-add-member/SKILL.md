@@ -33,7 +33,7 @@ gwsr admin +group-add-member --group <EMAIL> --member <EMAIL>
 | `--group` | ✓ | — | Group email or ID |
 | `--member` | ✓ | — | Member email |
 | `--role` | — | MEMBER | Membership role |
-| `--yes` | — | — | Confirm this action without prompting (required when not on a terminal) |
+| `--yes` | — | — | Confirm without prompting. When stdin or stderr is not a terminal, destructive actions require it; outbound ones (send, share, notify, run code) only when GWSR_REQUIRE_CONFIRM=1 |
 
 ## Examples
 

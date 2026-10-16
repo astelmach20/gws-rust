@@ -32,7 +32,7 @@ gwsr sheets +clear --spreadsheet-id <ID> --range <RANGE>
 |------|----------|---------|-------------|
 | `--spreadsheet-id` | ✓ | — | Spreadsheet ID |
 | `--range` | ✓ | — | Range to clear, e.g. 'Sheet1!A2:Z' |
-| `--yes` | — | — | Confirm this action without prompting (required when not on a terminal) |
+| `--yes` | — | — | Confirm without prompting. When stdin or stderr is not a terminal, destructive actions require it; outbound ones (send, share, notify, run code) only when GWSR_REQUIRE_CONFIRM=1 |
 
 ## Examples
 

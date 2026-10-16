@@ -40,7 +40,7 @@ gwsr gmail +forward --message-id <ID> --to <EMAILS>
 | `--bcc` | — | — | BCC email address(es), comma-separated |
 | `--html` | — | — | Treat --body as HTML (a plain-text alternative is generated) |
 | `--draft` | — | — | Save as a draft instead of sending |
-| `--yes` | — | — | Confirm this action without prompting (required when not on a terminal) |
+| `--yes` | — | — | Confirm without prompting. When stdin or stderr is not a terminal, destructive actions require it; outbound ones (send, share, notify, run code) only when GWSR_REQUIRE_CONFIRM=1 |
 
 ## Examples
 

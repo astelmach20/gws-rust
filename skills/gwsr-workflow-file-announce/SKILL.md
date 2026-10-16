@@ -33,7 +33,7 @@ gwsr workflow +file-announce --file-id <ID> --space-id <ID>
 | `--file-id` | ✓ | — | Drive file ID to announce |
 | `--space-id` | ✓ | — | Chat space (SPACE_ID or spaces/SPACE_ID) |
 | `--message` | — | — | Custom announcement text (the file link is appended) |
-| `--yes` | — | — | Confirm this action without prompting (required when not on a terminal) |
+| `--yes` | — | — | Confirm without prompting. When stdin or stderr is not a terminal, destructive actions require it; outbound ones (send, share, notify, run code) only when GWSR_REQUIRE_CONFIRM=1 |
 
 ## Examples
 

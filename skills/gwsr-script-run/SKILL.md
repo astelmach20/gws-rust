@@ -35,7 +35,7 @@ gwsr script +run --script-id <ID> --function <NAME>
 | `--args` | — | — | Function arguments as a JSON array, e.g. '["a", 2]' |
 | `--dev-mode` | — | — | Run the most recently saved code instead of the deployed version (owner only) |
 | `--scope` | — | — | OAuth scope the function needs (repeatable; default: the scopes listed by the Execution API) |
-| `--yes` | — | — | Confirm this action without prompting (required when not on a terminal) |
+| `--yes` | — | — | Confirm without prompting. When stdin or stderr is not a terminal, destructive actions require it; outbound ones (send, share, notify, run code) only when GWSR_REQUIRE_CONFIRM=1 |
 
 ## Examples
 

@@ -374,12 +374,19 @@ pub(crate) fn may_be_gated(method: &RestMethod) -> bool {
         || BODY_DESTRUCTIVE_METHODS.iter().any(|(m, _, _)| *m == id)
 }
 
+/// Help for `--yes`, matching [`decide`]: off a terminal, destructive
+/// actions are refused without it, outbound ones only under
+/// `GWSR_REQUIRE_CONFIRM`. Also used in the generated `gwsr-shared` skill.
+pub(crate) const YES_HELP: &str = "Confirm without prompting. When stdin or stderr is not a terminal, \
+    destructive actions require it; outbound ones (send, share, notify, run code) only when \
+    GWSR_REQUIRE_CONFIRM=1";
+
 /// The `--yes`/`-y` flag, identical on every gated command.
 pub(crate) fn yes_arg() -> Arg {
     Arg::new("yes")
         .long("yes")
         .short('y')
-        .help("Confirm this action without prompting (required when not on a terminal)")
+        .help(YES_HELP)
         .action(ArgAction::SetTrue)
 }
 
@@ -510,6 +517,32 @@ fn is_yes(answer: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `--yes` help must not claim it is always required off a terminal:
+    /// outbound actions are only gated under `GWSR_REQUIRE_CONFIRM`.
+    #[test]
+    fn yes_help_matches_the_gate() {
+        let help = yes_arg().get_help().map(ToString::to_string).unwrap();
+        assert_eq!(help, YES_HELP);
+        assert!(!help.contains("required when not on a terminal"), "{help}");
+        assert!(help.contains("destructive"), "{help}");
+        assert!(help.contains("outbound"), "{help}");
+        assert!(help.contains("GWSR_REQUIRE_CONFIRM=1"), "{help}");
+        // An outbound action off a terminal proceeds without --yes by
+        // default, and is refused only under the policy, as the help says.
+        assert_eq!(
+            decide(Impact::Outbound, false, false, false, false),
+            Decision::Proceed
+        );
+        assert_eq!(
+            decide(Impact::Outbound, true, false, false, false),
+            Decision::Refuse
+        );
+        assert_eq!(
+            decide(Impact::Destructive, false, false, false, false),
+            Decision::Refuse
+        );
+    }
 
     fn never_ask(_: &str) -> Result<bool, GwsError> {
         panic!("must not prompt")

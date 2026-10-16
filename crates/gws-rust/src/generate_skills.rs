@@ -975,7 +975,11 @@ fn push_usage_and_flags(out: &mut String, invocation: &str, cmd: &Command, level
 }
 
 fn generate_shared_skill(base: &Path, dry_run: bool) -> Result<(), GwsError> {
-    let content = r#"---
+    write_skill(base, "gwsr-shared", &shared_skill_content(), dry_run)
+}
+
+fn shared_skill_content() -> String {
+    r#"---
 name: gwsr-shared
 description: "gwsr CLI: Shared patterns for authentication, global flags, and output formatting."
 metadata:
@@ -1064,7 +1068,7 @@ gwsr <service> <resource> [sub-resource] <method> [flags]
 | `--page-items[=FIELD]` | Fetch every page, one JSON line per item |
 | `--page-limit <N>` | Stop after N pages (default: unlimited) |
 | `--wait` | Poll a returned long-running operation until it finishes |
-| `-y, --yes` | Confirm a destructive method (required when not on a terminal) |
+| `-y, --yes` | __YES_HELP__ |
 
 Unknown `--params` names and body fields are rejected; run `gwsr schema <service>.<resource>.<method>`
 to see what a method accepts.
@@ -1091,9 +1095,8 @@ to see what a method accepts.
   gwsr drive files list --params '{"pageSize": 5}'
   ```
 "#
-    .replace("__VERSION__", env!("CARGO_PKG_VERSION"));
-
-    write_skill(base, "gwsr-shared", &content, dry_run)
+    .replace("__VERSION__", env!("CARGO_PKG_VERSION"))
+    .replace("__YES_HELP__", crate::confirm::YES_HELP)
 }
 
 fn render_persona_skill(persona: &PersonaEntry) -> String {
@@ -1325,6 +1328,17 @@ mod tests {
     use crate::services;
     use clap::Command;
     use std::collections::HashSet;
+
+    /// The shared skill describes `--yes` with the CLI's own help text.
+    #[test]
+    fn test_shared_skill_uses_the_yes_help() {
+        let content = shared_skill_content();
+        assert!(
+            content.contains(&format!("| `-y, --yes` | {} |", crate::confirm::YES_HELP)),
+            "{content}"
+        );
+        assert!(!content.contains("__YES_HELP__"), "unreplaced placeholder");
+    }
 
     #[test]
     fn test_registry_references() {

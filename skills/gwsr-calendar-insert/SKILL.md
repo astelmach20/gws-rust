@@ -41,7 +41,7 @@ gwsr calendar +insert --summary <TEXT> --start <TIME>
 | `--start` | ✓ | — | Start: 2026-06-17 (all-day), 2026-06-17T09:00 (in --timezone) or RFC 3339 with offset |
 | `--end` | — | — | End, same forms as --start (all-day end dates are exclusive) |
 | `--duration` | — | — | Length instead of --end, e.g. 30m, 1h, 1h30m |
-| `--yes` | — | — | Confirm this action without prompting (required when not on a terminal) |
+| `--yes` | — | — | Confirm without prompting. When stdin or stderr is not a terminal, destructive actions require it; outbound ones (send, share, notify, run code) only when GWSR_REQUIRE_CONFIRM=1 |
 
 ## Examples
 
