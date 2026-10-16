@@ -1978,6 +1978,56 @@ fn chat_send_rejects_empty_text_before_confirm_and_auth() {
     }
 }
 
+/// An attached `.eml` is a `message/rfc822` part, which RFC 2046 §5.2.1 does
+/// not allow to be base64-encoded: a canonical message is sent unencoded.
+#[test]
+fn gmail_send_attaches_an_eml_file_without_base64() {
+    let dir = setup();
+    seed(dir.path(), "gmail", "v1", "");
+    let eml = "From: a@example.com\r\nSubject: Inner\r\n\r\nInner body\r\n";
+    std::fs::write(dir.path().join("note.eml"), eml).unwrap();
+
+    let out = gwsr(dir.path())
+        .args([
+            "gmail",
+            "+send",
+            "--to",
+            "b@example.com",
+            "--subject",
+            "s",
+            "--body",
+            "b",
+            "--attach",
+            "note.eml",
+            "--dry-run",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let raw = stdout_json(&out)["raw_message"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let part = raw
+        .split("\r\n--")
+        .find(|p| p.contains("note.eml"))
+        .unwrap_or_else(|| panic!("{raw}"));
+    let (headers, body) = part.split_once("\r\n\r\n").unwrap();
+    assert!(
+        headers.contains("Content-Type: message/rfc822"),
+        "{headers}"
+    );
+    assert!(
+        headers.contains("Content-Transfer-Encoding: 7bit"),
+        "{headers}"
+    );
+    assert_eq!(body, eml);
+}
+
 #[test]
 fn gmail_unsubscribe_dry_run_needs_no_credentials() {
     // README/CONTEXT: `--dry-run` loads no credentials and sends nothing.
