@@ -39,7 +39,6 @@ use crate::validate::validate_api_identifier;
 
 /// Maximum accepted Discovery Document size.
 pub const MAX_DOCUMENT_BYTES: usize = 64 * 1024 * 1024;
-const FETCH_TIMEOUT: Duration = Duration::from_secs(60);
 const DEFAULT_DISCOVERY_BASE: &str = "https://www.googleapis.com/";
 
 /// Where a loaded document came from.
@@ -126,8 +125,11 @@ impl DiscoveryLoader {
         self
     }
 
-    /// Retry policy for Discovery fetches. Defaults to the process-wide
-    /// [`crate::client::RetryPolicy`] with a 60-second response timeout.
+    /// Retry policy for Discovery fetches. Defaults to
+    /// [`crate::client::RetryPolicy::configured`], so the installed
+    /// process-wide request timeout (`--timeout`'s environment and config
+    /// defaults) applies. Its response timeout bounds the wait for response
+    /// headers and each gap while reading the body; `None` disables both.
     pub fn with_retry_policy(mut self, policy: crate::client::RetryPolicy) -> Self {
         self.retry = Some(policy);
         self
@@ -311,10 +313,7 @@ impl DiscoveryLoader {
         let policy = self
             .retry
             .clone()
-            .unwrap_or_else(|| crate::client::RetryPolicy {
-                response_timeout: Some(FETCH_TIMEOUT),
-                ..crate::client::RetryPolicy::default()
-            });
+            .unwrap_or_else(crate::client::RetryPolicy::configured);
         let mut attempts = Vec::new();
         let mut all_not_found = true;
 
@@ -322,7 +321,7 @@ impl DiscoveryLoader {
             tracing::debug!(%url, "Fetching Discovery Document");
             let resp =
                 match crate::client::send(&policy, crate::client::Idempotency::FromMethod, || {
-                    client.get(url.clone()).timeout(FETCH_TIMEOUT)
+                    client.get(url.clone())
                 })
                 .await
                 {
@@ -343,7 +342,7 @@ impl DiscoveryLoader {
                 attempts.push(format!("{url}: HTTP {status}"));
                 continue;
             }
-            let body = match read_limited(resp).await {
+            let body = match read_limited(resp, policy.response_timeout).await {
                 Ok(body) => body,
                 Err(msg) => {
                     attempts.push(format!("{url}: {msg}"));
@@ -405,14 +404,33 @@ fn error_chain(err: &dyn std::error::Error) -> String {
     msg
 }
 
-async fn read_limited(mut resp: reqwest::Response) -> Result<Vec<u8>, String> {
+/// Read a document body of at most [`MAX_DOCUMENT_BYTES`], failing if no
+/// bytes arrive for `idle` (when set).
+async fn read_limited(
+    mut resp: reqwest::Response,
+    idle: Option<Duration>,
+) -> Result<Vec<u8>, String> {
     if let Some(len) = resp.content_length()
         && len > MAX_DOCUMENT_BYTES as u64
     {
         return Err(format!("document is too large ({len} bytes)"));
     }
     let mut body = Vec::new();
-    while let Some(chunk) = resp.chunk().await.map_err(|e| error_chain(&e))? {
+    loop {
+        let next = match idle {
+            Some(limit) => tokio::time::timeout(limit, resp.chunk())
+                .await
+                .map_err(|_elapsed| {
+                    format!(
+                        "no data received for {}s while reading the document",
+                        limit.as_secs_f64()
+                    )
+                })?,
+            None => resp.chunk().await,
+        };
+        let Some(chunk) = next.map_err(|e| error_chain(&e))? else {
+            break;
+        };
         if body.len() + chunk.len() > MAX_DOCUMENT_BYTES {
             return Err(format!(
                 "document exceeds the {MAX_DOCUMENT_BYTES}-byte limit"
