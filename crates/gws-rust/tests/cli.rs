@@ -18,6 +18,8 @@
 //! cache, or are synthetic (`workflow`).
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
+// Tests start gwsr and helper programs with environments they set themselves.
+#![allow(clippy::disallowed_methods)]
 
 use std::path::PathBuf;
 
@@ -1935,6 +1937,70 @@ fn auth_subcommands_complete_and_get_man_pages() {
     for page in ["gwsr-auth-login.1", "gwsr-auth-status.1", "gwsr-auth-use.1"] {
         assert!(env.work_dir().join("man").join(page).exists(), "{page}");
     }
+}
+
+/// A child process gwsr starts (here `gcloud`, from `auth setup`) must not
+/// inherit `GWSR_TOKEN`, `GWSR_CLIENT_SECRET` or any other `GWSR_*`
+/// variable: none of them is meant for another program.
+#[cfg(unix)]
+#[test]
+fn gcloud_does_not_inherit_gwsr_variables() {
+    let env = Env::new();
+    let bin = env.root.path().join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let dump = env.root.path().join("gcloud-env.txt");
+    let gcloud = bin.join("gcloud");
+    // Written by a child `sh`, so no descriptor of this (multi-threaded)
+    // process holds the script open for writing when it runs (ETXTBSY).
+    let status = std::process::Command::new("/bin/sh")
+        .args(["-c", r#"printf '%s\n' "$1" > "$2" && chmod 755 "$2""#, "sh"])
+        .arg(format!(
+            // `export -p` is a shell builtin: the Nix build sandbox has no
+            // `/usr/bin/env`.
+            "#!/bin/sh\nexport -p > '{}'\nexit 1",
+            dump.display()
+        ))
+        .arg(&gcloud)
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    let out = env
+        .cmd()
+        .env("PATH", &bin)
+        .env("GWSR_TOKEN", "ya29.fake-test-token")
+        .env("GWSR_CLIENT_SECRET", "GOCSPX-fake-test-secret")
+        .env("GWSR_DEFAULT_CLIENT_SECRET", "GOCSPX-fake-build-secret")
+        .env("GWSR_PROJECT_ID", "fake-project")
+        .env("UNRELATED_TEST_VAR", "kept")
+        .args(["auth", "setup", "--non-interactive"])
+        .output()
+        .unwrap();
+    assert!(!out.status.success(), "{out:?}");
+    let seen = std::fs::read_to_string(&dump).unwrap_or_else(|e| {
+        panic!("the fake gcloud did not run ({e}): {out:?}");
+    });
+    // The rest of the environment is passed on. `export -p` quotes values
+    // differently per shell, so match on the name and the value separately.
+    let exported = |name: &str| {
+        seen.lines()
+            .filter_map(|l| l.strip_prefix("export "))
+            .find(|l| l.starts_with(&format!("{name}=")))
+    };
+    assert!(
+        exported("UNRELATED_TEST_VAR").is_some_and(|l| l.contains("kept")),
+        "{seen}"
+    );
+    assert!(
+        exported("CLOUDSDK_CORE_DISABLE_PROMPTS").is_some_and(|l| l.contains('1')),
+        "{seen}"
+    );
+    for line in seen.lines() {
+        let name = line.strip_prefix("export ").unwrap_or(line);
+        assert!(!name.starts_with("GWSR_"), "gcloud inherited {line}");
+    }
+    assert!(!seen.contains("fake-test-token"), "{seen}");
+    assert!(!seen.contains("fake-test-secret"), "{seen}");
 }
 
 /// `auth setup` parses its own flags too: completion and its man page must

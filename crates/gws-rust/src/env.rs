@@ -644,6 +644,49 @@ fn split_top_level(value: &str) -> Vec<&str> {
     parts
 }
 
+/// Names of the variables a child process `gwsr` starts (`gcloud`, the
+/// browser opener) must not inherit: every registered and build-time
+/// `GWSR_*` name, set or not, and every other `GWSR_*` variable in the
+/// process environment.
+///
+/// `GWSR_TOKEN`, `GWSR_CLIENT_SECRET` and the build-time
+/// `GWSR_DEFAULT_CLIENT_SECRET` are secrets, and `GWSR_TOKEN_FILE` /
+/// `GWSR_CREDENTIALS_FILE` point at them. No other program reads a `GWSR_*`
+/// variable, so the whole namespace is withheld: a secret variable added
+/// later cannot be missed. Used by [`crate::child`].
+pub fn withheld_from_children() -> Vec<OsString> {
+    withheld_names(std::env::vars_os().map(|(name, _)| name), cfg!(windows))
+}
+
+fn withheld_names(
+    present: impl IntoIterator<Item = OsString>,
+    names_ignore_case: bool,
+) -> Vec<OsString> {
+    let mut names: Vec<OsString> = REGISTRY
+        .iter()
+        .map(|v| v.name)
+        .chain(BUILD_TIME_VARS.iter().copied())
+        .filter(|name| name.starts_with(PREFIX))
+        .map(OsString::from)
+        .collect();
+    for name in present {
+        let prefixed = name
+            .as_encoded_bytes()
+            .get(..PREFIX.len())
+            .is_some_and(|p| {
+                if names_ignore_case {
+                    p.eq_ignore_ascii_case(PREFIX.as_bytes())
+                } else {
+                    p == PREFIX.as_bytes()
+                }
+            });
+        if prefixed && !names.contains(&name) {
+            names.push(name);
+        }
+    }
+    names
+}
+
 static PROCESS: OnceLock<Result<Env, String>> = OnceLock::new();
 
 /// The validated process environment, parsed on first use. `main` calls this
@@ -1061,5 +1104,45 @@ mod tests {
         for bad in ["short", "My-Project", "proj-", ":my-project", "a b"] {
             assert!(!is_gcp_project(bad), "{bad}");
         }
+    }
+
+    #[test]
+    fn children_never_inherit_gwsr_variables() {
+        let present = [
+            "PATH",
+            "GWSR_FUTURE_SECRET",
+            "gwsr_lower",
+            "HOME",
+            "GWSR_TOKEN",
+        ]
+        .map(OsString::from);
+        let names = withheld_names(present.clone(), false);
+        for always in [
+            "GWSR_TOKEN",
+            "GWSR_TOKEN_FILE",
+            "GWSR_CLIENT_SECRET",
+            "GWSR_CREDENTIALS_FILE",
+            "GWSR_DEFAULT_CLIENT_SECRET",
+            "GWSR_DEFAULT_CLIENT_ID",
+            "GWSR_COMPLETE",
+        ] {
+            assert!(
+                names.contains(&OsString::from(always)),
+                "{always}: {names:?}"
+            );
+        }
+        assert!(names.contains(&OsString::from("GWSR_FUTURE_SECRET")));
+        assert!(!names.contains(&OsString::from("gwsr_lower")));
+        assert!(!names.contains(&OsString::from("PATH")));
+        assert!(!names.contains(&OsString::from("RUST_LOG")));
+        assert_eq!(
+            names.iter().filter(|n| *n == "GWSR_TOKEN").count(),
+            1,
+            "{names:?}"
+        );
+        // Windows names ignore case.
+        let names = withheld_names(present, true);
+        assert!(names.contains(&OsString::from("gwsr_lower")));
+        assert!(!names.contains(&OsString::from("HOME")));
     }
 }

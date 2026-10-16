@@ -23,6 +23,7 @@
 
 mod args;
 mod auth;
+mod child;
 mod cli_args;
 mod client;
 mod commands;

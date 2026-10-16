@@ -2,3 +2,10 @@ allow-unwrap-in-tests = true
 allow-expect-in-tests = true
 allow-panic-in-tests = true
 allow-dbg-in-tests = true
+
+# Child processes must not inherit GWSR_TOKEN, GWSR_CLIENT_SECRET or any other
+# GWSR_* variable: build them with gwsr's `child::command`/`async_command`.
+disallowed-methods = [
+  { path = "std::process::Command::new", reason = "use crate::child::command, which withholds GWSR_* variables" },
+  { path = "tokio::process::Command::new", reason = "use crate::child::async_command, which withholds GWSR_* variables" },
+]

@@ -476,7 +476,7 @@ pub async fn exchange_code(
 }
 
 fn try_open_browser(url: &str) {
-    match webbrowser::open(url) {
+    match crate::child::open_in_browser(url) {
         Ok(()) => crate::output::eprint_line("Opened your browser to sign in."),
         Err(e) => tracing::warn!("could not open a browser ({e}); open the URL above manually"),
     }
