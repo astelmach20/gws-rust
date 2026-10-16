@@ -133,23 +133,13 @@ fn plan_paths(
 /// Select which parts to download: every attachment, plus inline images
 /// (parts embedded in the HTML body by Content-ID) when `include_inline`.
 ///
-/// Only images count as inline: some clients (Apple Mail) send ordinary files
-/// such as PDFs with `Content-Disposition: inline` and a Content-ID, and
-/// those are attachments the reader expects to get.
+/// Only images count as inline (see [`OriginalPart::is_inline_image`]).
 fn select_parts(parts: &[OriginalPart], include_inline: bool) -> Vec<OriginalPart> {
     parts
         .iter()
-        .filter(|p| include_inline || !is_inline_image(p))
+        .filter(|p| include_inline || !p.is_inline_image())
         .cloned()
         .collect()
-}
-
-fn is_inline_image(part: &OriginalPart) -> bool {
-    part.is_inline()
-        && part
-            .content_type
-            .get(..6)
-            .is_some_and(|t| t.eq_ignore_ascii_case("image/"))
 }
 
 /// Download `parts` into `dir` and describe what was written.

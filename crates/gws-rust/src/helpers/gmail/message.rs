@@ -61,6 +61,20 @@ impl OriginalPart {
     pub fn is_inline(&self) -> bool {
         self.content_id.is_some()
     }
+
+    /// Whether this part is an image embedded in the HTML body: inline (see
+    /// [`Self::is_inline`]) and `image/*`.
+    ///
+    /// Only images count: some clients (Apple Mail) send ordinary files such
+    /// as PDFs with `Content-Disposition: inline` and a Content-ID, and those
+    /// are attachments the reader expects to get.
+    pub fn is_inline_image(&self) -> bool {
+        self.is_inline()
+            && self
+                .content_type
+                .get(..6)
+                .is_some_and(|t| t.eq_ignore_ascii_case("image/"))
+    }
 }
 
 /// A parsed Gmail message fetched via the API, used as context for reply/forward.

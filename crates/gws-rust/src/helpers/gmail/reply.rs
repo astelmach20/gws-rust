@@ -102,7 +102,7 @@ pub(super) async fn handle_reply(
         let inline_parts: Vec<_> = original
             .parts
             .iter()
-            .filter(|p| p.is_inline())
+            .filter(|p| p.is_inline_image())
             .cloned()
             .collect();
         fetch_and_merge_original_parts(
