@@ -53,6 +53,8 @@ fn value_args(cmd: Command) -> Command {
         Arg::new("values")
             .long("values")
             .help("One row as CSV (quote cells containing commas: 'a,\"b,c\",d')")
+            // A row may start with a negative number or a '-' cell.
+            .allow_hyphen_values(true)
             .value_name("CSV_ROW"),
     )
     .arg(
@@ -167,6 +169,7 @@ TIPS:
                 .arg(
                     Arg::new("title")
                         .long("title")
+                        .allow_hyphen_values(true)
                         .help("Spreadsheet title")
                         .required(true)
                         .value_name("TITLE"),
@@ -174,6 +177,7 @@ TIPS:
                 .arg(
                     Arg::new("sheet")
                         .long("sheet")
+                        .allow_hyphen_values(true)
                         .help("Sheet (tab) name; repeat for several (default: one 'Sheet1')")
                         .action(ArgAction::Append)
                         .value_name("NAME"),
@@ -494,13 +498,22 @@ async fn create(api: &Api, title: &str, sheets: &[String]) -> Result<Value, GwsE
 }
 
 /// Serialize a `values` array as CSV.
+///
+/// The API omits trailing empty cells, so its rows are ragged. Every record
+/// is padded with empty fields to the widest row: a CSV whose later records
+/// have more fields than the first is rejected by strict readers (pandas,
+/// `csv` without `flexible`).
 fn values_to_csv(values: Option<&Value>) -> Result<String, GwsError> {
-    let mut writer = csv::WriterBuilder::new()
-        .flexible(true)
-        .from_writer(Vec::new());
+    let mut writer = csv::WriterBuilder::new().from_writer(Vec::new());
     if let Some(rows) = values.and_then(Value::as_array) {
+        let width = rows
+            .iter()
+            .filter_map(Value::as_array)
+            .map(Vec::len)
+            .max()
+            .unwrap_or(0);
         for row in rows {
-            let cells: Vec<String> = row
+            let mut cells: Vec<String> = row
                 .as_array()
                 .map(|cells| {
                     cells
@@ -513,6 +526,7 @@ fn values_to_csv(values: Option<&Value>) -> Result<String, GwsError> {
                         .collect()
                 })
                 .unwrap_or_default();
+            cells.resize(width, String::new());
             writer
                 .write_record(&cells)
                 .map_err(|e| http::other_err(anyhow::anyhow!("Failed to encode CSV: {e}")))?;
@@ -560,6 +574,34 @@ mod tests {
         ])
         .unwrap();
         assert_eq!(rows, vec![vec![json!("a"), json!("b,c"), json!("d")]]);
+    }
+
+    #[test]
+    fn values_row_may_start_with_a_hyphen() {
+        // A row starting with a negative number or a '-' cell is a value,
+        // not a flag.
+        let rows = values_of(&[
+            "gwsr",
+            "+append",
+            "--spreadsheet-id",
+            "S",
+            "--values",
+            "-5,abc",
+        ])
+        .unwrap();
+        assert_eq!(rows, vec![vec![json!("-5"), json!("abc")]]);
+        let rows = values_of(&[
+            "gwsr",
+            "+write",
+            "--spreadsheet-id",
+            "S",
+            "--range",
+            "A1",
+            "--values",
+            "--,n/a",
+        ])
+        .unwrap();
+        assert_eq!(rows, vec![vec![json!("--"), json!("n/a")]]);
     }
 
     #[test]
@@ -655,7 +697,21 @@ mod tests {
     #[test]
     fn csv_export_quotes_cells() {
         let v = json!([["a", "b,c"], ["1", null, 2]]);
-        assert_eq!(values_to_csv(Some(&v)).unwrap(), "a,\"b,c\"\n1,,2\n");
+        assert_eq!(values_to_csv(Some(&v)).unwrap(), "a,\"b,c\",\n1,,2\n");
+    }
+
+    #[test]
+    fn csv_export_pads_ragged_rows_to_the_widest() {
+        // values.get drops trailing empty cells and returns an empty row as
+        // []: every record still gets one field per column.
+        let v = json!([["Title"], [], ["Name", "Email", "Phone"], ["Ann", "a@x"]]);
+        let csv = values_to_csv(Some(&v)).unwrap();
+        assert_eq!(csv, "Title,,\n,,\nName,Email,Phone\nAnn,a@x,\n");
+        let mut reader = csv::ReaderBuilder::new()
+            .has_headers(false)
+            .from_reader(csv.as_bytes());
+        assert!(reader.records().all(|r| r.unwrap().len() == 3));
+        assert_eq!(values_to_csv(None).unwrap(), "");
     }
 
     #[tokio::test]

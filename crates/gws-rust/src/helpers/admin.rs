@@ -140,8 +140,8 @@ fn directory_commands(cmd: Command) -> Command {
         Command::new("+user-create")
             .about("[Helper] Create a user account")
             .arg(Arg::new("email").long("email").help("Primary email").required(true).value_name("EMAIL"))
-            .arg(Arg::new("given-name").long("given-name").help("First name").required(true).value_name("NAME"))
-            .arg(Arg::new("family-name").long("family-name").help("Last name").required(true).value_name("NAME"))
+            .arg(Arg::new("given-name").long("given-name").allow_hyphen_values(true).help("First name").required(true).value_name("NAME"))
+            .arg(Arg::new("family-name").long("family-name").allow_hyphen_values(true).help("Last name").required(true).value_name("NAME"))
             .arg(
                 Arg::new("org-unit")
                     .long("org-unit")
@@ -249,7 +249,7 @@ fn reports_commands(cmd: Command, doc: &crate::discovery::RestDescription) -> Co
             .arg(
                 Arg::new("since")
                     .long("since")
-                    .help("Start: RFC 3339 time, or a look-back like 24h / 7d (default: 1d)")
+                    .help("Start: RFC 3339 time, or a look-back like 24h / 7d before --until (default: 1d)")
                     .default_value("1d")
                     .value_name("WHEN"),
             )
@@ -452,16 +452,15 @@ fn parse_until(s: &str) -> Result<String, GwsError> {
 
 #[cfg(test)]
 fn parse_since(s: &str, now: chrono::DateTime<chrono::Utc>) -> Result<String, GwsError> {
-    since_time(s, now).map(utc_rfc3339)
+    use chrono::SubsecRound;
+    since_time(s, now.trunc_subsecs(0)).map(utc_rfc3339)
 }
 
-/// `--since`: RFC 3339, or a look-back like `24h`/`7d`/`30m` relative to `now`
-/// (whole seconds).
+/// `--since`: RFC 3339, or a look-back like `24h`/`7d`/`30m` before `end`.
 fn since_time(
     s: &str,
-    now: chrono::DateTime<chrono::Utc>,
+    end: chrono::DateTime<chrono::Utc>,
 ) -> Result<chrono::DateTime<chrono::Utc>, GwsError> {
-    use chrono::SubsecRound;
     // Not RFC 3339 is not an error yet: it may be a look-back, parsed next.
     if let Ok(t) = chrono::DateTime::parse_from_rfc3339(s) {
         return Ok(t.with_timezone(&chrono::Utc));
@@ -487,10 +486,8 @@ fn since_time(
             "--since look-back must be positive".into(),
         ));
     }
-    let start = d.and_then(|d| now.checked_sub_signed(d)).ok_or_else(|| {
-        GwsError::Validation(format!("--since '{s}' reaches too far into the past"))
-    })?;
-    Ok(start.trunc_subsecs(0))
+    d.and_then(|d| end.checked_sub_signed(d))
+        .ok_or_else(|| GwsError::Validation(format!("--since '{s}' reaches too far into the past")))
 }
 
 /// The Reports API refuses Gmail queries without an `endTime`, and Gmail
@@ -502,10 +499,31 @@ impl Audit {
         Self::parse_at(m, chrono::Utc::now())
     }
 
+    /// Parse with `now` as the current time. A `--since` look-back counts
+    /// back from `--until` when given, else from `now` in whole seconds.
     fn parse_at(m: &ArgMatches, now: chrono::DateTime<chrono::Utc>) -> Result<Self, GwsError> {
+        use chrono::SubsecRound;
         let application = required(m, "application")?;
-        let start = since_time(required(m, "since")?, now)?;
         let mut end = optional(m, "until")?.map(until_time).transpose()?;
+        let since = required(m, "since")?;
+        let start = since_time(since, end.unwrap_or_else(|| now.trunc_subsecs(0)))?;
+        // The API rejects these itself, but only after a round trip, and
+        // with a less specific message.
+        if let Some(end) = end
+            && start >= end
+        {
+            return Err(GwsError::Validation(format!(
+                "--since ({}) must be before --until ({})",
+                utc_rfc3339(start),
+                utc_rfc3339(end)
+            )));
+        }
+        if start > now {
+            return Err(GwsError::Validation(format!(
+                "--since ({}) is in the future",
+                utc_rfc3339(start)
+            )));
+        }
         if application == "gmail" {
             // Gmail requires both ends of the range: default the end to now,
             // as the API does for every other application.
@@ -823,9 +841,82 @@ mod tests {
             .with_timezone(&chrono::Utc);
         let m = AdminHelper
             .inject_commands(Command::new("gwsr"), &doc(REPORTS))
-            .try_get_matches_from(["gwsr", "+audit"].iter().chain(args))
+            .try_get_matches_from(
+                // Default to an application without Gmail's extra rules.
+                ["gwsr", "+audit"]
+                    .iter()
+                    .chain(if args.contains(&"--application") {
+                        &[][..]
+                    } else {
+                        &["--application", "login"][..]
+                    })
+                    .chain(args),
+            )
             .unwrap();
         Audit::parse_at(m.subcommand_matches("+audit").unwrap(), now)
+    }
+
+    #[test]
+    fn audit_look_back_counts_from_until() {
+        let now = "2026-01-10T08:00:00.250Z";
+        // No --until: one day before now (whole seconds), open-ended.
+        let a = parse_audit(&[], now).unwrap();
+        assert_eq!(a.start, "2026-01-09T08:00:00Z");
+        assert_eq!(a.end, None);
+        // --until alone: the default 1d look-back ends at --until, so an old
+        // --until is a valid range rather than one that starts after it ends.
+        let a = parse_audit(&["--until", "2025-06-01T12:00:00+02:00"], now).unwrap();
+        assert_eq!(a.start, "2025-05-31T10:00:00Z");
+        assert_eq!(a.end.as_deref(), Some("2025-06-01T10:00:00Z"));
+        // An explicit look-back counts from --until too, keeping its
+        // fractional seconds.
+        let a = parse_audit(&["--since", "7d", "--until", "2026-01-05T00:00:00.5Z"], now).unwrap();
+        assert_eq!(a.start, "2025-12-29T00:00:00.500Z");
+        // An RFC 3339 --since is used as given.
+        let a = parse_audit(
+            &[
+                "--since",
+                "2026-01-01T00:00:00-05:00",
+                "--until",
+                "2026-01-02T00:00:00Z",
+            ],
+            now,
+        )
+        .unwrap();
+        assert_eq!(a.start, "2026-01-01T05:00:00Z");
+    }
+
+    #[test]
+    fn audit_rejects_a_start_not_before_the_end() {
+        let now = "2026-01-10T08:00:00Z";
+        for args in [
+            // --since after --until.
+            &[
+                "--since",
+                "2026-01-09T00:00:00Z",
+                "--until",
+                "2026-01-08T00:00:00Z",
+            ][..],
+            // An empty range.
+            &[
+                "--since",
+                "2026-01-08T00:00:00Z",
+                "--until",
+                "2026-01-08T01:00:00+01:00",
+            ],
+            // --since in the future, without --until.
+            &["--since", "2026-01-10T08:00:01Z"],
+            // --since in the future, even before a later --until.
+            &[
+                "--since",
+                "2026-01-11T00:00:00Z",
+                "--until",
+                "2026-01-12T00:00:00Z",
+            ],
+        ] {
+            let err = parse_audit(args, now).unwrap_err();
+            assert!(matches!(err, GwsError::Validation(_)), "{args:?}: {err:?}");
+        }
     }
 
     #[test]

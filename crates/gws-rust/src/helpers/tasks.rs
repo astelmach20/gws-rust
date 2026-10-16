@@ -50,6 +50,7 @@ impl Helper for TasksHelper {
                 .arg(
                     Arg::new("title")
                         .long("title")
+                        .allow_hyphen_values(true)
                         .help("Task title")
                         .required(true)
                         .value_name("TEXT"),
@@ -57,6 +58,7 @@ impl Helper for TasksHelper {
                 .arg(
                     Arg::new("notes")
                         .long("notes")
+                        .allow_hyphen_values(true)
                         .help("Task notes")
                         .value_name("TEXT"),
                 )

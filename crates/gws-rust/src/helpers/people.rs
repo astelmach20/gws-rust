@@ -37,6 +37,7 @@ impl Helper for PeopleHelper {
                 .arg(
                     Arg::new("query")
                         .long("query")
+                        .allow_hyphen_values(true)
                         .help("Name, email or phone prefix to search for")
                         .required(true)
                         .value_name("TEXT"),

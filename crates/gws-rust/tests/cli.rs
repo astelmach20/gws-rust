@@ -2214,6 +2214,172 @@ async fn device_wipes_requested_in_the_body_are_destructive() {
     assert_eq!(server.received_requests().await.unwrap().len(), 3);
 }
 
+/// Seed an Admin SDK Directory v1 Discovery document with the two methods
+/// that deprovision ChromeOS devices, depending on the request body. The
+/// older `chromeosdevices.action` is flagged deprecated, as Google publishes it.
+fn seed_admin_chromeos_status(env: &Env) {
+    let doc = json!({
+        "name": "admin",
+        "version": "directory_v1",
+        "rootUrl": "https://admin.googleapis.com/",
+        "servicePath": "",
+        "batchPath": "batch",
+        "schemas": {
+            "ChromeOsDeviceAction": {"id": "ChromeOsDeviceAction", "type": "object",
+                "properties": {"action": {"type": "string"},
+                    "deprovisionReason": {"type": "string"}}},
+            "BatchChangeChromeOsDeviceStatusRequest": {
+                "id": "BatchChangeChromeOsDeviceStatusRequest", "type": "object",
+                "properties": {
+                    "changeChromeOsDeviceStatusAction": {"type": "string", "enum": [
+                        "CHANGE_CHROME_OS_DEVICE_STATUS_ACTION_UNSPECIFIED",
+                        "CHANGE_CHROME_OS_DEVICE_STATUS_ACTION_DEPROVISION",
+                        "CHANGE_CHROME_OS_DEVICE_STATUS_ACTION_DISABLE",
+                        "CHANGE_CHROME_OS_DEVICE_STATUS_ACTION_REENABLE"]},
+                    "deprovisionReason": {"type": "string"},
+                    "deviceIds": {"type": "array", "items": {"type": "string"}}
+                }},
+            "BatchChangeChromeOsDeviceStatusResponse": {
+                "id": "BatchChangeChromeOsDeviceStatusResponse", "type": "object",
+                "properties": {}}
+        },
+        "resources": {
+            "chromeosdevices": {"methods": {"action": {
+                "id": "directory.chromeosdevices.action",
+                "httpMethod": "POST",
+                "deprecated": true,
+                "path": "admin/directory/v1/customer/{customerId}/devices/chromeos/{resourceId}/action",
+                "parameters": {
+                    "customerId": {"type": "string", "location": "path", "required": true},
+                    "resourceId": {"type": "string", "location": "path", "required": true}
+                },
+                "parameterOrder": ["customerId", "resourceId"],
+                "request": {"$ref": "ChromeOsDeviceAction"},
+                "scopes": ["https://www.googleapis.com/auth/admin.directory.device.chromeos"]
+            }}},
+            "customer": {"resources": {"devices": {"resources": {"chromeos": {"methods": {"batchChangeStatus": {
+                "id": "admin.customer.devices.chromeos.batchChangeStatus",
+                "httpMethod": "POST",
+                "path": "admin/directory/v1/customer/{customerId}/devices/chromeos:batchChangeStatus",
+                "parameters": {
+                    "customerId": {"type": "string", "location": "path", "required": true}
+                },
+                "parameterOrder": ["customerId"],
+                "request": {"$ref": "BatchChangeChromeOsDeviceStatusRequest"},
+                "response": {"$ref": "BatchChangeChromeOsDeviceStatusResponse"},
+                "scopes": ["https://www.googleapis.com/auth/admin.directory.device.chromeos"]
+            }}}}}}}
+        }
+    });
+    std::fs::write(
+        env.cache_dir().join("discovery/admin+directory_v1.json"),
+        serde_json::to_string(&doc).unwrap(),
+    )
+    .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn chromeos_deprovisions_requested_in_the_body_are_destructive() {
+    use wiremock::matchers::any;
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    Mock::given(any())
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+        .mount(&server)
+        .await;
+    let env = Env::new();
+    seed_admin_chromeos_status(&env);
+    let run = |args: &[String], stdin: Option<&str>| {
+        let mut c = env.cmd();
+        c.env("GWSR_TOKEN", "test-token")
+            .env("GWSR_API_BASE_URL", server.uri())
+            .env("GWSR_REQUIRE_CONFIRM", "0")
+            .args(args);
+        if let Some(s) = stdin {
+            c.write_stdin(s);
+        }
+        c.output().unwrap()
+    };
+    let action = |action: &str, extra: &[&str]| {
+        let mut v: Vec<String> = [
+            "admin",
+            "chromeosdevices",
+            "action",
+            "--params",
+            r#"{"customerId":"my_customer","resourceId":"d1"}"#,
+            "--json",
+        ]
+        .map(String::from)
+        .to_vec();
+        v.push(json!({ "action": action, "deprovisionReason": "retiring_device" }).to_string());
+        v.extend(extra.iter().map(|s| s.to_string()));
+        v
+    };
+    let change_status = |status: &str| {
+        let mut v: Vec<String> = [
+            "admin",
+            "customer",
+            "devices",
+            "chromeos",
+            "batchChangeStatus",
+            "--params",
+            r#"{"customerId":"my_customer"}"#,
+            "--json",
+        ]
+        .map(String::from)
+        .to_vec();
+        v.push(
+            json!({
+                "deviceIds": ["d1", "d2"],
+                "changeChromeOsDeviceStatusAction":
+                    format!("CHANGE_CHROME_OS_DEVICE_STATUS_ACTION_{status}"),
+            })
+            .to_string(),
+        );
+        v
+    };
+    let refused = |out: &std::process::Output, what: &str| {
+        assert_eq!(out.status.code(), Some(7), "{what}: {}", stderr_of(out));
+        assert_eq!(
+            stderr_error(out)["error"]["reason"],
+            "confirmationRequired",
+            "{what}"
+        );
+    };
+
+    // A deprovision is destructive even with GWSR_REQUIRE_CONFIRM off.
+    for a in [action("deprovision", &[]), change_status("DEPROVISION")] {
+        refused(&run(&a, None), &a.join(" "));
+    }
+    // ... and in `gwsr batch`.
+    let batch = ["batch", "admin"].map(String::from);
+    for line in [
+        r#"{"method":"chromeosdevices.action","params":{"customerId":"c","resourceId":"d1"},"json":{"action":"deprovision","deprovisionReason":"retiring_device"}}"#,
+        r#"{"method":"customer.devices.chromeos.batchChangeStatus","params":{"customerId":"c"},"json":{"deviceIds":["d1"],"changeChromeOsDeviceStatusAction":"CHANGE_CHROME_OS_DEVICE_STATUS_ACTION_DEPROVISION"}}"#,
+    ] {
+        refused(&run(&batch, Some(line)), line);
+    }
+    assert!(
+        server.received_requests().await.unwrap().is_empty(),
+        "nothing may be sent before confirmation"
+    );
+
+    // --yes confirms a deprovision.
+    let out = run(&action("deprovision", &["--yes"]), None);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    // Disabling and re-enabling are not gated.
+    for a in [
+        action("disable", &[]),
+        change_status("DISABLE"),
+        change_status("REENABLE"),
+    ] {
+        let out = run(&a, None);
+        assert!(out.status.success(), "{}: {}", a.join(" "), stderr_of(&out));
+    }
+    assert_eq!(server.received_requests().await.unwrap().len(), 4);
+}
+
 /// Seed a Calendar v3 Discovery document with `events.insert` (which can
 /// email attendees) and `acl.insert` (which shares the calendar).
 fn seed_calendar_outbound(env: &Env) {

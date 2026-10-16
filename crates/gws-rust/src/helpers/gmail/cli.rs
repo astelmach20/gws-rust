@@ -176,6 +176,7 @@ fn common_reply_args(cmd: Command) -> Command {
             .arg(
                 Arg::new("body")
                     .long("body")
+                    .allow_hyphen_values(true)
                     .help("Reply body (plain text, or HTML with --html)")
                     .required(true)
                     .value_name("TEXT"),
@@ -204,6 +205,7 @@ fn send_cmd() -> Command {
             .arg(
                 Arg::new("subject")
                     .long("subject")
+                    .allow_hyphen_values(true)
                     .help("Email subject")
                     .required(true)
                     .value_name("SUBJECT"),
@@ -211,6 +213,7 @@ fn send_cmd() -> Command {
             .arg(
                 Arg::new("body")
                     .long("body")
+                    .allow_hyphen_values(true)
                     .help("Email body (plain text, or HTML with --html)")
                     .required(true)
                     .value_name("TEXT"),
@@ -304,6 +307,7 @@ fn forward_cmd() -> Command {
             .arg(
                 Arg::new("body")
                     .long("body")
+                    .allow_hyphen_values(true)
                     .help("Note to include above the forwarded message (plain text, or HTML with --html)")
                     .value_name("TEXT"),
             )
@@ -380,6 +384,7 @@ fn triage_cmd() -> Command {
         .arg(
             Arg::new("query")
                 .long("query")
+                .allow_hyphen_values(true)
                 .help("Gmail search query")
                 .default_value("is:unread")
                 .value_name("QUERY"),
@@ -409,6 +414,7 @@ fn search_cmd() -> Command {
         .arg(
             Arg::new("query")
                 .long("query")
+                .allow_hyphen_values(true)
                 .help("Gmail search query (same syntax as the Gmail search box)")
                 .value_name("QUERY"),
         )
@@ -513,30 +519,35 @@ fn filter_cmd() -> Command {
         .arg(
             Arg::new("from")
                 .long("from")
+                .allow_hyphen_values(true)
                 .help("Match sender")
                 .value_name("TEXT"),
         )
         .arg(
             Arg::new("to")
                 .long("to")
+                .allow_hyphen_values(true)
                 .help("Match recipient")
                 .value_name("TEXT"),
         )
         .arg(
             Arg::new("subject")
                 .long("subject")
+                .allow_hyphen_values(true)
                 .help("Match subject")
                 .value_name("TEXT"),
         )
         .arg(
             Arg::new("query")
                 .long("query")
+                .allow_hyphen_values(true)
                 .help("Match a Gmail search query")
                 .value_name("QUERY"),
         )
         .arg(
             Arg::new("exclude")
                 .long("exclude")
+                .allow_hyphen_values(true)
                 .help("Exclude messages matching this query")
                 .value_name("QUERY"),
         )

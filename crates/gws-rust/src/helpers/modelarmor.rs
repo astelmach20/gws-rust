@@ -579,6 +579,7 @@ impl Helper for ModelArmorHelper {
                 .arg(
                     Arg::new("text")
                         .long("text")
+                        .allow_hyphen_values(true)
                         .help("Text content to sanitize")
                         .value_name("TEXT"),
                 )
@@ -608,6 +609,7 @@ TIPS:
                 .arg(
                     Arg::new("text")
                         .long("text")
+                        .allow_hyphen_values(true)
                         .help("Text content to sanitize")
                         .value_name("TEXT"),
                 )

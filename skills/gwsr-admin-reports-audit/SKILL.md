@@ -33,7 +33,7 @@ gwsr admin-reports +audit --application <APP>
 | `--application` | ✓ | — | Application whose audit log to read |
 | `--user` | — | — | Only this user's activity (email or ID; default: all users) |
 | `--event` | — | — | Only this event name, e.g. login_failure |
-| `--since` | — | 1d | Start: RFC 3339 time, or a look-back like 24h / 7d (default: 1d) |
+| `--since` | — | 1d | Start: RFC 3339 time, or a look-back like 24h / 7d before --until (default: 1d) |
 | `--until` | — | — | End: RFC 3339 time (default: now) |
 | `--filter` | — | — | Event parameter filter, e.g. 'doc_id==XYZ' |
 | `--limit` | — | 1000 | Maximum activities (default: 1000) |

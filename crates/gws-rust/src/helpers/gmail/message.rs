@@ -643,10 +643,12 @@ fn extract_payload_recursive(
 
     let mut bodies = NodeBodies::default();
     if let Some(data) = body_text_data {
+        // MIME types are case-insensitive (RFC 2045 §5.1) and Gmail reports
+        // them as the sender wrote them, e.g. `TEXT/PLAIN`.
         let content_type = get_part_header(part, "Content-Type");
-        if mime_type == "text/plain" {
+        if mime_type.eq_ignore_ascii_case("text/plain") {
             bodies.text = Some(decode_text_body(data, content_type, "text/plain")?);
-        } else if mime_type == "text/html" {
+        } else if mime_type.eq_ignore_ascii_case("text/html") {
             bodies.html = Some(decode_text_body(data, content_type, "text/html")?);
         }
     } else if let Some(part_data) = part_data {
@@ -1239,6 +1241,29 @@ mod tests {
         let contents = extract_payload_contents(&payload).unwrap();
         assert_eq!(contents.body_text.as_deref(), Some("Plain"));
         assert_eq!(contents.body_html.as_deref(), Some("<p>Rich</p>"));
+    }
+
+    /// MIME types are case-insensitive: a body part Gmail reports as
+    /// `TEXT/PLAIN` or `Text/Html` is still the body.
+    #[test]
+    fn test_body_mime_types_match_case_insensitively() {
+        let payload = json!({
+            "mimeType": "Multipart/Alternative",
+            "parts": [
+                {
+                    "mimeType": "TEXT/PLAIN",
+                    "body": { "data": URL_SAFE.encode("Plain body") }
+                },
+                {
+                    "mimeType": "Text/Html",
+                    "body": { "data": URL_SAFE.encode("<p>HTML body</p>") }
+                }
+            ]
+        });
+        let contents = extract_payload_contents(&payload).unwrap();
+        assert_eq!(contents.body_text.as_deref(), Some("Plain body"));
+        assert_eq!(contents.body_html.as_deref(), Some("<p>HTML body</p>"));
+        assert!(contents.parts.is_empty());
     }
 
     /// Joining must not pull in the text of an embedded message or of a

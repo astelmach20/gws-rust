@@ -2951,6 +2951,42 @@ fn existing_subscription_rejects_setup_flags() {
     assert_eq!(plan["labelIds"], json!(["INBOX"]), "{plan}");
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn admin_audit_rejects_since_after_until_locally() {
+    use wiremock::matchers::any;
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    Mock::given(any())
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"items": []})))
+        .mount(&server)
+        .await;
+    let dir = setup();
+    seed(dir.path(), "admin", "reports_v1", "");
+    let out = gwsr(dir.path())
+        .env("GWSR_TOKEN", "test-token")
+        .env("GWSR_API_BASE_URL", server.uri())
+        .args([
+            "admin-reports",
+            "+audit",
+            "--application",
+            "login",
+            "--since",
+            "2026-01-09T00:00:00Z",
+            "--until",
+            "2026-01-08T00:00:00Z",
+        ])
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(3), "{stderr}");
+    assert!(stderr.contains("--since"), "{stderr}");
+    assert!(
+        server.received_requests().await.unwrap().is_empty(),
+        "an empty range must be refused before any request"
+    );
+}
+
 /// `admin +user-create --org-unit` takes a full path from the root. A bare
 /// unit name (`Sales`) is refused as a validation error (exit 3) before any
 /// request; `/Sales` is sent as given.
