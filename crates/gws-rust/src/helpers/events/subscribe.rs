@@ -273,14 +273,10 @@ impl SubscribeStep<'_> {
         let fatal = |e: String| StepError::Fatal(GwsError::other(e));
         match &self.config.output_dir {
             Some(dir) => {
-                self.file_counter += 1;
-                let ts = chrono::Utc::now().timestamp_millis();
-                let path = dir.join(format!("{ts}_{}.json", self.file_counter));
                 let text = serde_json::to_string_pretty(event)
                     .map_err(|e| fatal(format!("Failed to serialize event: {e}")))?;
-                // The shared writer replaces (never follows) a symlink at
-                // the target and applies GWSR_RESTRICT_PATHS.
-                crate::output_file::write_atomic(&path, text.as_bytes(), true)
+                let ts = chrono::Utc::now().timestamp_millis();
+                let path = write_event_file(dir, ts, &mut self.file_counter, text.as_bytes())
                     .await
                     .map_err(StepError::Fatal)?;
                 emit_diagnostic(
@@ -293,6 +289,39 @@ impl SubscribeStep<'_> {
         }
         Ok(())
     }
+}
+
+/// Write one event to a new `{ts}_{n}.json` file in `dir`, where `n` is the
+/// first number after `counter` whose name is free, and return its path.
+///
+/// A name that is already taken (by an earlier or concurrent run whose clock
+/// and counter met the same values, or by anything else in the directory) is
+/// skipped, and the file is created without overwriting, so a name taken
+/// between the check and the write fails loudly instead of replacing an
+/// event. The shared writer applies GWSR_RESTRICT_PATHS and never follows a
+/// symlink at the target.
+async fn write_event_file(
+    dir: &std::path::Path,
+    ts: i64,
+    counter: &mut u64,
+    data: &[u8],
+) -> Result<PathBuf, GwsError> {
+    let path = loop {
+        *counter += 1;
+        let path = dir.join(format!("{ts}_{counter}.json"));
+        match std::fs::symlink_metadata(&path) {
+            Ok(_) => continue,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => break path,
+            Err(e) => {
+                return Err(GwsError::other(format!(
+                    "Failed to check {}: {e}",
+                    path.display()
+                )));
+            }
+        }
+    };
+    crate::output_file::write_atomic(&path, data, false).await?;
+    Ok(path)
 }
 
 impl StreamStep for SubscribeStep<'_> {
@@ -479,6 +508,10 @@ pub(super) async fn handle_subscribe(
             .map_err(|e| GwsError::other(format!("Failed to create {}: {e}", dir.display())))?;
     }
 
+    // Before any resource is created: a Ctrl+C or SIGTERM during setup must
+    // not kill the process, so the stream stops at once and `--cleanup`
+    // still deletes what was created.
+    crate::helpers::listen_for_shutdown();
     let pubsub = PubSubClient::new(&Transport::for_scopes(&[PUBSUB_SCOPE]).await?);
 
     let (subscription, created) = match &config.subscription {
@@ -909,6 +942,31 @@ mod tests {
             "orphaned Pub/Sub resources left behind: {deleted:?}"
         );
     }
+    /// `--output-dir` never replaces an existing file: a name another run
+    /// already wrote (same millisecond, same counter) is skipped, and the
+    /// event goes to the next free name.
+    #[tokio::test]
+    async fn output_dir_never_overwrites_an_existing_event_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let ts = 1_700_000_000_000_i64;
+        let taken = dir.path().join(format!("{ts}_1.json"));
+        std::fs::write(&taken, b"earlier run").unwrap();
+        let mut counter = 0;
+
+        let path = write_event_file(dir.path(), ts, &mut counter, b"new event")
+            .await
+            .unwrap();
+        assert_eq!(std::fs::read(&taken).unwrap(), b"earlier run");
+        assert_eq!(path, dir.path().join(format!("{ts}_2.json")));
+        assert_eq!(std::fs::read(&path).unwrap(), b"new event");
+
+        let next = write_event_file(dir.path(), ts, &mut counter, b"another")
+            .await
+            .unwrap();
+        assert_eq!(next, dir.path().join(format!("{ts}_3.json")));
+        assert_eq!(std::fs::read(&path).unwrap(), b"new event");
+    }
+
     #[tokio::test]
     async fn test_pending_operation_keeps_pubsub_resources() {
         let server = MockServer::start().await;

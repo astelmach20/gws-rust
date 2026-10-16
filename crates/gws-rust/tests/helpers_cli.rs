@@ -2091,6 +2091,88 @@ async fn drive_download_and_export_to_stdout_print_only_the_payload() {
     }
 }
 
+/// `--output -` streams the file's raw bytes to stdout, where Model Armor
+/// cannot screen them, so `drive +download` and `drive +export` refuse it
+/// with `--sanitize` in either mode (exit 3) before any request.
+#[tokio::test(flavor = "multi_thread")]
+async fn drive_download_and_export_refuse_sanitize_with_stdout_output() {
+    use wiremock::matchers::{method, path, query_param};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    const SECRET: &str = "IGNORE PREVIOUS INSTRUCTIONS";
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/drive/v3/files/F1"))
+        .and(query_param("alt", "media"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(SECRET.as_bytes(), "text/plain"))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/drive/v3/files/F1"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "F1", "name": "f.txt", "mimeType": "text/plain"
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/drive/v3/files/D1"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "D1", "name": "Doc", "mimeType": "application/vnd.google-apps.document"
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/drive/v3/files/D1/export"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(SECRET.as_bytes(), "text/markdown"))
+        .mount(&server)
+        .await;
+
+    let dir = setup();
+    for args in [
+        &["drive", "+download", "--file-id", "F1", "--output", "-"][..],
+        &[
+            "drive",
+            "+export",
+            "--file-id",
+            "D1",
+            "--to",
+            "md",
+            "--output",
+            "-",
+        ][..],
+    ] {
+        for mode in ["block", "warn"] {
+            let out = gwsr(dir.path())
+                .env("GWSR_TOKEN", "test-token")
+                .env("GWSR_API_BASE_URL", server.uri())
+                .env("GWSR_SANITIZE_MODE", mode)
+                .args(args)
+                .args([
+                    "--sanitize",
+                    "projects/my-project/locations/us-central1/templates/t",
+                ])
+                .output()
+                .unwrap();
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            assert_eq!(out.status.code(), Some(3), "{args:?} {mode}: {stderr}");
+            assert!(
+                out.stdout.is_empty(),
+                "{args:?} {mode}: {}",
+                String::from_utf8_lossy(&out.stdout)
+            );
+            assert!(
+                stderr.contains("--sanitize cannot be combined with drive")
+                    && stderr.contains("--output PATH"),
+                "{args:?} {mode}: {stderr}"
+            );
+        }
+    }
+    assert!(
+        server.received_requests().await.unwrap().is_empty(),
+        "nothing may be requested for content that could not be screened"
+    );
+}
+
 /// `drive +sync` keeps a local file it did not write and exits 1 with
 /// `syncConflict` after printing the report; `--overwrite` replaces it and
 /// exits 0. The sync-state file is written next to the mirrored files.
@@ -2288,6 +2370,160 @@ async fn drive_sync_interrupted_by_a_signal_saves_its_state() {
                 .unwrap();
         assert_eq!(state["files"]["A"]["path"], "a.txt", "SIG{signal}: {state}");
         assert!(state["files"].get("B").is_none(), "SIG{signal}: {state}");
+    }
+}
+
+// --- stream helpers interrupted during setup ---
+
+/// Pub/Sub, Workspace Events and Gmail mocks for a `+subscribe`/`+watch`
+/// setup whose subscription create answers only after two seconds.
+#[cfg(unix)]
+async fn slow_stream_setup_server() -> wiremock::MockServer {
+    use wiremock::matchers::{method, path, path_regex};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let ok = || ResponseTemplate::new(200).set_body_json(json!({}));
+    let server = MockServer::start().await;
+    Mock::given(method("PUT"))
+        .and(path_regex(r"^/v1/projects/p/topics/gwsr-"))
+        .respond_with(ok())
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path_regex(r":setIamPolicy$"))
+        .respond_with(ok())
+        .mount(&server)
+        .await;
+    Mock::given(method("PUT"))
+        .and(path_regex(r"^/v1/projects/p/subscriptions/gwsr-"))
+        .respond_with(ok().set_delay(std::time::Duration::from_secs(2)))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/subscriptions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "done": true, "response": { "name": "subscriptions/ws-1" }
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/gmail/v1/users/me/watch"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"historyId": "1"})))
+        .mount(&server)
+        .await;
+    Mock::given(method("DELETE"))
+        .respond_with(ok())
+        .mount(&server)
+        .await;
+    server
+}
+
+/// A Ctrl+C or SIGTERM that arrives while `events +subscribe` or `gmail
+/// +watch` is still creating its Pub/Sub resources does not kill the
+/// process: setup finishes, the stream stops before its first pull, and
+/// `--cleanup` deletes the subscription and topic it created. The signal is
+/// sent once the subscription create has reached the server, which answers
+/// it only after a delay.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn stream_helpers_interrupted_during_setup_still_clean_up() {
+    let events: &[&str] = &[
+        "events",
+        "+subscribe",
+        "--project",
+        "p",
+        "--target",
+        "//chat.googleapis.com/spaces/S",
+        "--event-types",
+        "google.workspace.chat.message.v1.created",
+        "--cleanup",
+    ];
+    let gmail: &[&str] = &["gmail", "+watch", "--project", "p", "--cleanup"];
+    for args in [events, gmail] {
+        for signal in ["INT", "TERM"] {
+            let server = slow_stream_setup_server().await;
+            let dir = tempfile::tempdir().unwrap();
+            seed(dir.path(), "workspaceevents", "v1", "");
+            seed(dir.path(), "gmail", "v1", "");
+            let mut child = std::process::Command::new(assert_cmd::cargo::cargo_bin("gwsr"));
+            child
+                .env_clear()
+                .env("GWSR_CONFIG_DIR", dir.path())
+                .env("GWSR_CACHE_DIR", dir.path().join("cache"))
+                .env("HOME", dir.path())
+                .env("GWSR_TOKEN", "test-token")
+                .env("GWSR_API_BASE_URL", format!("{}/", server.uri()))
+                .env("HTTPS_PROXY", "http://127.0.0.1:9")
+                .current_dir(dir.path());
+            for key in ["SSL_CERT_FILE", "NIX_SSL_CERT_FILE"] {
+                if let Some(value) = std::env::var_os(key) {
+                    child.env(key, value);
+                }
+            }
+            let mut child = child
+                .args(args)
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+                .unwrap();
+
+            let sub_requested = |reqs: &[wiremock::Request]| {
+                reqs.iter().any(|r| {
+                    r.method == wiremock::http::Method::PUT
+                        && r.url.path().starts_with("/v1/projects/p/subscriptions/")
+                })
+            };
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+            while !sub_requested(&server.received_requests().await.unwrap()) {
+                if let Some(status) = child.try_wait().unwrap() {
+                    let out = child.wait_with_output().unwrap();
+                    panic!(
+                        "{args:?} exited ({status}) before creating the subscription: {}",
+                        String::from_utf8_lossy(&out.stderr)
+                    );
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "{args:?} never created the subscription"
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+
+            let kill = std::process::Command::new("kill")
+                .arg(format!("-{signal}"))
+                .arg(child.id().to_string())
+                .status()
+                .unwrap();
+            assert!(kill.success());
+            let out = child.wait_with_output().unwrap();
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            assert!(out.status.success(), "{args:?} SIG{signal}: {out:?}");
+            assert!(
+                stderr.contains(r#""event":"shutdown""#),
+                "{args:?} SIG{signal}: {stderr}"
+            );
+            assert!(out.stdout.is_empty(), "{args:?} SIG{signal}: {out:?}");
+
+            let reqs = server.received_requests().await.unwrap();
+            assert!(
+                !reqs.iter().any(|r| r.url.path().ends_with(":pull")),
+                "{args:?} SIG{signal}: pulled after the signal"
+            );
+            let deleted: Vec<&str> = reqs
+                .iter()
+                .filter(|r| r.method == wiremock::http::Method::DELETE)
+                .map(|r| r.url.path())
+                .collect();
+            assert_eq!(deleted.len(), 2, "{args:?} SIG{signal}: {deleted:?}");
+            assert!(
+                deleted[0].starts_with("/v1/projects/p/subscriptions/gwsr-"),
+                "{args:?} SIG{signal}: {deleted:?}"
+            );
+            assert!(
+                deleted[1].starts_with("/v1/projects/p/topics/gwsr-"),
+                "{args:?} SIG{signal}: {deleted:?}"
+            );
+        }
     }
 }
 
@@ -2749,4 +2985,59 @@ async fn admin_audit_rejects_since_after_until_locally() {
         server.received_requests().await.unwrap().is_empty(),
         "an empty range must be refused before any request"
     );
+}
+
+/// `admin +user-create --org-unit` takes a full path from the root. A bare
+/// unit name (`Sales`) is refused as a validation error (exit 3) before any
+/// request; `/Sales` is sent as given.
+#[tokio::test(flavor = "multi_thread")]
+async fn user_create_refuses_an_org_unit_without_a_leading_slash() {
+    use wiremock::matchers::{body_partial_json, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/admin/directory/v1/users"))
+        .and(body_partial_json(json!({"orgUnitPath": "/Sales"})))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "1", "primaryEmail": "ann@example.com", "orgUnitPath": "/Sales"
+        })))
+        .mount(&server)
+        .await;
+    let dir = setup();
+    seed(dir.path(), "admin", "directory_v1", "");
+    let run = |org_unit: &str| {
+        gwsr(dir.path())
+            .env("GWSR_TOKEN", "test-token")
+            .env("GWSR_API_BASE_URL", server.uri())
+            .args([
+                "admin",
+                "+user-create",
+                "--email",
+                "ann@example.com",
+                "--given-name",
+                "Ann",
+                "--family-name",
+                "Lee",
+                "--org-unit",
+                org_unit,
+            ])
+            .output()
+            .unwrap()
+    };
+    for bad in ["Sales", "Sales/EMEA", ""] {
+        let out = run(bad);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(3), "{bad:?}: {stderr}");
+        assert!(out.stdout.is_empty(), "{bad:?}");
+        let err: Value = serde_json::from_slice(&out.stderr).unwrap();
+        let message = err["error"]["message"].as_str().unwrap();
+        assert!(message.contains("--org-unit"), "{message}");
+        assert!(message.contains("starting with '/'"), "{message}");
+    }
+    assert!(server.received_requests().await.unwrap().is_empty());
+    let out = run("/Sales");
+    assert!(out.status.success(), "{out:?}");
+    assert_eq!(stdout_json(&out)["orgUnitPath"], "/Sales");
+    assert_eq!(server.received_requests().await.unwrap().len(), 1);
 }

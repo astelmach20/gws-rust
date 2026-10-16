@@ -145,7 +145,7 @@ fn directory_commands(cmd: Command) -> Command {
             .arg(
                 Arg::new("org-unit")
                     .long("org-unit")
-                    .help("Organizational unit path (default: /)")
+                    .help("Organizational unit path from the root, e.g. /Sales (default: /)")
                     .value_name("PATH"),
             )
             .arg(
@@ -309,8 +309,22 @@ fn generate_password() -> Zeroizing<String> {
     )
 }
 
+/// `--org-unit`: the Directory API takes an organizational unit's full path
+/// from the root (`/`, `/Sales`, `/Sales/EMEA`). A bare name such as `Sales`
+/// is not a path: refuse it before anything is read or sent.
+fn parse_org_unit(path: &str) -> Result<String, GwsError> {
+    if path.starts_with('/') {
+        return Ok(path.to_string());
+    }
+    Err(GwsError::Validation(format!(
+        "--org-unit '{path}' must be a full organizational unit path starting with '/', \
+         e.g. '/{path}' ('/' is the top-level unit)"
+    )))
+}
+
 impl UserCreate {
     fn parse(m: &ArgMatches) -> Result<Self, GwsError> {
+        let org_unit = optional(m, "org-unit")?.map(parse_org_unit).transpose()?;
         let (password, generated) = match optional(m, "password-file")? {
             Some(path) => {
                 let raw = Zeroizing::new(http::read_text_input(path, "--password-file")?);
@@ -328,7 +342,7 @@ impl UserCreate {
             email: required(m, "email")?.to_string(),
             given: required(m, "given-name")?.to_string(),
             family: required(m, "family-name")?.to_string(),
-            org_unit: optional(m, "org-unit")?.map(str::to_string),
+            org_unit,
             password,
             generated,
             change_at_next_login: !flag(m, "no-password-change")?,
