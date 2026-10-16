@@ -196,22 +196,36 @@ pub(crate) fn finalize_scopes(scopes_in: Vec<String>) -> Vec<String> {
 }
 
 /// After a login to `name`, record it as the active profile in `config.toml`
-/// when no profile is configured there yet. Returns whether it was recorded.
+/// when no profile is configured there yet and the implicit default profile
+/// is not in use. Returns whether it was recorded.
 ///
 /// The default profile is never recorded: it is already active when nothing
 /// is configured, and recording it would make it an explicitly chosen
-/// profile, which never falls back to Application Default Credentials.
+/// profile, which never falls back to Application Default Credentials. For
+/// the same reason a default-profile login leaves `config.toml` empty, so a
+/// later login to a named profile must not take over while the default
+/// profile has credentials: commands without `--profile` would silently
+/// switch identity.
 fn make_active_if_unset(base: &std::path::Path, name: &str) -> Result<bool, GwsError> {
     if name == profiles::DEFAULT_PROFILE {
         return Ok(false);
     }
     let configured = crate::config::profile_in(&crate::config::config_path_in(base))?;
     if configured.is_some() {
-        Ok(false)
-    } else {
-        profiles::set_active_profile(base, name).map_err(crate::auth::to_gws_error)?;
-        Ok(true)
+        return Ok(false);
     }
+    let default = profiles::ProfilePaths::new(base, profiles::DEFAULT_PROFILE);
+    let default_logged_in = default.credentials.try_exists().map_err(|e| {
+        GwsError::other(format!(
+            "cannot check '{}': {e}",
+            default.credentials.display()
+        ))
+    })?;
+    if default_logged_in {
+        return Ok(false);
+    }
+    profiles::set_active_profile(base, name).map_err(crate::auth::to_gws_error)?;
+    Ok(true)
 }
 
 /// Handle parsed `auth login` arguments.
@@ -389,6 +403,23 @@ mod tests {
         assert_eq!(active.source, profiles::ProfileSource::ConfigFile);
         assert!(!make_active_if_unset(base, "home").unwrap());
         assert_eq!(profiles::active_profile(base).unwrap().name, "work");
+    }
+
+    /// A default-profile login is not recorded in `config.toml`, so a later
+    /// login to a named profile must not take over from it: commands without
+    /// `--profile` would quietly run as the other account.
+    #[test]
+    fn named_login_does_not_replace_a_logged_in_default_profile() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path();
+        let default = profiles::ProfilePaths::new(base, profiles::DEFAULT_PROFILE);
+        default.ensure_dir().unwrap();
+        std::fs::write(&default.credentials, b"sealed").unwrap();
+        assert!(!make_active_if_unset(base, "work").unwrap());
+        let active = profiles::active_profile(base).unwrap();
+        assert_eq!(active.name, profiles::DEFAULT_PROFILE);
+        assert_eq!(active.source, profiles::ProfileSource::Default);
+        assert!(!crate::config::config_path_in(base).exists());
     }
 
     fn matches(args: &[&str]) -> clap::ArgMatches {
