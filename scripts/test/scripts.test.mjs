@@ -104,6 +104,7 @@ describe("check-changeset.sh", () => {
     git("init", "-q", "-b", "main");
     git("config", "user.email", "test@example.com");
     git("config", "user.name", "test");
+    git("config", "core.autocrlf", "false");
     fs.mkdirSync(path.join(dir, "crates/gws-rust/src"), { recursive: true });
     fs.mkdirSync(path.join(dir, ".changeset"));
     fs.writeFileSync(path.join(dir, "crates/gws-rust/Cargo.toml"), '[dependencies]\ngws-rust-core = { version = "1", path = "../x" }\n');
@@ -156,6 +157,44 @@ describe("check-changeset.sh", () => {
     assert.equal(res.status, 1);
     assert.match(res.stdout, /Unknown package 'googleworkspace-cli'/);
   });
+
+  // Each of these passed the check but makes `changeset version` throw, which breaks the
+  // release job on main instead of the PR that added the changeset.
+  for (const [what, body, message] of [
+    ["an invalid bump type", '---\n"gws-rust": Patch\n---\n\nFix\n', /invalid bump type "Patch"/],
+    ["a misspelled bump type", "---\ngws-rust: fix\n---\n\nFix\n", /invalid bump type "fix"/],
+    ["no front matter", "Fix a thing\n", /missing front matter/],
+    ["an empty file", "", /missing front matter/],
+    ["unclosed front matter", '---\n"gws-rust": patch\n\nFix\n', /not closed/],
+    ["an unreadable front matter line", "---\ngws-rust patch\n---\n\nFix\n", /unreadable front matter line: gws-rust patch/],
+    ["another package behind CRLF line endings", '---\r\n"googleworkspace-cli": patch\r\n---\r\n\r\nFix\r\n', /Unknown package 'googleworkspace-cli'/],
+    ["another package with a space before the colon", '---\n"googleworkspace-cli" : patch\n---\n\nFix\n', /Unknown package 'googleworkspace-cli'/],
+  ]) {
+    it(`rejects a changeset with ${what}`, () => {
+      const r = repo();
+      r.write("crates/gws-rust/src/main.rs", "fn main() { println!(); }\n");
+      r.write(".changeset/fix.md", body);
+      r.commit();
+      const res = r.check();
+      assert.equal(res.status, 1, res.stdout + res.stderr);
+      assert.match(res.stdout, message);
+    });
+  }
+
+  for (const [what, body] of [
+    ["CRLF line endings", '---\r\n"gws-rust": patch\r\n---\r\n\r\nFix\r\n'],
+    ["unquoted, single-quoted and commented front matter", "---\n# why\n'gws-rust' : 'minor' # note\n---\n\nFix\n"],
+    ["an empty release list", "---\n---\n\nNo release needed\n"],
+  ]) {
+    it(`accepts a changeset with ${what}`, () => {
+      const r = repo();
+      r.write("crates/gws-rust/src/main.rs", "fn main() { println!(); }\n");
+      r.write(".changeset/fix.md", body);
+      r.commit();
+      const res = r.check();
+      assert.equal(res.status, 0, res.stdout + res.stderr);
+    });
+  }
 
   it("rejects generated google-* API crates", () => {
     const r = repo();
