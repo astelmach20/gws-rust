@@ -725,6 +725,24 @@ fn avoid_windows_device_name(name: &str) -> String {
     }
 }
 
+/// The key under which a file system that ignores case and Unicode
+/// normalization (the macOS and Windows defaults, APFS and NTFS) treats
+/// local names as the same file: two names with equal keys must never be
+/// written as two files.
+///
+/// NFC first (APFS treats `é` and `e\u{301}` alike), then upper- and
+/// lowercase. `to_lowercase` alone is not enough: it leaves `ς` (final
+/// sigma) and `σ` distinct, and `ſ` (long s) and `s`, while both file
+/// systems match each pair (NTFS upper-cases both to `Σ` / `S`). The round
+/// trip may merge a few names a file system keeps apart (`ß` and `ss`),
+/// which only costs a disambiguated name, never a lost file.
+pub(crate) fn case_insensitive_key(name: &str) -> String {
+    icu_normalizer::ComposingNormalizerBorrowed::new_nfc()
+        .normalize(name)
+        .to_uppercase()
+        .to_lowercase()
+}
+
 /// The output format: `--format` > `GWSR_FORMAT` > config file > JSON
 /// (clap has already rejected unknown `--format` values).
 pub(crate) fn output_format(
@@ -1210,6 +1228,27 @@ mod tests {
         }
         let file = dir.path().join("out.pdf");
         assert!(OutputTarget::parse(file.to_str().unwrap(), false).is_ok());
+    }
+
+    /// Names one file on APFS and NTFS must share a key; names that are two
+    /// files there may share one too (that only costs a renamed copy).
+    #[test]
+    fn case_insensitive_key_matches_what_apfs_and_ntfs_treat_as_one_name() {
+        let key = case_insensitive_key;
+        for (a, b) in [
+            ("Report.txt", "report.TXT"),
+            ("caf\u{e9}.txt", "cafe\u{301}.txt"),
+            // Final sigma: `to_lowercase` keeps `ς` and `σ` apart.
+            ("\u{3b1}\u{3c2}.txt", "\u{3b1}\u{3c3}.txt"),
+            ("\u{391}\u{3a3}.txt", "\u{3b1}\u{3c2}.txt"),
+            // Long s.
+            ("\u{17f}.txt", "s.txt"),
+            // Kelvin sign.
+            ("\u{212a}.txt", "k.txt"),
+        ] {
+            assert_eq!(key(a), key(b), "{a:?} vs {b:?}");
+        }
+        assert_ne!(key("a.txt"), key("b.txt"));
     }
 
     #[test]

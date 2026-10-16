@@ -17,7 +17,7 @@
 //! Every call sets `supportsAllDrives=true` so Shared Drive items work.
 
 use super::Helper;
-use super::http::{self, Api, ApiRequest, OutputTarget, safe_filename};
+use super::http::{self, Api, ApiRequest, OutputTarget, case_insensitive_key, safe_filename};
 use crate::args::{flag, optional, required};
 use crate::confirm::{self, Impact, with_yes};
 use crate::error::GwsError;
@@ -1454,21 +1454,22 @@ enum SyncKind {
 ///
 /// Names are compared case-insensitively: Drive names are case-sensitive,
 /// but the default macOS and Windows file systems are not, so `Report.txt`
-/// and `report.txt` would otherwise share one local file.
+/// and `report.txt` would otherwise share one local file (see
+/// [`case_insensitive_key`]).
 fn disambiguate(children: &[(&str, &str)]) -> Result<Vec<String>, GwsError> {
     let mut claims: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
     for &(_, name) in children {
-        *claims.entry(name.to_lowercase()).or_insert(0) += 1;
+        *claims.entry(case_insensitive_key(name)).or_insert(0) += 1;
     }
     let mut used = std::collections::HashSet::new();
     let mut out = Vec::with_capacity(children.len());
     for &(id, name) in children {
-        let local = if matches!(claims.get(&name.to_lowercase()), Some(&n) if n > 1) {
+        let local = if matches!(claims.get(&case_insensitive_key(name)), Some(&n) if n > 1) {
             safe_filename(&format!("{id}-{name}"), id)
         } else {
             name.to_string()
         };
-        if !used.insert(local.to_lowercase()) {
+        if !used.insert(case_insensitive_key(&local)) {
             return Err(GwsError::other(anyhow::anyhow!(
                 "cannot sync: more than one Drive item in the same folder maps to the local name '{local}' (item '{id}'); rename one in Drive"
             )));
@@ -2481,6 +2482,23 @@ mod tests {
             [SYNC_STATE_FILE, "P-a.txt", "Q-a.txt", "unique.txt"]
         );
         assert_eq!(layouts[0], layouts[1]);
+    }
+
+    /// `ας.txt` and `ασ.txt` (final and medial sigma) are two Drive names
+    /// but one file on APFS and NTFS, which upper-case both to `ΑΣ.TXT`;
+    /// `to_lowercase` alone leaves them apart, so the second download
+    /// replaced the first. The same holds for `ſ` (long s) and `s`.
+    #[test]
+    fn disambiguate_merges_names_case_insensitive_disks_merge() {
+        for (a, b) in [
+            ("\u{3b1}\u{3c2}.txt", "\u{3b1}\u{3c3}.txt"),
+            ("\u{17f}.txt", "s.txt"),
+        ] {
+            let names = disambiguate(&[("A", a), ("B", b)]).unwrap();
+            assert_eq!(names, vec![format!("A-{a}"), format!("B-{b}")]);
+        }
+        let names = disambiguate(&[("A", "a.txt"), ("B", "b.txt")]).unwrap();
+        assert_eq!(names, vec!["a.txt", "b.txt"]);
     }
 
     #[tokio::test]
