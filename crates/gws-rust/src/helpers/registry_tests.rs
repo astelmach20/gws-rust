@@ -42,13 +42,17 @@ fn strings(v: &toml::Value, out: &mut Vec<String>) {
     }
 }
 
-/// Every backtick-quoted span that starts with `gwsr `.
+/// Every backtick-quoted span that starts with `gwsr `, or ends in a `gwsr`
+/// command that input is piped into (`printf ... | gwsr ...`).
 fn commands_in(text: &str) -> Vec<String> {
     text.split('`')
         .skip(1)
         .step_by(2)
-        .filter(|span| span.starts_with("gwsr "))
-        .map(str::to_string)
+        .filter_map(|span| match span.rsplit_once("| gwsr ") {
+            _ if span.starts_with("gwsr ") => Some(span.to_string()),
+            Some((_, rest)) => Some(format!("gwsr {rest}")),
+            None => None,
+        })
         .collect()
 }
 
@@ -161,6 +165,22 @@ fn validate(command: &str) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// A recipe step that pipes input into `gwsr` (`printf ... | gwsr docs
+/// +write --text-file -`) is validated like any other command.
+#[test]
+fn piped_commands_are_validated() {
+    assert_eq!(
+        commands_in("Write: `printf 'a\\n' | gwsr docs +write --document-id D --text-file -`"),
+        ["gwsr docs +write --document-id D --text-file -"]
+    );
+    assert!(
+        all_commands()
+            .iter()
+            .any(|(_, c)| c.starts_with("gwsr docs +write") && c.contains("--text-file -")),
+        "the piped docs +write recipe steps are not validated"
+    );
 }
 
 #[test]
