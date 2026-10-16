@@ -1240,6 +1240,143 @@ async fn events_subscribe_acks_the_events_printed_before_a_failure() {
     assert_eq!(acks, vec![json!({ "ackIds": ["a1"] })], "{out:?}");
 }
 
+/// A Ctrl+C or SIGTERM while `events +subscribe` is still handling a pulled
+/// batch (here: waiting on Model Armor for the second event) stops the
+/// stream without printing the rest, but the events it already printed are
+/// still acknowledged, so Pub/Sub does not redeliver them and a reattached
+/// stream does not print them twice.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn events_subscribe_acks_printed_events_when_interrupted_mid_batch() {
+    use base64::Engine as _;
+    use std::io::BufRead as _;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let b64 = |s: &str| base64::engine::general_purpose::STANDARD.encode(s);
+    let server = MockServer::start().await;
+    let received: Vec<Value> = (1..=3)
+        .map(|n| {
+            json!({ "ackId": format!("a{n}"), "message": {
+                "attributes": { "ce-type": "t" },
+                "data": b64(&format!(r#"{{"n":{n}}}"#))
+            }})
+        })
+        .collect();
+    Mock::given(method("POST"))
+        .and(path("/v1/projects/p/subscriptions/ev:pull"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({ "receivedMessages": received })),
+        )
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/projects/p/subscriptions/ev:acknowledge"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+        .mount(&server)
+        .await;
+
+    // The https proxy Model Armor is reached through. It refuses tunnels
+    // (closing each connection) until `hold` is set, so the first event is
+    // screened at once (warn mode prints it with an error annotation); from
+    // then on it keeps connections open without answering, so screening the
+    // next event never finishes.
+    let proxy = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let proxy_addr = proxy.local_addr().unwrap();
+    let hold = Arc::new(AtomicBool::new(false));
+    {
+        let hold = hold.clone();
+        std::thread::spawn(move || {
+            let mut held = Vec::new();
+            for conn in proxy.incoming() {
+                let Ok(conn) = conn else { break };
+                if hold.load(Ordering::SeqCst) {
+                    held.push(conn);
+                }
+            }
+        });
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    seed(dir.path(), "workspaceevents", "v1", "");
+    let mut child = std::process::Command::new(assert_cmd::cargo::cargo_bin("gwsr"));
+    child
+        .env_clear()
+        .env("GWSR_CONFIG_DIR", dir.path())
+        .env("GWSR_CACHE_DIR", dir.path().join("cache"))
+        .env("HOME", dir.path())
+        .env("GWSR_TOKEN", "test-token")
+        .env("GWSR_API_BASE_URL", format!("{}/", server.uri()))
+        .env("HTTPS_PROXY", format!("http://{proxy_addr}"))
+        .env(
+            "GWSR_SANITIZE_TEMPLATE",
+            "projects/test-project/locations/us-central1/templates/t",
+        )
+        .env("GWSR_SANITIZE_MODE", "warn")
+        .current_dir(dir.path());
+    for key in ["SSL_CERT_FILE", "NIX_SSL_CERT_FILE"] {
+        if let Some(value) = std::env::var_os(key) {
+            child.env(key, value);
+        }
+    }
+    let mut child = child
+        .args([
+            "events",
+            "+subscribe",
+            "--subscription",
+            "projects/p/subscriptions/ev",
+            "--jq",
+            ".data.n",
+        ])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    let mut stdout = std::io::BufReader::new(child.stdout.take().unwrap());
+    let mut first = String::new();
+    stdout.read_line(&mut first).unwrap();
+    hold.store(true, Ordering::SeqCst);
+    assert_eq!(first.trim(), "1", "the first event was not printed");
+
+    let kill = std::process::Command::new("kill")
+        .arg("-INT")
+        .arg(child.id().to_string())
+        .status()
+        .unwrap();
+    assert!(kill.success());
+    let mut rest = String::new();
+    std::io::Read::read_to_string(&mut stdout, &mut rest).unwrap();
+    let out = child.wait_with_output().unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains(r#""event":"shutdown""#), "{stderr}");
+
+    let printed: Vec<String> = std::iter::once(first.trim().to_string())
+        .chain(rest.lines().map(str::to_string))
+        .map(|n| format!("a{n}"))
+        .collect();
+    let mut acked: Vec<String> = server
+        .received_requests()
+        .await
+        .unwrap()
+        .iter()
+        .filter(|r| r.url.path().ends_with(":acknowledge"))
+        .flat_map(|r| {
+            let body: Value = serde_json::from_slice(&r.body).unwrap();
+            body["ackIds"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|v| v.as_str().unwrap().to_string())
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    acked.sort();
+    assert_eq!(acked, printed, "printed events must be acked; {stderr}");
+}
+
 // ── Model Armor input from stdin ────────────────────────────────────────
 
 /// Unreadable stdin (here: not UTF-8) is bad input (exit 3), as it is for

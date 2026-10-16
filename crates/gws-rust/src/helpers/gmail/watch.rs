@@ -22,8 +22,8 @@
 use super::cli::{required_str, value_or_default};
 use super::prelude::*;
 use crate::helpers::events::stream::{
-    PubSubClient, StepError, StreamOptions, StreamPrinter, StreamStep, cleanup_resources,
-    emit_diagnostic, run_stream,
+    PubSubClient, ReceivedMessage, StepError, StreamOptions, StreamPrinter, StreamStep,
+    cleanup_resources, emit_diagnostic, interruptible, run_stream,
 };
 use crate::helpers::modelarmor::{SanitizeConfig, Sanitized, sanitize_value};
 use crate::transport::Transport;
@@ -283,15 +283,17 @@ impl GmailWatchStep<'_> {
 }
 
 impl StreamStep for GmailWatchStep<'_> {
-    async fn step(&mut self) -> Result<(), StepError> {
-        let received = self
-            .pubsub
+    async fn pull(&mut self) -> Result<Vec<ReceivedMessage>, StepError> {
+        self.pubsub
             .pull(
                 &self.subscription,
                 self.config.max_messages,
                 self.pull_timeout,
             )
-            .await?;
+            .await
+    }
+
+    async fn handle(&mut self, received: Vec<ReceivedMessage>) -> Result<(), StepError> {
         if received.is_empty() {
             return Ok(());
         }
@@ -309,7 +311,12 @@ impl StreamStep for GmailWatchStep<'_> {
             }
         }
         if max_history_id > self.last_history_id {
-            self.emit_new_messages().await?;
+            // A signal stops the stream before the notifications are
+            // acknowledged: they announce messages not all printed yet.
+            let Some(emitted) = interruptible(self.emit_new_messages()).await else {
+                return Ok(());
+            };
+            emitted?;
             self.last_history_id = max_history_id;
         }
         let ack_ids: Vec<String> = received.into_iter().map(|m| m.ack_id).collect();
