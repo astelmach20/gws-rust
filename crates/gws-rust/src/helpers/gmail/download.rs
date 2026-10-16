@@ -45,14 +45,19 @@ pub(super) fn safe_filename(raw: &str, fallback: &str) -> String {
     // `http::is_windows_device_name`). Dots and whitespace are trimmed in
     // one pass, so `". .bashrc"` cannot leave `.bashrc` behind.
     let cleaned = cleaned.trim_matches(|c: char| c == '.' || c.is_whitespace());
-    let name = if cleaned.is_empty() {
-        fallback.to_string()
-    } else if crate::helpers::http::is_windows_device_name(cleaned) {
-        format!("_{cleaned}")
+    if cleaned.is_empty() {
+        return truncate_filename(fallback);
+    }
+    // Check for a device name after shortening: the cut drops the tail and
+    // the spaces before it, so `CON<spaces>tail` becomes `CON`. The `_`
+    // prefix can push the name back over the limit, so cut again (a name
+    // starting with `_` is never a device).
+    let name = truncate_filename(cleaned);
+    if crate::helpers::http::is_windows_device_name(&name) {
+        truncate_filename(&format!("_{name}"))
     } else {
-        cleaned.to_string()
-    };
-    truncate_filename(&name)
+        name
+    }
 }
 
 /// Truncate to MAX_FILENAME_BYTES on a char boundary, preserving the extension
@@ -326,6 +331,19 @@ mod tests {
             assert!(!out.ends_with(['.', ' ']), "{out:?}");
             assert!(out.starts_with('a'), "{out:?}");
         }
+    }
+
+    /// Shortening a long name drops its tail and the spaces before the cut,
+    /// which can leave a bare Windows device name (`CON`, `CON.pdf`) that
+    /// the check on the full name did not see.
+    #[test]
+    fn truncation_never_leaves_a_windows_device_name() {
+        let spaces = " ".repeat(300);
+        assert_eq!(safe_filename(&format!("CON{spaces}tail"), "f"), "_CON");
+        assert_eq!(
+            safe_filename(&format!("nul{spaces}tail.pdf"), "f"),
+            "_nul.pdf"
+        );
     }
 
     #[test]

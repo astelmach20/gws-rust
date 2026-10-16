@@ -644,8 +644,12 @@ pub(crate) fn safe_filename(raw: &str, fallback: &str) -> String {
             }
         })
         .collect();
-    let cleaned = avoid_windows_device_name(trim_name(&cleaned));
-    let truncated = truncate_keeping_extension(&cleaned);
+    // Check for a device name after shortening: the cut drops the tail and
+    // the spaces before it, so `CON<spaces>tail` becomes `CON`. The `_`
+    // prefix can push the name back over the limit, so cut again (a name
+    // starting with `_` is never a device).
+    let truncated = avoid_windows_device_name(&truncate_keeping_extension(trim_name(&cleaned)));
+    let truncated = truncate_keeping_extension(&truncated);
     if truncated.is_empty() {
         fallback.to_string()
     } else {
@@ -1348,5 +1352,22 @@ mod tests {
         // The cut never leaves a dot or space before the extension.
         let out = safe_filename(&format!("{}. {}.pdf", "a".repeat(194), "b".repeat(50)), "x");
         assert_eq!(out, format!("{}.pdf", "a".repeat(194)));
+    }
+
+    /// Shortening a long name drops its tail and the spaces before the cut,
+    /// which can leave a bare Windows device name (`CON`, `CON.pdf`) that
+    /// the check on the full name did not see.
+    #[test]
+    fn safe_filename_never_shortens_a_name_into_a_device_name() {
+        let spaces = " ".repeat(300);
+        assert_eq!(safe_filename(&format!("CON{spaces}tail"), "x"), "_CON");
+        assert_eq!(
+            safe_filename(&format!("nul{spaces}tail.pdf"), "x"),
+            "_nul.pdf"
+        );
+        assert_eq!(
+            safe_filename(&format!("COM1{spaces}tail.tar.gz"), "x"),
+            "_COM1.gz"
+        );
     }
 }
