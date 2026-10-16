@@ -191,13 +191,23 @@ fn find_method_by_id<'a>(doc: &'a RestDescription, id: &str) -> Option<&'a RestM
         .or_else(|| search(&doc.resources, id))
 }
 
+/// A leading API name is optional, but a name that starts like the API may
+/// also be a plain resource path: in the `tasks` API, `tasks.list` is the
+/// `tasks` resource's `list` (as `forms.get` is in `forms`, `people.get` in
+/// `people`). The name without the prefix is tried first, then as given.
 fn find_method_by_path<'a>(doc: &'a RestDescription, name: &str) -> Option<&'a RestMethod> {
     let prefix = format!("{}.", doc.name);
-    let path: Vec<&str> = name
-        .strip_prefix(&prefix)
-        .unwrap_or(name)
-        .split('.')
-        .collect();
+    name.strip_prefix(&prefix)
+        .and_then(|rest| find_method_by_resource_path(doc, rest))
+        .or_else(|| find_method_by_resource_path(doc, name))
+}
+
+/// Resolve `resource[.subresource].method`, or a bare top-level method.
+fn find_method_by_resource_path<'a>(
+    doc: &'a RestDescription,
+    name: &str,
+) -> Option<&'a RestMethod> {
+    let path: Vec<&str> = name.split('.').collect();
     let (method_name, resources) = path.split_last()?;
     if resources.is_empty() {
         // A method declared outside any resource (e.g. `oauth2.tokeninfo`).
@@ -813,6 +823,46 @@ mod tests {
         assert!(find_method(&doc, "about").is_some());
         assert!(find_method(&doc, "drive.about").is_some());
         assert!(find_method(&doc, "about.get").is_none());
+    }
+
+    /// In the `tasks` API (like `forms` and `people`) a resource has the
+    /// API's own name, so `tasks.list` is a resource path, not the API name
+    /// followed by a top-level `list` method.
+    #[test]
+    fn method_lookup_with_a_resource_named_like_the_api() {
+        let mut tasks = RestResource::default();
+        let mut comments = RestResource::default();
+        for (resource, id) in [
+            (&mut tasks, "tasks.tasks.list"),
+            (&mut comments, "tasks.tasks.comments.list"),
+        ] {
+            resource.methods.insert(
+                "list".into(),
+                RestMethod {
+                    id: Some(id.into()),
+                    http_method: "GET".into(),
+                    ..Default::default()
+                },
+            );
+        }
+        tasks.resources.insert("comments".into(), comments);
+        let mut doc = RestDescription {
+            name: "tasks".into(),
+            version: "v1".into(),
+            ..Default::default()
+        };
+        doc.resources.insert("tasks".into(), tasks);
+        for (name, id) in [
+            ("tasks.list", "tasks.tasks.list"),
+            ("tasks.tasks.list", "tasks.tasks.list"),
+            ("tasks.comments.list", "tasks.tasks.comments.list"),
+            ("tasks.tasks.comments.list", "tasks.tasks.comments.list"),
+        ] {
+            let found = find_method(&doc, name).map(|m| m.id.as_deref());
+            assert_eq!(found, Some(Some(id)), "{name}");
+        }
+        assert!(find_method(&doc, "tasks.get").is_none());
+        assert!(find_method(&doc, "list").is_none());
     }
 
     /// Discovery method ids do not always start with the API name: the
