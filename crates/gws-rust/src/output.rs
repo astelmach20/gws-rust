@@ -47,6 +47,35 @@ pub(crate) fn sanitize_for_terminal(text: &str) -> String {
         .collect()
 }
 
+/// Escape, as `\uXXXX`, every character in serialized JSON that a terminal
+/// could act on but `serde_json` writes raw: C1 controls (U+0080–U+009F,
+/// such as U+009B, an 8-bit CSI), DEL, and the dangerous Unicode of
+/// [`is_dangerous_unicode`] (bidi overrides and isolates, zero-width
+/// characters, line separators). `serde_json` already escapes C0 controls
+/// inside strings.
+///
+/// The JSON value is unchanged: these characters only occur inside strings
+/// (JSON's structure is ASCII), and every one is in the Basic Multilingual
+/// Plane, so a single `\uXXXX` escape decodes back to it. JSON whitespace
+/// (`\n`, `\r`, `\t`) between tokens is left alone.
+pub(crate) fn escape_json_for_terminal(json: String) -> String {
+    fn needs_escape(c: char) -> bool {
+        (c.is_control() && !matches!(c, '\n' | '\r' | '\t')) || is_dangerous_unicode(c)
+    }
+    if !json.chars().any(needs_escape) {
+        return json;
+    }
+    let mut out = String::with_capacity(json.len() + 16);
+    for c in json.chars() {
+        if needs_escape(c) {
+            out.push_str(&format!("\\u{:04x}", u32::from(c)));
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
 // ── Terminal detection ────────────────────────────────────────────────
 
 /// True when stdout is an interactive terminal.
@@ -247,6 +276,31 @@ mod tests {
     #[test]
     fn sanitize_strips_directional_isolates() {
         assert_eq!(sanitize_for_terminal("a\u{2066}b\u{2069}c"), "abc");
+    }
+
+    #[test]
+    fn json_escape_covers_c1_controls_and_dangerous_unicode() {
+        let value = serde_json::json!({
+            "m": "a\u{9b}31mb\u{85}c\u{7f}d\u{202E}e\u{2066}f\u{200B}g\u{2028}h\u{1b}i",
+            "ok": "日本語 café\tαβγ",
+        });
+        let raw = serde_json::to_string_pretty(&value).unwrap();
+        let escaped = escape_json_for_terminal(raw);
+        assert!(
+            !escaped
+                .chars()
+                .any(|c| (c.is_control() && c != '\n') || is_dangerous_unicode(c)),
+            "{escaped:?}"
+        );
+        for esc in [
+            "\\u009b", "\\u0085", "\\u007f", "\\u202e", "\\u2066", "\\u200b", "\\u2028", "\\u001b",
+        ] {
+            assert!(escaped.contains(esc), "{esc} missing from {escaped}");
+        }
+        // Lossless: the escaped text parses back to the same value.
+        let parsed: serde_json::Value = serde_json::from_str(&escaped).unwrap();
+        assert_eq!(parsed, value);
+        assert!(escaped.contains("日本語 café\\tαβγ"), "{escaped}");
     }
 
     #[test]

@@ -496,13 +496,12 @@ pub fn error_envelope(err: &CliError, ctx: &ErrorContext) -> Value {
 pub fn human_report(err: &CliError, ctx: &ErrorContext, color: bool) -> String {
     match err {
         CliError::Clap(e) => {
-            // clap already prints `error: …` plus usage and tips.
-            let rendered = if color {
-                e.render().ansi().to_string()
-            } else {
-                e.render().to_string()
-            };
-            rendered.trim_end().to_string()
+            // clap already prints `error: …` plus usage and tips. It quotes
+            // argument values verbatim, and arguments are often written by an
+            // LLM, so the text is sanitized like any other untrusted text.
+            // That rules out clap's own colors: user-supplied escape sequences
+            // could not be told apart from them.
+            sanitize_for_terminal(e.render().to_string().trim_end())
         }
         CliError::Gws(e) => {
             let label = format!("error[{}]:", kind_label(err));
@@ -538,7 +537,10 @@ pub fn render(err: &CliError, ctx: &ErrorContext, human: bool, color: bool) -> S
     if human {
         return human_report(err, ctx, color);
     }
-    match serde_json::to_string(&error_envelope(err, ctx)) {
+    // Messages carry API- and filter-derived text (`--jq` `error(...)`).
+    // serde_json escapes C0 controls but not C1 controls (U+009B is an 8-bit
+    // CSI to some terminals) or bidi overrides, so they are escaped here.
+    let line = match serde_json::to_string(&error_envelope(err, ctx)) {
         Ok(line) => line,
         Err(e) => json!({
             "error": {
@@ -549,7 +551,8 @@ pub fn render(err: &CliError, ctx: &ErrorContext, human: bool, color: bool) -> S
             }
         })
         .to_string(),
-    }
+    };
+    crate::output::escape_json_for_terminal(line)
 }
 
 /// Report `err` on stderr following the module-level output contract.
@@ -918,6 +921,53 @@ mod tests {
         assert!(v["error"]["hint"].as_str().unwrap().contains("gwsr auth"));
         let human = render(&err, &ErrorContext::default(), true, false);
         assert!(human.starts_with("error[api]:"), "{human}");
+    }
+
+    /// An API message or a `--jq` `error(...)` value can hold C1 controls
+    /// (U+009B is an 8-bit CSI) and bidi overrides, which serde_json does not
+    /// escape: neither form of the error lets them reach the terminal raw.
+    #[test]
+    fn error_output_never_carries_c1_or_bidi_controls() {
+        let message = "a\u{9b}31mb\u{202E}c\u{2066}d\u{85}e\u{1b}[2Jf";
+        let err = CliError::from(GwsError::Validation(message.into()));
+        let line = render(&err, &ErrorContext::default(), false, false);
+        let raw = |c: char| c.is_control() || crate::output::is_dangerous_unicode(c);
+        assert!(!line.chars().any(raw), "{line:?}");
+        assert!(
+            line.contains("\\u009b") && line.contains("\\u202e"),
+            "{line}"
+        );
+        let v: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(v["error"]["message"], message);
+        for color in [false, true] {
+            let human = render(&err, &ErrorContext::default(), true, color);
+            assert!(!human.chars().any(|c| c != '\u{1b}' && raw(c)), "{human:?}");
+            assert!(human.contains("a31mbcde[2Jf"), "{human:?}");
+        }
+    }
+
+    /// clap quotes argument values verbatim; the human form strips the
+    /// controls from them as well.
+    #[test]
+    fn human_clap_errors_are_sanitized() {
+        let parsed = clap::Command::new("gwsr")
+            .arg(
+                clap::Arg::new("format")
+                    .long("format")
+                    .value_parser(["json", "table"]),
+            )
+            .try_get_matches_from(["gwsr", "--format", "x\u{9b}31m\u{1b}[2J\u{202E}y"]);
+        let err = CliError::Clap(parsed.unwrap_err());
+        for color in [false, true] {
+            let human = render(&err, &ErrorContext::default(), true, color);
+            assert!(
+                !human.chars().any(
+                    |c| (c.is_control() && c != '\n') || crate::output::is_dangerous_unicode(c)
+                ),
+                "{human:?}"
+            );
+            assert!(human.contains("invalid value"), "{human}");
+        }
     }
 
     #[test]

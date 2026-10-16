@@ -989,6 +989,39 @@ fn invalid_jq_fails_before_doing_anything() {
         .stderr(predicate::str::contains("invalid --jq expression"));
 }
 
+/// A `--jq` `error(...)` value (or an API message) reaches the stderr error
+/// envelope. serde_json leaves C1 controls (U+009B is an 8-bit CSI) and bidi
+/// overrides raw, so the envelope escapes them; the human form strips them.
+#[test]
+fn jq_error_text_cannot_put_c1_or_bidi_controls_on_stderr() {
+    let env = Env::new();
+    let jq = r#"error("A\u009b31mB\u202eC\u0085D")"#;
+    for human in [false, true] {
+        let mut cmd = env.cmd();
+        if human {
+            cmd.args(["--format", "table"]);
+        }
+        let out = cmd
+            .args(["cache", "clear", "--dry-run", "--jq", jq])
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(3), "{out:?}");
+        let stderr = stderr_of(&out);
+        assert!(
+            !stderr
+                .chars()
+                .any(|c| (c.is_control() && c != '\n') || ('\u{2000}'..='\u{206f}').contains(&c)),
+            "{stderr:?}"
+        );
+        if !human {
+            assert!(stderr.contains(r"\u009b31mB\u202eC\u0085D"), "{stderr}");
+            let v: Value = serde_json::from_str(stderr.trim()).unwrap();
+            let message = v["error"]["message"].as_str().unwrap();
+            assert!(message.contains("A\u{9b}31mB\u{202e}C\u{85}D"), "{message}");
+        }
+    }
+}
+
 /// A generated method checks its input, and asks for confirmation, before it
 /// loads credentials: broken credentials (here a `GWSR_CREDENTIALS_FILE` that
 /// does not exist) must not turn a bad call into a credential error (exit 8, or 2), and
