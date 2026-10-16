@@ -137,6 +137,11 @@ pub(super) fn apply_optional_headers<'x>(
 ///
 /// In plain-text mode inline parts are sent as regular attachments (callers
 /// normally drop them, matching Gmail web).
+///
+/// A bare CR in the body (a classic Mac line break, or a stray `\r` from a
+/// shell or an LLM) becomes a line break: RFC 5322 allows CR only as part of
+/// CRLF, and mail-builder writes a lone CR through unchanged, so the
+/// recipient's server dropped or misread it.
 pub(super) fn finalize_message(
     mb: mail_builder::MessageBuilder<'_>,
     body: impl Into<String>,
@@ -145,7 +150,7 @@ pub(super) fn finalize_message(
 ) -> Result<String, GwsError> {
     use mail_builder::mime::MimePart;
 
-    let body_str = body.into();
+    let body_str = normalize_bare_cr(body.into());
 
     let (inline, regular): (Vec<&Attachment>, Vec<&Attachment>) = if html {
         attachments.iter().partition(|a| a.is_inline())
@@ -192,6 +197,15 @@ pub(super) fn finalize_message(
     mb.body(root)
         .write_to_string()
         .map_err(|e| GwsError::other(format!("Failed to serialize email: {e}")))
+}
+
+/// Turn every CR that is not followed by LF into a line break. mail-builder
+/// writes `\n` as CRLF, so `\r\n` and a lone `\r` both become one CRLF.
+fn normalize_bare_cr(body: String) -> String {
+    if !body.contains('\r') {
+        return body;
+    }
+    body.replace("\r\n", "\n").replace('\r', "\n")
 }
 
 /// The MIME leaf for an attachment's bytes.
@@ -548,6 +562,35 @@ mod tests {
         assert!(raw.contains("multipart/mixed"));
         assert!(raw.contains("a.pdf"));
         assert!(raw.contains("b.csv"));
+    }
+
+    /// A bare CR in the body is sent as a line break (CRLF), never as a
+    /// lone CR, in plain text, HTML and quoted-printable bodies alike.
+    #[test]
+    fn test_bare_cr_in_body_becomes_crlf() {
+        for (body, html, expected) in [
+            ("line1\rline2", false, "line1\r\nline2"),
+            (
+                "The caf\u{e9} on Main Street is open\rline2",
+                false,
+                "is open\r\nline2",
+            ),
+            ("a\r\nb\r\rc", false, "a\r\nb\r\n\r\nc"),
+            ("<p>a\rb</p>", true, "<p>a\r\nb</p>"),
+        ] {
+            let mb = mail_builder::MessageBuilder::new()
+                .to(MbAddress::new_address(None::<&str>, "t@example.com"))
+                .subject("s");
+            let raw = finalize_message(mb, body, html, &[]).unwrap();
+            assert!(raw.contains(expected), "{body:?}: {raw:?}");
+            let bytes = raw.as_bytes();
+            for (i, &b) in bytes.iter().enumerate() {
+                assert!(
+                    b != b'\r' || bytes.get(i + 1) == Some(&b'\n'),
+                    "{body:?}: bare CR at {i} in {raw:?}"
+                );
+            }
+        }
     }
 
     #[test]
