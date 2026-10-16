@@ -2433,11 +2433,20 @@ mod tests {
             )
             .mount(&server)
             .await;
+        // Nothing is patched: an unmatched PATCH would also fail (404), so
+        // check the error and that no PATCH was sent.
+        Mock::given(method("PATCH"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+            .expect(0)
+            .mount(&server)
+            .await;
         let api = api(&server.uri(), "");
+        let err = rsvp(&api, "primary", "E1", "accepted", None, "all")
+            .await
+            .unwrap_err();
         assert!(
-            rsvp(&api, "primary", "E1", "accepted", None, "all")
-                .await
-                .is_err()
+            matches!(&err, GwsError::Validation(m) if m.contains("not on the guest list")),
+            "{err:?}"
         );
     }
 
