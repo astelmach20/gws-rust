@@ -130,12 +130,11 @@ fn api_error(status: reqwest::StatusCode, error_body: &str, retry_note: Option<&
         && let Some(err_obj) = error_json.get("error")
         && err_obj.is_object()
     {
-        let code = err_obj
-            .get("code")
-            .and_then(Value::as_u64)
-            // An out-of-range body code falls back to the HTTP status.
-            .and_then(|c| u16::try_from(c).ok())
-            .unwrap_or(status.as_u16());
+        // The HTTP status, not the body's `error.code`, is the code: it is
+        // what the client's retry policy acted on, so the exit code (6 or 1)
+        // must agree with it even when a proxy or API sends a body code that
+        // disagrees.
+        let code = status.as_u16();
         let message = err_obj
             .get("message")
             .and_then(Value::as_str)
@@ -260,6 +259,28 @@ mod tests {
         assert_eq!(code, 503);
         assert_eq!(message, "Backend Error (gave up after 4 attempts)");
         assert_eq!(reason, "backendError");
+    }
+
+    /// The HTTP status decides retries (the client retries a 503, never a
+    /// 400), so it must also decide the reported code and the exit code: a
+    /// body `error.code` that disagrees with it must not flip them.
+    #[test]
+    fn http_status_wins_over_a_disagreeing_body_code() {
+        for (status, body_code, exit) in [
+            (503, 400, GwsError::EXIT_CODE_API_RETRYABLE),
+            (400, 503, GwsError::EXIT_CODE_API),
+        ] {
+            let body =
+                json!({"error": {"code": body_code, "message": "m", "status": "X"}}).to_string();
+            let err = error_from_response(
+                reqwest::StatusCode::from_u16(status).unwrap(),
+                &body,
+                &AuthMethod::OAuth,
+                None,
+            );
+            assert_eq!(err.exit_code(), exit, "HTTP {status}, body {body_code}");
+            assert_eq!(api_parts(err).0, status, "HTTP {status}, body {body_code}");
+        }
     }
 
     #[test]
