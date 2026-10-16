@@ -277,6 +277,7 @@ mod tests {
             size: 0,
             data,
             content_id: inline.then(|| "cid1".to_string()),
+            charset: None,
         }
     }
 

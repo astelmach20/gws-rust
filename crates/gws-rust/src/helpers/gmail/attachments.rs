@@ -69,7 +69,10 @@ pub(super) async fn fetch_original_parts(
 
         attachments.push(Attachment {
             filename: part.filename.clone(),
-            content_type: part.content_type.clone(),
+            content_type: match &part.charset {
+                Some(charset) => format!("{}; charset=\"{charset}\"", part.content_type),
+                None => part.content_type.clone(),
+            },
             data,
             content_id: part.content_id.clone(),
         });
