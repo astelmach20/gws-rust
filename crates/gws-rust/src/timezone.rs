@@ -103,6 +103,12 @@ fn read_cache(path: &std::path::Path) -> Option<Tz> {
             return None;
         }
     };
+    // Under a shared cache directory (`GWSR_CACHE_DIR=/tmp/...`) another
+    // user could plant the zone that calendar times are interpreted in.
+    if let Some(problem) = untrusted(&metadata) {
+        tracing::warn!(path = %path.display(), problem, "untrusted timezone cache; ignoring it");
+        return None;
+    }
     // A cache whose age cannot be determined (no mtime support, or an mtime
     // in the future) is treated as stale and refetched, which is always safe.
     let fresh = metadata
@@ -128,6 +134,28 @@ fn read_cache(path: &std::path::Path) -> Option<Tz> {
             None
         }
     }
+}
+
+/// Why a cache file someone else could have written must not be used: it
+/// belongs to another user, or group or others may write it.
+#[cfg(unix)]
+fn untrusted(metadata: &std::fs::Metadata) -> Option<String> {
+    untrusted_for(metadata, rustix::process::geteuid().as_raw())
+}
+
+#[cfg(unix)]
+fn untrusted_for(metadata: &std::fs::Metadata, owner: u32) -> Option<String> {
+    use std::os::unix::fs::MetadataExt;
+    if metadata.uid() != owner {
+        return Some("owned by another user".to_string());
+    }
+    let mode = metadata.mode() & 0o777;
+    (mode & 0o022 != 0).then(|| format!("writable by group or others (mode {mode:o})"))
+}
+
+#[cfg(not(unix))]
+fn untrusted(_metadata: &std::fs::Metadata) -> Option<String> {
+    None
 }
 
 /// Write a timezone name to the cache file.
@@ -365,6 +393,24 @@ mod tests {
         assert_eq!(read_cache(&cache_file), None);
         std::fs::write(&cache_file, "Not/A/Zone").unwrap();
         assert_eq!(read_cache(&cache_file), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn shared_or_foreign_cache_is_a_miss() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let cache_file = cache_file(dir.path(), Some("profile:/c:default")).unwrap();
+        std::fs::write(&cache_file, "Pacific/Kiritimati\n").unwrap();
+        std::fs::set_permissions(&cache_file, std::fs::Permissions::from_mode(0o666)).unwrap();
+        assert_eq!(read_cache(&cache_file), None);
+
+        std::fs::set_permissions(&cache_file, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let meta = std::fs::metadata(&cache_file).unwrap();
+        let me = rustix::process::geteuid().as_raw();
+        assert_eq!(untrusted_for(&meta, me), None);
+        let why = untrusted_for(&meta, me.wrapping_add(1)).unwrap();
+        assert!(why.contains("another user"), "{why}");
     }
 
     async fn settings_server(tz: &str) -> wiremock::MockServer {

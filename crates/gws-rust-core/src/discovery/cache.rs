@@ -17,8 +17,8 @@
 //! Documents live in `<root>/discovery/<api>+<version>.json`. The directory
 //! is created `0700` and files are written atomically (temp file + rename)
 //! with mode `0600`, and only after the document has been parsed and its
-//! endpoints validated (SEC-12). Files or directories writable by group or
-//! others are never trusted.
+//! endpoints validated (SEC-12). Files or directories owned by another user,
+//! or writable by group or others, are never trusted.
 //!
 //! The cache root is always supplied by the caller; this module reads no
 //! environment variables.
@@ -47,6 +47,12 @@ const CLEAR_MAX_ROUNDS: usize = 5;
 pub struct DiscoveryCache {
     dir: PathBuf,
     ttl: Duration,
+    /// The user that must own the cache directory and its entries: the
+    /// process's effective user. Another user's files are never trusted,
+    /// whatever their mode (a cache under a shared directory such as `/tmp`
+    /// may have been created by someone else).
+    #[cfg(unix)]
+    owner: u32,
 }
 
 /// A document read from the cache.
@@ -77,7 +83,16 @@ impl DiscoveryCache {
         Self {
             dir: root.as_ref().join(DISCOVERY_SUBDIR),
             ttl: DEFAULT_TTL,
+            #[cfg(unix)]
+            owner: rustix::process::geteuid().as_raw(),
         }
+    }
+
+    /// Expect the cache to belong to `uid` instead of the effective user.
+    #[cfg(all(test, unix))]
+    fn with_owner(mut self, uid: u32) -> Self {
+        self.owner = uid;
+        self
     }
 
     /// Override the freshness TTL (default [`DEFAULT_TTL`]).
@@ -114,7 +129,7 @@ impl DiscoveryCache {
         api_base_override: Option<&Url>,
     ) -> Result<Option<CachedDocument>, DiscoveryError> {
         match std::fs::symlink_metadata(&self.dir) {
-            Ok(_) => check_not_shared(&self.dir)?,
+            Ok(_) => self.check_not_shared(&self.dir)?,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(e) => return Err(DiscoveryError::cache("inspect", &self.dir, e)),
         }
@@ -130,7 +145,7 @@ impl DiscoveryCache {
                 reason: "cache entry is not a regular file".to_string(),
             });
         }
-        check_not_shared(&path)?;
+        self.check_not_shared(&path)?;
         let modified = meta
             .modified()
             .map_err(|e| DiscoveryError::cache("read mtime of", &path, e))?;
@@ -314,27 +329,35 @@ fn set_mode(_path: &Path, _mode: u32) -> Result<(), DiscoveryError> {
     Ok(())
 }
 
-/// Fail if `path` is writable by group or others.
-#[cfg(unix)]
-fn check_not_shared(path: &Path) -> Result<(), DiscoveryError> {
-    use std::os::unix::fs::PermissionsExt;
-    let mode = std::fs::metadata(path)
-        .map_err(|e| DiscoveryError::cache("inspect", path, e))?
-        .permissions()
-        .mode()
-        & 0o777;
-    if mode & 0o022 != 0 {
-        return Err(DiscoveryError::InsecurePermissions {
-            path: path.to_path_buf(),
-            mode,
-        });
+impl DiscoveryCache {
+    /// Fail if `path` belongs to another user or is writable by group or
+    /// others: either way someone else can choose the document gwsr builds
+    /// its commands from.
+    #[cfg(unix)]
+    fn check_not_shared(&self, path: &Path) -> Result<(), DiscoveryError> {
+        use std::os::unix::fs::MetadataExt;
+        let meta =
+            std::fs::metadata(path).map_err(|e| DiscoveryError::cache("inspect", path, e))?;
+        if meta.uid() != self.owner {
+            return Err(DiscoveryError::InsecurePermissions {
+                path: path.to_path_buf(),
+                reason: "is owned by another user".to_string(),
+            });
+        }
+        let mode = meta.mode() & 0o777;
+        if mode & 0o022 != 0 {
+            return Err(DiscoveryError::InsecurePermissions {
+                path: path.to_path_buf(),
+                reason: format!("is writable by group or others (mode {mode:o})"),
+            });
+        }
+        Ok(())
     }
-    Ok(())
-}
 
-#[cfg(not(unix))]
-fn check_not_shared(_path: &Path) -> Result<(), DiscoveryError> {
-    Ok(())
+    #[cfg(not(unix))]
+    fn check_not_shared(&self, _path: &Path) -> Result<(), DiscoveryError> {
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -426,6 +449,26 @@ mod tests {
             cache.load("drive", "v3", None),
             Err(DiscoveryError::InsecurePermissions { .. })
         ));
+    }
+
+    /// A cache under a shared directory (`GWSR_CACHE_DIR=/tmp/...`) may
+    /// have been created by another user with an ordinary 0755/0644 mode:
+    /// its documents decide what each command sends, so they are not used.
+    #[cfg(unix)]
+    #[test]
+    fn entries_owned_by_another_user_are_untrusted() {
+        let tmp = tempfile::tempdir().unwrap();
+        DiscoveryCache::new(tmp.path())
+            .store("drive", "v3", DOC.as_bytes())
+            .unwrap();
+        let other = rustix::process::geteuid().as_raw().wrapping_add(1);
+        let cache = DiscoveryCache::new(tmp.path()).with_owner(other);
+        let err = cache.load("drive", "v3", None).unwrap_err();
+        assert!(
+            matches!(&err, DiscoveryError::InsecurePermissions { path, .. } if path == cache.dir()),
+            "{err:?}"
+        );
+        assert!(err.to_string().contains("owned by another user"), "{err}");
     }
 
     #[test]

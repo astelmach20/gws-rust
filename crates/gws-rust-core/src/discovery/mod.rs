@@ -207,11 +207,14 @@ impl DiscoveryLoader {
                 }
                 Ok(Some(cached)) => stale = Some(cached),
                 Ok(None) => {}
-                Err(DiscoveryError::InsecurePermissions { path, mode }) if path == cache.dir() => {
-                    // Ignore every entry; `store` below resets the directory to 0700.
+                Err(DiscoveryError::InsecurePermissions { path, reason })
+                    if path == cache.dir() =>
+                {
+                    // Ignore every entry; `store` below resets the directory
+                    // to 0700 (or fails, and says so, when another user owns it).
                     notices.push(DiscoveryNotice::DiscardedCacheEntry {
                         path: path.display().to_string(),
-                        reason: format!("directory is writable by group or others (mode {mode:o})"),
+                        reason: format!("directory {reason}"),
                     });
                 }
                 Err(
