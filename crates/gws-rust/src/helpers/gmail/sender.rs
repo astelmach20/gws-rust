@@ -17,8 +17,8 @@
 use super::prelude::*;
 
 #[derive(Debug)]
-struct SendAsIdentity {
-    mailbox: Mailbox,
+pub(super) struct SendAsIdentity {
+    pub mailbox: Mailbox,
 }
 
 /// Parse the JSON response from `users.settings.sendAs.list` into identities.
@@ -105,9 +105,23 @@ pub(super) async fn resolve_sender(
     let Some(from) = from else {
         return Ok(None);
     };
-    let body = api.send_as_list().await?;
-    let identities = parse_send_as_response(&body)?;
-    resolve_sender_from_identities(from, &identities).map(Some)
+    resolve_sender_with(Some(from), &send_as_identities(api).await?)
+}
+
+/// The account's send-as identities (`users.settings.sendAs.list`). They
+/// include the primary address.
+pub(super) async fn send_as_identities(api: &GmailApi) -> Result<Vec<SendAsIdentity>, GwsError> {
+    parse_send_as_response(&api.send_as_list().await?)
+}
+
+/// [`resolve_sender`] against identities already fetched with
+/// [`send_as_identities`].
+pub(super) fn resolve_sender_with(
+    from: Option<&[Mailbox]>,
+    identities: &[SendAsIdentity],
+) -> Result<Option<Vec<Mailbox>>, GwsError> {
+    from.map(|from| resolve_sender_from_identities(from, identities))
+        .transpose()
 }
 
 #[cfg(test)]
