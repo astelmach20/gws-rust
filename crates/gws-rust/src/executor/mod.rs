@@ -834,8 +834,8 @@ pub(crate) async fn execute_to(
                     download::decoded_payload(doc, method, &value, options.decode_field.as_deref())
                         .map_err(applied)?
                 {
-                    emitter.bytes(&bytes).await?;
-                    emitter.flush().await?;
+                    emitter.bytes(&bytes).await.map_err(applied)?;
+                    emitter.flush().await.map_err(applied)?;
                     break;
                 }
             }

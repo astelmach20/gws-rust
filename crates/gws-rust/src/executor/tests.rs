@@ -2204,6 +2204,42 @@ async fn json_output_decodes_base64_attachment() {
     assert_eq!(std::fs::read(&out).unwrap(), b"hi?");
 }
 
+/// `-o -` with a decoded payload: when the bytes cannot be written to
+/// stdout after a method that changed something, the error must say the
+/// change was made (as the JSON and `-o FILE` paths do), or a retry repeats
+/// the write. After a read it stays a plain stdout error.
+#[tokio::test]
+async fn failed_stdout_bytes_after_a_write_say_the_change_was_made() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/drive/v3/files:query"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id": "f1", "data": "aGk"})))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/drive/v3/attachments/a1"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": "aGk", "size": 2})))
+        .mount(&server)
+        .await;
+    let d = doc(&server.uri());
+
+    let mut call = Call::new(&d, "query", &server);
+    call.body = Some(json!({"filter": "x"}));
+    call.output = Some(OutputTarget::Stdout);
+    call.options.decode_field = Some("data".into());
+    let err = call.run(&Emitter::failing()).await.unwrap_err().to_string();
+    assert!(err.contains("failed to write to stdout"), "{err}");
+    assert!(err.contains("change was made"), "{err}");
+    assert!(err.contains("id: f1"), "{err}");
+
+    let mut call = Call::new(&d, "attachment", &server);
+    call.params = json!({"id": "a1"});
+    call.output = Some(OutputTarget::Stdout);
+    let err = call.run(&Emitter::failing()).await.unwrap_err().to_string();
+    assert!(err.contains("failed to write to stdout"), "{err}");
+    assert!(!err.contains("change was made"), "{err}");
+}
+
 // ── Long-running operations ─────────────────────────────────────────────
 
 #[tokio::test]
