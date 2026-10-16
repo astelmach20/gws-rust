@@ -6,12 +6,36 @@ import os from "node:os";
 import path from "node:path";
 import { describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
+import zlib from "node:zlib";
 
 const scriptsDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const tmp = (prefix) => fs.mkdtempSync(path.join(os.tmpdir(), prefix));
 const sha256 = (file) => createHash("sha256").update(fs.readFileSync(file)).digest("hex");
 const run = (script, args, opts = {}) =>
   spawnSync("bash", [path.join(scriptsDir, script), ...args], { encoding: "utf8", ...opts });
+
+// The owner fields of every entry in a .tar.gz, read from the tar headers
+// (a `tar -tv` listing prints them differently per tar implementation).
+function tarOwners(file) {
+  const data = zlib.gunzipSync(fs.readFileSync(file));
+  const entries = [];
+  for (let off = 0; off + 512 <= data.length; ) {
+    const header = data.subarray(off, off + 512);
+    if (header.every((b) => b === 0)) break;
+    const field = (start, len) =>
+      header.subarray(start, start + len).toString("latin1").replace(/\0[\s\S]*$/, "").trim();
+    const size = parseInt(field(124, 12) || "0", 8);
+    entries.push({
+      name: field(0, 100),
+      uid: parseInt(field(108, 8), 8),
+      gid: parseInt(field(116, 8), 8),
+      uname: field(265, 32),
+      gname: field(297, 32),
+    });
+    off += 512 + Math.ceil(size / 512) * 512;
+  }
+  return entries;
+}
 
 function hasGnu(tool) {
   const res = spawnSync(tool, ["--version"], { encoding: "utf8" });
@@ -41,14 +65,23 @@ describe("homebrew-formula.sh", () => {
     assert.equal(res.status, 0, res.stderr);
     assert.match(res.stdout, /class GwsRust < Formula/);
     assert.match(res.stdout, /bin\.install "gwsr"/);
-    for (const [i, t] of targets.entries()) {
-      assert.ok(
-        res.stdout.includes(
-          `url "https://github.com/astelmach20/gws-rust/releases/download/v${version}/gws-rust-${version}-${t}.tar.gz"`,
-        ),
-        t,
-      );
-      assert.ok(res.stdout.includes(`sha256 "${String(i + 1).repeat(64)}"`), t);
+    // Each archive and its checksum must sit in its own OS and CPU block: a
+    // swapped on_arm/on_intel would install the wrong binary.
+    const block = (cpu, i) => {
+      const t = targets[i];
+      return [
+        `    ${cpu} do`,
+        `      url "https://github.com/astelmach20/gws-rust/releases/download/v${version}/gws-rust-${version}-${t}.tar.gz"`,
+        `      sha256 "${String(i + 1).repeat(64)}"`,
+        "    end",
+      ].join("\n");
+    };
+    const expected = [
+      ["  on_macos do", block("on_arm", 0), block("on_intel", 1), "  end"].join("\n"),
+      ["  on_linux do", block("on_arm", 2), block("on_intel", 3), "  end"].join("\n"),
+    ];
+    for (const os of expected) {
+      assert.ok(res.stdout.includes(os), `missing:\n${os}\n\nin:\n${res.stdout}`);
     }
   });
 
@@ -114,15 +147,27 @@ describe("package-release.sh", { skip: !(hasGnu("tar") && hasGnu("touch")) && "n
     assert.match(listing, /gws-rust-1\.2\.3-x86_64-unknown-linux-musl\/gwsr/);
     assert.match(listing, /gws-rust-1\.2\.3-x86_64-unknown-linux-musl\/LICENSE/);
     assert.match(listing, /2023-11-14/);
-    assert.doesNotMatch(listing, /[a-z]+\/[a-z]+ .*runner/);
+    // No entry records the build user: every owner is root, by number.
+    const entries = tarOwners(path.join(outA, name));
+    assert.ok(entries.length >= 5, JSON.stringify(entries));
+    for (const e of entries) {
+      assert.equal(e.uid, 0, JSON.stringify(e));
+      assert.equal(e.gid, 0, JSON.stringify(e));
+      assert.ok(["", "root"].includes(e.uname) && ["", "root"].includes(e.gname), JSON.stringify(e));
+    }
   });
+});
 
+// Checked before any GNU tool is needed, so this runs on every platform.
+describe("package-release.sh arguments", () => {
   it("requires SOURCE_DATE_EPOCH", () => {
+    const bin = path.join(tmp("gwsr-bin-"), "gwsr");
+    fs.writeFileSync(bin, "#!/bin/sh\necho gwsr\n", { mode: 0o755 });
     const env = { ...process.env };
     delete env.SOURCE_DATE_EPOCH;
     const res = run("package-release.sh", ["1.2.3", "x86_64-unknown-linux-musl", bin, tmp("gwsr-pkg-")], { env });
     assert.notEqual(res.status, 0);
-    assert.match(res.stderr, /SOURCE_DATE_EPOCH/);
+    assert.match(res.stderr, /SOURCE_DATE_EPOCH must be set/);
   });
 });
 
