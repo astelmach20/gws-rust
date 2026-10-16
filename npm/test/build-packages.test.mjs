@@ -40,6 +40,19 @@ function fakeRelease({ corrupt } = {}) {
   return dir;
 }
 
+/** The file list `npm pack` would publish from `dir` (no network, no user npmrc). */
+function packedFiles(dir) {
+  const userconfig = path.join(tmp("gwsr-npmrc-"), "npmrc");
+  fs.writeFileSync(userconfig, "");
+  const out = execFileSync("npm", ["pack", "--dry-run", "--json", "--ignore-scripts"], {
+    cwd: dir,
+    encoding: "utf8",
+    env: { ...process.env, npm_config_userconfig: userconfig },
+    shell: process.platform === "win32",
+  });
+  return JSON.parse(out)[0].files.map((f) => f.path).sort();
+}
+
 describe("parseChecksums", () => {
   it("parses text and binary mode lines", () => {
     const sums = parseChecksums(`${"a".repeat(64)}  one.tar.gz\n${"B".repeat(64)} *two.zip\n\n`);
@@ -76,6 +89,17 @@ describe("buildPackages", () => {
     const main = path.join(out, "gws-rust");
     for (const f of ["bin/gwsr.js", "lib/platform.js", "platforms.json", "package.json", "README.md", "LICENSE", "NOTICE"]) {
       assert.ok(fs.existsSync(path.join(main, f)), f);
+    }
+  });
+
+  it("ships LICENSE and NOTICE in every published tarball (Apache-2.0 section 4)", () => {
+    const out = path.join(tmp("gwsr-out-"), "packages");
+    const order = buildPackages({ version, artifacts: fakeRelease(), out });
+    for (const name of order) {
+      const files = packedFiles(path.join(out, name));
+      for (const required of ["LICENSE", "NOTICE"]) {
+        assert.ok(files.includes(required), `${name} must publish ${required}; it would publish ${files.join(", ")}`);
+      }
     }
   });
 

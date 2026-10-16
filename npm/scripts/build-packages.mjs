@@ -130,6 +130,7 @@ export function buildPackages({ version, artifacts, out }) {
       fs.copyFileSync(binary, dest);
       fs.chmodSync(dest, 0o755);
       copyFile(path.join(repoRoot, "LICENSE"), pkgDir);
+      copyFile(path.join(repoRoot, "NOTICE"), pkgDir);
       fs.writeFileSync(path.join(pkgDir, "README.md"), platformReadme(entry, version));
       writeJson(path.join(pkgDir, "package.json"), {
         name: entry.package,
@@ -140,7 +141,8 @@ export function buildPackages({ version, artifacts, out }) {
         homepage: mainManifest.homepage,
         os: [entry.os],
         cpu: entry.cpu,
-        files: ["bin/"],
+        // npm always packs LICENSE and README, but not NOTICE, which Apache-2.0 requires.
+        files: ["bin/", "NOTICE"],
         preferUnplugged: true,
         publishConfig: mainManifest.publishConfig,
       });
