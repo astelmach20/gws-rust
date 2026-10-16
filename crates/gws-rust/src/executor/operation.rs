@@ -173,18 +173,77 @@ pub(crate) struct PollTarget<'a> {
     params: Map<String, Value>,
 }
 
-/// Work out how to poll an operation started by a request with
-/// `request_params`, or refuse.
+/// The API's `operations.get`, the path parameter that takes the
+/// operation's name, and the getter's other path parameters, which come
+/// from the request's parameters of the same name.
+struct PollShape<'a> {
+    method: &'a RestMethod,
+    op_param: String,
+    others: Vec<&'a str>,
+}
+
+/// Whether `--wait` applies to `method`: the API's `operations.get` returns
+/// the schema `method` returns, and every other path parameter that getter
+/// needs is a parameter of `method`.
 ///
-/// A nested `operations.get` (storage `b/{bucket}/operations/{operationId}`)
-/// takes the operation in the placeholder that follows `operations/`. Its
-/// other path parameters come from the request's parameters of the same
-/// name. Checked before the request is sent, so `--wait` fails before it
-/// starts an operation it could not poll.
+/// A response schema whose name merely ends in `Operation` is not enough.
+/// Compute Engine operations are polled through `zoneOperations`,
+/// `regionOperations` or `globalOperations` (there is no `operations.get`),
+/// a Cloud DNS `Operation` has no `name` to poll, and an API Hub
+/// `ApiOperation` describes an HTTP operation of a cataloged API.
+pub(crate) fn can_wait(doc: &RestDescription, method: &RestMethod) -> bool {
+    let schema = |m: &RestMethod| m.response.as_ref().and_then(|r| r.schema_ref.clone());
+    let Some(returned) = schema(method) else {
+        return false;
+    };
+    // An API whose operations cannot be polled is the answer here, not a
+    // failure: the flag is not offered, and `--wait` is an unknown flag.
+    let Ok(shape) = poll_shape(doc) else {
+        return false;
+    };
+    schema(shape.method).as_deref() == Some(returned.as_str())
+        && shape
+            .others
+            .iter()
+            .all(|p| method.parameters.contains_key(*p))
+}
+
+/// Work out how to poll an operation started by a request with
+/// `request_params`, or refuse. Checked before the request is sent, so
+/// `--wait` fails before it starts an operation it could not poll.
 pub(crate) fn poll_target<'a>(
     doc: &'a RestDescription,
     request_params: &Map<String, Value>,
 ) -> Result<PollTarget<'a>, GwsError> {
+    let PollShape {
+        method: get,
+        op_param,
+        others,
+    } = poll_shape(doc)?;
+    let id = get.id.as_deref().unwrap_or("operations.get");
+    let template = path_template(get);
+    let mut params = Map::new();
+    for p in others {
+        let value = request_params.get(p).ok_or_else(|| {
+            GwsError::Validation(format!(
+                "--wait: polling with {id} ({template}) needs path parameter '{p}', which \
+                 this request does not have"
+            ))
+        })?;
+        params.insert(p.to_string(), value.clone());
+    }
+    Ok(PollTarget {
+        method: get,
+        op_param,
+        params,
+    })
+}
+
+/// Work out how this API's operations are polled, or refuse.
+///
+/// A nested `operations.get` (storage `b/{bucket}/operations/{operationId}`)
+/// takes the operation in the placeholder that follows `operations/`.
+fn poll_shape(doc: &RestDescription) -> Result<PollShape<'_>, GwsError> {
     let get = find_operations_get(doc).ok_or_else(|| no_operations_get(doc))?;
     let id = get.id.as_deref().unwrap_or("operations.get");
     let template = path_template(get);
@@ -219,20 +278,11 @@ pub(crate) fn poll_target<'a>(
             }
         }
     };
-    let mut params = Map::new();
-    for p in path_params.into_iter().filter(|p| *p != op_param) {
-        let value = request_params.get(p).ok_or_else(|| {
-            GwsError::Validation(format!(
-                "--wait: polling with {id} ({template}) needs path parameter '{p}', which \
-                 this request does not have"
-            ))
-        })?;
-        params.insert(p.to_string(), value.clone());
-    }
-    Ok(PollTarget {
+    let others = path_params.into_iter().filter(|p| *p != op_param).collect();
+    Ok(PollShape {
         method: get,
         op_param,
-        params,
+        others,
     })
 }
 
@@ -418,5 +468,49 @@ mod tests {
             Some("x.operations.get")
         );
         assert!(find_operations_get(&RestDescription::default()).is_none());
+    }
+
+    fn wait_doc(getter: Option<Value>, methods: Value) -> RestDescription {
+        let mut resources = json!({"things": {"methods": methods}});
+        if let Some(get) = getter {
+            resources["projects"] = json!({"resources": {"operations": {"methods": {"get": get}}}});
+        }
+        serde_json::from_value(json!({"name": "x", "version": "v1", "rootUrl": "https://x.googleapis.com/", "servicePath": "", "resources": resources}))
+            .unwrap()
+    }
+
+    fn path_param() -> Value {
+        json!({"type": "string", "location": "path", "required": true})
+    }
+
+    #[test]
+    fn wait_is_offered_only_where_the_operation_can_be_polled() {
+        let getter = json!({
+            "httpMethod": "GET", "path": "v1/projects/{project}/operations/{operation}",
+            "parameters": {"project": path_param(), "operation": path_param()},
+            "response": {"$ref": "Operation"}
+        });
+        let methods = json!({
+            "create": {"httpMethod": "POST", "path": "v1/{project}/things", "parameters": {"project": path_param()}, "response": {"$ref": "Operation"}},
+            "patch": {"httpMethod": "POST", "path": "v1/{project}/things", "parameters": {"project": path_param()}, "response": {"$ref": "ApiOperation"}},
+            "orphan": {"httpMethod": "POST", "path": "v1/{project}/things", "parameters": {}, "response": {"$ref": "Operation"}},
+            "delete": {"httpMethod": "POST", "path": "v1/{project}/things", "parameters": {"project": path_param()}}
+        });
+        let doc = wait_doc(Some(getter), methods.clone());
+        let method = |name: &str| &doc.resources["things"].methods[name];
+        // The getter returns the same schema, and every parameter it needs
+        // besides the operation itself is one the method has.
+        assert!(can_wait(&doc, method("create")));
+        // A different schema whose name only ends in `Operation`.
+        assert!(!can_wait(&doc, method("patch")));
+        // The getter needs `project`, which the method cannot supply.
+        assert!(!can_wait(&doc, method("orphan")));
+        // No response at all.
+        assert!(!can_wait(&doc, method("delete")));
+
+        // An API without `operations.get` (Compute Engine polls through
+        // `zoneOperations.get` and friends) offers `--wait` nowhere.
+        let doc = wait_doc(None, methods);
+        assert!(!can_wait(&doc, &doc.resources["things"].methods["create"]));
     }
 }

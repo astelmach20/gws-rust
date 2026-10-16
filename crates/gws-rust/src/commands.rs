@@ -68,15 +68,6 @@ fn is_deprecated(method: &RestMethod) -> bool {
         })
 }
 
-/// The response schema looks like a long-running Operation.
-pub(crate) fn returns_operation(method: &RestMethod) -> bool {
-    method
-        .response
-        .as_ref()
-        .and_then(|r| r.schema_ref.as_deref())
-        .is_some_and(|r| r.ends_with("Operation"))
-}
-
 /// Flags for one generated method command. Ids must match
 /// `executor::options`.
 pub fn method_args(doc: &RestDescription, method: &RestMethod) -> Vec<Arg> {
@@ -203,7 +194,7 @@ pub fn method_args(doc: &RestDescription, method: &RestMethod) -> Vec<Arg> {
         );
     }
 
-    if returns_operation(method) {
+    if crate::executor::operation::can_wait(doc, method) {
         args.push(
             Arg::new("wait")
                 .long("wait")
