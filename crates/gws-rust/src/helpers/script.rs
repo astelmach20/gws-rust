@@ -297,11 +297,25 @@ fn collect_files(root: &Path) -> Result<Vec<Value>, GwsError> {
             root.display()
         )));
     }
-    if !files.contains_key("appsscript") {
-        return Err(GwsError::Validation(format!(
-            "'{}' has no appsscript.json manifest; Apps Script requires it (use +pull to fetch the current one)",
-            root.display()
-        )));
+    // Only `appsscript.json` is the manifest. A root `appsscript.gs` or
+    // `appsscript.html` would take its name without being one, and the API
+    // rejects the push with an unhelpful error.
+    match files.get("appsscript") {
+        Some(f) if f["type"] == "JSON" => {}
+        Some(f) => {
+            return Err(GwsError::Validation(format!(
+                "'{}' would be pushed as the Apps Script file 'appsscript', which is reserved for \
+                 the appsscript.json manifest; rename it and add appsscript.json (use +pull to \
+                 fetch the current one)",
+                f["_path"].as_str().unwrap_or("?")
+            )));
+        }
+        None => {
+            return Err(GwsError::Validation(format!(
+                "'{}' has no appsscript.json manifest; Apps Script requires it (use +pull to fetch the current one)",
+                root.display()
+            )));
+        }
     }
     Ok(files
         .into_values()
@@ -753,6 +767,20 @@ mod tests {
         if fs::read_dir(dir.path()).unwrap().count() == 3 {
             let err = collect_files(dir.path()).unwrap_err().to_string();
             assert!(err.contains("Two local files map"), "{err}");
+        }
+    }
+
+    #[test]
+    fn collect_files_only_takes_appsscript_json_as_the_manifest() {
+        for other in ["appsscript.gs", "appsscript.js", "appsscript.html"] {
+            let dir = tempdir().unwrap();
+            write(&dir.path().join("Code.gs"), "x");
+            write(&dir.path().join(other), "x");
+            let err = collect_files(dir.path()).unwrap_err().to_string();
+            assert!(
+                err.contains(other) && err.contains("appsscript.json"),
+                "{other}: {err}"
+            );
         }
     }
 
