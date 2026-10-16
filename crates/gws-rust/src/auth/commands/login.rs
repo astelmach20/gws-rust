@@ -272,6 +272,7 @@ pub(crate) async fn handle(m: &clap::ArgMatches) -> Result<(), GwsError> {
         open_browser: args.open_browser && stderr_tty && args.mode == RedirectMode::Loopback,
         timeout: args.timeout,
         login_hint: args.login_hint,
+        login_command: crate::auth::login_command_for(&active),
     };
     let mode = match args.mode {
         RedirectMode::Loopback => "loopback",
