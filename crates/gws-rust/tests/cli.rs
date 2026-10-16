@@ -584,6 +584,38 @@ fn schema_honors_api_version_flag() {
     assert_eq!(v["description"], "v3 listing");
 }
 
+/// `workflow` has helpers only and no Discovery document. `schema` and
+/// `batch` used to ask the network for one and failed with a Discovery
+/// error (exit 4, or a network error offline) instead of a clear refusal.
+#[test]
+fn schema_and_batch_refuse_a_service_without_a_discovery_document() {
+    let env = Env::new();
+    for (args, stdin) in [
+        (&["schema", "workflow.standup"][..], ""),
+        (&["schema", "wf:v1.Type"], ""),
+        (&["batch", "workflow"], "{\"method\": \"x.get\"}\n"),
+    ] {
+        let out = env
+            .cmd()
+            // Nothing may be fetched: a request would hit this closed proxy.
+            .env("HTTPS_PROXY", "http://127.0.0.1:9")
+            .env("HTTP_PROXY", "http://127.0.0.1:9")
+            .args(args)
+            .write_stdin(stdin)
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(3), "{args:?}: {}", stderr_of(&out));
+        assert!(out.stdout.is_empty(), "{args:?}");
+        let err = stderr_error(&out);
+        let message = err["error"]["message"].as_str().unwrap();
+        assert!(
+            message.contains("has no Discovery document")
+                && message.contains("gwsr workflow --help"),
+            "{args:?}: {message}"
+        );
+    }
+}
+
 // ── Errors ──────────────────────────────────────────────────────────────
 
 /// Parse stderr as exactly one JSON error object.
@@ -1437,6 +1469,64 @@ fn commands_json_is_machine_readable() {
             .unwrap()
             .iter()
             .any(|c| c["path"] == "dev generate-skills")
+    );
+}
+
+/// `--api-version` lists that version's commands, as it selects the version
+/// a method runs with; `gwsr commands` used to ignore it and list the
+/// default version.
+#[test]
+fn commands_honor_api_version_flag() {
+    let env = Env::new();
+    env.seed_drive("v3 listing");
+    env.seed_doc(&one_method_doc(
+        "drive",
+        "v2",
+        "revisionsV2",
+        "get",
+        "drive.revisions.get",
+    ));
+    let paths = |args: &[&str]| -> (String, Vec<String>) {
+        let out = env.cmd().args(args).output().unwrap();
+        assert!(out.status.success(), "{args:?}: {}", stderr_of(&out));
+        let v: Value = serde_json::from_slice(&out.stdout).unwrap();
+        let svc = &v["services"][0];
+        let paths = svc["commands"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|c| c["kind"] == "method")
+            .map(|c| c["path"].as_str().unwrap().to_string())
+            .collect();
+        (svc["version"].as_str().unwrap().to_string(), paths)
+    };
+    for args in [
+        &["commands", "drive", "--api-version", "v2"][..],
+        &["--api-version=v2", "commands", "drive"],
+    ] {
+        let (version, methods) = paths(args);
+        assert_eq!(version, "v2", "{args:?}");
+        assert_eq!(methods, ["revisionsV2 get"], "{args:?}");
+    }
+    let (version, methods) = paths(&["commands", "drive"]);
+    assert_eq!(version, "v3");
+    assert_eq!(methods, ["files list"]);
+
+    // One version cannot apply to every service at once.
+    let out = env
+        .cmd()
+        .args(["commands", "--api-version", "v2"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(3), "{}", stderr_of(&out));
+    assert!(out.stdout.is_empty());
+    let err = stderr_error(&out);
+    assert!(
+        err["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("--api-version needs the services to list"),
+        "{err}"
     );
 }
 

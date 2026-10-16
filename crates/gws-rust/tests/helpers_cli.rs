@@ -1379,6 +1379,69 @@ async fn dot_segment_path_parameters_are_rejected_before_sending() {
     assert!(sent.is_empty(), "requests reached the server: {sent:?}");
 }
 
+/// An empty ID leaves an empty path segment, so `--event-id ""` would
+/// DELETE `events/` (the collection) and `--message-id ""` would GET the
+/// message list: helpers and workflows refuse it, real run and dry run alike.
+#[tokio::test(flavor = "multi_thread")]
+async fn empty_path_ids_are_rejected_before_sending() {
+    use wiremock::{Mock, MockServer, ResponseTemplate, matchers::any};
+
+    let server = MockServer::start().await;
+    Mock::given(any())
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+        .mount(&server)
+        .await;
+
+    let dir = setup();
+    let run = |args: &[&str]| {
+        gwsr(dir.path())
+            .env("GWSR_TOKEN", "test-token")
+            .env("GWSR_API_BASE_URL", server.uri())
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    let cases: [&[&str]; 6] = [
+        &["calendar", "+delete", "--event-id", "", "--yes"],
+        &["calendar", "+delete", "--event-id", "", "--dry-run"],
+        &[
+            "calendar",
+            "+delete",
+            "--calendar-id",
+            "",
+            "--event-id",
+            "E1",
+            "--yes",
+        ],
+        &["tasks", "+list", "--list-id", ""],
+        &["workflow", "+email-to-task", "--message-id", ""],
+        &[
+            "workflow",
+            "+email-to-task",
+            "--message-id",
+            "",
+            "--dry-run",
+        ],
+    ];
+    for args in cases {
+        let out = run(args);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(
+            out.status.code(),
+            Some(3),
+            "{args:?} was not rejected: stdout={} stderr={stderr}",
+            String::from_utf8_lossy(&out.stdout)
+        );
+        assert!(stderr.contains("empty segment"), "{args:?}: {stderr}");
+    }
+    let received = server.received_requests().await.unwrap();
+    let sent: Vec<String> = received
+        .iter()
+        .map(|r| format!("{} {}", r.method, r.url.path()))
+        .collect();
+    assert!(sent.is_empty(), "requests reached the server: {sent:?}");
+}
+
 // ── Account time zone lookups ───────────────────────────────────────────
 
 /// `+insert`/`+update` read the account time zone only for a time without an

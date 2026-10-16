@@ -797,13 +797,23 @@ mod tests {
         )
         .unwrap();
 
-        let capture = Capture::default();
-        let writer = capture.clone();
-        let subscriber = tracing_subscriber::fmt()
-            .with_max_level(tracing::Level::DEBUG)
-            .with_writer(move || writer.clone())
-            .finish();
-        let _guard = tracing::subscriber::set_default(subscriber);
+        // Installed process-wide, not per thread: a thread-scoped default
+        // races with tests on other threads registering the same callsites,
+        // which can cache them as disabled for this thread too. Other tests'
+        // lines land in the buffer as well; the assertions below look only
+        // for this test's own URL.
+        static CAPTURE: std::sync::OnceLock<Capture> = std::sync::OnceLock::new();
+        let capture = CAPTURE.get_or_init(|| {
+            let capture = Capture::default();
+            let writer = capture.clone();
+            let subscriber = tracing_subscriber::fmt()
+                .with_max_level(tracing::Level::DEBUG)
+                .with_writer(move || writer.clone())
+                .finish();
+            tracing::subscriber::set_global_default(subscriber)
+                .expect("no other test installs a global subscriber");
+            capture
+        });
         let url = format!(
             "{}/upload/drive/v3/files?uploadType=resumable&upload_id=FAKE-upload-id",
             server.uri()

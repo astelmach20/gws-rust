@@ -134,7 +134,9 @@ EXAMPLES:
   gwsr workflow +standup-report --format table
 
 TIPS:
-  Read-only. Combines today's calendar agenda (account time zone) with open tasks.",
+  Read-only. Combines today's calendar agenda (account time zone) with open tasks.
+  Meetings leave out declined and cancelled events and working-location,
+  out-of-office, focus-time and birthday entries.",
         )
 }
 
@@ -156,7 +158,8 @@ EXAMPLES:
 
 TIPS:
   Read-only. Shows the next timed event that has not started yet, skipping
-  all-day, cancelled and declined events, with attendees and description.",
+  all-day, cancelled and declined events and working-location, out-of-office,
+  focus-time and birthday entries, with attendees and description.",
         )
 }
 
@@ -199,7 +202,9 @@ EXAMPLES:
   gwsr workflow +weekly-digest --format table
 
 TIPS:
-  Read-only. The unread count is Gmail's estimate for is:unread.",
+  Read-only. The unread count is Gmail's estimate for is:unread.
+  Meetings leave out declined and cancelled events and working-location,
+  out-of-office, focus-time and birthday entries.",
         )
 }
 
@@ -391,6 +396,30 @@ fn chat_message_query(request_id: &str) -> Vec<(&'static str, String)> {
     vec![("requestId", request_id.to_string())]
 }
 
+/// Whether a calendar entry is a meeting for the workflow summaries: an
+/// ordinary event (`eventType` `default`, or none given) that is not
+/// cancelled and that the user has not declined. Working-location,
+/// out-of-office, focus-time, birthday and Gmail-generated entries are not
+/// meetings.
+fn is_meeting(event: &Value) -> bool {
+    if str_field(event, "status") == "cancelled" {
+        return false;
+    }
+    if !matches!(str_field(event, "eventType"), "" | "default") {
+        return false;
+    }
+    let declined = event
+        .get("attendees")
+        .and_then(Value::as_array)
+        .is_some_and(|a| {
+            a.iter().any(|a| {
+                a.get("self").and_then(Value::as_bool) == Some(true)
+                    && str_field(a, "responseStatus") == "declined"
+            })
+        });
+    !declined
+}
+
 /// Events between two instants, expanded and ordered by start time.
 async fn events_between(
     rest: &Transport,
@@ -421,6 +450,7 @@ async fn standup_report(
     let events = events_between(rest, bases, time_min, time_max).await?;
     let meetings: Vec<Value> = events
         .iter()
+        .filter(|e| is_meeting(e))
         .map(|e| json!({ "summary": event_summary(e), "start": event_time(e, "start"), "end": event_time(e, "end") }))
         .collect();
     let tasks = get_all_items(
@@ -498,19 +528,7 @@ fn is_upcoming_meeting(
     event: &Value,
     now: chrono::DateTime<chrono::Utc>,
 ) -> Result<bool, GwsError> {
-    if str_field(event, "status") == "cancelled" {
-        return Ok(false);
-    }
-    let declined = event
-        .get("attendees")
-        .and_then(Value::as_array)
-        .is_some_and(|a| {
-            a.iter().any(|a| {
-                a.get("self").and_then(Value::as_bool) == Some(true)
-                    && str_field(a, "responseStatus") == "declined"
-            })
-        });
-    if declined {
+    if !is_meeting(event) {
         return Ok(false);
     }
     let Some(start) = event.pointer("/start/dateTime").and_then(Value::as_str) else {
@@ -743,6 +761,7 @@ async fn weekly_digest(
     let events = events_between(rest, bases, time_min, time_max).await?;
     let meetings: Vec<Value> = events
         .iter()
+        .filter(|e| is_meeting(e))
         .map(|e| json!({ "summary": event_summary(e), "start": event_time(e, "start") }))
         .collect();
     let unread = rest
@@ -1387,6 +1406,82 @@ mod tests {
                           that goes well past seventy-eight columns so it must not be wrapped"
             })
         );
+    }
+
+    /// Calendar entries that are not meetings: declined, cancelled, and the
+    /// non-meeting event types. Only "Planning" and "Untyped" are meetings.
+    fn mixed_events() -> Value {
+        let me_declined =
+            json!([{"email": "me@example.com", "self": true, "responseStatus": "declined"}]);
+        let t = |h: u32| json!({"dateTime": format!("2026-03-11T{h:02}:00:00Z")});
+        json!({"items": [
+            {"summary": "Planning", "eventType": "default", "start": t(9), "end": t(10),
+             "attendees": [{"email": "me@example.com", "self": true, "responseStatus": "accepted"}]},
+            {"summary": "Declined", "eventType": "default", "start": t(10), "end": t(11), "attendees": me_declined},
+            {"summary": "Cancelled", "status": "cancelled", "start": t(10), "end": t(11)},
+            {"summary": "Office", "eventType": "workingLocation", "start": {"date": "2026-03-11"}, "end": {"date": "2026-03-12"}},
+            {"summary": "Away", "eventType": "outOfOffice", "start": t(11), "end": t(12)},
+            {"summary": "Focus", "eventType": "focusTime", "start": t(12), "end": t(13)},
+            {"summary": "Birthday", "eventType": "birthday", "start": {"date": "2026-03-11"}, "end": {"date": "2026-03-12"}},
+            {"summary": "Untyped", "start": t(14), "end": t(15)}
+        ]})
+    }
+
+    #[tokio::test]
+    async fn standup_and_digest_count_only_meetings() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/calendar/v3/calendars/primary/events"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(mixed_events()))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/tasks/v1/lists/@default/tasks"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/gmail/v1/users/me/messages"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(json!({"resultSizeEstimate": 0})),
+            )
+            .mount(&server)
+            .await;
+        let standup = standup_report(&rest(&server), &bases(&server), "a", "b", "2026-03-11")
+            .await
+            .unwrap();
+        let digest = weekly_digest(&rest(&server), &bases(&server), "a", "b")
+            .await
+            .unwrap();
+        for out in [standup, digest] {
+            let names: Vec<&str> = out["meetings"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|m| m["summary"].as_str().unwrap())
+                .collect();
+            assert_eq!(names, ["Planning", "Untyped"], "{out}");
+            assert_eq!(out["meetingCount"], 2, "{out}");
+        }
+    }
+
+    #[tokio::test]
+    async fn meeting_prep_skips_non_meeting_event_types() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/calendar/v3/calendars/primary/events"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(mixed_events()))
+            .mount(&server)
+            .await;
+        // After "Planning" has started, the next meeting is "Untyped", not
+        // the out-of-office or focus-time blocks before it.
+        let now = chrono::DateTime::parse_from_rfc3339("2026-03-11T09:30:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let out = meeting_prep(&rest(&server), &bases(&server), "primary", now)
+            .await
+            .unwrap();
+        assert_eq!(out["summary"], "Untyped", "{out}");
     }
 
     #[tokio::test]
