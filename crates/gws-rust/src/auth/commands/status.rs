@@ -39,10 +39,14 @@ pub(super) async fn build_report(env: &AuthEnv, offline: bool) -> Value {
     match profiles::list_profiles(&env.base) {
         Ok(dirs) => {
             out["profiles"] = json!(dirs.valid);
-            let (invalid, warning) = super::profile::invalid_profiles_report(&dirs);
-            out["invalid_profiles"] = invalid;
-            if let Some(w) = warning {
-                out["invalid_profiles_warning"] = json!(w);
+            match super::profile::invalid_profiles_report(&dirs) {
+                Ok((invalid, warning)) => {
+                    out["invalid_profiles"] = invalid;
+                    if let Some(w) = warning {
+                        out["invalid_profiles_warning"] = json!(w);
+                    }
+                }
+                Err(e) => out["invalid_profiles_error"] = json!(e.to_string()),
             }
         }
         Err(e) => out["profiles_error"] = json!(format!("{e:#}")),
@@ -61,8 +65,10 @@ pub(super) async fn build_report(env: &AuthEnv, offline: bool) -> Value {
             });
             if c.source == client_config::ClientSource::EnvVars {
                 let p = client_config::client_config_path_in(&env.base);
-                if p.exists() {
-                    client["overrides"] = json!(p.display().to_string());
+                match super::stored_file_exists(&p) {
+                    Ok(true) => client["overrides"] = json!(p.display().to_string()),
+                    Ok(false) => {}
+                    Err(e) => client["overrides_error"] = json!(e.to_string()),
                 }
             }
             out["client"] = client;
@@ -87,13 +93,17 @@ pub(super) async fn build_report(env: &AuthEnv, offline: bool) -> Value {
     if let Some(p) = source.path() {
         out["credential_path"] = json!(p.display().to_string());
     }
-    if let CredentialSource::CredentialsFile(_) = source
-        && env.paths.credentials.exists()
-    {
-        out["note"] = json!(format!(
-            "GWSR_CREDENTIALS_FILE overrides the stored credentials of profile '{}'",
-            env.profile.name
-        ));
+    if let CredentialSource::CredentialsFile(_) = source {
+        match super::stored_file_exists(&env.paths.credentials) {
+            Ok(true) => {
+                out["note"] = json!(format!(
+                    "GWSR_CREDENTIALS_FILE overrides the stored credentials of profile '{}'",
+                    env.profile.name
+                ));
+            }
+            Ok(false) => {}
+            Err(e) => out["note_error"] = json!(e.to_string()),
+        }
     }
 
     if let CredentialSource::Profile { .. } = source {

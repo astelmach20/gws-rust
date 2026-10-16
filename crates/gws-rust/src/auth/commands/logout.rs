@@ -128,7 +128,9 @@ pub(super) async fn logout(env: &AuthEnv, no_revoke: bool) -> Result<Outcome, Gw
     });
     let mut revoke_error = None;
 
-    let has_profile_creds = env.paths.credentials.exists();
+    // A credentials file that cannot be inspected must not be taken for an
+    // absent one: that would skip revoking its refresh token.
+    let has_profile_creds = super::stored_file_exists(&env.paths.credentials)?;
     if has_profile_creds && !no_revoke {
         // Load the profile's own credentials (not whatever GWSR_TOKEN etc. say).
         let mut profile_env = env.clone();
@@ -349,6 +351,31 @@ mod tests {
         running.await.unwrap().unwrap();
         assert!(!env.paths.token_cache.exists());
         assert!(!env.paths.credentials.exists());
+    }
+
+    /// Credentials that cannot be inspected are not taken for absent ones:
+    /// logout fails before skipping the revocation or removing anything.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn uninspectable_credentials_fail_instead_of_skipping_revoke() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = MockServer::start().await;
+        let env = logged_in_env(dir.path(), &server);
+        let Some(guard) = crate::fs_util::testing::unsearchable_dir(&env.paths.dir) else {
+            return;
+        };
+        let result = logout(&env, false).await.map(|o| o.report);
+        drop(guard);
+        let err = result.unwrap_err();
+        assert!(matches!(err, GwsError::CredentialStore(_)), "{err:?}");
+        assert!(
+            err.to_string().contains(&format!(
+                "cannot inspect '{}'",
+                env.paths.credentials.display()
+            )),
+            "{err}"
+        );
+        assert!(env.paths.credentials.exists(), "nothing was removed");
     }
 
     #[tokio::test]
