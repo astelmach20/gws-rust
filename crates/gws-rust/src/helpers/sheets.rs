@@ -53,6 +53,8 @@ fn value_args(cmd: Command) -> Command {
         Arg::new("values")
             .long("values")
             .help("One row as CSV (quote cells containing commas: 'a,\"b,c\",d')")
+            // A row may start with a negative number or a '-' cell.
+            .allow_hyphen_values(true)
             .value_name("CSV_ROW"),
     )
     .arg(
@@ -560,6 +562,34 @@ mod tests {
         ])
         .unwrap();
         assert_eq!(rows, vec![vec![json!("a"), json!("b,c"), json!("d")]]);
+    }
+
+    #[test]
+    fn values_row_may_start_with_a_hyphen() {
+        // A row starting with a negative number or a '-' cell is a value,
+        // not a flag.
+        let rows = values_of(&[
+            "gwsr",
+            "+append",
+            "--spreadsheet-id",
+            "S",
+            "--values",
+            "-5,abc",
+        ])
+        .unwrap();
+        assert_eq!(rows, vec![vec![json!("-5"), json!("abc")]]);
+        let rows = values_of(&[
+            "gwsr",
+            "+write",
+            "--spreadsheet-id",
+            "S",
+            "--range",
+            "A1",
+            "--values",
+            "--,n/a",
+        ])
+        .unwrap();
+        assert_eq!(rows, vec![vec![json!("--"), json!("n/a")]]);
     }
 
     #[test]

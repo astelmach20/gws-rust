@@ -46,6 +46,8 @@ fn content_args(cmd: Command, required: bool) -> Command {
         Arg::new("text")
             .long("text")
             .help("Content to add")
+            // Content may start with '-': a Markdown list item, a rule.
+            .allow_hyphen_values(true)
             .value_name("TEXT"),
     )
     .arg(
@@ -165,6 +167,7 @@ TIPS:
                         .long("find")
                         .help("Text to find")
                         .required(true)
+                        .allow_hyphen_values(true)
                         .value_name("TEXT"),
                 )
                 .arg(
@@ -534,6 +537,42 @@ mod tests {
             cmd.try_get_matches_from(["gwsr", "+write", "--text", "x"])
                 .is_err()
         );
+    }
+
+    #[test]
+    fn content_and_find_may_start_with_a_hyphen() {
+        // A Markdown list or rule starts with '-'; clap must not read it
+        // as a flag.
+        let m = parse(&[
+            "gwsr",
+            "+write",
+            "--document-id",
+            "D",
+            "--markdown",
+            "--text",
+            "- item one\n- item two",
+        ]);
+        let c = Content::parse(m.subcommand_matches("+write").unwrap())
+            .unwrap()
+            .unwrap();
+        assert_eq!(c.text, "- item one\n- item two");
+        let m = parse(&["gwsr", "+create", "--title", "T", "--text", "---"]);
+        let c = Content::parse(m.subcommand_matches("+create").unwrap())
+            .unwrap()
+            .unwrap();
+        assert_eq!(c.text, "---");
+        let m = parse(&[
+            "gwsr",
+            "+replace",
+            "--document-id",
+            "D",
+            "--find",
+            "-5 C",
+            "--replace-with",
+            "-10 C",
+        ]);
+        let sub = m.subcommand_matches("+replace").unwrap();
+        assert_eq!(required(sub, "find").unwrap(), "-5 C");
     }
 
     #[test]
