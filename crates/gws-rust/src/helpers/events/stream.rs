@@ -239,9 +239,13 @@ pub(crate) async fn run_stream<S: StreamStep>(
             Err(StepError::Fatal(e)) => return Err(e),
             Err(StepError::Transient(e)) => {
                 let Some(delay) = budget.record_failure() else {
+                    // `consecutive()` already counts this final failure:
+                    // `--max-failures N` tolerates N and stops on the N+1th.
                     let context = format!(
-                        "giving up after {} consecutive transient failures; last error",
-                        budget.consecutive() - 1
+                        "giving up after {} consecutive transient failures \
+                         (--max-failures {}); last error",
+                        budget.consecutive(),
+                        opts.max_failures
                     );
                     return Err(crate::helpers::modelarmor::prefix_message(e, &context));
                 };
@@ -646,10 +650,17 @@ mod tests {
             calls: 0,
         };
         let err = run_stream(&fast(true, 2), &mut s).await.unwrap_err();
+        // --max-failures 2 tolerates two failures and stops on the third:
+        // the message counts every failed attempt that was made.
+        assert_eq!(s.calls, 3);
         match err {
             GwsError::Api { code, message, .. } => {
                 assert_eq!(code, 502);
-                assert!(message.contains("giving up after 2"));
+                assert!(
+                    message.contains("giving up after 3 consecutive transient failures"),
+                    "{message}"
+                );
+                assert!(message.contains("--max-failures 2"), "{message}");
             }
             other => panic!("unexpected {other:?}"),
         }
@@ -685,7 +696,8 @@ mod tests {
             };
             let err = run_stream(&fast(true, 1), &mut s).await.unwrap_err();
             assert_eq!(err.exit_code(), exit, "{err:?}");
-            assert!(err.to_string().contains("giving up after 1"), "{err}");
+            assert_eq!(s.calls, 2);
+            assert!(err.to_string().contains("giving up after 2"), "{err}");
             assert!(err.to_string().contains(&make().to_string()), "{err}");
         }
     }
