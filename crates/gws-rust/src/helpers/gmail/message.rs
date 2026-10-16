@@ -399,9 +399,11 @@ fn extract_payload_recursive(
         body_data.filter(|_| !is_hydratable && filename.is_empty() && content_id_header.is_none());
 
     if let Some(data) = body_text_data {
-        if mime_type == "text/plain" && contents.body_text.is_none() {
+        // MIME types are case-insensitive (RFC 2045 §5.1) and Gmail reports
+        // them as the sender wrote them, e.g. `TEXT/PLAIN`.
+        if mime_type.eq_ignore_ascii_case("text/plain") && contents.body_text.is_none() {
             contents.body_text = Some(decode_text_body(data, "text/plain")?);
-        } else if mime_type == "text/html" && contents.body_html.is_none() {
+        } else if mime_type.eq_ignore_ascii_case("text/html") && contents.body_html.is_none() {
             contents.body_html = Some(decode_text_body(data, "text/html")?);
         }
     } else if let Some(part_data) = part_data {
@@ -838,6 +840,29 @@ mod tests {
             extract_plain_text_body(&payload).unwrap(),
             "Nested plain text"
         );
+    }
+
+    /// MIME types are case-insensitive: a body part Gmail reports as
+    /// `TEXT/PLAIN` or `Text/Html` is still the body.
+    #[test]
+    fn test_body_mime_types_match_case_insensitively() {
+        let payload = json!({
+            "mimeType": "Multipart/Alternative",
+            "parts": [
+                {
+                    "mimeType": "TEXT/PLAIN",
+                    "body": { "data": URL_SAFE.encode("Plain body") }
+                },
+                {
+                    "mimeType": "Text/Html",
+                    "body": { "data": URL_SAFE.encode("<p>HTML body</p>") }
+                }
+            ]
+        });
+        let contents = extract_payload_contents(&payload).unwrap();
+        assert_eq!(contents.body_text.as_deref(), Some("Plain body"));
+        assert_eq!(contents.body_html.as_deref(), Some("<p>HTML body</p>"));
+        assert!(contents.parts.is_empty());
     }
 
     #[test]
