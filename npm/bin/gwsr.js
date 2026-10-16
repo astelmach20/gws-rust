@@ -33,8 +33,12 @@ try {
   throw err;
 }
 
-const child = spawn(binaryPath, process.argv.slice(2), { stdio: "inherit" });
-
+// Install the forwarding handlers before spawning. Once the binary is running
+// it can produce output, and whoever reads that output may signal the launcher
+// straight away; if the default action still applied at that point, the
+// launcher would die and orphan the binary. Node delivers signals to these
+// handlers from the event loop, so none runs before `child` is assigned below.
+let child;
 const handlers = new Map();
 for (const signal of FORWARDED_SIGNALS) {
   const handler = () => {
@@ -44,6 +48,8 @@ for (const signal of FORWARDED_SIGNALS) {
   handlers.set(signal, handler);
   process.on(signal, handler);
 }
+
+child = spawn(binaryPath, process.argv.slice(2), { stdio: "inherit" });
 
 function removeHandlers() {
   for (const [signal, handler] of handlers) process.removeListener(signal, handler);
