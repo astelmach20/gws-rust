@@ -1988,6 +1988,57 @@ mod tests {
         );
     }
 
+    /// The committed helper skills match what the generator renders from the
+    /// helpers' own clap definitions (no Discovery document needed): usage,
+    /// required flag groups, flags, examples and tips. The CI drift check is
+    /// only a warning, so a stale helper skill could otherwise be committed.
+    #[test]
+    fn committed_helper_skills_match_the_helpers() {
+        let section = |md: &str| -> String {
+            let start = md.find("## Usage\n").unwrap_or(md.len());
+            let end = md.find("## See Also\n").unwrap_or(md.len());
+            md[start..end.max(start)].to_string()
+        };
+        let mut stale = Vec::new();
+        let mut checked = 0;
+        for entry in services::SERVICES {
+            let doc = crate::discovery::RestDescription {
+                name: entry.api_name.to_string(),
+                version: entry.version.to_string(),
+                ..Default::default()
+            };
+            let cli = crate::commands::build_cli(&doc);
+            let alias = entry.aliases[0];
+            for helper in cli
+                .get_subcommands()
+                .filter(|s| s.get_name().starts_with('+'))
+            {
+                let short = helper.get_name().trim_start_matches('+');
+                let path = format!(
+                    "{}/../../skills/gwsr-{alias}-{short}/SKILL.md",
+                    env!("CARGO_MANIFEST_DIR")
+                );
+                let committed = std::fs::read_to_string(&path)
+                    .unwrap_or_else(|e| panic!("cannot read {path}: {e}"));
+                let rendered = render_helper_skill(alias, helper.get_name(), helper, entry, "P");
+                checked += 1;
+                if section(&committed) != section(&rendered) {
+                    stale.push(format!(
+                        "gwsr-{alias}-{short}:\n--- committed\n{}\n--- generated\n{}",
+                        section(&committed),
+                        section(&rendered)
+                    ));
+                }
+            }
+        }
+        assert!(checked > 40, "only {checked} helper skills checked");
+        assert!(
+            stale.is_empty(),
+            "stale helper skills (run `just skills`):\n{}",
+            stale.join("\n")
+        );
+    }
+
     /// A tip wrapped over several help lines is one bullet in the skill, not
     /// one fragment per line.
     #[test]
