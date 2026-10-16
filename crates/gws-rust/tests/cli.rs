@@ -744,6 +744,33 @@ fn clap_errors_are_json_with_a_single_prefix() {
     assert!(!stderr.contains("error[validation]: error"), "{stderr}");
 }
 
+/// clap's suggestions for a mistyped flag or command reach the JSON
+/// envelope as `hint`, not only the human form.
+#[test]
+fn clap_suggestions_are_the_json_hint() {
+    let env = Env::new();
+    env.seed_drive("Lists files.");
+    for (args, hint) in [
+        (
+            &["drive", "files", "list", "--param", "{}"][..],
+            "a similar argument exists: '--params'",
+        ),
+        (
+            &["drive", "fils", "list"],
+            "a similar subcommand exists: 'files'",
+        ),
+        (
+            &["drive", "files", "lst"],
+            "a similar subcommand exists: 'list'",
+        ),
+    ] {
+        let out = env.cmd().args(args).assert().code(3).get_output().clone();
+        assert!(stdout_of(&out).is_empty());
+        let v = stderr_error(&out);
+        assert_eq!(v["error"]["hint"], hint, "{args:?}: {v}");
+    }
+}
+
 #[test]
 fn unknown_format_is_rejected_with_exit_3() {
     let env = Env::new();
