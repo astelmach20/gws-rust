@@ -237,6 +237,19 @@ fn build_schema_output(doc: &RestDescription, method: &RestMethod) -> Value {
         output["parameterOrder"] = json!(method.parameter_order);
     }
 
+    // Parameters every method of the API accepts in --params (`fields`,
+    // `quotaUser`, `prettyPrint`, ...). A method's own parameter of the same
+    // name is the one that applies, so it is listed only under `parameters`.
+    let mut api_params = json!({});
+    for (name, param) in &doc.parameters {
+        if !method.parameters.contains_key(name) {
+            api_params[name] = param_to_json(param);
+        }
+    }
+    if api_params.as_object().is_some_and(|m| !m.is_empty()) {
+        output["apiParameters"] = api_params;
+    }
+
     // Resolve request body schema
     if let Some(ref req_ref) = method.request
         && let Some(ref schema_name) = req_ref.schema_ref
@@ -848,6 +861,57 @@ mod tests {
         );
         assert_eq!(out["mediaUpload"]["maxSize"], "10MB");
         assert!(out.get("pagination").is_none());
+    }
+
+    /// `--params` accepts the API-wide parameters (`fields`, `quotaUser`),
+    /// and a rejected one points at `gwsr schema`, so schema lists them.
+    #[test]
+    fn build_schema_output_lists_api_wide_parameters() {
+        let doc: RestDescription = serde_json::from_value(json!({
+            "name": "x", "version": "v1", "rootUrl": "https://x.googleapis.com/",
+            "parameters": {
+                "fields": { "type": "string", "location": "query",
+                            "description": "Selector specifying a subset of fields." },
+                "quotaUser": { "type": "string", "location": "query" },
+                "alt": { "type": "string", "location": "query", "default": "json",
+                         "enum": ["json", "media"] }
+            },
+            "resources": { "items": { "methods": {
+                "get": { "httpMethod": "GET", "path": "items/{id}",
+                    "parameters": {
+                        "id": { "type": "string", "location": "path", "required": true },
+                        "alt": { "type": "string", "location": "query", "enum": ["json"] }
+                    } }
+            } } }
+        }))
+        .unwrap();
+        let get = find_method(&doc, &["items"], "get").unwrap();
+        let out = build_schema_output(&doc, get);
+        assert_eq!(out["apiParameters"]["fields"]["type"], "string");
+        assert_eq!(out["apiParameters"]["fields"]["location"], "query");
+        assert_eq!(
+            out["apiParameters"]["fields"]["description"],
+            "Selector specifying a subset of fields."
+        );
+        assert!(out["apiParameters"].get("quotaUser").is_some());
+        // The method's own `alt` wins and is not listed twice.
+        assert!(out["apiParameters"].get("alt").is_none());
+        assert_eq!(out["parameters"]["alt"]["enum"], json!(["json"]));
+        assert!(out["parameters"].get("fields").is_none());
+
+        // An API without global parameters gets no empty object.
+        let bare: RestDescription = serde_json::from_value(json!({
+            "name": "x", "version": "v1", "rootUrl": "https://x.googleapis.com/",
+            "resources": { "items": { "methods": {
+                "list": { "httpMethod": "GET", "path": "items" } } } }
+        }))
+        .unwrap();
+        let list = find_method(&bare, &["items"], "list").unwrap();
+        assert!(
+            build_schema_output(&bare, list)
+                .get("apiParameters")
+                .is_none()
+        );
     }
 
     #[test]
