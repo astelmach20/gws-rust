@@ -50,19 +50,34 @@ const DEFAULT_PAGE_DELAY_MS: u64 = 100;
 
 /// Pagination flags: flag > env/config > default. `--page-limit` defaults
 /// to 0 (unlimited).
+///
+/// `--page-limit` and `--page-delay` only shape a `--page-all` /
+/// `--page-items` run; given without either, they would be silently ignored
+/// (one page is fetched whatever the limit), so they are rejected.
 pub fn parse_pagination_config(
     m: &clap::ArgMatches,
     defaults: &ConfigDefaults,
 ) -> Result<PaginationConfig, GwsError> {
+    let page_all =
+        args::flag_if_defined(m, "page-all")? || args::present_if_defined(m, "page-items")?;
+    let page_limit = args::value_if_defined::<u32>(m, "page-limit")?.copied();
+    let page_delay_ms = args::value_if_defined::<u64>(m, "page-delay")?.copied();
+    if !page_all {
+        for (flag, given) in [
+            ("--page-limit", page_limit.is_some()),
+            ("--page-delay", page_delay_ms.is_some()),
+        ] {
+            if given {
+                return Err(GwsError::Validation(format!(
+                    "{flag} only applies when fetching several pages; add --page-all or --page-items"
+                )));
+            }
+        }
+    }
     Ok(PaginationConfig {
-        page_all: args::flag_if_defined(m, "page-all")?
-            || args::present_if_defined(m, "page-items")?,
-        page_limit: args::value_if_defined::<u32>(m, "page-limit")?
-            .copied()
-            .or(defaults.page_limit)
-            .unwrap_or(0),
-        page_delay_ms: args::value_if_defined::<u64>(m, "page-delay")?
-            .copied()
+        page_all,
+        page_limit: page_limit.or(defaults.page_limit).unwrap_or(0),
+        page_delay_ms: page_delay_ms
             .or(defaults.page_delay_ms)
             .unwrap_or(DEFAULT_PAGE_DELAY_MS),
     })
@@ -232,9 +247,46 @@ mod tests {
         let m = cmd().get_matches_from(["t", "--page-all"]);
         let p = parse_pagination_config(&m, &config).unwrap();
         assert_eq!((p.page_limit, p.page_delay_ms), (7, 9));
-        let m = cmd().get_matches_from(["t", "--page-limit", "2", "--page-delay", "3"]);
+        let m = cmd().get_matches_from([
+            "t",
+            "--page-items",
+            "--page-limit",
+            "2",
+            "--page-delay",
+            "3",
+        ]);
         let p = parse_pagination_config(&m, &config).unwrap();
         assert_eq!((p.page_limit, p.page_delay_ms), (2, 3));
+    }
+
+    /// Without --page-all or --page-items one page is fetched whatever
+    /// --page-limit says; the flag must not be silently ignored. A config or
+    /// environment default is not a flag and stays allowed.
+    #[test]
+    fn page_limit_and_delay_need_paging() {
+        for args in [
+            &["t", "--page-limit", "5"][..],
+            &["t", "--page-delay", "0"][..],
+        ] {
+            let m = cmd().get_matches_from(args);
+            let err = parse_pagination_config(&m, &ConfigDefaults::default())
+                .map(|p| format!("accepted: {p:?}"))
+                .unwrap_or_else(|e| match e {
+                    GwsError::Validation(msg) => msg,
+                    other => format!("wrong error: {other:?}"),
+                });
+            assert!(
+                err.contains("add --page-all or --page-items"),
+                "{args:?}: {err}"
+            );
+        }
+        let config = ConfigDefaults {
+            page_limit: Some(7),
+            page_delay_ms: Some(9),
+        };
+        let m = cmd().get_matches_from(["t"]);
+        let p = parse_pagination_config(&m, &config).unwrap();
+        assert!(!p.page_all);
     }
 
     #[test]
