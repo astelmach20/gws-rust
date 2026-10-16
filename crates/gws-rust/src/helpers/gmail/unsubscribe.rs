@@ -18,8 +18,9 @@
 //! * `List-Unsubscribe-Post: List-Unsubscribe=One-Click` is present (RFC 8058 §3.1);
 //! * `List-Unsubscribe` contains an `https:` URI whose host is a DNS name
 //!   (not an IP literal or localhost);
-//! * Gmail's `Authentication-Results` reports `dkim=pass`, since RFC 8058
-//!   requires the headers to be covered by a valid DKIM signature.
+//! * Gmail's own (topmost `mx.google.com`) `Authentication-Results` header
+//!   reports `dkim=pass`, since RFC 8058 requires the headers to be covered
+//!   by a valid DKIM signature. Lower headers come from the sender.
 //!
 //! The POST carries no credentials or cookies and does not follow redirects.
 //! When one-click is not possible the command fails and lists the manual
@@ -96,13 +97,73 @@ fn extract_info(msg: &Value) -> UnsubscribeInfo {
     info.one_click = header_values(msg, "List-Unsubscribe-Post")
         .iter()
         .any(|v| v.trim().eq_ignore_ascii_case(ONE_CLICK_BODY));
-    info.dkim_pass = header_values(msg, "Authentication-Results")
-        .iter()
-        .any(|v| {
-            let v = v.to_ascii_lowercase();
-            v.trim_start().starts_with("mx.google.com") && v.contains("dkim=pass")
-        });
+    info.dkim_pass = gmail_dkim_pass(msg);
     info
+}
+
+/// Split an `Authentication-Results` value on the `;` separators of RFC 8601,
+/// dropping `(comments)` and ignoring `;` inside comments and quoted strings.
+fn auth_results_parts(value: &str) -> Vec<String> {
+    let mut parts = Vec::new();
+    let mut current = String::new();
+    let mut depth = 0usize;
+    let mut quoted = false;
+    let mut chars = value.chars();
+    while let Some(c) = chars.next() {
+        if c == '\\' && (quoted || depth > 0) {
+            // A quoted-pair: the next character is literal.
+            let next = chars.next();
+            if depth == 0 {
+                current.push(c);
+                current.extend(next);
+            }
+            continue;
+        }
+        match c {
+            '(' if !quoted => {
+                depth += 1;
+                current.push(' ');
+            }
+            ')' if depth > 0 => depth -= 1,
+            _ if depth > 0 => {}
+            '"' => {
+                quoted = !quoted;
+                current.push(c);
+            }
+            ';' if !quoted => parts.push(std::mem::take(&mut current)),
+            _ => current.push(c),
+        }
+    }
+    parts.push(current);
+    parts
+}
+
+/// Whether Gmail's own `Authentication-Results` header reports `dkim=pass`.
+///
+/// Only the topmost header whose authserv-id is `mx.google.com` counts: Gmail
+/// prepends it, so any header below it (even one claiming to be from
+/// `mx.google.com`) was supplied by the sender (RFC 8601 §5). The Gmail API
+/// returns `payload.headers` in message order, with or without
+/// `format=metadata`.
+fn gmail_dkim_pass(msg: &Value) -> bool {
+    let Some(parts) = header_values(msg, "Authentication-Results")
+        .into_iter()
+        .map(auth_results_parts)
+        .find(|parts| {
+            parts
+                .first()
+                .and_then(|id| id.split_whitespace().next())
+                .is_some_and(|id| id.eq_ignore_ascii_case("mx.google.com"))
+        })
+    else {
+        return false;
+    };
+    parts.iter().skip(1).any(|resinfo| {
+        resinfo
+            .split_whitespace()
+            .next()
+            .is_some_and(|result| result.eq_ignore_ascii_case("dkim=pass"))
+    })
 }
 
 /// Validate a one-click target URL: https and a DNS host name.
@@ -352,6 +413,50 @@ mod tests {
             ("Authentication-Results", "evil.example; dkim=pass"),
         ]));
         assert!(one_click_target(&info).unwrap_err().contains("DKIM"));
+    }
+
+    #[test]
+    fn only_gmails_topmost_authentication_results_counts() {
+        // Gmail prepends its own header; anything below it came from the
+        // sender (RFC 8601 §5), even when it claims to be mx.google.com.
+        let info = extract_info(&msg(&[
+            ("List-Unsubscribe", "<https://list.example.com/u>"),
+            ("List-Unsubscribe-Post", "List-Unsubscribe=One-Click"),
+            (
+                "Authentication-Results",
+                "mx.google.com; dkim=fail header.i=@example.com; spf=pass",
+            ),
+            (
+                "Authentication-Results",
+                "mx.google.com; dkim=pass header.i=@example.com",
+            ),
+        ]));
+        assert!(!info.dkim_pass);
+        assert!(one_click_target(&info).unwrap_err().contains("DKIM"));
+    }
+
+    #[test]
+    fn dkim_pass_must_be_a_dkim_result_from_gmail() {
+        for value in [
+            // Another server whose name merely starts with mx.google.com.
+            "mx.google.com.evil.example; dkim=pass",
+            // `dkim=pass` inside a comment or another method's value.
+            "mx.google.com; dkim=fail; spf=pass (google.com: domain of dkim=pass@example.com) smtp.mailfrom=dkim=pass@example.com",
+            "mx.google.com; dkim=passed",
+            "mx.google.com; arc=pass (i=1 dkim=pass)",
+            "mx.google.com; spf=pass smtp.mailfrom=\"a;dkim=pass\"@example.com",
+        ] {
+            let info = extract_info(&msg(&[("Authentication-Results", value)]));
+            assert!(!info.dkim_pass, "{value}");
+        }
+        for value in [
+            "mx.google.com; dkim=pass header.i=@example.com",
+            "MX.Google.Com;\r\n       dkim=neutral (no key) header.d=a.example;\r\n       dkim=pass (test mode) header.d=example.com",
+            "mx.google.com;\r\n       dkim=pass",
+        ] {
+            let info = extract_info(&msg(&[("Authentication-Results", value)]));
+            assert!(info.dkim_pass, "{value}");
+        }
     }
 
     #[test]
