@@ -180,7 +180,7 @@ pub(crate) fn auth_command() -> clap::Command {
                 .arg(
                     clap::Arg::new("output")
                         .long("output")
-                        .value_name("FILE")
+                        .value_name("FILE").value_hint(clap::ValueHint::AnyPath)
                         .requires("unmasked")
                         .help("New file to write (created with mode 0600; must not exist)"),
                 )

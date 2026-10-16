@@ -193,7 +193,8 @@ fn common_mail_args(cmd: Command) -> Command {
                 .long("attach")
                 .help("Attach a file (repeatable)")
                 .action(ArgAction::Append)
-                .value_name("PATH"),
+                .value_name("PATH")
+                .value_hint(clap::ValueHint::FilePath),
         )
         .arg(
             Arg::new("cc")
@@ -805,7 +806,8 @@ fn attachments_cmd() -> Command {
                 .long("output-dir")
                 .help("Directory to write files into")
                 .default_value(".")
-                .value_name("DIR"),
+                .value_name("DIR")
+                .value_hint(clap::ValueHint::DirPath),
         )
         .arg(
             Arg::new("include-inline")
@@ -913,7 +915,8 @@ fn watch_cmd() -> Command {
             Arg::new("output-dir")
                 .long("output-dir")
                 .help("Write each message to a separate JSON file in this directory")
-                .value_name("DIR"),
+                .value_name("DIR")
+                .value_hint(clap::ValueHint::DirPath),
         )
         .after_help(
             "\

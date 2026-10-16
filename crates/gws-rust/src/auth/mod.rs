@@ -312,6 +312,27 @@ pub fn token_provider(scopes: &[&str]) -> ScopedTokenProvider {
     ScopedTokenProvider::new(scopes)
 }
 
+/// Whether gwsr can obtain a different access token from `source` after an
+/// API rejects the current one with HTTP 401.
+///
+/// `GWSR_TOKEN` is a fixed token: "refreshing" it would resend the same
+/// rejected value. `GWSR_TOKEN_FILE` is read again, so a token rotated by
+/// whatever writes the file is picked up; every other source mints a new
+/// token.
+pub(crate) fn source_can_refresh(source: &CredentialSource) -> bool {
+    !matches!(source, CredentialSource::TokenEnv)
+}
+
+/// [`source_can_refresh`] for this process's credential source.
+///
+/// # Errors
+///
+/// Credential-source resolution failures (conflicting or missing sources).
+pub(crate) fn active_source_can_refresh() -> anyhow::Result<bool> {
+    let env = AuthEnv::from_process()?;
+    Ok(source_can_refresh(&env.source()?))
+}
+
 /// Obtain an access token for `scopes` using the configured credentials
 /// (see [`credentials`] for the source order).
 ///
@@ -524,7 +545,15 @@ fn identity_cache_key_for(env: &AuthEnv) -> Result<Option<String>, AuthError> {
         CredentialSource::CredentialsFile(path)
         | CredentialSource::AdcEnv(path)
         | CredentialSource::AdcWellKnown(path) => {
-            format!("{}:{}", source.kind(), path.display())
+            // Key on the file the path resolves to: a relative path or a
+            // symlink names a different account from another directory.
+            let resolved = std::fs::canonicalize(path).map_err(|e| {
+                AuthError::Config(format!(
+                    "cannot resolve the credentials path '{}': {e}",
+                    path.display()
+                ))
+            })?;
+            format!("{}:{}", source.kind(), resolved.display())
         }
     };
     Ok(Some(match &env.impersonate {
@@ -657,6 +686,26 @@ mod tests {
             client_secret: secrecy::SecretString::from("secret".to_string()),
             project_id: project.map(str::to_string),
             source: client_config::ClientSource::BuiltIn,
+        }
+    }
+
+    /// Only `GWSR_TOKEN` is fixed: every other source can yield a new token
+    /// after a 401, so the transport still refreshes once for them.
+    #[test]
+    fn only_the_token_env_var_cannot_refresh() {
+        let p = std::path::PathBuf::from("/tmp/x.json");
+        assert!(!source_can_refresh(&CredentialSource::TokenEnv));
+        for source in [
+            CredentialSource::TokenFile(p.clone()),
+            CredentialSource::CredentialsFile(p.clone()),
+            CredentialSource::Profile {
+                name: "default".to_string(),
+                path: p.clone(),
+            },
+            CredentialSource::AdcEnv(p.clone()),
+            CredentialSource::AdcWellKnown(p),
+        ] {
+            assert!(source_can_refresh(&source), "{source:?}");
         }
     }
 
@@ -1215,6 +1264,51 @@ mod tests {
         token.profile.source = ProfileSource::Default;
         token.token = Some(SecretString::from("tok".to_string()));
         assert_eq!(key(&token), None, "a raw token has no known account");
+    }
+
+    /// A relative `GWSR_CREDENTIALS_FILE` names a different file in each
+    /// working directory, so the key must identify the file it resolves to,
+    /// not the text of the path. Otherwise `./sa.json` in two project
+    /// directories (two accounts) shares one cached timezone.
+    #[cfg(unix)]
+    #[test]
+    fn identity_cache_key_resolves_relative_credential_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        let sa = dir.path().join("sa.json");
+        std::fs::write(&sa, "{}").unwrap();
+        // Spell the same file relative to the current directory without
+        // changing it (tests run in parallel).
+        let cwd = std::env::current_dir().unwrap();
+        let mut relative = std::path::PathBuf::new();
+        for _ in cwd.components().skip(1) {
+            relative.push("..");
+        }
+        relative.push(sa.strip_prefix("/").unwrap());
+        assert!(relative.is_relative());
+
+        let mk = |path: std::path::PathBuf| {
+            let mut env = AuthEnv::new(
+                dir.path().to_path_buf(),
+                ActiveProfile {
+                    name: "default".into(),
+                    source: ProfileSource::Default,
+                },
+                ProfilePaths::new(dir.path(), "default"),
+            );
+            env.credentials_file = Some(path);
+            identity_cache_key_for(&env).unwrap()
+        };
+        assert_eq!(mk(relative), mk(sa.clone()), "relative vs absolute");
+
+        // A symlink to the file is the same account, too.
+        let link = dir.path().join("link.json");
+        std::os::unix::fs::symlink(&sa, &link).unwrap();
+        assert_eq!(mk(link), mk(sa.clone()), "symlink vs target");
+
+        // A different file is still a different account.
+        let other = dir.path().join("other.json");
+        std::fs::write(&other, "{}").unwrap();
+        assert_ne!(mk(other), mk(sa));
     }
 
     #[test]
