@@ -421,7 +421,7 @@ impl UploadArgs {
                 "--file '{raw}' is not a readable file"
             )));
         }
-        let name = match optional(m, "name")? {
+        let name = match optional_non_empty(m, "name")? {
             Some(n) => n.to_string(),
             None => determine_filename(raw)?,
         };
@@ -2294,6 +2294,29 @@ mod tests {
             let (_, sub) = m.subcommand().unwrap();
             assert_eq!(UploadArgs::parse(sub).unwrap().content_type, good);
         }
+    }
+
+    /// An empty or blank `--name` (an unset shell variable, say) is refused
+    /// while parsing, before credentials are loaded: sent as `name: ""`,
+    /// Drive would create the file as "Untitled".
+    #[test]
+    fn upload_rejects_an_empty_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("r.txt");
+        std::fs::write(&file, "data").unwrap();
+        let file = file.to_str().unwrap();
+        for blank in ["", " ", "\t"] {
+            let m = matches(&["gwsr", "+upload", "--file", file, "--name", blank]);
+            let (_, sub) = m.subcommand().unwrap();
+            let err = UploadArgs::parse(sub)
+                .err()
+                .unwrap_or_else(|| panic!("{blank:?} accepted"));
+            assert!(matches!(err, GwsError::Validation(_)), "{blank:?}: {err:?}");
+            assert!(err.to_string().contains("--name"), "{err}");
+        }
+        let m = matches(&["gwsr", "+upload", "--file", file, "--name", "-draft"]);
+        let (_, sub) = m.subcommand().unwrap();
+        assert_eq!(UploadArgs::parse(sub).unwrap().name, "-draft");
     }
 
     #[tokio::test]
