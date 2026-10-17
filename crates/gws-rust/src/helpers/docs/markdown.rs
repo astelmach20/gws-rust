@@ -448,9 +448,16 @@ impl Rendered {
         text.push_str(self.text.strip_suffix('\n').unwrap_or(&self.text));
         let total_end = base + utf16_len(&self.text);
 
-        let mut requests = vec![json!({
-            "insertText": { "location": { "index": index }, "text": text }
-        })];
+        let mut requests = Vec::new();
+        // Content that is one empty paragraph (a lone rule, an empty heading
+        // or list item) has no text before the newline it shares with the
+        // document; Docs rejects an insertText with no text, so the styles
+        // below apply to the paragraph already at `index`.
+        if !text.is_empty() {
+            requests.push(json!({
+                "insertText": { "location": { "index": index }, "text": text }
+            }));
+        }
         // Reset styling inherited from the paragraph the content lands in
         // (its text style, and paragraph styles such as a quote's indent or a
         // rule's border) over the whole inserted range.
@@ -627,6 +634,39 @@ mod tests {
         assert_eq!(para[0]["range"], json!({"startIndex": 11, "endIndex": 13}));
         assert_eq!(para[1]["range"], json!({"startIndex": 11, "endIndex": 13}));
         assert_eq!(para[1]["paragraphStyle"]["namedStyleType"], "HEADING_1");
+    }
+
+    #[test]
+    fn single_empty_paragraph_sends_no_empty_insert() {
+        // A lone rule, empty heading or empty item is one empty paragraph:
+        // its only text is the newline that the document's own final newline
+        // replaces. Docs rejects an insertText without text, so none is sent
+        // and the styles apply to the paragraph at `index`.
+        for (md, named) in [("---", "NORMAL_TEXT"), ("#", "HEADING_1"), ("-", "")] {
+            let reqs = render(md).unwrap().to_requests(1, false);
+            assert!(find(&reqs, "insertText").is_empty(), "{md}: {reqs:?}");
+            for key in ["deleteParagraphBullets", "updateTextStyle"] {
+                assert_eq!(
+                    find(&reqs, key)[0]["range"],
+                    json!({"startIndex": 1, "endIndex": 2}),
+                    "{md}"
+                );
+            }
+            if !named.is_empty() {
+                assert_eq!(
+                    find(&reqs, "updateParagraphStyle")[1]["paragraphStyle"]["namedStyleType"],
+                    named
+                );
+            }
+        }
+        let reqs = render("-").unwrap().to_requests(1, false);
+        assert_eq!(
+            find(&reqs, "createParagraphBullets")[0]["range"],
+            json!({"startIndex": 1, "endIndex": 2})
+        );
+        // After a paragraph with text, the break itself is still inserted.
+        let reqs = render("---").unwrap().to_requests(5, true);
+        assert_eq!(reqs[0]["insertText"]["text"], "\n");
     }
 
     #[test]
