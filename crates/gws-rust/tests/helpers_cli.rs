@@ -1101,6 +1101,52 @@ fn drive_download_and_export_check_output_before_auth() {
     }
 }
 
+/// An existing `--output` file without `--overwrite` can never be written
+/// either: every helper must refuse it before loading (absent) credentials
+/// or sending a request, and leave the file alone.
+#[test]
+fn helper_output_to_an_existing_file_is_refused_before_auth() {
+    let dir = setup();
+    seed(dir.path(), "forms", "v1", "");
+    std::fs::write(dir.path().join("taken.out"), "keep me").unwrap();
+    let cases: [&[&str]; 5] = [
+        &["drive", "+download", "--file-id", "F1"],
+        &["drive", "+export", "--file-id", "F1", "--to", "pdf"],
+        &[
+            "docs",
+            "+read",
+            "--document-id",
+            "D",
+            "--body-format",
+            "text",
+        ],
+        &[
+            "sheets",
+            "+read",
+            "--spreadsheet-id",
+            "S",
+            "--range",
+            "A1:B2",
+        ],
+        &["forms", "+responses", "--form-id", "F"],
+    ];
+    for args in cases {
+        let out = gwsr(dir.path())
+            .args(args)
+            .args(["--output", "taken.out"])
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(3), "{args:?}: {stderr}");
+        assert!(stderr.contains("already exists"), "{args:?}: {stderr}");
+        assert!(stderr.contains("--overwrite"), "{args:?}: {stderr}");
+    }
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("taken.out")).unwrap(),
+        "keep me"
+    );
+}
+
 #[test]
 fn gmail_helper_output_honors_sanitize_block_mode() {
     let dir = setup();
