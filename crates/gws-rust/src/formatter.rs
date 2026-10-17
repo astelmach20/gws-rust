@@ -32,7 +32,7 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::error::GwsError;
 use crate::jq::JqFilter;
-use crate::output::sanitize_for_terminal;
+use crate::output::{is_joiner, sanitize_for_terminal, sanitize_text_for_terminal};
 
 /// Values accepted by `--format` (and `format` in the config file).
 pub const FORMAT_NAMES: &[&str] = &["json", "table", "yaml", "yml", "csv"];
@@ -315,7 +315,7 @@ fn render(
         let lines: Vec<String> = outputs
             .iter()
             .map(|v| match v {
-                Value::String(s) if settings.terminal => sanitize_for_terminal(s),
+                Value::String(s) if settings.terminal => sanitize_text_for_terminal(s),
                 Value::String(s) => s.clone(),
                 other => json_string(other, style),
             })
@@ -850,15 +850,20 @@ fn table_key(key: &str) -> String {
 /// `s` without terminal control sequences, on one line: a newline or tab
 /// would break the table's rows and alignment.
 fn one_line(s: &str) -> String {
-    sanitize_for_terminal(s).replace(['\n', '\t'], " ")
+    sanitize_text_for_terminal(s).replace(['\n', '\t'], " ")
 }
 
 /// Neutralise spreadsheet formula injection (OWASP): a text cell starting with
 /// `=`, `+`, `-`, `@`, TAB or CR is prefixed with `'`. Control sequences are
-/// stripped first, so a stripped leading character cannot hide a formula.
+/// stripped first, so a stripped leading character cannot hide a formula, and
+/// the zero-width joiners text uses are kept but cannot hide one either.
 fn csv_text(s: &str) -> String {
-    let clean = sanitize_for_terminal(s);
-    if s.starts_with('\r') || clean.starts_with(['=', '+', '-', '@', '\t']) {
+    let clean = sanitize_text_for_terminal(s);
+    if s.starts_with('\r')
+        || clean
+            .trim_start_matches(is_joiner)
+            .starts_with(['=', '+', '-', '@', '\t'])
+    {
         format!("'{clean}")
     } else {
         clean
@@ -1743,5 +1748,37 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(fmt_with(&json!(1), OutputFormat::Json, &settings), "");
+    }
+
+    /// Zero-width joiners are part of the text (emoji sequences, Persian and
+    /// Indic scripts): table and CSV cells keep them, while other invisible
+    /// characters are still removed.
+    #[test]
+    fn table_and_csv_keep_zero_width_joiners() {
+        let family = "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}";
+        let persian = "\u{0645}\u{06CC}\u{200C}\u{062E}\u{0648}\u{0627}\u{0645}";
+        let val = json!([{"a": family, "b": persian, "c": "x\u{200B}y"}]);
+        assert_eq!(
+            fmt(&val, OutputFormat::Csv),
+            format!("a,b,c\n{family},{persian},xy")
+        );
+        let table = fmt(&val, OutputFormat::Table);
+        let row = table.lines().nth(2).unwrap();
+        assert!(row.starts_with(family) && row.contains(persian), "{table}");
+        assert!(!table.contains('\u{200B}'), "{table}");
+        // An emoji ZWJ sequence is one two-column character: the header
+        // separator is as wide as the column needs, no wider.
+        assert!(table.lines().nth(1).unwrap().starts_with("──  "), "{table}");
+        // A joiner in front of a formula does not hide it.
+        assert_eq!(
+            fmt(&json!(["\u{200D}=1+1"]), OutputFormat::Csv),
+            "'\u{200D}=1+1"
+        );
+        let settings = OutputSettings {
+            jq: Some(JqFilter::compile(".[0].a").unwrap()),
+            terminal: true,
+            ..Default::default()
+        };
+        assert_eq!(fmt_with(&val, OutputFormat::Json, &settings), family);
     }
 }
