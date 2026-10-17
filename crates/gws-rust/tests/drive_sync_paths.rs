@@ -99,10 +99,16 @@ async fn sync_creates_no_directory_outside_cwd_through_a_symlink() {
     seed_drive(&config);
 
     let sync = || {
-        Command::cargo_bin("gwsr")
-            .unwrap()
-            .env_clear()
-            .env("GWSR_CONFIG_DIR", &config)
+        let mut cmd = Command::cargo_bin("gwsr").unwrap();
+        cmd.env_clear();
+        // The Nix build sandbox has no system trust store; building the HTTP
+        // client needs its certificate bundle even for a plain-HTTP server.
+        for key in ["SSL_CERT_FILE", "NIX_SSL_CERT_FILE"] {
+            if let Some(value) = std::env::var_os(key) {
+                cmd.env(key, value);
+            }
+        }
+        cmd.env("GWSR_CONFIG_DIR", &config)
             .env("GWSR_CACHE_DIR", config.join("cache"))
             .env("HOME", &config)
             .env("GWSR_TOKEN", "test-token")
