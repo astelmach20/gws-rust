@@ -38,11 +38,13 @@ const SECRET_FIELDS: &[&str] = &["client_secret", "refresh_token", "private_key"
 pub(super) async fn handle(m: &clap::ArgMatches) -> Result<(), GwsError> {
     let unmasked = crate::args::flag(m, "unmasked")?;
     // Check the destination under `GWSR_RESTRICT_PATHS` before any
-    // credentials are read.
+    // credentials are read. A path naming a directory (`out/`, an existing
+    // directory) is refused: resolving `out/` drops the trailing separator,
+    // so the secrets would otherwise land in a file named `out`.
     let output = if unmasked {
         let output = crate::args::value::<String>(m, "output")?
             .ok_or_else(|| GwsError::Validation("--unmasked requires --output FILE".into()))?;
-        Some(crate::validate::validate_safe_file_path(
+        Some(crate::validate::validate_output_file_path(
             output, "--output",
         )?)
     } else {
