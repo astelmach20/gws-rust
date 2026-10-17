@@ -631,7 +631,7 @@ fn resolve_target(
     // A name taken from Drive is always a file, never `-` (stdout): only
     // the user's own `--output -` may send raw bytes to stdout.
     let path = crate::validate::validate_output_file_path(&name, "--output")?;
-    Ok(OutputTarget::File { path, overwrite })
+    OutputTarget::file(path, overwrite)
 }
 
 /// Placeholder for the Drive file's name, which a dry run does not read.

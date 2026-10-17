@@ -40,7 +40,7 @@ gwsr gmail +watch
 | `--msg-format` | — | full | Gmail message format |
 | `--once` | — | — | Pull once and exit |
 | `--cleanup` | — | — | Delete created Pub/Sub resources on exit |
-| `--output-dir` | — | — | Write each message to a separate JSON file in this directory |
+| `--output-dir` | — | — | Write each message to a separate JSON file in this directory (not with --jq, --columns or a non-JSON --format) |
 
 ## Examples
 

@@ -85,6 +85,42 @@ impl StreamPrinter {
     }
 }
 
+/// Refuse the stdout-only output flags with `--output-dir`.
+///
+/// With `--output-dir` every record is written as JSON to its own file and
+/// nothing goes to stdout, so `--jq`, `--columns` and a non-JSON `--format`
+/// would be silently ignored. A `format` from the environment or
+/// `config.toml` is a default for stdout and does not count.
+pub(crate) fn reject_stdout_flags_with_output_dir(
+    matches: &clap::ArgMatches,
+    output_dir: bool,
+) -> Result<(), GwsError> {
+    if !output_dir {
+        return Ok(());
+    }
+    let mut flags = Vec::new();
+    if crate::args::optional(matches, "jq")?.is_some() {
+        flags.push("--jq".to_string());
+    }
+    if !crate::args::many(matches, "columns")?.is_empty() {
+        flags.push("--columns".to_string());
+    }
+    if let Some(format) = crate::args::optional(matches, "format")?
+        && format != "json"
+    {
+        flags.push(format!("--format {format}"));
+    }
+    if flags.is_empty() {
+        return Ok(());
+    }
+    Err(GwsError::Validation(format!(
+        "{} cannot be combined with --output-dir: each record is written \
+         as JSON to its own file and nothing is printed on stdout; \
+         omit --output-dir to filter or format the stream",
+        flags.join(", ")
+    )))
+}
+
 /// Write one diagnostic record to stderr as a single JSON line. With `-q`
 /// only `error` records are written.
 pub(crate) fn emit_diagnostic(level: &str, event: &str, fields: Value) {

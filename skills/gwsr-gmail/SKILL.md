@@ -31,7 +31,7 @@ gwsr gmail <resource> <method> [flags]
 | [`+reply-all`](../gwsr-gmail-reply-all/SKILL.md) | Reply to all recipients of a message (handles threading automatically) |
 | [`+forward`](../gwsr-gmail-forward/SKILL.md) | Forward a message to new recipients |
 | [`+read`](../gwsr-gmail-read/SKILL.md) | Read a message and print its body and optionally headers |
-| [`+triage`](../gwsr-gmail-triage/SKILL.md) | Show an unread inbox summary (sender, subject, date) |
+| [`+triage`](../gwsr-gmail-triage/SKILL.md) | Summarize unread messages (sender, subject, date) |
 | [`+search`](../gwsr-gmail-search/SKILL.md) | Search messages and return full metadata, with pagination |
 | [`+label`](../gwsr-gmail-label/SKILL.md) | Add or remove labels on messages or threads |
 | [`+archive`](../gwsr-gmail-archive/SKILL.md) | Archive messages or threads (remove from Inbox) |

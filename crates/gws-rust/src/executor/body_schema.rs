@@ -44,6 +44,18 @@ fn int64_number(format: Option<&str>, n: &serde_json::Number) -> bool {
     }
 }
 
+/// Whether `s` is a valid value for a string property of Discovery
+/// `format`: for `int64` and `uint64`, a decimal integer in that format's
+/// range (the same check as [`int64_number`] and [`integer_string`], so
+/// `"1.5"` is refused); any string for every other format.
+fn string_value(format: Option<&str>, s: &str) -> bool {
+    match format {
+        Some("int64") => s.parse::<i64>().is_ok(),
+        Some("uint64") => s.parse::<u64>().is_ok(),
+        _ => true,
+    }
+}
+
 /// Whether `v` is in range for an integer property of Discovery `format`
 /// `int32`, `uint32` (or no format: any 64-bit integer, signed or unsigned).
 fn integer_in_range(format: Option<&str>, v: i128) -> bool {
@@ -69,11 +81,33 @@ fn integer_string(format: Option<&str>, s: &str) -> bool {
     s.parse::<i128>().is_ok_and(|v| integer_in_range(format, v))
 }
 
+/// Whether the finite `v` is in range for a number property of Discovery
+/// `format`: a `float` is a 32-bit float, so a value that rounds beyond
+/// `f32::MAX` is refused (the API's proto3 JSON parser rejects it); `double`
+/// (or no format) takes any finite f64.
+fn number_in_range(format: Option<&str>, v: f64) -> bool {
+    match format {
+        // Rounding to the nearest f32 overflows to infinity exactly when
+        // `v` is beyond the float range.
+        Some("float") => (v as f32).is_finite(),
+        _ => true,
+    }
+}
+
+/// Whether `n` is a valid JSON number for a number property of `format`.
+fn number_number(format: Option<&str>, n: &serde_json::Number) -> bool {
+    n.as_f64()
+        .is_some_and(|v| v.is_finite() && number_in_range(format, v))
+}
+
 /// Whether `s` is a valid proto3 JSON string form of a `double` or `float`:
-/// a finite decimal number, `"NaN"`, `"Infinity"` or `"-Infinity"`.
-fn number_string(s: &str) -> bool {
+/// a finite decimal number in the format's range, `"NaN"`, `"Infinity"` or
+/// `"-Infinity"`.
+fn number_string(format: Option<&str>, s: &str) -> bool {
     matches!(s, "NaN" | "Infinity" | "-Infinity")
-        || (s.trim() == s && s.parse::<f64>().is_ok_and(f64::is_finite))
+        || (s.trim() == s
+            && s.parse::<f64>()
+                .is_ok_and(|v| v.is_finite() && number_in_range(format, v)))
 }
 
 struct Checker<'a> {
@@ -204,7 +238,7 @@ impl Checker<'_> {
 
         if let Some(expected) = &prop.prop_type {
             let type_matches = match (expected.as_str(), value) {
-                ("string", Value::String(_)) => true,
+                ("string", Value::String(s)) => string_value(prop.format.as_deref(), s),
                 // Discovery types 64-bit integers as strings; the API's JSON
                 // parser takes them as numbers too (proto3 JSON mapping).
                 ("string", Value::Number(n)) => int64_number(prop.format.as_deref(), n),
@@ -212,8 +246,8 @@ impl Checker<'_> {
                 // Proto3 JSON also takes integers and floating-point numbers
                 // as strings ("5", "1.5", "NaN", "Infinity").
                 ("integer", Value::String(s)) => integer_string(prop.format.as_deref(), s),
-                ("number", Value::Number(_)) => true,
-                ("number", Value::String(s)) => number_string(s),
+                ("number", Value::Number(n)) => number_number(prop.format.as_deref(), n),
+                ("number", Value::String(s)) => number_string(prop.format.as_deref(), s),
                 ("boolean", Value::Bool(_)) => true,
                 ("array", Value::Array(_)) => true,
                 ("object", Value::Object(_)) => true,
@@ -221,8 +255,15 @@ impl Checker<'_> {
                 _ => false,
             };
             if !type_matches {
+                // The format says why a value of the right JSON type (an
+                // `int64` string such as "abc") is refused.
+                let format = prop
+                    .format
+                    .as_deref()
+                    .map(|f| format!(" with format '{f}'"))
+                    .unwrap_or_default();
                 self.errors.push(format!(
-                    "{path}: Expected type '{expected}', found {}",
+                    "{path}: Expected type '{expected}'{format}, found {}",
                     value_type(value)
                 ));
                 return;
@@ -485,6 +526,52 @@ mod tests {
         }
     }
 
+    /// A string sent for an `int64`/`uint64` field must be a decimal integer
+    /// in that format's range, as the JSON number form and the string form
+    /// of an `int32` field must: `"abc"` or `"1.5"` would be refused by the
+    /// API after the request was sent.
+    #[test]
+    fn int64_string_values_are_checked_like_numbers() {
+        let doc: RestDescription = serde_json::from_value(json!({
+            "name": "x", "version": "v1", "rootUrl": "https://x.googleapis.com/",
+            "schemas": { "Req": { "id": "Req", "type": "object", "properties": {
+                "size": { "type": "string", "format": "int64" },
+                "historyId": { "type": "string", "format": "uint64" },
+                "ids": { "type": "array",
+                         "items": { "type": "string", "format": "int64" } },
+                "when": { "type": "string", "format": "date-time" },
+                "name": { "type": "string" }
+            } } }
+        }))
+        .unwrap();
+        let check = |body: Value| validate_body(&body, "Req", &doc, false);
+        for body in [
+            json!({"size": "-9223372036854775808", "historyId": "18446744073709551615"}),
+            json!({"size": "9223372036854775807", "historyId": "0", "ids": ["1", 2]}),
+            // Other string formats and plain strings are not number-checked.
+            json!({"when": "2026-01-01T00:00:00Z", "name": "1.5"}),
+        ] {
+            check(body.clone()).unwrap_or_else(|e| panic!("{body}: {e}"));
+        }
+        for (body, needle) in [
+            (json!({"size": "abc"}), "size: "),
+            (json!({"size": ""}), "size: "),
+            (json!({"size": "1.5"}), "size: "),
+            (json!({"size": " 5"}), "size: "),
+            (json!({"size": "9223372036854775808"}), "size: "),
+            (json!({"historyId": "-1"}), "historyId: "),
+            (json!({"historyId": "18446744073709551616"}), "historyId: "),
+            (json!({"ids": ["1", "x"]}), "ids[1]: "),
+        ] {
+            let msg = check(body.clone()).unwrap_err().to_string();
+            assert!(msg.contains(needle), "{body}: {msg}");
+            assert!(
+                msg.contains("format 'int64'") || msg.contains("format 'uint64'"),
+                "{body}: {msg}"
+            );
+        }
+    }
+
     /// The proto3 JSON mapping that Google APIs parse accepts 32-bit integers
     /// and floating-point numbers as strings too, including the special
     /// values `"NaN"`, `"Infinity"` and `"-Infinity"`.
@@ -572,6 +659,45 @@ mod tests {
         ] {
             let msg = check(body.clone()).unwrap_err().to_string();
             assert!(msg.contains("Expected type 'integer'"), "{body}: {msg}");
+        }
+    }
+
+    /// A `float` field holds a 32-bit float: a value beyond its range is
+    /// refused by the API's proto3 JSON parser, whether it is a JSON number
+    /// or its string form, while a `double` field takes the full f64 range.
+    #[test]
+    fn float_values_are_range_checked() {
+        let doc: RestDescription = serde_json::from_value(json!({
+            "name": "x", "version": "v1", "rootUrl": "https://x.googleapis.com/",
+            "schemas": { "Req": { "id": "Req", "type": "object", "properties": {
+                "scale": { "type": "number", "format": "float" },
+                "ratio": { "type": "number", "format": "double" },
+                "plain": { "type": "number" }
+            } } }
+        }))
+        .unwrap();
+        let check = |body: Value| validate_body(&body, "Req", &doc, false);
+        for body in [
+            json!({"scale": 3.4e38, "ratio": 1e300, "plain": 1e300}),
+            json!({"scale": -3.4e38, "ratio": "1e300", "plain": "-1e300"}),
+            json!({"scale": "3.4e38"}),
+            json!({"scale": 1e-50}),
+            json!({"scale": "NaN"}),
+            json!({"scale": "-Infinity"}),
+        ] {
+            check(body.clone()).unwrap_or_else(|e| panic!("{body}: {e}"));
+        }
+        for body in [
+            json!({"scale": 1e39}),
+            json!({"scale": -1e39}),
+            json!({"scale": "1e39"}),
+            json!({"scale": "-3.5e38"}),
+        ] {
+            let msg = check(body.clone()).unwrap_err().to_string();
+            assert!(
+                msg.contains("scale: Expected type 'number'"),
+                "{body}: {msg}"
+            );
         }
     }
 

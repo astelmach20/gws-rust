@@ -1,6 +1,6 @@
 ---
 name: gwsr-gmail-triage
-description: "Gmail: Show an unread inbox summary (sender, subject, date)."
+description: "Gmail: Summarize unread messages (sender, subject, date)."
 metadata:
   version: 0.23.0
   openclaw:
@@ -18,7 +18,7 @@ metadata:
 
 > **PREREQUISITE:** Read `../gwsr-shared/SKILL.md` for auth, global flags, and security rules. If it is missing, install it with `npx skills add https://github.com/astelmach20/gws-rust/tree/main/skills/gwsr-shared`.
 
-Show an unread inbox summary (sender, subject, date)
+Summarize unread messages (sender, subject, date)
 
 ## Usage
 
@@ -40,12 +40,14 @@ gwsr gmail +triage
 gwsr gmail +triage
 gwsr gmail +triage --max 5 --query 'from:boss'
 gwsr gmail +triage --format table
+gwsr gmail +triage --query 'is:unread in:inbox'
 gwsr gmail +triage | jq -r '.messages[].subject'
 ```
 
 ## Tips
 
-- Read-only. Use +search for full metadata and paging.
+- Read-only. The default query, is:unread, searches all mail, archived messages included; add in:inbox to limit it to the Inbox. --query replaces the default rather than narrowing it.
+- Use +search for full metadata and paging.
 
 ## See Also
 

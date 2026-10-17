@@ -131,12 +131,25 @@ pub(super) fn parse_optional_mailboxes(
     matches: &ArgMatches,
     name: &str,
 ) -> Result<Option<Vec<Mailbox>>, GwsError> {
-    let Some(value) = parse_optional_trimmed(matches, name)? else {
+    optional_mailboxes(crate::args::optional(matches, name)?, name)
+}
+
+/// [`parse_optional_mailboxes`] for an argument that some commands sharing
+/// the code do not define (`--remove`, only on `+reply-all`).
+pub(super) fn parse_optional_mailboxes_if_defined(
+    matches: &ArgMatches,
+    name: &str,
+) -> Result<Option<Vec<Mailbox>>, GwsError> {
+    optional_mailboxes(crate::args::optional_if_defined(matches, name)?, name)
+}
+
+fn optional_mailboxes(value: Option<&str>, name: &str) -> Result<Option<Vec<Mailbox>>, GwsError> {
+    let Some(value) = value.map(str::trim).filter(|s| !s.is_empty()) else {
         return Ok(None);
     };
     let flag = format!("--{name}");
-    reject_dangerous_header_chars(&value, &flag)?;
-    let mailboxes = Mailbox::parse_list(&value);
+    reject_dangerous_header_chars(value, &flag)?;
+    let mailboxes = Mailbox::parse_list(value);
     reject_invisible_in_addresses(&mailboxes, &flag)?;
     Ok(Some(mailboxes).filter(|v| !v.is_empty()))
 }
@@ -437,7 +450,7 @@ TIPS:
 
 fn triage_cmd() -> Command {
     Command::new("+triage")
-        .about("[Helper] Show an unread inbox summary (sender, subject, date)")
+        .about("[Helper] Summarize unread messages (sender, subject, date)")
         .arg(
             Arg::new("max")
                 .long("max")
@@ -466,10 +479,14 @@ EXAMPLES:
   gwsr gmail +triage
   gwsr gmail +triage --max 5 --query 'from:boss'
   gwsr gmail +triage --format table
+  gwsr gmail +triage --query 'is:unread in:inbox'
   gwsr gmail +triage | jq -r '.messages[].subject'
 
 TIPS:
-  Read-only. Use +search for full metadata and paging.",
+  Read-only. The default query, is:unread, searches all mail, archived
+    messages included; add in:inbox to limit it to the Inbox. --query
+    replaces the default rather than narrowing it.
+  Use +search for full metadata and paging.",
         )
 }
 
@@ -920,7 +937,7 @@ fn watch_cmd() -> Command {
         .arg(
             Arg::new("output-dir")
                 .long("output-dir")
-                .help("Write each message to a separate JSON file in this directory")
+                .help("Write each message to a separate JSON file in this directory (not with --jq, --columns or a non-JSON --format)")
                 .value_name("DIR")
                 .value_hint(clap::ValueHint::DirPath),
         )
@@ -1063,6 +1080,35 @@ mod tests {
         assert!(!flat.contains("links are printed"), "{flat}");
         assert!(flat.contains("fails with exit code 3"), "{flat}");
         assert!(flat.contains("error message lists"), "{flat}");
+    }
+
+    /// `+triage` describes what its default query finds: `is:unread` searches
+    /// all mail (archived messages included), so the help must not promise
+    /// an inbox summary unless the default query is limited to the inbox.
+    #[test]
+    fn test_triage_help_matches_its_default_query() {
+        let cmd = triage_cmd();
+        let about = cmd.get_about().map(|a| a.to_string()).unwrap_or_default();
+        let query = cmd
+            .get_arguments()
+            .find(|a| a.get_id() == "query")
+            .and_then(|a| a.get_default_values().first())
+            .and_then(|v| v.to_str())
+            .unwrap_or_default()
+            .to_string();
+        assert_eq!(
+            about.to_lowercase().contains("inbox"),
+            query.contains("in:inbox"),
+            "about {about:?} vs default query {query:?}"
+        );
+        let help = cmd
+            .get_after_help()
+            .map(|h| h.to_string())
+            .unwrap_or_default();
+        assert!(
+            help.contains(&query),
+            "the tips name the default query: {help}"
+        );
     }
 
     #[test]

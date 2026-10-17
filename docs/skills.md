@@ -64,7 +64,7 @@ Shortcut commands for common operations.
 | [gwsr-gmail-reply-all](../skills/gwsr-gmail-reply-all/SKILL.md) | Gmail: Reply to all recipients of a message (handles threading automatically). |
 | [gwsr-gmail-forward](../skills/gwsr-gmail-forward/SKILL.md) | Gmail: Forward a message to new recipients. |
 | [gwsr-gmail-read](../skills/gwsr-gmail-read/SKILL.md) | Gmail: Read a message and print its body and optionally headers. |
-| [gwsr-gmail-triage](../skills/gwsr-gmail-triage/SKILL.md) | Gmail: Show an unread inbox summary (sender, subject, date). |
+| [gwsr-gmail-triage](../skills/gwsr-gmail-triage/SKILL.md) | Gmail: Summarize unread messages (sender, subject, date). |
 | [gwsr-gmail-search](../skills/gwsr-gmail-search/SKILL.md) | Gmail: Search messages and return full metadata, with pagination. |
 | [gwsr-gmail-label](../skills/gwsr-gmail-label/SKILL.md) | Gmail: Add or remove labels on messages or threads. |
 | [gwsr-gmail-archive](../skills/gwsr-gmail-archive/SKILL.md) | Gmail: Archive messages or threads (remove from Inbox). |

@@ -14,7 +14,7 @@
 
 //! `gmail +forward`: forward a message (with its attachments) to new recipients.
 
-use super::cli::{parse_optional_mailboxes, parse_optional_trimmed};
+use super::cli::parse_optional_mailboxes;
 use super::dispatch::{Delivery, deliver, outgoing_content};
 use super::prelude::*;
 use super::sender::resolve_sender;
@@ -266,7 +266,10 @@ fn parse_forward_args(matches: &ArgMatches) -> Result<ForwardConfig, GwsError> {
         from: parse_optional_mailboxes(matches, "from")?,
         cc: parse_optional_mailboxes(matches, "cc")?,
         bcc: parse_optional_mailboxes(matches, "bcc")?,
-        body: parse_optional_trimmed(matches, "body")?,
+        // Verbatim, as `+send` and `+reply` keep `--body`; a blank note is no note.
+        body: crate::args::optional(matches, "body")?
+            .filter(|b| !b.trim().is_empty())
+            .map(str::to_string),
         html: crate::args::flag(matches, "html")?,
         attachments: parse_attachments(matches)?,
         no_original_attachments: crate::args::flag(matches, "no-original-attachments")?,
@@ -643,6 +646,36 @@ mod tests {
         let config = parse_forward_args(&matches).unwrap();
         assert!(config.cc.is_none());
         assert!(config.bcc.is_none());
+    }
+
+    /// The note is kept verbatim, as `+send` and `+reply` keep `--body`:
+    /// leading indentation and surrounding blank lines are the sender's.
+    /// Only a blank note means "no note".
+    #[test]
+    fn test_parse_forward_args_keeps_body_whitespace() {
+        let note = "\n  - first point\n  - second point\n\nThanks,\nAnn\n\n";
+        let matches = make_forward_matches(&[
+            "test",
+            "--message-id",
+            "abc123",
+            "--to",
+            "dave@example.com",
+            "--body",
+            note,
+        ]);
+        let config = parse_forward_args(&matches).unwrap();
+        assert_eq!(config.body.as_deref(), Some(note));
+
+        let matches = make_forward_matches(&[
+            "test",
+            "--message-id",
+            "abc123",
+            "--to",
+            "dave@example.com",
+            "--body",
+            " \n\t ",
+        ]);
+        assert!(parse_forward_args(&matches).unwrap().body.is_none());
     }
 
     #[test]

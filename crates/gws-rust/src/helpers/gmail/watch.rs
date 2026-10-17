@@ -55,6 +55,10 @@ fn parse_watch_args(matches: &ArgMatches) -> Result<WatchConfig, GwsError> {
     let output_dir = crate::args::value::<String>(matches, "output-dir")?
         .map(|dir| crate::validate::validate_safe_output_dir(dir))
         .transpose()?;
+    crate::helpers::events::stream::reject_stdout_flags_with_output_dir(
+        matches,
+        output_dir.is_some(),
+    )?;
     let subscription = crate::args::value::<String>(matches, "subscription")?
         .map(|s| crate::validate::validate_resource_name(s).map(str::to_string))
         .transpose()?;
@@ -264,10 +268,12 @@ impl GmailWatchStep<'_> {
                 Err(e) => return Err(StepError::from(e)),
             };
             // Fail closed: a sanitization error in block mode aborts this
-            // iteration before anything is emitted or acknowledged.
+            // iteration before anything is emitted or acknowledged. A
+            // permanent failure (an invalid template, a 403 or 404) is fatal;
+            // only a retryable one is retried.
             match sanitize_value(self.sanitize, msg)
                 .await
-                .map_err(StepError::Transient)?
+                .map_err(StepError::from)?
             {
                 Sanitized::Pass(v) => self.output(&id, &v).await?,
                 Sanitized::Blocked(result) => emit_diagnostic(
@@ -646,6 +652,32 @@ mod tests {
             (10, 5, 10)
         );
         assert_eq!(c.format, "full");
+    }
+
+    /// `--output-dir` writes each message as JSON to its own file, so the
+    /// stdout-only flags `--jq`, `--columns` and a non-JSON `--format` would be
+    /// ignored: they are refused instead (exit 3).
+    #[test]
+    fn test_parse_watch_args_output_dir_rejects_stdout_flags() {
+        let base = ["+watch", "--subscription", "s", "--output-dir", "out"];
+        for extra in [
+            &["--jq", ".id"][..],
+            &["--format", "table"][..],
+            &["--format", "csv", "--columns", "id"][..],
+            &["--format", "yaml"][..],
+        ] {
+            let args: Vec<&str> = base.iter().chain(extra).copied().collect();
+            let Err(err) = parse_watch_args(&helper_matches(&args)) else {
+                panic!("{extra:?} with --output-dir was accepted");
+            };
+            assert!(matches!(err, GwsError::Validation(_)), "{extra:?}: {err:?}");
+            assert!(err.to_string().contains("--output-dir"), "{err}");
+        }
+        // JSON is what the files hold, and without --output-dir every flag applies.
+        let args: Vec<&str> = base.iter().chain(&["--format", "json"]).copied().collect();
+        assert!(parse_watch_args(&helper_matches(&args)).is_ok());
+        let m = helper_matches(&["+watch", "--subscription", "s", "--jq", ".id"]);
+        assert!(parse_watch_args(&m).is_ok());
     }
 
     // --- Setup rollback: a failed later step deletes what this run created ---
@@ -1263,6 +1295,20 @@ mod tests {
             mode: crate::helpers::modelarmor::SanitizeMode::Block,
         };
         let err = run_once(&server, &sanitize).await.unwrap_err();
-        assert!(err.to_string().contains("giving up"), "{err}");
+        // A permanent error (here an invalid template) stops the stream at
+        // once, keeping its class, instead of being retried as transient.
+        assert!(matches!(err, GwsError::Validation(_)), "{err:?}");
+        assert!(!err.to_string().contains("giving up"), "{err}");
+        let pulls = server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .filter(|r| r.url.path().ends_with(":pull"))
+            .count();
+        assert_eq!(
+            pulls, 1,
+            "a permanent sanitization error must not be retried"
+        );
     }
 }

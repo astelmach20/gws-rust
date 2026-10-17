@@ -60,8 +60,14 @@ fn render_elements(
             render_paragraph(p, document, markdown, numbers, out);
         } else if let Some(t) = el.get("table") {
             render_table(t, document, markdown, numbers, out);
+        } else if let Some(toc) = el
+            .pointer("/tableOfContents/content")
+            .and_then(Value::as_array)
+        {
+            // A table of contents holds its entries as ordinary paragraphs.
+            render_elements(toc, document, markdown, numbers, out);
         }
-        // sectionBreak and tableOfContents carry no body text of their own.
+        // A sectionBreak carries no body text of its own.
     }
 }
 
@@ -443,6 +449,41 @@ fn render_table(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// A table of contents is body content: its entries are paragraphs
+    /// (linked to headings by ID, not URL) and are rendered in place, in both
+    /// formats, like the document shows them.
+    #[test]
+    fn table_of_contents_entries_are_rendered() {
+        let entry = |text: &str, heading: &str| {
+            json!({"paragraph": {"elements": [{"textRun": {
+                "content": format!("{text}\n"),
+                "textStyle": {"link": {"headingId": heading}}
+            }}]}})
+        };
+        let document = json!({"body": {"content": [
+            {"tableOfContents": {"content": [
+                entry("Overview", "h.1"),
+                entry("Next steps", "h.2"),
+            ]}},
+            {"paragraph": {"paragraphStyle": {"namedStyleType": "HEADING_1"},
+                "elements": [{"textRun": {"content": "Overview\n"}}]}},
+            {"paragraph": {"elements": [{"textRun": {"content": "Body text\n"}}]}},
+        ]}});
+        let text = render(&document, false);
+        assert!(
+            text.starts_with("Overview\nNext steps\n"),
+            "the contents come first: {text:?}"
+        );
+        assert!(text.contains("Body text"), "{text:?}");
+        let md = render(&document, true);
+        assert!(md.contains("Next steps"), "{md:?}");
+        assert!(md.contains("# Overview"), "{md:?}");
+        assert!(
+            md.find("Next steps") < md.find("# Overview"),
+            "the contents precede the heading: {md:?}"
+        );
+    }
 
     fn doc() -> Value {
         json!({

@@ -2459,6 +2459,89 @@ fn generate_skills_index_must_be_a_file() {
     }
 }
 
+/// A symlinked `SKILL.md` in the output directory is replaced, never written
+/// through, so it cannot overwrite the file it points to.
+#[cfg(unix)]
+#[test]
+fn generate_skills_replaces_a_symlink_instead_of_following_it() {
+    let env = Env::new();
+    let outside = tempfile::tempdir().unwrap();
+    let victim = outside.path().join("victim.txt");
+    std::fs::write(&victim, "keep me").unwrap();
+    let skill_dir = env.work_dir().join("out/gwsr-shared");
+    std::fs::create_dir_all(&skill_dir).unwrap();
+    let skill = skill_dir.join("SKILL.md");
+    std::os::unix::fs::symlink(&victim, &skill).unwrap();
+    env.cmd()
+        .args([
+            "dev",
+            "generate-skills",
+            "--output-dir",
+            "out",
+            "--filter",
+            "shared",
+        ])
+        .assert()
+        .success();
+    assert_eq!(std::fs::read_to_string(&victim).unwrap(), "keep me");
+    assert!(!skill.symlink_metadata().unwrap().is_symlink());
+    assert!(
+        std::fs::read_to_string(&skill)
+            .unwrap()
+            .contains("name: gwsr-shared")
+    );
+}
+
+/// With `GWSR_RESTRICT_PATHS=cwd`, a symlinked `SKILL.md` that points
+/// outside the current directory is refused, not written through.
+#[cfg(unix)]
+#[test]
+fn generate_skills_do_not_write_through_a_symlink_out_of_cwd() {
+    let env = Env::new();
+    let outside = tempfile::tempdir().unwrap();
+    let victim = outside.path().join("victim.txt");
+    std::fs::write(&victim, "keep me").unwrap();
+    let skill_dir = env.work_dir().join("out/gwsr-shared");
+    std::fs::create_dir_all(&skill_dir).unwrap();
+    std::os::unix::fs::symlink(&victim, skill_dir.join("SKILL.md")).unwrap();
+    env.cmd()
+        .env("GWSR_RESTRICT_PATHS", "cwd")
+        .args([
+            "dev",
+            "generate-skills",
+            "--output-dir",
+            "out",
+            "--filter",
+            "shared",
+        ])
+        .assert()
+        .code(3)
+        .stderr(predicate::str::contains("outside the current directory"));
+    assert_eq!(std::fs::read_to_string(&victim).unwrap(), "keep me");
+}
+
+/// Every skill is rendered and every filter checked before anything is
+/// written: a run that fails writes nothing.
+#[test]
+fn failed_generate_skills_run_writes_nothing() {
+    let env = Env::new();
+    env.cmd()
+        .args([
+            "dev",
+            "generate-skills",
+            "--output-dir",
+            "out",
+            "--filter",
+            "shared",
+            "--filter",
+            "nope",
+        ])
+        .assert()
+        .code(3)
+        .stderr(predicate::str::contains("--filter matched no skill: nope"));
+    assert!(!env.work_dir().join("out").exists());
+}
+
 // ── Process hygiene ─────────────────────────────────────────────────────
 
 #[test]

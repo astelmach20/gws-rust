@@ -79,6 +79,7 @@ fn parse_subscribe_args(matches: &ArgMatches) -> Result<SubscribeConfig, GwsErro
             .map(|d| crate::validate::validate_safe_output_dir(d))
             .transpose()?,
     };
+    super::stream::reject_stdout_flags_with_output_dir(matches, config.output_dir.is_some())?;
     validate_subscribe_config(&config)?;
     Ok(config)
 }
@@ -361,7 +362,10 @@ impl StreamStep for SubscribeStep<'_> {
                     );
                     Ok(())
                 }
-                Err(e) => Err(StepError::Transient(e)),
+                // Classified like any other step error: a permanent Model
+                // Armor failure (an invalid template, a 403 or 404) stops the
+                // stream instead of being retried until the budget runs out.
+                Err(e) => Err(StepError::from(e)),
             };
             if let Err(e) = result {
                 failure = Some(e);
@@ -617,6 +621,33 @@ mod tests {
         assert!(c.no_ack);
     }
 
+    /// As for `gmail +watch`: with `--output-dir` the stdout-only flags would
+    /// be ignored, so they are refused (exit 3).
+    #[test]
+    fn test_parse_subscribe_args_output_dir_rejects_stdout_flags() {
+        let base = [
+            "+subscribe",
+            "--subscription",
+            "projects/p/subscriptions/s",
+            "--output-dir",
+            "out",
+        ];
+        for extra in [
+            &["--jq", ".id"][..],
+            &["--format", "table"][..],
+            &["--format", "csv", "--columns", "id"][..],
+        ] {
+            let args: Vec<&str> = base.iter().chain(extra).copied().collect();
+            let Err(err) = parse_subscribe_args(&events_matches(&args)) else {
+                panic!("{extra:?} with --output-dir was accepted");
+            };
+            assert!(matches!(err, GwsError::Validation(_)), "{extra:?}: {err:?}");
+            assert!(err.to_string().contains("--output-dir"), "{err}");
+        }
+        let args: Vec<&str> = base.iter().chain(&["--format", "json"]).copied().collect();
+        assert!(parse_subscribe_args(&events_matches(&args)).is_ok());
+    }
+
     #[test]
     fn test_parse_subscribe_args_validation() {
         let m = events_matches(&[
@@ -806,7 +837,14 @@ mod tests {
     }
 
     async fn run(server: &MockServer, cfg: SubscribeConfig) -> Result<(), GwsError> {
-        let sanitize = SanitizeConfig::default();
+        run_with(server, cfg, &SanitizeConfig::default()).await
+    }
+
+    async fn run_with(
+        server: &MockServer,
+        cfg: SubscribeConfig,
+        sanitize: &SanitizeConfig,
+    ) -> Result<(), GwsError> {
         let mut step = SubscribeStep {
             pubsub: PubSubClient::with_base(
                 &Transport::for_test(&server.uri()),
@@ -815,7 +853,7 @@ mod tests {
             subscription: "projects/test/subscriptions/demo".into(),
             pull_timeout: Duration::from_secs(5),
             config: cfg,
-            sanitize: &sanitize,
+            sanitize,
             file_counter: 0,
             printer: StreamPrinter::new(crate::formatter::OutputFormat::Json),
         };
@@ -851,6 +889,41 @@ mod tests {
             .mount(&server)
             .await;
         run(&server, config(false)).await.unwrap();
+    }
+
+    /// A permanent sanitization error (here an invalid template) stops the
+    /// stream at once with its own class instead of being retried as
+    /// transient until the failure budget runs out; nothing is acknowledged.
+    #[tokio::test]
+    async fn permanent_sanitization_error_is_not_retried() {
+        let server = MockServer::start().await;
+        mount_pull(&server).await;
+        Mock::given(method("POST"))
+            .and(path("/v1/projects/test/subscriptions/demo:acknowledge"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+            .expect(0)
+            .mount(&server)
+            .await;
+        let sanitize = SanitizeConfig {
+            template: Some("projects/p/locations/evil.com#/templates/t".into()),
+            mode: crate::helpers::modelarmor::SanitizeMode::Block,
+        };
+        let mut cfg = config(false);
+        cfg.once = false;
+        let err = run_with(&server, cfg, &sanitize).await.unwrap_err();
+        assert!(matches!(err, GwsError::Validation(_)), "{err:?}");
+        assert!(!err.to_string().contains("giving up"), "{err}");
+        let pulls = server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .filter(|r| r.url.path().ends_with(":pull"))
+            .count();
+        assert_eq!(
+            pulls, 1,
+            "a permanent sanitization error must not be retried"
+        );
     }
 
     #[tokio::test]
