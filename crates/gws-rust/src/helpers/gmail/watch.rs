@@ -55,6 +55,10 @@ fn parse_watch_args(matches: &ArgMatches) -> Result<WatchConfig, GwsError> {
     let output_dir = crate::args::value::<String>(matches, "output-dir")?
         .map(|dir| crate::validate::validate_safe_output_dir(dir))
         .transpose()?;
+    crate::helpers::events::stream::reject_stdout_flags_with_output_dir(
+        matches,
+        output_dir.is_some(),
+    )?;
     let subscription = crate::args::value::<String>(matches, "subscription")?
         .map(|s| crate::validate::validate_resource_name(s).map(str::to_string))
         .transpose()?;
@@ -646,6 +650,32 @@ mod tests {
             (10, 5, 10)
         );
         assert_eq!(c.format, "full");
+    }
+
+    /// `--output-dir` writes each message as JSON to its own file, so the
+    /// stdout-only flags `--jq`, `--columns` and a non-JSON `--format` would be
+    /// ignored: they are refused instead (exit 3).
+    #[test]
+    fn test_parse_watch_args_output_dir_rejects_stdout_flags() {
+        let base = ["+watch", "--subscription", "s", "--output-dir", "out"];
+        for extra in [
+            &["--jq", ".id"][..],
+            &["--format", "table"][..],
+            &["--format", "csv", "--columns", "id"][..],
+            &["--format", "yaml"][..],
+        ] {
+            let args: Vec<&str> = base.iter().chain(extra).copied().collect();
+            let Err(err) = parse_watch_args(&helper_matches(&args)) else {
+                panic!("{extra:?} with --output-dir was accepted");
+            };
+            assert!(matches!(err, GwsError::Validation(_)), "{extra:?}: {err:?}");
+            assert!(err.to_string().contains("--output-dir"), "{err}");
+        }
+        // JSON is what the files hold, and without --output-dir every flag applies.
+        let args: Vec<&str> = base.iter().chain(&["--format", "json"]).copied().collect();
+        assert!(parse_watch_args(&helper_matches(&args)).is_ok());
+        let m = helper_matches(&["+watch", "--subscription", "s", "--jq", ".id"]);
+        assert!(parse_watch_args(&m).is_ok());
     }
 
     // --- Setup rollback: a failed later step deletes what this run created ---

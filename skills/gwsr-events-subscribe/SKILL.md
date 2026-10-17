@@ -40,7 +40,7 @@ gwsr events +subscribe
 | `--once` | — | — | Pull once and exit |
 | `--cleanup` | — | — | Delete created Pub/Sub resources on exit |
 | `--no-ack` | — | — | Do not acknowledge messages (they will be redelivered) |
-| `--output-dir` | — | — | Write each event to a separate JSON file in this directory |
+| `--output-dir` | — | — | Write each event to a separate JSON file in this directory (not with --jq, --columns or a non-JSON --format) |
 
 ## Examples
 

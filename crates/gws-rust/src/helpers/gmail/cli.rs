@@ -919,7 +919,7 @@ fn watch_cmd() -> Command {
         .arg(
             Arg::new("output-dir")
                 .long("output-dir")
-                .help("Write each message to a separate JSON file in this directory")
+                .help("Write each message to a separate JSON file in this directory (not with --jq, --columns or a non-JSON --format)")
                 .value_name("DIR")
                 .value_hint(clap::ValueHint::DirPath),
         )
