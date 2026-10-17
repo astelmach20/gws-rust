@@ -83,8 +83,18 @@ pub fn resolve_file_path(
 }
 
 /// Resolves an output directory (which may not exist yet) relative to `cwd`.
+///
+/// A path that exists but is not a directory (a file) is refused here, so
+/// the command fails before it does any work instead of when it first
+/// writes into it.
 pub fn resolve_output_dir(dir: &str, policy: PathPolicy, cwd: &Path) -> Result<PathBuf, GwsError> {
-    resolve_file_path(dir, "--output-dir", policy, cwd)
+    let resolved = resolve_file_path(dir, "--output-dir", policy, cwd)?;
+    if resolved.exists() && !resolved.is_dir() {
+        return Err(GwsError::Validation(format!(
+            "output directory '{dir}' exists and is not a directory"
+        )));
+    }
+    Ok(resolved)
 }
 
 /// Resolves an existing directory relative to `cwd`.
@@ -469,6 +479,23 @@ mod tests {
         assert!(resolve_dir_path("file", PathPolicy::Unrestricted, &cwd).is_err());
         assert!(resolve_dir_path("..", PathPolicy::Cwd, &cwd).is_err());
         assert!(resolve_dir_path("..", PathPolicy::Unrestricted, &cwd).is_ok());
+    }
+
+    #[test]
+    fn output_dir_must_not_be_an_existing_file() {
+        let (_d, cwd) = canon_tmp();
+        std::fs::write(cwd.join("notes.txt"), "x").unwrap();
+        for policy in [PathPolicy::Unrestricted, PathPolicy::Cwd] {
+            let err = resolve_output_dir("notes.txt", policy, &cwd).unwrap_err();
+            assert!(
+                matches!(&err, GwsError::Validation(m) if m.contains("not a directory")),
+                "{err}"
+            );
+        }
+        // An existing directory and a new one are fine.
+        std::fs::create_dir(cwd.join("out")).unwrap();
+        assert!(resolve_output_dir("out", PathPolicy::Cwd, &cwd).is_ok());
+        assert!(resolve_output_dir("fresh", PathPolicy::Cwd, &cwd).is_ok());
     }
 
     #[test]
