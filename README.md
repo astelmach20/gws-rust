@@ -280,7 +280,7 @@ gwsr auth export --unmasked --output ci-credentials.json
 |---|---|
 | `--format json\|table\|yaml\|csv` | Output format (default `json`) |
 | `--jq EXPR` | Filter with a jq expression (built in via [jaq](https://github.com/01mf02/jaq)). String results print raw, like `gh --jq`. `env` is not available, so a filter cannot print secrets such as `GWSR_TOKEN`; nor are `stderr`, `debug` and `halt_error`, which would write unsanitized text to the terminal |
-| `--columns a,b.c` | Columns for `table`/`csv` (dot paths for nested fields; a `.` or `\` inside a field name is escaped as `\.` / `\\`, so `{"a.b": 1}` is column `a\.b`). An unknown column is an error |
+| `--columns a,b.c` | Columns for `table`/`csv` (dot paths for nested fields; a `.` or `\` inside a field name is escaped as `\.` / `\\`, so `{"a.b": 1}` is column `a\.b`). An unknown column is an error, and so is `--columns` with `json` or `yaml` |
 | `--compact` / `--pretty` | Force the JSON layout (`GWSR_JSON_STYLE=auto\|compact\|pretty`) |
 
 Table output escapes terminal control characters. CSV cells that start with a formula character get a `'` prefix.

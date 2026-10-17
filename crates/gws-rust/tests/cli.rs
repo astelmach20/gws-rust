@@ -1327,6 +1327,30 @@ fn dry_run_formats() {
         .assert()
         .success()
         .stdout("method,url\nGET,https://www.googleapis.com/drive/v3/files\n");
+
+    // --columns with a format it does not shape (the JSON default, YAML) is
+    // refused instead of silently ignored.
+    for format in [&[][..], &["--format", "yaml"][..]] {
+        let out = env
+            .cmd()
+            .args(base)
+            .args(format)
+            .args(["--columns", "url"])
+            .output()
+            .unwrap();
+        assert_eq!(
+            out.status.code(),
+            Some(3),
+            "{format:?}: {}",
+            stderr_of(&out)
+        );
+        assert_eq!(stdout_of(&out), "", "{format:?}");
+        assert!(
+            stderr_of(&out).contains("--columns only applies to --format table or csv"),
+            "{format:?}: {}",
+            stderr_of(&out)
+        );
+    }
 }
 
 #[test]
