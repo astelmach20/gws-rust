@@ -112,6 +112,25 @@ pub struct OutputSettings {
     pub terminal: bool,
 }
 
+/// `--columns` shapes only `table` and `csv` output. With any other format it
+/// would be silently ignored, so it is refused instead.
+pub fn check_columns_format(
+    columns: Option<&[String]>,
+    format: OutputFormat,
+) -> Result<(), GwsError> {
+    match (columns, format) {
+        (None, _) | (Some(_), OutputFormat::Table | OutputFormat::Csv) => Ok(()),
+        (Some(_), other) => Err(GwsError::Validation(format!(
+            "--columns only applies to --format table or csv, not {}; add --format table or \
+             --format csv, or use --jq to select fields",
+            match other {
+                OutputFormat::Yaml => "yaml",
+                _ => "json",
+            }
+        ))),
+    }
+}
+
 static SETTINGS: OnceLock<OutputSettings> = OnceLock::new();
 
 /// Install the process-wide output settings. May be called once.
@@ -1743,5 +1762,26 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(fmt_with(&json!(1), OutputFormat::Json, &settings), "");
+    }
+
+    /// `--columns` with a format it does not shape is refused rather than
+    /// silently ignored.
+    #[test]
+    fn columns_need_table_or_csv() {
+        let cols = vec!["id".to_string()];
+        for format in [OutputFormat::Table, OutputFormat::Csv] {
+            assert!(
+                check_columns_format(Some(&cols), format).is_ok(),
+                "{format:?}"
+            );
+        }
+        for format in [OutputFormat::Json, OutputFormat::Yaml] {
+            assert!(check_columns_format(None, format).is_ok(), "{format:?}");
+            let err = check_columns_format(Some(&cols), format).unwrap_err();
+            assert!(
+                matches!(&err, GwsError::Validation(m) if m.contains("--columns only applies")),
+                "{format:?}: {err:?}"
+            );
+        }
     }
 }
