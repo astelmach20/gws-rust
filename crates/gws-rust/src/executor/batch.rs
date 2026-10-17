@@ -24,7 +24,9 @@
 //! `method` is the resource path plus method name (the service prefix is
 //! optional). Output is NDJSON, one line per call, in input order:
 //! `{"id": ..., "status": 200, "body": ...}`. Calls are grouped into batches
-//! of at most 100 (Google's limit; 50 for Classroom, see [`batch_limit`]). The
+//! of at most 100 (Google's limit; 50 for Classroom, see [`batch_limit`]). A
+//! call the batch response has no part for gets no line, and the command
+//! stops with an error naming it after printing the rest of its group. The
 //! command fails when any call failed, after printing every result: exit 6
 //! (retry later) when every failure is retryable (HTTP 408, 429, 500, 502,
 //! 503, 504 or a 403 rate limit), exit 1 otherwise. With `--sanitize`, every result body
@@ -522,13 +524,23 @@ pub(crate) fn parse_batch_response(
     Ok(parts)
 }
 
-/// Order response parts like `chunk`. Parts carry `response-item-<id>`
+/// Order response parts like `chunk`: one slot per call, `None` for a call
+/// the response has no part for. Parts carry `response-item-<id>`
 /// Content-IDs and may arrive in any order; a part without a Content-ID
-/// stands for the call at its position.
+/// stands for the call at its position, which is only known when the
+/// response has a part for every call.
 fn in_call_order(
     chunk: &[BatchCall<'_>],
     parts: Vec<PartResponse>,
-) -> Result<Vec<PartResponse>, GwsError> {
+) -> Result<Vec<Option<PartResponse>>, GwsError> {
+    if parts.len() != chunk.len() && parts.iter().any(|p| p.content_id.is_none()) {
+        return Err(GwsError::other(anyhow::anyhow!(
+            "batch response has {} parts for {} calls, not all with a Content-ID, so they \
+             cannot be matched to calls",
+            parts.len(),
+            chunk.len()
+        )));
+    }
     let mut slots: Vec<Option<PartResponse>> = chunk.iter().map(|_| None).collect();
     for (position, part) in parts.into_iter().enumerate() {
         let index = match part.content_id.as_deref() {
@@ -552,29 +564,18 @@ fn in_call_order(
             )));
         }
     }
-    slots
-        .into_iter()
-        .zip(chunk)
-        .map(|(slot, call)| {
-            slot.ok_or_else(|| {
-                GwsError::other(anyhow::anyhow!(
-                    "batch response has no part for call {:?}",
-                    call.id
-                ))
-            })
-        })
-        .collect()
+    Ok(slots)
 }
 
 /// Send one group of calls as a batch request and return its parts in
-/// call order.
+/// call order (`None` for a call the response has no part for).
 async fn send_group(
     transport: &Transport,
     batch_url: &str,
     chunk: &[BatchCall<'_>],
     options: &ExecOptions,
     auth: &crate::transport::AuthMethod,
-) -> Result<Vec<PartResponse>, GwsError> {
+) -> Result<Vec<Option<PartResponse>>, GwsError> {
     let boundary = format!("gwsr_batch_{:016x}", rand::random::<u64>());
     let (content_type, body) = build_batch_body(chunk, &boundary)?;
     // The batch request is re-sent as a whole, so it may be retried only
@@ -609,13 +610,6 @@ async fn send_group(
         return Err(error_from_response(status, &text, auth, note.as_deref()));
     }
     let parts = parse_batch_response(&resp_type, &text)?;
-    if parts.len() != chunk.len() {
-        return Err(GwsError::other(anyhow::anyhow!(
-            "batch response has {} parts for {} calls",
-            parts.len(),
-            chunk.len()
-        )));
-    }
     in_call_order(chunk, parts)
 }
 
@@ -633,21 +627,19 @@ fn part_retry_code(part: &PartResponse) -> Option<u16> {
 }
 
 /// The error for a batch that stopped early: `err`, prefixed with the ids
-/// of the calls that got no result (and `why`) and of those never sent, so
-/// the caller knows what happened to every call. Results already printed
-/// stay on stdout.
+/// of the calls that got no result (each list with why) and of those never
+/// sent, so the caller knows what happened to every call. Results already
+/// printed stay on stdout.
 fn batch_stopped(
     err: GwsError,
-    no_result: &[&str],
-    why: &str,
+    no_result: &[(&[&str], &str)],
     not_sent: &[BatchCall<'_>],
 ) -> GwsError {
     let mut what = Vec::new();
-    if !no_result.is_empty() {
-        what.push(format!(
-            "no result for call(s) {} ({why})",
-            no_result.join(", ")
-        ));
+    for (ids, why) in no_result {
+        if !ids.is_empty() {
+            what.push(format!("no result for call(s) {} ({why})", ids.join(", ")));
+        }
     }
     if !not_sent.is_empty() {
         let ids: Vec<&str> = not_sent.iter().map(|c| c.id.as_str()).collect();
@@ -761,16 +753,40 @@ pub(crate) async fn run_batch(
                 let ids: Vec<&str> = chunk.iter().map(|c| c.id.as_str()).collect();
                 return Err(batch_stopped(
                     e,
-                    &ids,
-                    "their batch request failed, so they may or may not have been applied",
+                    &[(
+                        &ids,
+                        "their batch request failed, so they may or may not have been applied",
+                    )],
                     not_sent,
                 ));
             }
+        };
+        // Calls the response has no part for. The parts it does have are
+        // still printed: those calls were applied, and their results are
+        // all the caller has to tell them from the missing ones.
+        let missing: Vec<&str> = chunk
+            .iter()
+            .zip(&parts)
+            .filter(|(_, part)| part.is_none())
+            .map(|(call, _)| call.id.as_str())
+            .collect();
+        const MISSING_WHY: &str =
+            "the batch response had no part for them, so they may or may not have been applied";
+        // The calls from `index` on that the response answered.
+        let answered_from = |index: usize| {
+            chunk[index..]
+                .iter()
+                .map(|c| c.id.as_str())
+                .filter(|id| !missing.contains(id))
+                .collect::<Vec<&str>>()
         };
         // Calls whose result Model Armor withheld: sent and answered.
         let mut withheld: Vec<&str> = Vec::new();
         let mut first_error: Option<GwsError> = None;
         for (index, (call, part)) in chunk.iter().zip(parts).enumerate() {
+            let Some(part) = part else {
+                continue;
+            };
             if !(200..300).contains(&part.status) {
                 failures += 1;
                 match part_retry_code(&part) {
@@ -791,7 +807,7 @@ pub(crate) async fn run_batch(
                 Err(e) => {
                     // Screening itself failed (block mode fails closed): the
                     // rest of this group cannot be screened either.
-                    withheld.extend(chunk[index..].iter().map(|c| c.id.as_str()));
+                    withheld.extend(answered_from(index));
                     first_error.get_or_insert(e);
                     break;
                 }
@@ -804,11 +820,16 @@ pub(crate) async fn run_batch(
                 // A `--jq`/format or write failure: this call and the rest
                 // of its group were applied, but their results are lost.
                 let mut unprinted = withheld;
-                unprinted.extend(chunk[index..].iter().map(|c| c.id.as_str()));
+                unprinted.extend(answered_from(index));
                 return Err(batch_stopped(
                     e,
-                    &unprinted,
-                    "sent and answered, but the result was not printed",
+                    &[
+                        (
+                            &unprinted,
+                            "sent and answered, but the result was not printed",
+                        ),
+                        (&missing, MISSING_WHY),
+                    ],
                     not_sent,
                 ));
             }
@@ -816,8 +837,21 @@ pub(crate) async fn run_batch(
         if let Some(err) = first_error {
             return Err(batch_stopped(
                 err,
-                &withheld,
-                "sent and answered, but the result was withheld",
+                &[
+                    (&withheld, "sent and answered, but the result was withheld"),
+                    (&missing, MISSING_WHY),
+                ],
+                not_sent,
+            ));
+        }
+        if !missing.is_empty() {
+            return Err(batch_stopped(
+                GwsError::other(anyhow::anyhow!(
+                    "the batch response has {} part(s) for {} call(s)",
+                    chunk.len() - missing.len(),
+                    chunk.len()
+                )),
+                &[(&missing, MISSING_WHY)],
                 not_sent,
             ));
         }
@@ -1246,7 +1280,11 @@ mod tests {
             body: Value::Null,
         };
         let statuses = |parts| {
-            in_call_order(&calls, parts).map(|p| p.iter().map(|p| p.status).collect::<Vec<_>>())
+            in_call_order(&calls, parts).map(|p| {
+                p.iter()
+                    .map(|p| p.as_ref().map(|p| p.status))
+                    .collect::<Vec<_>>()
+            })
         };
         assert_eq!(
             statuses(vec![
@@ -1254,12 +1292,18 @@ mod tests {
                 part(Some("response-item-a"), 200)
             ])
             .unwrap(),
-            vec![200, 404]
+            vec![Some(200), Some(404)]
         );
         // Without Content-IDs, position decides.
         assert_eq!(
             statuses(vec![part(None, 200), part(None, 404)]).unwrap(),
-            vec![200, 404]
+            vec![Some(200), Some(404)]
+        );
+        // A call the response has no part for is an empty slot; the others
+        // keep their results.
+        assert_eq!(
+            statuses(vec![part(Some("response-item-b"), 404)]).unwrap(),
+            vec![None, Some(404)]
         );
         for bad in [
             vec![
@@ -1270,7 +1314,13 @@ mod tests {
                 part(Some("response-item-a"), 200),
                 part(Some("response-item-a"), 200),
             ],
-            vec![part(Some("response-item-a"), 200)],
+            // Too few parts to match by position.
+            vec![part(None, 200)],
+            vec![
+                part(Some("response-item-a"), 200),
+                part(None, 200),
+                part(None, 200),
+            ],
         ] {
             assert!(statuses(bad).is_err());
         }
