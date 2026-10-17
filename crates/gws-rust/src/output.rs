@@ -165,18 +165,29 @@ pub(crate) fn stdout_closed() -> bool {
     STDOUT_CLOSED.load(Ordering::Relaxed)
 }
 
-/// Write `text` followed by a newline to stdout and flush.
+/// Write `text`, ended by a newline, to stdout and flush.
 ///
 /// Every command writes its results through this function instead of
 /// `println!`, which panics when the reader closes the pipe. An empty `text`
-/// writes nothing. A closed pipe is recorded (see [`stdout_closed`]) and
-/// returned as an error so callers stop producing output; `main` turns it into
-/// a clean exit.
+/// writes nothing; a newline is added unless `text` already ends with one
+/// (so `"\n"` is one empty line: see [`terminated_line`]). A closed pipe is
+/// recorded (see [`stdout_closed`]) and returned as an error so callers stop
+/// producing output; `main` turns it into a clean exit.
 pub(crate) fn emit(text: &str) -> Result<(), GwsError> {
     if text.is_empty() {
         return Ok(());
     }
     write_line(&mut std::io::stdout().lock(), text).map_err(stdout_error)
+}
+
+/// The bytes [`emit`] writes for `text`: nothing for an empty text,
+/// otherwise `text` ended by exactly the newline it lacks.
+pub(crate) fn terminated_line(text: &str) -> std::borrow::Cow<'_, str> {
+    if text.is_empty() || text.ends_with('\n') {
+        std::borrow::Cow::Borrowed(text)
+    } else {
+        std::borrow::Cow::Owned(format!("{text}\n"))
+    }
 }
 
 /// Convert a failed stdout write into an error, recording a closed pipe
@@ -193,8 +204,7 @@ fn write_line(w: &mut dyn Write, text: &str) -> std::io::Result<()> {
     if STDOUT_CLOSED.load(Ordering::Relaxed) {
         return Err(std::io::ErrorKind::BrokenPipe.into());
     }
-    w.write_all(text.as_bytes())?;
-    w.write_all(b"\n")?;
+    w.write_all(terminated_line(text).as_bytes())?;
     w.flush()
 }
 
@@ -359,6 +369,17 @@ mod tests {
         let mut buf = Vec::new();
         write_line(&mut buf, "abc").unwrap();
         assert_eq!(buf, b"abc\n");
+    }
+
+    /// Text that already ends its line (a `--jq` result, an empty line) is
+    /// written as is.
+    #[test]
+    fn write_line_does_not_double_a_trailing_newline() {
+        for (text, written) in [("\n", "\n"), ("a\n", "a\n"), ("a\n\n", "a\n\n")] {
+            let mut buf = Vec::new();
+            write_line(&mut buf, text).unwrap();
+            assert_eq!(String::from_utf8(buf).unwrap(), written, "{text:?}");
+        }
     }
 
     #[test]
