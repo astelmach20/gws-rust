@@ -598,6 +598,40 @@ fn rebuild_response(
     reqwest::Response::from(rebuilt)
 }
 
+/// Read `response`'s body, failing if no bytes arrive for `idle` (when set).
+async fn read_body_idle(
+    mut response: reqwest::Response,
+    method: &Method,
+    url: &str,
+    status: StatusCode,
+    idle: Option<Duration>,
+) -> Result<bytes::Bytes, SendError> {
+    let mut body = bytes::BytesMut::new();
+    loop {
+        let next = match idle {
+            Some(limit) => tokio::time::timeout(limit, response.chunk())
+                .await
+                .map_err(|_elapsed| SendError::BodyTimeout {
+                    method: method.clone(),
+                    url: url.to_string(),
+                    status,
+                    timeout: limit,
+                })?,
+            None => response.chunk().await,
+        }
+        .map_err(|source| SendError::ReadBody {
+            method: method.clone(),
+            url: url.to_string(),
+            status,
+            source: source.without_url(),
+        })?;
+        match next {
+            Some(chunk) => body.extend_from_slice(&chunk),
+            None => return Ok(body.freeze()),
+        }
+    }
+}
+
 async fn classify(
     response: reqwest::Response,
     method: &Method,
@@ -616,29 +650,13 @@ async fn classify(
         return Ok(Verdict::Done(response));
     }
     // A 403 is only retryable when the body names a rate-limit reason, so the
-    // body must be read and the response rebuilt around it. The read is
-    // bounded by the response timeout: a body that stalls must not hang the
-    // request past `--timeout`.
+    // body must be read and the response rebuilt around it. Like every other
+    // body read, the response timeout limits each gap between chunks: a body
+    // that stalls must not hang the request, but one that keeps arriving is
+    // read in full.
     let version = response.version();
     let headers = response.headers().clone();
-    let read = response.bytes();
-    let body = match body_timeout {
-        Some(limit) => tokio::time::timeout(limit, read)
-            .await
-            .map_err(|_elapsed| SendError::BodyTimeout {
-                method: method.clone(),
-                url: url.to_string(),
-                status,
-                timeout: limit,
-            })?,
-        None => read.await,
-    }
-    .map_err(|source| SendError::ReadBody {
-        method: method.clone(),
-        url: url.to_string(),
-        status,
-        source: source.without_url(),
-    })?;
+    let body = read_body_idle(response, method, url, status, body_timeout).await?;
     let rate_limited = is_rate_limit_body(&body);
     let response = rebuild_response(status, version, headers, body);
     Ok(if rate_limited {
@@ -1350,7 +1368,7 @@ mod tests {
     }
 
     /// A 403 is read to look for a rate-limit reason. A body that stops
-    /// arriving is bounded by the response timeout instead of hanging the
+    /// arriving for the response timeout fails instead of hanging the
     /// request forever.
     #[tokio::test]
     async fn stalled_forbidden_body_times_out() {
@@ -1387,6 +1405,54 @@ mod tests {
             "{err}"
         );
         assert!(err.to_string().contains("--timeout"), "{err}");
+        server.abort();
+    }
+
+    /// The 403 body read is limited per gap, like every other body read
+    /// (README: the timeout limits "each gap while reading the body"): a body
+    /// that keeps arriving, just slowly, is read in full even when the whole
+    /// read takes longer than the timeout.
+    #[tokio::test]
+    async fn slow_forbidden_body_is_limited_per_gap_not_in_total() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/r", listener.local_addr().unwrap());
+        let body: &[u8] = br#"{"error":{"code":403,"message":"no"}}"#;
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 4096];
+            let read = socket.read(&mut buf).await.unwrap();
+            assert!(read > 0, "no request arrived");
+            let head = format!(
+                "HTTP/1.1 403 Forbidden\r\ncontent-length: {}\r\n\r\n",
+                body.len()
+            );
+            socket.write_all(head.as_bytes()).await.unwrap();
+            // Six pieces 80 ms apart: each gap is under the 200 ms timeout,
+            // the whole body takes about 480 ms.
+            for piece in body.chunks(body.len().div_ceil(6)) {
+                tokio::time::sleep(Duration::from_millis(80)).await;
+                socket.write_all(piece).await.unwrap();
+                socket.flush().await.unwrap();
+            }
+            std::future::pending::<()>().await;
+            drop(socket);
+        });
+        let client = shared_client().unwrap();
+        let policy = RetryPolicy {
+            response_timeout: Some(Duration::from_millis(200)),
+            ..fast_policy()
+        };
+        let sent = tokio::time::timeout(
+            Duration::from_secs(5),
+            send(&policy, Idempotency::FromMethod, || client.get(&url)),
+        )
+        .await
+        .expect("send hung")
+        .unwrap();
+        assert_eq!(sent.response.status(), StatusCode::FORBIDDEN);
+        assert_eq!(sent.attempts, 1);
+        assert_eq!(sent.response.bytes().await.unwrap(), body);
         server.abort();
     }
 
