@@ -44,6 +44,18 @@ fn int64_number(format: Option<&str>, n: &serde_json::Number) -> bool {
     }
 }
 
+/// Whether `s` is a valid value for a string property of Discovery
+/// `format`: for `int64` and `uint64`, a decimal integer in that format's
+/// range (the same check as [`int64_number`] and [`integer_string`], so
+/// `"1.5"` is refused); any string for every other format.
+fn string_value(format: Option<&str>, s: &str) -> bool {
+    match format {
+        Some("int64") => s.parse::<i64>().is_ok(),
+        Some("uint64") => s.parse::<u64>().is_ok(),
+        _ => true,
+    }
+}
+
 /// Whether `v` is in range for an integer property of Discovery `format`
 /// `int32`, `uint32` (or no format: any 64-bit integer, signed or unsigned).
 fn integer_in_range(format: Option<&str>, v: i128) -> bool {
@@ -204,7 +216,7 @@ impl Checker<'_> {
 
         if let Some(expected) = &prop.prop_type {
             let type_matches = match (expected.as_str(), value) {
-                ("string", Value::String(_)) => true,
+                ("string", Value::String(s)) => string_value(prop.format.as_deref(), s),
                 // Discovery types 64-bit integers as strings; the API's JSON
                 // parser takes them as numbers too (proto3 JSON mapping).
                 ("string", Value::Number(n)) => int64_number(prop.format.as_deref(), n),
@@ -221,8 +233,15 @@ impl Checker<'_> {
                 _ => false,
             };
             if !type_matches {
+                // The format says why a value of the right JSON type (an
+                // `int64` string such as "abc") is refused.
+                let format = prop
+                    .format
+                    .as_deref()
+                    .map(|f| format!(" with format '{f}'"))
+                    .unwrap_or_default();
                 self.errors.push(format!(
-                    "{path}: Expected type '{expected}', found {}",
+                    "{path}: Expected type '{expected}'{format}, found {}",
                     value_type(value)
                 ));
                 return;
@@ -482,6 +501,52 @@ mod tests {
         ] {
             let msg = check(body.clone()).unwrap_err().to_string();
             assert!(msg.contains(needle), "{body}: {msg}");
+        }
+    }
+
+    /// A string sent for an `int64`/`uint64` field must be a decimal integer
+    /// in that format's range, as the JSON number form and the string form
+    /// of an `int32` field must: `"abc"` or `"1.5"` would be refused by the
+    /// API after the request was sent.
+    #[test]
+    fn int64_string_values_are_checked_like_numbers() {
+        let doc: RestDescription = serde_json::from_value(json!({
+            "name": "x", "version": "v1", "rootUrl": "https://x.googleapis.com/",
+            "schemas": { "Req": { "id": "Req", "type": "object", "properties": {
+                "size": { "type": "string", "format": "int64" },
+                "historyId": { "type": "string", "format": "uint64" },
+                "ids": { "type": "array",
+                         "items": { "type": "string", "format": "int64" } },
+                "when": { "type": "string", "format": "date-time" },
+                "name": { "type": "string" }
+            } } }
+        }))
+        .unwrap();
+        let check = |body: Value| validate_body(&body, "Req", &doc, false);
+        for body in [
+            json!({"size": "-9223372036854775808", "historyId": "18446744073709551615"}),
+            json!({"size": "9223372036854775807", "historyId": "0", "ids": ["1", 2]}),
+            // Other string formats and plain strings are not number-checked.
+            json!({"when": "2026-01-01T00:00:00Z", "name": "1.5"}),
+        ] {
+            check(body.clone()).unwrap_or_else(|e| panic!("{body}: {e}"));
+        }
+        for (body, needle) in [
+            (json!({"size": "abc"}), "size: "),
+            (json!({"size": ""}), "size: "),
+            (json!({"size": "1.5"}), "size: "),
+            (json!({"size": " 5"}), "size: "),
+            (json!({"size": "9223372036854775808"}), "size: "),
+            (json!({"historyId": "-1"}), "historyId: "),
+            (json!({"historyId": "18446744073709551616"}), "historyId: "),
+            (json!({"ids": ["1", "x"]}), "ids[1]: "),
+        ] {
+            let msg = check(body.clone()).unwrap_err().to_string();
+            assert!(msg.contains(needle), "{body}: {msg}");
+            assert!(
+                msg.contains("format 'int64'") || msg.contains("format 'uint64'"),
+                "{body}: {msg}"
+            );
         }
     }
 
