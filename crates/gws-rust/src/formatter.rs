@@ -130,8 +130,11 @@ fn settings() -> &'static OutputSettings {
 /// Format a JSON value according to the specified output format and the
 /// installed output settings.
 ///
-/// The returned string has no trailing newline; an empty string means
-/// "print nothing" (for example a `--jq` filter that produced no output).
+/// The returned string is printed with [`crate::output::emit`]: an empty
+/// string means "print nothing" (for example a `--jq` filter that produced no
+/// output), and a newline is added unless the text already ends with one.
+/// `--jq` results in JSON mode end with a newline each, so a sole empty
+/// string result prints as one empty line.
 pub fn format_value(value: &Value, format: &OutputFormat) -> Result<String, GwsError> {
     render(value, *format, settings(), None)
 }
@@ -311,16 +314,22 @@ fn render(
 
     let outputs = jq.run(value)?;
     if format == OutputFormat::Json {
-        // `gh`-style: one result per line, strings printed raw.
-        let lines: Vec<String> = outputs
-            .iter()
-            .map(|v| match v {
-                Value::String(s) if settings.terminal => sanitize_text_for_terminal(s),
-                Value::String(s) => s.clone(),
-                other => json_string(other, style),
-            })
-            .collect();
-        return Ok(lines.join("\n"));
+        // `gh`-style: one result per line, strings printed raw. Every result
+        // ends with its own newline, so an empty string result is an empty
+        // line (as with `jq -r`), not "print nothing", and a stream keeps one
+        // line per page or item.
+        let mut text = String::new();
+        for v in &outputs {
+            match v {
+                Value::String(s) if settings.terminal => {
+                    text.push_str(&sanitize_text_for_terminal(s))
+                }
+                Value::String(s) => text.push_str(s),
+                other => text.push_str(&json_string(other, style)),
+            }
+            text.push('\n');
+        }
+        return Ok(text);
     }
     match outputs.len() {
         0 => Ok(String::new()),
@@ -1607,7 +1616,7 @@ mod tests {
         let val = json!({"files": [{"id": "a", "n": 1}, {"id": "b", "n": {"x": 2}}]});
         assert_eq!(
             fmt_with(&val, OutputFormat::Json, &settings),
-            "a\n1\nb\n{\n  \"x\": 2\n}"
+            "a\n1\nb\n{\n  \"x\": 2\n}\n"
         );
     }
 
@@ -1737,7 +1746,7 @@ mod tests {
         };
         assert_eq!(
             fmt_with(&json!({"a": "x\u{1b}[2Jy"}), OutputFormat::Json, &settings),
-            "x[2Jy"
+            "x[2Jy\n"
         );
     }
 
@@ -1779,6 +1788,35 @@ mod tests {
             terminal: true,
             ..Default::default()
         };
-        assert_eq!(fmt_with(&val, OutputFormat::Json, &settings), family);
+        assert_eq!(
+            fmt_with(&val, OutputFormat::Json, &settings),
+            format!("{family}\n")
+        );
+    }
+
+    /// An empty string result is an empty line, as with `jq -r`, not "print
+    /// nothing": a `--page-items` stream keeps one line per item.
+    #[test]
+    fn jq_empty_string_result_is_an_empty_line() {
+        let settings = OutputSettings {
+            jq: Some(JqFilter::compile(".name").unwrap()),
+            ..Default::default()
+        };
+        let printed = |v: Value| {
+            crate::output::terminated_line(&fmt_with(&v, OutputFormat::Json, &settings))
+                .into_owned()
+        };
+        assert_eq!(printed(json!({"name": ""})), "\n");
+        assert_eq!(printed(json!({"name": "a"})), "a\n");
+        // A string that ends with a newline keeps it, then ends its line.
+        assert_eq!(printed(json!({"name": "a\n"})), "a\n\n");
+        let several = OutputSettings {
+            jq: Some(JqFilter::compile(".[]").unwrap()),
+            ..Default::default()
+        };
+        assert_eq!(
+            fmt_with(&json!(["", "b", ""]), OutputFormat::Json, &several),
+            "\nb\n\n"
+        );
     }
 }
