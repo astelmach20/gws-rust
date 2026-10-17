@@ -354,16 +354,24 @@ async fn send_simple(
 
 /// Parse a resumable-upload `Range: bytes=0-N` header into the next offset.
 ///
-/// An offset past the end of the `total`-byte file is an error: the server
-/// is describing some other upload.
+/// An offset past the end of the `total`-byte file, or past the `sent` bytes
+/// this upload has transmitted so far, is an error: the server is describing
+/// some other upload, and resuming from there would skip bytes it never got.
 pub(crate) fn next_offset(
     headers: &reqwest::header::HeaderMap,
     total: u64,
+    sent: u64,
 ) -> Result<u64, GwsError> {
     let offset = parse_range_end(headers)?;
     if offset > total {
         return Err(GwsError::other(anyhow::anyhow!(
             "upload server reports {offset} bytes persisted, but the file has only {total}"
+        )));
+    }
+    if offset > sent {
+        return Err(GwsError::other(anyhow::anyhow!(
+            "upload server reports {offset} bytes persisted, but only {sent} of {total} were sent; \
+             refusing to skip the rest of the file"
         )));
     }
     Ok(offset)
@@ -522,11 +530,15 @@ pub(crate) async fn resumable_upload(
 
     let progress = Progress::new(total);
     let mut offset: u64 = 0;
+    // The end of the furthest chunk sent: the server cannot have persisted
+    // more than that.
+    let mut sent_end: u64 = 0;
     let mut failures: u32 = 0;
     loop {
         let len = usize::try_from((total - offset).min(req.chunk_size as u64))
             .map_err(|_| GwsError::other(anyhow::anyhow!("chunk length overflow")))?;
         let chunk = req.data.read_range(offset, len).await?;
+        sent_end = sent_end.max(offset + len as u64);
         // Nothing left to send (an empty file, or a 308 acknowledging every
         // byte): ask the server to finish the upload.
         let range = if len == 0 {
@@ -556,7 +568,7 @@ pub(crate) async fn resumable_upload(
                     return Ok(sent);
                 }
                 StatusCode::PERMANENT_REDIRECT => {
-                    let next = next_offset(sent.response.headers(), total)?;
+                    let next = next_offset(sent.response.headers(), total, sent_end)?;
                     if next > offset {
                         offset = next;
                         failures = 0;
@@ -645,7 +657,7 @@ pub(crate) async fn resumable_upload(
                 return Ok(sent);
             }
             Ok(sent) if sent.response.status() == StatusCode::PERMANENT_REDIRECT => {
-                offset = next_offset(sent.response.headers(), total)?;
+                offset = next_offset(sent.response.headers(), total, sent_end)?;
             }
             Ok(sent) => {
                 tracing::debug!(status = %sent.response.status(), "upload status query failed; retrying chunk");
@@ -690,6 +702,7 @@ mod tests {
     use super::*;
     use serde_json::json;
     use std::time::Duration;
+    use wiremock::ResponseTemplate;
 
     #[test]
     fn resolve_mime_priority() {
@@ -835,16 +848,178 @@ mod tests {
     #[test]
     fn range_header_parsing() {
         let mut h = reqwest::header::HeaderMap::new();
-        assert_eq!(next_offset(&h, u64::MAX).unwrap(), 0);
+        assert_eq!(next_offset(&h, u64::MAX, u64::MAX).unwrap(), 0);
         h.insert(RANGE, "bytes=0-262143".parse().unwrap());
-        assert_eq!(next_offset(&h, u64::MAX).unwrap(), 262_144);
+        assert_eq!(next_offset(&h, u64::MAX, u64::MAX).unwrap(), 262_144);
         h.insert(RANGE, "garbage".parse().unwrap());
-        assert!(next_offset(&h, u64::MAX).is_err());
+        assert!(next_offset(&h, u64::MAX, u64::MAX).is_err());
         h.insert(RANGE, "bytes=0-99".parse().unwrap());
-        assert_eq!(next_offset(&h, 100).unwrap(), 100);
-        assert!(next_offset(&h, 99).is_err(), "past the end of the file");
+        assert_eq!(next_offset(&h, 100, 100).unwrap(), 100);
+        assert!(next_offset(&h, 99, 99).is_err(), "past the end of the file");
+        let err = next_offset(&h, 200, 50).unwrap_err();
+        assert!(
+            err.to_string().contains("only 50 of 200 were sent"),
+            "{err}"
+        );
         h.insert(RANGE, format!("bytes=0-{}", u64::MAX).parse().unwrap());
-        assert!(next_offset(&h, u64::MAX).is_err(), "must not overflow");
+        assert!(
+            next_offset(&h, u64::MAX, u64::MAX).is_err(),
+            "must not overflow"
+        );
+    }
+
+    /// A two-chunk upload against a session that answers `answer` to the
+    /// first chunk, and completes the upload for any status query.
+    async fn upload_with_first_chunk_answer(
+        answer: ResponseTemplate,
+    ) -> (Result<Sent, GwsError>, Vec<String>) {
+        use wiremock::matchers::{header, method};
+        use wiremock::{Mock, MockServer};
+        let server = MockServer::start().await;
+        let session = format!("{}/upload/session/abc", server.uri());
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).insert_header("location", session.as_str()))
+            .mount(&server)
+            .await;
+        let total = 2 * CHUNK_GRANULARITY;
+        Mock::given(method("PUT"))
+            .and(header(
+                "content-range",
+                format!("bytes 0-{}/{total}", CHUNK_GRANULARITY - 1).as_str(),
+            ))
+            .respond_with(answer)
+            .mount(&server)
+            .await;
+        // A status query, or a "finish" request, completes the upload.
+        Mock::given(method("PUT"))
+            .and(header("content-range", format!("bytes */{total}").as_str()))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id": "F"})))
+            .mount(&server)
+            .await;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("f.bin");
+        std::fs::write(&path, vec![7u8; total]).unwrap();
+        let data = UploadData {
+            path: path.to_str().unwrap().to_string(),
+            size: total as u64,
+        };
+        let transport = Transport::for_test(&server.uri());
+        let url = format!("{}/upload/files", server.uri());
+        let result = resumable_upload(
+            &transport,
+            Resumable {
+                method: Method::POST,
+                url: &url,
+                query: &[],
+                metadata: &None,
+                data: &data,
+                media_mime: "application/octet-stream",
+                chunk_size: CHUNK_GRANULARITY,
+            },
+        )
+        .await;
+        let ranges = server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .filter_map(|r| r.headers.get("content-range"))
+            .map(|v| v.to_str().unwrap().to_string())
+            .collect();
+        (result, ranges)
+    }
+
+    /// A 308 claiming bytes this upload never sent must not let it skip the
+    /// rest of the file and report success.
+    #[tokio::test]
+    async fn resumable_upload_refuses_a_range_beyond_what_was_sent() {
+        let total = 2 * CHUNK_GRANULARITY;
+        let claim_all = ResponseTemplate::new(308)
+            .insert_header("range", format!("bytes=0-{}", total - 1).as_str());
+        let (result, ranges) = upload_with_first_chunk_answer(claim_all).await;
+        let err = result.expect_err("the second chunk was never sent");
+        assert!(
+            err.to_string()
+                .contains(&format!("only {CHUNK_GRANULARITY} of {total} were sent")),
+            "{err}"
+        );
+        assert_eq!(ranges.len(), 1, "nothing after the bad 308: {ranges:?}");
+    }
+
+    /// The same check applies to the status query after a failed chunk.
+    #[tokio::test]
+    async fn resumable_upload_status_query_cannot_claim_unsent_bytes() {
+        use wiremock::matchers::{header, method};
+        use wiremock::{Mock, MockServer};
+        let server = MockServer::start().await;
+        let session = format!("{}/upload/session/abc", server.uri());
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).insert_header("location", session.as_str()))
+            .mount(&server)
+            .await;
+        let total = 2 * CHUNK_GRANULARITY;
+        Mock::given(method("PUT"))
+            .and(header(
+                "content-range",
+                format!("bytes 0-{}/{total}", CHUNK_GRANULARITY - 1).as_str(),
+            ))
+            .respond_with(ResponseTemplate::new(503))
+            .mount(&server)
+            .await;
+        Mock::given(method("PUT"))
+            .and(header("content-range", format!("bytes */{total}").as_str()))
+            .respond_with(
+                ResponseTemplate::new(308)
+                    .insert_header("range", format!("bytes=0-{}", total - 1).as_str()),
+            )
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("PUT"))
+            .and(header("content-range", format!("bytes */{total}").as_str()))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id": "F"})))
+            .mount(&server)
+            .await;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("f.bin");
+        std::fs::write(&path, vec![7u8; total]).unwrap();
+        let data = UploadData {
+            path: path.to_str().unwrap().to_string(),
+            size: total as u64,
+        };
+        let transport = Transport::for_test(&server.uri());
+        let url = format!("{}/upload/files", server.uri());
+        let err = resumable_upload(
+            &transport,
+            Resumable {
+                method: Method::POST,
+                url: &url,
+                query: &[],
+                metadata: &None,
+                data: &data,
+                media_mime: "application/octet-stream",
+                chunk_size: CHUNK_GRANULARITY,
+            },
+        )
+        .await
+        .expect_err("the second chunk was never sent");
+        assert!(err.to_string().contains("were sent"), "{err}");
+    }
+
+    /// A 308 acknowledging exactly what was sent still advances normally.
+    #[tokio::test]
+    async fn resumable_upload_accepts_a_range_up_to_what_was_sent() {
+        let ack_first = ResponseTemplate::new(308).insert_header(
+            "range",
+            format!("bytes=0-{}", CHUNK_GRANULARITY - 1).as_str(),
+        );
+        let (result, ranges) = upload_with_first_chunk_answer(ack_first).await;
+        // The second chunk has no mock of its own and gets wiremock's 404,
+        // which ends the upload as an expired session: what matters is that
+        // it was sent.
+        let total = 2 * CHUNK_GRANULARITY;
+        let second = format!("bytes {CHUNK_GRANULARITY}-{}/{total}", total - 1);
+        assert!(ranges.contains(&second), "{ranges:?} / {:?}", result.err());
     }
 
     #[test]
