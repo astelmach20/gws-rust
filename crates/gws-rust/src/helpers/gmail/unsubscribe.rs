@@ -23,7 +23,7 @@
 //!   by a valid DKIM signature. Lower headers come from the sender.
 //!
 //! The POST carries no credentials or cookies and does not follow redirects.
-//! When one-click is not possible the command fails and lists the manual
+//! When one-click is not possible the command fails (exit 3) and lists the manual
 //! unsubscribe options instead of guessing.
 
 use super::cli::required_message_id;
@@ -296,6 +296,25 @@ async fn post_one_click(url: &reqwest::Url) -> Result<u16, GwsError> {
     }
 }
 
+/// The error for a message that cannot be unsubscribed with one click
+/// (exit 3): it names the reason and lists the manual unsubscribe links, as
+/// the `+unsubscribe` help promises. Nothing is sent.
+fn not_available(info: &UnsubscribeInfo, reason: &str) -> GwsError {
+    let mut manual: Vec<String> = info.https.clone();
+    manual.extend(info.mailto.iter().cloned());
+    GwsError::Validation(format!(
+        "One-click unsubscribe is not available: {reason}.{}",
+        if manual.is_empty() {
+            String::new()
+        } else {
+            format!(
+                " Manual options: {}",
+                sanitize_for_terminal(&manual.join(", "))
+            )
+        }
+    ))
+}
+
 /// Handle `+unsubscribe`.
 pub(super) async fn handle_unsubscribe(
     matches: &ArgMatches,
@@ -337,21 +356,7 @@ pub(super) async fn handle_unsubscribe(
         .get_message(&message_id, "metadata", METADATA_HEADERS)
         .await?;
     let info = extract_info(&msg);
-    let target = one_click_target(&info).map_err(|reason| {
-        let mut manual: Vec<String> = info.https.clone();
-        manual.extend(info.mailto.iter().cloned());
-        GwsError::Validation(format!(
-            "One-click unsubscribe is not available: {reason}.{}",
-            if manual.is_empty() {
-                String::new()
-            } else {
-                format!(
-                    " Manual options: {}",
-                    sanitize_for_terminal(&manual.join(", "))
-                )
-            }
-        ))
-    })?;
+    let target = one_click_target(&info).map_err(|reason| not_available(&info, &reason))?;
 
     confirm::confirm(
         matches,
@@ -406,6 +411,25 @@ mod tests {
                 "mx.google.com; dkim=pass header.i=@example.com; spf=pass",
             ),
         ])
+    }
+
+    /// Without one-click (here a mailto-only list), the command fails with a
+    /// validation error (exit 3) whose message lists the manual links.
+    #[test]
+    fn not_available_fails_and_lists_the_manual_links() {
+        let info = extract_info(&msg(&[(
+            "List-Unsubscribe",
+            "<mailto:u@list.example.com?subject=unsub>",
+        )]));
+        let reason = one_click_target(&info).unwrap_err();
+        let err = not_available(&info, &reason);
+        assert!(matches!(err, GwsError::Validation(_)), "{err:?}");
+        assert_eq!(err.exit_code(), 3);
+        let text = err.to_string();
+        assert!(
+            text.contains("Manual options: mailto:u@list.example.com?subject=unsub"),
+            "{text}"
+        );
     }
 
     #[test]

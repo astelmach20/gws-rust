@@ -42,7 +42,7 @@ gwsr gmail +unsubscribe --message-id 18f1a2b3c4d --dry-run
 
 ## Tips
 
-- One-click unsubscribe is performed only when the message advertises List-Unsubscribe-Post: List-Unsubscribe=One-Click with an https URL and Gmail verified its DKIM signature. Otherwise the available unsubscribe links are printed and nothing is sent.
+- One-click unsubscribe is performed only when the message advertises List-Unsubscribe-Post: List-Unsubscribe=One-Click with an https URL and Gmail verified its DKIM signature. Otherwise nothing is sent: the command fails with exit code 3, and its error message lists the available unsubscribe links (https and mailto) to use by hand.
 - With --sanitize, the unsubscribe URL is screened before the POST (block mode: a match or a Model Armor failure sends nothing).
 - --dry-run loads no credentials and reads nothing: it shows the metadata read and the one-click POST, with the URL as a placeholder.
 
