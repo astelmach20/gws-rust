@@ -183,11 +183,38 @@ impl OutputTarget {
     /// Parse an `--output` value (`-` means stdout). File paths are validated
     /// by the `GWSR_RESTRICT_PATHS` policy (any path by default; `cwd` confines
     /// them to the current directory).
+    ///
+    /// An existing file is refused here, before any request, unless
+    /// `overwrite` is set: the write would refuse it anyway, but only after
+    /// credentials were loaded and the content fetched.
     pub fn parse(value: &str, overwrite: bool) -> Result<Self, GwsError> {
         if value == "-" {
             return Ok(Self::Stdout);
         }
         let path = crate::validate::validate_output_file_path(value, "--output")?;
+        Self::file(path, overwrite)
+    }
+
+    /// A file target at an already validated `path`, refused when it exists
+    /// and `overwrite` is not set (a dangling symlink counts as existing).
+    pub fn file(path: PathBuf, overwrite: bool) -> Result<Self, GwsError> {
+        if !overwrite {
+            match std::fs::symlink_metadata(&path) {
+                Ok(_) => {
+                    return Err(GwsError::Validation(format!(
+                        "'{}' already exists; pass --overwrite to replace it",
+                        path.display()
+                    )));
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => {
+                    return Err(GwsError::Validation(format!(
+                        "cannot inspect --output '{}': {e}",
+                        path.display()
+                    )));
+                }
+            }
+        }
         Ok(Self::File { path, overwrite })
     }
 
@@ -891,6 +918,25 @@ mod tests {
     use super::*;
     use wiremock::matchers::{header, method, path, query_param};
     use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    #[test]
+    fn file_target_refuses_an_existing_path_without_overwrite() {
+        let dir = tempfile::tempdir().unwrap();
+        let taken = dir.path().join("taken");
+        std::fs::write(&taken, "x").unwrap();
+        let err = OutputTarget::file(taken.clone(), false).unwrap_err();
+        assert!(matches!(err, GwsError::Validation(_)), "{err:?}");
+        assert!(err.to_string().contains("--overwrite"), "{err}");
+        assert!(OutputTarget::file(taken, true).is_ok());
+        assert!(OutputTarget::file(dir.path().join("free"), false).is_ok());
+        // A dangling symlink is a name the write cannot take either.
+        #[cfg(unix)]
+        {
+            let link = dir.path().join("link");
+            std::os::unix::fs::symlink(dir.path().join("missing"), &link).unwrap();
+            assert!(OutputTarget::file(link, false).is_err());
+        }
+    }
 
     #[test]
     fn dry_run_request_matches_describe() {
