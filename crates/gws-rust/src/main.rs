@@ -475,7 +475,7 @@ async fn dispatch(
         } => {
             let dry_run = cli.global.dry_run;
             let output_dir = crate::validate::validate_safe_output_dir(&output_dir)?;
-            let files = completions::write_man_pages(&output_dir, dry_run)?;
+            let files = completions::write_man_pages(&output_dir, dry_run).await?;
             let names: Vec<String> = files.iter().map(|p| p.display().to_string()).collect();
             let summary = if dry_run {
                 serde_json::json!({ "dry_run": true, "wouldWrite": names })

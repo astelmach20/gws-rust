@@ -207,55 +207,50 @@ pub fn registration_script(shell: CompletionShell, completer: &str) -> Result<St
 /// Write man pages for the static command tree into `dir`.
 /// Returns the files written.
 ///
+/// Every page is rendered before anything is written, so a render failure
+/// leaves the directory untouched. Each page is then written through
+/// [`crate::output_file`]: atomically, replacing (never writing through) a
+/// symlink at its path, and under `GWSR_RESTRICT_PATHS`.
+///
 /// With `dry_run` every page is still rendered (so failures surface) but
 /// nothing is created or written; the returned paths are the pages that
 /// would be written.
-pub fn write_man_pages(dir: &Path, dry_run: bool) -> Result<Vec<std::path::PathBuf>, GwsError> {
-    if !dry_run {
-        std::fs::create_dir_all(dir).map_err(|e| {
-            GwsError::from(
-                anyhow::Error::new(e).context(format!("failed to create {}", dir.display())),
-            )
-        })?;
-    }
+pub async fn write_man_pages(
+    dir: &Path,
+    dry_run: bool,
+) -> Result<Vec<std::path::PathBuf>, GwsError> {
     let mut root = with_auth_tree(crate::cli_args::command());
     root.build();
-    let mut written = Vec::new();
-    write_page(&root, "gwsr", dir, dry_run, &mut written)?;
+    let mut pages = Vec::new();
+    render_page(&root, "gwsr", dir, &mut pages)?;
+    let mut written = Vec::with_capacity(pages.len());
+    for (path, page) in pages {
+        if !dry_run {
+            crate::output_file::write_atomic(&path, &page, true).await?;
+        }
+        written.push(path);
+    }
     Ok(written)
 }
 
-fn write_page(
+/// Render the page of `cmd` (as `name`) and of each visible subcommand,
+/// paired with the path under `dir` it belongs at.
+fn render_page(
     cmd: &Command,
     name: &str,
     dir: &Path,
-    dry_run: bool,
-    written: &mut Vec<std::path::PathBuf>,
+    pages: &mut Vec<(std::path::PathBuf, Vec<u8>)>,
 ) -> Result<(), GwsError> {
-    let path = dir.join(format!("{name}.1"));
     let mut buf = Vec::new();
     clap_mangen::Man::new(cmd.clone().name(name.to_string()))
         .render(&mut buf)
         .map_err(|e| GwsError::from(anyhow::Error::new(e).context("failed to render man page")))?;
-    if !dry_run {
-        std::fs::write(&path, buf).map_err(|e| {
-            GwsError::from(
-                anyhow::Error::new(e).context(format!("failed to write {}", path.display())),
-            )
-        })?;
-    }
-    written.push(path);
+    pages.push((dir.join(format!("{name}.1")), buf));
     for sub in cmd.get_subcommands() {
         if sub.is_hide_set() || sub.get_name() == "help" {
             continue;
         }
-        write_page(
-            sub,
-            &format!("{name}-{}", sub.get_name()),
-            dir,
-            dry_run,
-            written,
-        )?;
+        render_page(sub, &format!("{name}-{}", sub.get_name()), dir, pages)?;
     }
     Ok(())
 }
@@ -570,10 +565,10 @@ mod tests {
         }
     }
 
-    #[test]
-    fn man_pages_are_written_for_static_commands() {
+    #[tokio::test]
+    async fn man_pages_are_written_for_static_commands() {
         let tmp = tempfile::tempdir().unwrap();
-        let files = write_man_pages(tmp.path(), false).unwrap();
+        let files = write_man_pages(tmp.path(), false).await.unwrap();
         let names: Vec<String> = files
             .iter()
             .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
@@ -590,16 +585,34 @@ mod tests {
         assert!(page.contains(".TH"));
     }
 
-    #[test]
-    fn man_pages_dry_run_lists_pages_but_writes_nothing() {
+    /// A page is replaced, never written through: a symlink in the output
+    /// directory must not let `dev man` overwrite the file it points to.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn man_pages_replace_a_symlink_instead_of_following_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let victim = tmp.path().join("victim.txt");
+        std::fs::write(&victim, b"keep me").unwrap();
+        let out = tmp.path().join("man");
+        std::fs::create_dir(&out).unwrap();
+        std::os::unix::fs::symlink(&victim, out.join("gwsr.1")).unwrap();
+        write_man_pages(&out, false).await.unwrap();
+        assert_eq!(std::fs::read_to_string(&victim).unwrap(), "keep me");
+        let page = out.join("gwsr.1");
+        assert!(!page.symlink_metadata().unwrap().is_symlink());
+        assert!(std::fs::read_to_string(&page).unwrap().contains(".TH"));
+    }
+
+    #[tokio::test]
+    async fn man_pages_dry_run_lists_pages_but_writes_nothing() {
         let tmp = tempfile::tempdir().unwrap();
         let out = tmp.path().join("man");
-        let dry = write_man_pages(&out, true).unwrap();
+        let dry = write_man_pages(&out, true).await.unwrap();
         assert!(
             !out.exists(),
             "dry run must not create the output directory"
         );
-        let real = write_man_pages(&out, false).unwrap();
+        let real = write_man_pages(&out, false).await.unwrap();
         assert_eq!(
             dry, real,
             "a dry run reports exactly the pages a real run writes"

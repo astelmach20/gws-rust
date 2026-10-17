@@ -2064,6 +2064,28 @@ fn man_pages_are_generated() {
     assert!(env.work_dir().join("man/gwsr-completions.1").exists());
 }
 
+/// With `GWSR_RESTRICT_PATHS=cwd`, a symlinked page in the output directory
+/// that points outside the current directory is refused, not written
+/// through.
+#[cfg(unix)]
+#[test]
+fn man_pages_do_not_write_through_a_symlink_out_of_cwd() {
+    let env = Env::new();
+    let outside = tempfile::tempdir().unwrap();
+    let victim = outside.path().join("victim.txt");
+    std::fs::write(&victim, "keep me").unwrap();
+    let man = env.work_dir().join("man");
+    std::fs::create_dir(&man).unwrap();
+    std::os::unix::fs::symlink(&victim, man.join("gwsr.1")).unwrap();
+    env.cmd()
+        .env("GWSR_RESTRICT_PATHS", "cwd")
+        .args(["dev", "man", "--output-dir", "man"])
+        .assert()
+        .code(3)
+        .stderr(predicate::str::contains("outside the current directory"));
+    assert_eq!(std::fs::read_to_string(&victim).unwrap(), "keep me");
+}
+
 /// `gwsr auth` parses its own subcommands, so the completion and man page
 /// trees must include them rather than the top-level passthrough argument.
 #[test]
