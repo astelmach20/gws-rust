@@ -24,7 +24,7 @@
 //! break (U+000B) so they neither become bullets nor split the list.
 
 use crate::error::GwsError;
-use pulldown_cmark::{Event, HeadingLevel, Options, Parser, Tag, TagEnd};
+use pulldown_cmark::{Event, HeadingLevel, LinkType, Options, Parser, Tag, TagEnd};
 use serde_json::{Value, json};
 
 const MONOSPACE: &str = "Courier New";
@@ -296,7 +296,20 @@ pub(super) fn render(md: &str) -> Result<Rendered, GwsError> {
                 Tag::Emphasis => b.open_span(SpanStyle::Italic),
                 Tag::Strong => b.open_span(SpanStyle::Bold),
                 Tag::Strikethrough => b.open_span(SpanStyle::Strike),
-                Tag::Link { dest_url, .. } => b.open_span(SpanStyle::Link(dest_url.to_string())),
+                Tag::Link {
+                    link_type,
+                    dest_url,
+                    ..
+                } => {
+                    // An email autolink (`<ann@example.com>`) carries the bare
+                    // address; a Docs link needs the mailto: scheme.
+                    let url = if link_type == LinkType::Email {
+                        format!("mailto:{dest_url}")
+                    } else {
+                        dest_url.to_string()
+                    };
+                    b.open_span(SpanStyle::Link(url));
+                }
                 Tag::Table(_) | Tag::TableHead | Tag::TableRow | Tag::TableCell => {
                     return Err(unsupported("tables"));
                 }
@@ -642,6 +655,35 @@ mod tests {
         // Tabs and line breaks are kept.
         let r = render("x\ty").unwrap();
         assert_eq!(r.text, "x\ty\n");
+    }
+
+    #[test]
+    fn email_autolink_gets_a_mailto_url() {
+        // pulldown-cmark gives an email autolink's bare address as its
+        // destination; as a Docs link URL that is not a mail link.
+        let r = render("Write to <ann@example.com> or <https://x.test>.").unwrap();
+        let links: Vec<_> = r
+            .spans
+            .iter()
+            .filter_map(|s| match &s.style {
+                SpanStyle::Link(url) => Some((s.start, s.end, url.as_str())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            links,
+            [
+                (9, 24, "mailto:ann@example.com"),
+                (28, 42, "https://x.test")
+            ]
+        );
+        assert_eq!(r.text, "Write to ann@example.com or https://x.test.\n");
+        // An explicit mailto: link is left as written.
+        let r = render("[mail](mailto:ann@example.com)").unwrap();
+        assert_eq!(
+            r.spans[0].style,
+            SpanStyle::Link("mailto:ann@example.com".into())
+        );
     }
 
     #[test]
