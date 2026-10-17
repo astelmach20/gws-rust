@@ -1442,7 +1442,7 @@ fn workflow_dry_run_plans_list_every_query_parameter() {
             &["workflow", "+standup-report", "--dry-run"],
             vec![
                 events.clone(),
-                json!({"showCompleted": "false", "maxResults": "100"}),
+                json!({"showCompleted": "false", "showAssigned": "true", "maxResults": "100"}),
             ],
         ),
         (
