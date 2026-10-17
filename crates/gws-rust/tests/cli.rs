@@ -2249,6 +2249,36 @@ fn dev_commands_honor_dry_run() {
     );
 }
 
+/// An `--output-dir` that is an existing file is a validation error before
+/// anything is written, not an I/O failure halfway through.
+#[test]
+fn dev_output_dir_that_is_a_file_is_refused() {
+    let env = Env::new();
+    std::fs::write(env.work_dir().join("taken"), "mine").unwrap();
+    for args in [
+        &["dev", "man", "--output-dir", "taken"][..],
+        &[
+            "dev",
+            "generate-skills",
+            "--output-dir",
+            "taken",
+            "--filter",
+            "shared",
+        ],
+    ] {
+        env.cmd()
+            .args(args)
+            .assert()
+            .code(3)
+            .stdout("")
+            .stderr(predicate::str::contains("not a directory"));
+    }
+    assert_eq!(
+        std::fs::read_to_string(env.work_dir().join("taken")).unwrap(),
+        "mine"
+    );
+}
+
 #[test]
 fn filtered_generate_skills_run_prunes_nothing() {
     let env = Env::new();
