@@ -434,7 +434,6 @@ impl GmailApi {
                 &self.upload_url(draft),
                 Idempotency::NonIdempotent,
                 context,
-                None,
                 |rb| {
                     rb.query(&[("uploadType", "multipart")])
                         .header(

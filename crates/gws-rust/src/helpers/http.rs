@@ -310,8 +310,10 @@ impl Api {
         Ok(())
     }
 
-    /// Send a request and return the successful response (2xx, or 308 for
-    /// resumable-upload progress). Must not be called in dry-run mode.
+    /// Send a request and return the successful (2xx) response. Must not be
+    /// called in dry-run mode. A redirect `reqwest` could not follow, such as
+    /// a 308 without `Location`, is an error: its body is not the answer.
+    /// (Resumable uploads read their 308s in [`crate::executor::upload`].)
     async fn execute(&self, req: &ApiRequest) -> Result<reqwest::Response, GwsError> {
         let transport = self.transport.as_ref().ok_or_else(|| {
             GwsError::other("internal error: a dry-run request reached the transport")
@@ -324,7 +326,6 @@ impl Api {
                 // GET/PUT/DELETE may be retried; POST/PATCH are sent once.
                 Idempotency::FromMethod,
                 &context,
-                Some(reqwest::StatusCode::PERMANENT_REDIRECT),
                 |rb| req.apply(rb),
             )
             .await?;
@@ -1092,6 +1093,56 @@ mod tests {
                 .await
                 .is_err()
         );
+    }
+
+    /// A 308 that `reqwest` could not follow (no `Location`) is not a
+    /// success: a listing page answered with one must not end the listing
+    /// as complete.
+    #[tokio::test]
+    async fn paginate_unfollowable_308_is_an_error_not_the_last_page() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(query_param("pageToken", "p2"))
+            .respond_with(ResponseTemplate::new(308))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({"items": [1, 2], "nextPageToken": "p2"})),
+            )
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+        let api = api(&server.uri(), "");
+        let err = api
+            .paginate(ApiRequest::get(api.url("x")), "items", None)
+            .await
+            .expect_err("a 308 page is not the end of the list");
+        assert!(matches!(err, GwsError::Api { code: 308, .. }), "{err:?}");
+    }
+
+    /// Nor is it a download: its body must not be saved as the file.
+    #[tokio::test]
+    async fn download_unfollowable_308_saves_nothing() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(308).set_body_string("<html>moved</html>"))
+            .mount(&server)
+            .await;
+        let api = api(&server.uri(), "");
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("out.bin");
+        let target = OutputTarget::File {
+            path: path.clone(),
+            overwrite: false,
+        };
+        let err = api
+            .download(ApiRequest::get(api.url("f")), &target)
+            .await
+            .expect_err("a 308 is not the file");
+        assert!(matches!(err, GwsError::Api { code: 308, .. }), "{err:?}");
+        assert!(!path.exists());
     }
 
     #[tokio::test]
