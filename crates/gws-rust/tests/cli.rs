@@ -1312,6 +1312,14 @@ fn dry_run_formats() {
         .success()
         .stdout("https://www.googleapis.com/drive/v3/files\n");
 
+    // An empty string result is an empty line, as with `jq -r`.
+    env.cmd()
+        .args(["--jq", r#""""#])
+        .args(base)
+        .assert()
+        .success()
+        .stdout("\n");
+
     // --columns for table.
     env.cmd()
         .args(base)
