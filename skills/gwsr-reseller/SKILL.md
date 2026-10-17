@@ -2,7 +2,7 @@
 name: gwsr-reseller
 description: "Google Workspace Reseller: Manage reseller customers and subscriptions."
 metadata:
-  version: 0.23.0
+  version: 0.24.0
   openclaw:
     category: "productivity"
     requires:

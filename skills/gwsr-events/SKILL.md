@@ -2,7 +2,7 @@
 name: gwsr-events
 description: "Subscribe to Google Workspace events."
 metadata:
-  version: 0.23.0
+  version: 0.24.0
   openclaw:
     category: "productivity"
     requires:
