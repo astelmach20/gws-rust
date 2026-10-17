@@ -63,7 +63,11 @@ use url::{UrlTarget, build_url};
 /// Media upload content: a file on disk, streamed. The content type is
 /// explicit, inferred from the extension, or taken from metadata `mimeType`.
 pub struct UploadSource<'a> {
+    /// The validated path, symlinks resolved: what is read.
     pub path: &'a str,
+    /// The path as given on the command line. Its extension names the
+    /// content type: `report.pdf -> blobs/9f3a` is a PDF.
+    pub given: &'a str,
     pub content_type: Option<&'a str>,
 }
 
@@ -213,13 +217,28 @@ impl UploadPlan {
     }
 }
 
+/// The path whose extension names an upload's content type: the one given,
+/// not the file a symlink resolves to, unless the given one has no name of
+/// its own (`dir/..`).
+fn type_path<'a>(given: &'a str, resolved: &'a str) -> &'a str {
+    if std::path::Path::new(given).file_name().is_some() {
+        given
+    } else {
+        resolved
+    }
+}
+
 async fn plan_upload(
     source: &UploadSource<'_>,
     method: &RestMethod,
     body: &Option<Value>,
     mode: UploadMode,
 ) -> Result<UploadPlan, GwsError> {
-    let UploadSource { path, content_type } = source;
+    let UploadSource {
+        path,
+        given,
+        content_type,
+    } = source;
     let meta = tokio::fs::metadata(path)
         .await
         .map_err(|e| GwsError::Validation(format!("Failed to read upload file '{path}': {e}")))?;
@@ -228,7 +247,7 @@ async fn plan_upload(
             "Upload path '{path}' is not a regular file"
         )));
     }
-    let mime = upload::resolve_upload_mime(*content_type, Some(path), body);
+    let mime = upload::resolve_upload_mime(*content_type, Some(type_path(given, path)), body);
     let data = UploadData {
         path: (*path).to_string(),
         size: meta.len(),

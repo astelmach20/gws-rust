@@ -2053,6 +2053,34 @@ fn cache_clear_reports_removed_documents() {
     assert!(!env.seeded_drive_path().exists());
 }
 
+/// `--upload` is typed after the path as given, not the file a symlink
+/// resolves to: `notes.csv -> blob` is sent as `text/csv`.
+#[cfg(unix)]
+#[test]
+fn upload_content_type_comes_from_the_given_name_not_the_symlink_target() {
+    let env = Env::new();
+    let doc: Value =
+        serde_json::from_str(include_str!("fixtures/discovery/drive_v3.json")).unwrap();
+    env.seed_doc(&doc);
+    std::fs::write(env.work_dir().join("blob"), "a,b\n1,2\n").unwrap();
+    std::os::unix::fs::symlink("blob", env.work_dir().join("notes.csv")).unwrap();
+    let out = env
+        .cmd()
+        .args([
+            "drive",
+            "files",
+            "create",
+            "--upload",
+            "notes.csv",
+            "--dry-run",
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    let plan: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(plan["upload"]["contentType"], "text/csv", "{plan}");
+}
+
 #[test]
 fn man_pages_are_generated() {
     let env = Env::new();
@@ -2062,6 +2090,28 @@ fn man_pages_are_generated() {
         .success();
     assert!(env.work_dir().join("man/gwsr.1").exists());
     assert!(env.work_dir().join("man/gwsr-completions.1").exists());
+}
+
+/// With `GWSR_RESTRICT_PATHS=cwd`, a symlinked page in the output directory
+/// that points outside the current directory is refused, not written
+/// through.
+#[cfg(unix)]
+#[test]
+fn man_pages_do_not_write_through_a_symlink_out_of_cwd() {
+    let env = Env::new();
+    let outside = tempfile::tempdir().unwrap();
+    let victim = outside.path().join("victim.txt");
+    std::fs::write(&victim, "keep me").unwrap();
+    let man = env.work_dir().join("man");
+    std::fs::create_dir(&man).unwrap();
+    std::os::unix::fs::symlink(&victim, man.join("gwsr.1")).unwrap();
+    env.cmd()
+        .env("GWSR_RESTRICT_PATHS", "cwd")
+        .args(["dev", "man", "--output-dir", "man"])
+        .assert()
+        .code(3)
+        .stderr(predicate::str::contains("outside the current directory"));
+    assert_eq!(std::fs::read_to_string(&victim).unwrap(), "keep me");
 }
 
 /// `gwsr auth` parses its own subcommands, so the completion and man page
@@ -2273,6 +2323,36 @@ fn dev_commands_honor_dry_run() {
     );
 }
 
+/// An `--output-dir` that is an existing file is a validation error before
+/// anything is written, not an I/O failure halfway through.
+#[test]
+fn dev_output_dir_that_is_a_file_is_refused() {
+    let env = Env::new();
+    std::fs::write(env.work_dir().join("taken"), "mine").unwrap();
+    for args in [
+        &["dev", "man", "--output-dir", "taken"][..],
+        &[
+            "dev",
+            "generate-skills",
+            "--output-dir",
+            "taken",
+            "--filter",
+            "shared",
+        ],
+    ] {
+        env.cmd()
+            .args(args)
+            .assert()
+            .code(3)
+            .stdout("")
+            .stderr(predicate::str::contains("not a directory"));
+    }
+    assert_eq!(
+        std::fs::read_to_string(env.work_dir().join("taken")).unwrap(),
+        "mine"
+    );
+}
+
 #[test]
 fn filtered_generate_skills_run_prunes_nothing() {
     let env = Env::new();
@@ -2352,6 +2432,33 @@ fn generate_skills_filters_are_exact_and_output_is_agent_safe() {
         .stderr(predicate::str::contains("--filter matched no skill: a"));
 }
 
+/// `--index` names a file: a directory (existing, or spelled `dir/`) is a
+/// validation error before any skill is written.
+#[test]
+fn generate_skills_index_must_be_a_file() {
+    let env = Env::new();
+    std::fs::create_dir(env.work_dir().join("docs")).unwrap();
+    for index in ["docs", "new/"] {
+        env.cmd()
+            .args([
+                "dev",
+                "generate-skills",
+                "--output-dir",
+                "out",
+                "--filter",
+                "shared",
+                "--index",
+                index,
+            ])
+            .assert()
+            .code(3)
+            .stdout("")
+            .stderr(predicate::str::contains("--index"))
+            .stderr(predicate::str::contains("directory"));
+        assert!(!env.work_dir().join("out").exists(), "{index}");
+    }
+}
+
 // ── Process hygiene ─────────────────────────────────────────────────────
 
 #[test]
@@ -2374,6 +2481,41 @@ fn closed_stdout_is_a_clean_exit() {
     let stderr = stderr_of(&out);
     assert!(!stderr.contains("panicked"), "{stderr}");
     assert_eq!(out.status.code(), Some(0), "{stderr}");
+}
+
+/// `auth` prints its own help; a reader that closed stdout (`| head`) is a
+/// clean exit there too, not a validation error.
+#[test]
+fn auth_help_to_a_closed_stdout_is_a_clean_exit() {
+    let env = Env::new();
+    for args in [
+        &["auth"][..],
+        &["auth", "--help"],
+        &["auth", "login", "--help"],
+        &["auth", "setup", "--help"],
+        &["help", "auth", "status"],
+    ] {
+        let (reader, writer) = std::io::pipe().unwrap();
+        // Nobody reads: every write to stdout fails with a broken pipe.
+        drop(reader);
+        let out = std::process::Command::new(assert_cmd::cargo::cargo_bin("gwsr"))
+            .args(args)
+            .env_clear()
+            .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+            .env("HOME", env.root.path().join("home"))
+            .env("GWSR_CONFIG_DIR", env.config_dir())
+            .env("GWSR_CACHE_DIR", env.cache_dir())
+            .env("GWSR_KEYRING_BACKEND", "file")
+            .env("NO_COLOR", "1")
+            .current_dir(env.work_dir())
+            .stdout(writer)
+            .stderr(std::process::Stdio::piped())
+            .output()
+            .unwrap();
+        let stderr = stderr_of(&out);
+        assert_eq!(out.status.code(), Some(0), "{args:?}: {stderr}");
+        assert!(stderr.is_empty(), "{args:?}: {stderr}");
+    }
 }
 
 #[cfg(unix)]

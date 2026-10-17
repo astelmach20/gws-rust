@@ -141,7 +141,8 @@ pub async fn handle_generate_skills(
     let output_path_buf = crate::validate::validate_safe_output_dir(&args.output_dir)?;
     let output_path = output_path_buf.as_path();
     let index_path = match &args.index {
-        Some(p) => Some(crate::validate::validate_safe_file_path(p, "--index")?),
+        // A file: a directory is refused before any skill is written.
+        Some(p) => Some(crate::validate::validate_output_file_path(p, "--index")?),
         None => None,
     };
     let filter = SkillFilter(args.filters.iter().map(|f| f.trim().to_string()).collect());
@@ -309,7 +310,7 @@ pub async fn handle_generate_skills(
     }
 
     if let Some(path) = &index_path {
-        write_skills_index(&index, path, dry_run)?;
+        write_skills_index(&index, path, output_path, dry_run)?;
     }
 
     // Only a full run knows every skill that should exist; a filtered run
@@ -494,6 +495,7 @@ fn write_skill(base: &Path, name: &str, content: &str, dry_run: bool) -> Result<
 fn write_skills_index(
     entries: &[SkillIndexEntry],
     path: &Path,
+    skills_dir: &Path,
     dry_run: bool,
 ) -> Result<(), GwsError> {
     let mut out = String::new();
@@ -519,6 +521,17 @@ fn write_skills_index(
         ),
     ];
 
+    // Links are relative to the index file, so they work wherever the index
+    // and the skills are (`docs/skills.md` links to `../skills/...`).
+    let base = relative_link(path.parent().unwrap_or(Path::new("")), skills_dir);
+    let link = |name: &str| {
+        if base.is_empty() {
+            format!("{name}/SKILL.md")
+        } else {
+            format!("{base}/{name}/SKILL.md")
+        }
+    };
+
     for (cat, heading, subtitle) in &sections {
         let items: Vec<&SkillIndexEntry> = entries.iter().filter(|e| e.category == *cat).collect();
         if items.is_empty() {
@@ -528,8 +541,10 @@ fn write_skills_index(
         out.push_str("| Skill | Description |\n|-------|-------------|\n");
         for item in &items {
             out.push_str(&format!(
-                "| [{}](../skills/{}/SKILL.md) | {} |\n",
-                item.name, item.name, item.description
+                "| [{}]({}) | {} |\n",
+                item.name,
+                link(&item.name),
+                item.description
             ));
         }
         out.push('\n');
@@ -555,6 +570,22 @@ fn write_skills_index(
         )
     })?;
     Ok(())
+}
+
+/// `to` relative to the directory `from`, with `/` separators (a Markdown
+/// link). Both are absolute: the path validators resolve them.
+fn relative_link(from: &Path, to: &Path) -> String {
+    let from: Vec<_> = from.components().collect();
+    let to: Vec<_> = to.components().collect();
+    let common = from.iter().zip(&to).take_while(|(a, b)| a == b).count();
+    let mut parts: Vec<String> =
+        std::iter::repeat_n("..".to_string(), from.len() - common).collect();
+    parts.extend(
+        to[common..]
+            .iter()
+            .map(|c| c.as_os_str().to_string_lossy().into_owned()),
+    );
+    parts.join("/")
 }
 
 // ---------------------------------------------------------------------------
@@ -1442,10 +1473,37 @@ mod tests {
         // Render errors still surface on a dry run.
         assert!(write_skill(dir.path(), "gwsr-y", "# no front matter", true).is_err());
         let index = dir.path().join("docs/skills.md");
-        write_skills_index(&[], &index, true).unwrap();
+        write_skills_index(&[], &index, &dir.path().join("skills"), true).unwrap();
         assert!(!dir.path().join("docs").exists());
         generate_shared_skill(dir.path(), true).unwrap();
         assert!(!dir.path().join("gwsr-shared").exists());
+    }
+
+    /// Index links point at the skills in `--output-dir`, relative to the
+    /// index file, wherever the two are.
+    #[test]
+    fn index_links_follow_the_output_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let entries = [SkillIndexEntry {
+            name: "gwsr-x".into(),
+            description: "X".into(),
+            category: "service".into(),
+        }];
+        for (index, skills, link) in [
+            ("docs/skills.md", "skills", "../skills/gwsr-x/SKILL.md"),
+            ("idx.md", "out", "out/gwsr-x/SKILL.md"),
+            ("a/b/idx.md", "c/skills", "../../c/skills/gwsr-x/SKILL.md"),
+            ("skills/index.md", "skills", "gwsr-x/SKILL.md"),
+        ] {
+            let index = root.join(index);
+            write_skills_index(&entries, &index, &root.join(skills), false).unwrap();
+            let text = std::fs::read_to_string(&index).unwrap();
+            assert!(
+                text.contains(&format!("| [gwsr-x]({link}) | X |")),
+                "{link}: {text}"
+            );
+        }
     }
 
     #[test]

@@ -143,7 +143,8 @@ pub async fn run_from_matches(
     let body: Option<Value> = input::parse_body(body_text.as_deref())?;
 
     // Validate file paths before any I/O; use the canonical paths for I/O.
-    let upload_path = args::optional_if_defined(m, "upload")?
+    let upload_given = args::optional_if_defined(m, "upload")?;
+    let upload_path = upload_given
         .map(|p| crate::validate::validate_safe_file_path(p, "--upload"))
         .transpose()?;
     // `-o -` streams the raw payload to stdout; anything else is a file.
@@ -163,10 +164,13 @@ pub async fn run_from_matches(
         })
         .transpose()?;
     let upload_content_type = args::optional_if_defined(m, "upload-content-type")?;
-    let upload = upload_path_str.map(|path| UploadSource {
-        path,
-        content_type: upload_content_type,
-    });
+    let upload = upload_path_str
+        .zip(upload_given)
+        .map(|(path, given)| UploadSource {
+            path,
+            given,
+            content_type: upload_content_type,
+        });
 
     let options = parse_exec_options(m)?;
     if options.decode_field.is_some() && output.is_none() {
