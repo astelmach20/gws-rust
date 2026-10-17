@@ -450,7 +450,7 @@ TIPS:
 
 fn triage_cmd() -> Command {
     Command::new("+triage")
-        .about("[Helper] Show an unread inbox summary (sender, subject, date)")
+        .about("[Helper] Summarize unread messages (sender, subject, date)")
         .arg(
             Arg::new("max")
                 .long("max")
@@ -479,10 +479,14 @@ EXAMPLES:
   gwsr gmail +triage
   gwsr gmail +triage --max 5 --query 'from:boss'
   gwsr gmail +triage --format table
+  gwsr gmail +triage --query 'is:unread in:inbox'
   gwsr gmail +triage | jq -r '.messages[].subject'
 
 TIPS:
-  Read-only. Use +search for full metadata and paging.",
+  Read-only. The default query, is:unread, searches all mail, archived
+    messages included; add in:inbox to limit it to the Inbox. --query
+    replaces the default rather than narrowing it.
+  Use +search for full metadata and paging.",
         )
 }
 
@@ -1060,6 +1064,35 @@ mod tests {
         ] {
             assert!(names.contains(&expected), "missing {expected}");
         }
+    }
+
+    /// `+triage` describes what its default query finds: `is:unread` searches
+    /// all mail (archived messages included), so the help must not promise
+    /// an inbox summary unless the default query is limited to the inbox.
+    #[test]
+    fn test_triage_help_matches_its_default_query() {
+        let cmd = triage_cmd();
+        let about = cmd.get_about().map(|a| a.to_string()).unwrap_or_default();
+        let query = cmd
+            .get_arguments()
+            .find(|a| a.get_id() == "query")
+            .and_then(|a| a.get_default_values().first())
+            .and_then(|v| v.to_str())
+            .unwrap_or_default()
+            .to_string();
+        assert_eq!(
+            about.to_lowercase().contains("inbox"),
+            query.contains("in:inbox"),
+            "about {about:?} vs default query {query:?}"
+        );
+        let help = cmd
+            .get_after_help()
+            .map(|h| h.to_string())
+            .unwrap_or_default();
+        assert!(
+            help.contains(&query),
+            "the tips name the default query: {help}"
+        );
     }
 
     #[test]
