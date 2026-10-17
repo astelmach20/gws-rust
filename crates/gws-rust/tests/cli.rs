@@ -1327,6 +1327,30 @@ fn dry_run_formats() {
         .assert()
         .success()
         .stdout("method,url\nGET,https://www.googleapis.com/drive/v3/files\n");
+
+    // --columns with a format it does not shape (the JSON default, YAML) is
+    // refused instead of silently ignored.
+    for format in [&[][..], &["--format", "yaml"][..]] {
+        let out = env
+            .cmd()
+            .args(base)
+            .args(format)
+            .args(["--columns", "url"])
+            .output()
+            .unwrap();
+        assert_eq!(
+            out.status.code(),
+            Some(3),
+            "{format:?}: {}",
+            stderr_of(&out)
+        );
+        assert_eq!(stdout_of(&out), "", "{format:?}");
+        assert!(
+            stderr_of(&out).contains("--columns only applies to --format table or csv"),
+            "{format:?}: {}",
+            stderr_of(&out)
+        );
+    }
 }
 
 #[test]
@@ -3961,6 +3985,35 @@ fn restrict_paths_confines_dev_man_and_auth_export() {
         .unwrap();
     assert!(out.status.success(), "{out:?}");
     assert!(env.work_dir().join("man").join("gwsr.1").exists());
+}
+
+/// `auth export --unmasked --output` refuses a path that names a directory
+/// before reading any credentials: `newdir/` used to resolve to `newdir`,
+/// so the secrets were written to a file of that name.
+#[test]
+fn auth_export_output_naming_a_directory_is_refused() {
+    let env = Env::new();
+    std::fs::create_dir(env.work_dir().join("existing")).unwrap();
+    for output in ["newdir/", "newdir/.", "existing"] {
+        let out = env
+            .cmd()
+            .args([
+                "auth",
+                "export",
+                "--unmasked",
+                "--yes-i-understand-this-exposes-secrets",
+                "--output",
+                output,
+            ])
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(3), "{output}: {out:?}");
+        assert!(out.stdout.is_empty(), "{output}: {out:?}");
+        let err: Value = serde_json::from_slice(&out.stderr).unwrap();
+        let message = err["error"]["message"].as_str().unwrap();
+        assert!(message.contains("directory"), "{output}: {message}");
+    }
+    assert!(!env.work_dir().join("newdir").exists());
 }
 
 // ── -o/--output and long-running operations ─────────────────────────────
