@@ -105,8 +105,9 @@ fn dedupe(name: &str, taken: &mut HashSet<String>) -> String {
     }
 }
 
-/// Choose output paths for the parts. Fails if any target exists and
-/// `overwrite` is false, before anything is downloaded.
+/// Choose output paths for the parts. Fails if any target is a directory
+/// (which no write can replace), or exists and `overwrite` is false, before
+/// anything is downloaded.
 fn plan_paths(
     dir: &Path,
     parts: &[OriginalPart],
@@ -121,6 +122,7 @@ fn plan_paths(
             &mut taken,
         );
         let path = dir.join(&name);
+        crate::validate::reject_directory(&path, "attachment path")?;
         if !overwrite && path.exists() {
             conflicts.push(path.display().to_string());
         }
@@ -552,6 +554,27 @@ mod tests {
         assert!(msg.contains(&written.display().to_string()), "{msg}");
         assert_eq!(std::fs::read(&written).unwrap(), b"hi");
         assert!(!dir.path().join("b.bin").exists());
+    }
+
+    /// A directory at a target name can never be replaced, `--overwrite` or
+    /// not. Refuse it before anything is downloaded, rather than after the
+    /// attachments before it were written.
+    #[tokio::test]
+    async fn a_directory_at_a_target_is_refused_before_writing() {
+        let server = MockServer::start().await;
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("b.txt")).unwrap();
+        let parts = vec![
+            part("a.txt", PartData::Inline("aGk".into()), false),
+            part("b.txt", PartData::Inline("aGk".into()), false),
+        ];
+        for overwrite in [true, false] {
+            let err = download(&mock_api(&server), "m1", &parts, dir.path(), overwrite)
+                .await
+                .unwrap_err();
+            assert!(matches!(err, GwsError::Validation(_)), "{err:?}");
+            assert!(!dir.path().join("a.txt").exists(), "{err}");
+        }
     }
 
     #[tokio::test]
