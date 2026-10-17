@@ -777,7 +777,11 @@ fn format_csv(
     // the `csv` crate without `flexible`) reject a ragged file.
     let mut writer = csv::WriterBuilder::new().from_writer(Vec::new());
 
-    if !arr.iter().any(Value::is_object) {
+    // `--columns` names columns, which only objects have: rows of other
+    // values then get the single `value` column, as in a table, so a column
+    // selection is applied (or refused) rather than ignored.
+    let plain_rows = !arr.iter().any(Value::is_object) && (selected.is_none() || arr.is_empty());
+    if plain_rows {
         // Arrays of rows (e.g. Sheets `values`) or of scalars. The Sheets API
         // drops trailing empty cells, so rows are padded with empty fields
         // to the widest one.
@@ -1743,5 +1747,35 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(fmt_with(&json!(1), OutputFormat::Json, &settings), "");
+    }
+
+    /// `--columns` on rows that are not objects (Sheets `values`, a list of
+    /// IDs) is applied to their `value` column, as in a table, instead of
+    /// being ignored: an unknown column is an error.
+    #[test]
+    fn csv_columns_apply_to_rows_that_are_not_objects() {
+        let select = |cols: &[&str]| OutputSettings {
+            columns: Some(cols.iter().map(|c| (*c).to_string()).collect()),
+            ..Default::default()
+        };
+        let rows = json!({"range": "A1:B2", "values": [["a", "b"], ["c"]]});
+        let err = render(&rows, OutputFormat::Csv, &select(&["id"]), None).unwrap_err();
+        assert!(err.to_string().contains("no such column(s): id"), "{err}");
+        let table_err = render(&rows, OutputFormat::Table, &select(&["id"]), None).unwrap_err();
+        assert!(
+            table_err.to_string().contains("no such column(s): id"),
+            "{table_err}"
+        );
+        assert_eq!(
+            fmt_with(&json!(["x", "=y"]), OutputFormat::Csv, &select(&["value"])),
+            "value\nx\n'=y"
+        );
+        // Without --columns the rows are written as they are.
+        assert_eq!(fmt(&rows, OutputFormat::Csv), "a,b\nc,");
+        // An empty list has no rows to check the selection against.
+        assert_eq!(
+            fmt_with(&json!([]), OutputFormat::Csv, &select(&["id"])),
+            ""
+        );
     }
 }
