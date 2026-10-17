@@ -79,6 +79,7 @@ fn parse_subscribe_args(matches: &ArgMatches) -> Result<SubscribeConfig, GwsErro
             .map(|d| crate::validate::validate_safe_output_dir(d))
             .transpose()?,
     };
+    super::stream::reject_stdout_flags_with_output_dir(matches, config.output_dir.is_some())?;
     validate_subscribe_config(&config)?;
     Ok(config)
 }
@@ -618,6 +619,33 @@ mod tests {
             (3, 7, 10)
         );
         assert!(c.no_ack);
+    }
+
+    /// As for `gmail +watch`: with `--output-dir` the stdout-only flags would
+    /// be ignored, so they are refused (exit 3).
+    #[test]
+    fn test_parse_subscribe_args_output_dir_rejects_stdout_flags() {
+        let base = [
+            "+subscribe",
+            "--subscription",
+            "projects/p/subscriptions/s",
+            "--output-dir",
+            "out",
+        ];
+        for extra in [
+            &["--jq", ".id"][..],
+            &["--format", "table"][..],
+            &["--format", "csv", "--columns", "id"][..],
+        ] {
+            let args: Vec<&str> = base.iter().chain(extra).copied().collect();
+            let Err(err) = parse_subscribe_args(&events_matches(&args)) else {
+                panic!("{extra:?} with --output-dir was accepted");
+            };
+            assert!(matches!(err, GwsError::Validation(_)), "{extra:?}: {err:?}");
+            assert!(err.to_string().contains("--output-dir"), "{err}");
+        }
+        let args: Vec<&str> = base.iter().chain(&["--format", "json"]).copied().collect();
+        assert!(parse_subscribe_args(&events_matches(&args)).is_ok());
     }
 
     #[test]
