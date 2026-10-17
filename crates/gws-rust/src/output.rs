@@ -197,6 +197,18 @@ pub(crate) fn emit(text: &str) -> Result<(), GwsError> {
     write_line(&mut std::io::stdout().lock(), text).map_err(stdout_error)
 }
 
+/// Write raw bytes to stdout (a payload streamed with `-o -`), unchanged.
+/// Errors are handled as by [`emit`]: a closed pipe is recorded and
+/// returned so the caller stops; any other failure is reported.
+pub(crate) fn emit_bytes(data: &[u8]) -> Result<(), GwsError> {
+    write_bytes(&mut std::io::stdout().lock(), data).map_err(stdout_error)
+}
+
+/// Flush stdout, reporting a failure as [`emit`] does.
+pub(crate) fn flush_stdout() -> Result<(), GwsError> {
+    std::io::stdout().lock().flush().map_err(stdout_error)
+}
+
 /// The bytes [`emit`] writes for `text`: nothing for an empty text,
 /// otherwise `text` ended by exactly the newline it lacks.
 pub(crate) fn terminated_line(text: &str) -> std::borrow::Cow<'_, str> {
@@ -218,10 +230,14 @@ pub(crate) fn stdout_error(e: std::io::Error) -> GwsError {
 }
 
 fn write_line(w: &mut dyn Write, text: &str) -> std::io::Result<()> {
+    write_bytes(w, terminated_line(text).as_bytes())
+}
+
+fn write_bytes(w: &mut dyn Write, data: &[u8]) -> std::io::Result<()> {
     if STDOUT_CLOSED.load(Ordering::Relaxed) {
         return Err(std::io::ErrorKind::BrokenPipe.into());
     }
-    w.write_all(terminated_line(text).as_bytes())?;
+    w.write_all(data)?;
     w.flush()
 }
 

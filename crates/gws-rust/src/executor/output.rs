@@ -21,7 +21,6 @@
 use std::sync::Mutex;
 
 use serde_json::Value;
-use tokio::io::AsyncWriteExt;
 
 use crate::error::GwsError;
 use crate::formatter::{OutputFormat, PageStream};
@@ -118,23 +117,23 @@ impl Emitter {
     }
 
     /// Write raw bytes (binary downloads streamed to stdout).
+    ///
+    /// Each chunk goes through the process's one stdout handle, in order,
+    /// before the next is accepted, as [`crate::output::emit`] writes lines.
+    /// (A fresh `tokio::io::stdout()` per chunk would hand each write to the
+    /// blocking pool and return at once: chunks could land out of order,
+    /// and a failed write would be lost with the dropped handle.)
     pub(crate) async fn bytes(&self, data: &[u8]) -> Result<(), GwsError> {
         if self.write_captured(data)? {
             return Ok(());
         }
-        let mut out = tokio::io::stdout();
-        out.write_all(data)
-            .await
-            .map_err(crate::output::stdout_error)
+        crate::output::emit_bytes(data)
     }
 
     pub(crate) async fn flush(&self) -> Result<(), GwsError> {
         if self.captured.is_some() {
             return Ok(());
         }
-        tokio::io::stdout()
-            .flush()
-            .await
-            .map_err(crate::output::stdout_error)
+        crate::output::flush_stdout()
     }
 }
