@@ -86,7 +86,15 @@ fn a_signal_during_a_download_removes_the_temporary_file() {
             .env("HOME", dir.path())
             .env("GWSR_TOKEN", "test-token")
             .env("GWSR_API_BASE_URL", &base)
-            .current_dir(dir.path())
+            .current_dir(dir.path());
+        // The Nix build sandbox has no system trust store; TLS setup needs
+        // its certificate bundle even though the server here is plain HTTP.
+        for key in ["SSL_CERT_FILE", "NIX_SSL_CERT_FILE"] {
+            if let Some(value) = std::env::var_os(key) {
+                child.env(key, value);
+            }
+        }
+        child
             .args([
                 "drive",
                 "files",
@@ -98,11 +106,18 @@ fn a_signal_during_a_download_removes_the_temporary_file() {
             .arg(out_dir.join("file.bin"))
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        let child = child.spawn().unwrap();
+        let mut child = child.spawn().unwrap();
 
         // Wait until the download has started writing its temporary file.
-        let deadline = Instant::now() + Duration::from_secs(10);
+        let deadline = Instant::now() + Duration::from_secs(60);
         while temp_files(&out_dir).is_empty() {
+            if let Some(status) = child.try_wait().unwrap() {
+                let out = child.wait_with_output().unwrap();
+                panic!(
+                    "gwsr exited ({status}) before the download started: {}",
+                    String::from_utf8_lossy(&out.stderr)
+                );
+            }
             assert!(Instant::now() < deadline, "the download never started");
             std::thread::sleep(Duration::from_millis(20));
         }
