@@ -104,6 +104,9 @@ struct Builder {
     /// can split one line over several `Text` events (it does for CRLF input),
     /// so a line break is added only where a line really starts.
     code_line_start: bool,
+    /// A code block that continued the current list item has just ended:
+    /// the item's next text starts on a new line, not on the code's last one.
+    after_item_code: bool,
     /// Where the current list item's content starts, after its nesting tabs.
     item_body: u64,
 }
@@ -129,6 +132,7 @@ impl Builder {
     }
 
     fn end_para(&mut self) {
+        self.after_item_code = false;
         if let Some((start, kind)) = self.para_start.take() {
             self.push("\n");
             self.out.paras.push(Para {
@@ -155,6 +159,7 @@ impl Builder {
     /// closed (by a nested list or a paragraph end), the last bullet
     /// paragraph is reopened.
     fn continue_item(&mut self) {
+        self.after_item_code = false;
         match &self.para_start {
             Some((start, _)) => {
                 // The current item's nesting tabs are not content.
@@ -191,6 +196,9 @@ impl Builder {
     }
 
     fn text(&mut self, t: &str) {
+        if self.after_item_code {
+            self.continue_item();
+        }
         if self.para_start.is_none() {
             let kind = self.list_item_kind();
             self.begin_para(kind);
@@ -199,6 +207,10 @@ impl Builder {
     }
 
     fn open_span(&mut self, style: SpanStyle) {
+        // Break the line before the span starts, so it does not cover the break.
+        if self.after_item_code {
+            self.continue_item();
+        }
         self.open_spans.push((self.len, style));
     }
 
@@ -236,14 +248,16 @@ pub(super) fn render(md: &str) -> Result<Rendered, GwsError> {
         in_code_block: false,
         code_in_item: false,
         code_line_start: false,
+        after_item_code: false,
         item_body: 0,
     };
     for event in Parser::new_ext(md, options) {
         match event {
             Event::Start(tag) => match tag {
                 Tag::Paragraph => {
-                    if b.in_list_item() && b.para_start.is_none() {
-                        // A later paragraph of the same list item.
+                    if b.in_list_item() && (b.para_start.is_none() || b.after_item_code) {
+                        // A later paragraph of the same list item (after a
+                        // code block, the item's paragraph is still open).
                         b.continue_item();
                     } else {
                         let kind = b.list_item_kind();
@@ -261,6 +275,7 @@ pub(super) fn render(md: &str) -> Result<Rendered, GwsError> {
                 Tag::CodeBlock(_) => {
                     b.code_in_item = b.in_list_item();
                     b.code_line_start = true;
+                    b.after_item_code = false;
                     if !b.code_in_item {
                         b.end_para();
                     }
@@ -316,6 +331,7 @@ pub(super) fn render(md: &str) -> Result<Rendered, GwsError> {
                     b.in_quote = b.in_quote.saturating_sub(1);
                 }
                 TagEnd::CodeBlock => {
+                    b.after_item_code = b.code_in_item;
                     b.in_code_block = false;
                     b.code_in_item = false;
                 }
@@ -747,6 +763,35 @@ mod tests {
             .map(|s| (s.start, s.end))
             .collect();
         assert_eq!(code, vec![(2, 3), (4, 5)]);
+    }
+
+    #[test]
+    fn list_item_text_after_a_code_block_starts_a_new_line() {
+        // Tight item: the text after the fence is a bare Text event.
+        let r = render("- a\n  ```\n  x\n  ```\n  after\n- b\n").unwrap();
+        assert_eq!(r.text, "a\u{b}x\u{b}after\nb\n");
+        // Loose item: it is a paragraph, opened while the code block's
+        // line is still the item's open paragraph.
+        let r = render("- a\n\n  ```\n  x\n  ```\n\n  *after*\n- b\n").unwrap();
+        assert_eq!(r.text, "a\u{b}x\u{b}after\nb\n");
+        assert!(r.spans.contains(&Span {
+            start: 4,
+            end: 9,
+            style: SpanStyle::Italic
+        }));
+        assert_eq!(
+            bullet_ranges(&r),
+            vec![json!({"startIndex": 1, "endIndex": 13})]
+        );
+        let r = render("- a\n  ```\n  x\n  ```\n  **after**\n").unwrap();
+        assert_eq!(r.text, "a\u{b}x\u{b}after\n");
+        assert_eq!(r.spans.last().unwrap().start, 4);
+        // Two code blocks in a row still get one break between them.
+        let r = render("- a\n\n  ```\n  x\n  ```\n\n  ```\n  y\n  ```\n").unwrap();
+        assert_eq!(r.text, "a\u{b}x\u{b}y\n");
+        // A nested list after the code block is unaffected.
+        let r = render("- a\n  ```\n  x\n  ```\n  - b\n").unwrap();
+        assert_eq!(r.text, "a\u{b}x\n\tb\n");
     }
 
     #[test]
