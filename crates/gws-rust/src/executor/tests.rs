@@ -1210,6 +1210,7 @@ async fn small_file_uses_multipart() {
     call.body = Some(json!({"name": "a.txt"}));
     call.upload = Some(UploadSource {
         path: &path,
+        given: &path,
         content_type: None,
     });
     let em = Emitter::capturing();
@@ -1267,6 +1268,7 @@ async fn simple_upload_without_multipart_sends_raw_media() {
     let mut call = Call::new(&d, "create", &server);
     call.upload = Some(UploadSource {
         path: &path,
+        given: &path,
         content_type: None,
     });
     let em = Emitter::capturing();
@@ -1290,6 +1292,7 @@ async fn simple_upload_without_multipart_sends_metadata_resumable() {
     call.body = Some(json!({"name": "a.txt"}));
     call.upload = Some(UploadSource {
         path: &path,
+        given: &path,
         content_type: None,
     });
     call.options.dry_run = true;
@@ -1319,6 +1322,7 @@ async fn simple_upload_without_multipart_refuses_metadata() {
     call.body = Some(json!({"name": "a.txt"}));
     call.upload = Some(UploadSource {
         path: &path,
+        given: &path,
         content_type: None,
     });
     let err = call.run(&Emitter::capturing()).await.unwrap_err();
@@ -1341,6 +1345,7 @@ async fn upload_dry_run_lists_the_upload_type() {
     call.body = Some(json!({"name": "a.txt"}));
     call.upload = Some(UploadSource {
         path: &path,
+        given: &path,
         content_type: None,
     });
     call.options.dry_run = true;
@@ -1381,6 +1386,7 @@ async fn small_file_uses_resumable_when_it_is_the_only_protocol() {
     call.body = Some(json!({"name": "a.txt"}));
     call.upload = Some(UploadSource {
         path: &path,
+        given: &path,
         content_type: None,
     });
     call.options.dry_run = true;
@@ -1417,6 +1423,7 @@ async fn upload_type_in_params_conflicts_with_upload() {
             call.body = Some(json!({"name": "a.txt"}));
             call.upload = Some(UploadSource {
                 path: &path,
+                given: &path,
                 content_type: None,
             });
             call.options.dry_run = dry_run;
@@ -1515,6 +1522,7 @@ async fn resumable_upload_resumes_after_chunk_failure() {
     call.body = Some(json!({"name": "big.bin"}));
     call.upload = Some(UploadSource {
         path: &file_path,
+        given: &file_path,
         content_type: Some("application/octet-stream"),
     });
     call.options.upload_mode = UploadMode::Resumable;
@@ -1546,6 +1554,7 @@ async fn upload_session_uri_on_foreign_host_is_refused() {
     let mut call = Call::new(&d, "create", &server);
     call.upload = Some(UploadSource {
         path: &file_path,
+        given: &file_path,
         content_type: None,
     });
     call.options.upload_mode = UploadMode::Resumable;
@@ -1583,6 +1592,7 @@ async fn resumable_against(
     let mut call = Call::new(&d, "create", &server);
     call.upload = Some(UploadSource {
         path: &file_path,
+        given: &file_path,
         content_type: Some("application/octet-stream"),
     });
     call.options.upload_mode = UploadMode::Resumable;
@@ -1739,6 +1749,7 @@ async fn resumable_308_with_every_byte_finalizes_with_a_status_query() {
     let mut call = Call::new(&d, "create", &server);
     call.upload = Some(UploadSource {
         path: &file_path,
+        given: &file_path,
         content_type: Some("application/octet-stream"),
     });
     call.options.upload_mode = UploadMode::Resumable;
@@ -1891,6 +1902,7 @@ async fn upload_over_discovery_max_size_is_rejected_before_sending() {
     let mut call = Call::new(&d, "create", &server);
     call.upload = Some(UploadSource {
         path: &file_path,
+        given: &file_path,
         content_type: None,
     });
     let err = call.run(&Emitter::capturing()).await.unwrap_err();
@@ -1916,6 +1928,7 @@ async fn upload_at_exactly_max_size_is_allowed_and_units_are_binary() {
     let mut call = Call::new(&d, "create", &server);
     call.upload = Some(UploadSource {
         path: &file_path,
+        given: &file_path,
         content_type: None,
     });
     call.run(&Emitter::capturing()).await.unwrap();
@@ -1925,6 +1938,7 @@ async fn upload_at_exactly_max_size_is_allowed_and_units_are_binary() {
     let mut call = Call::new(&d, "create", &server);
     call.upload = Some(UploadSource {
         path: &file_path,
+        given: &file_path,
         content_type: None,
     });
     let err = call.run(&Emitter::capturing()).await.unwrap_err();
@@ -1946,6 +1960,7 @@ async fn upload_with_unaccepted_media_type_is_rejected_before_sending() {
     let mut call = Call::new(&d, "create", &server);
     call.upload = Some(UploadSource {
         path: &file_path,
+        given: &file_path,
         content_type: None,
     });
     let err = call.run(&Emitter::capturing()).await.unwrap_err();
@@ -1961,6 +1976,7 @@ async fn upload_with_unaccepted_media_type_is_rejected_before_sending() {
     let mut call = Call::new(&d, "create", &server);
     call.upload = Some(UploadSource {
         path: &file_path,
+        given: &file_path,
         content_type: Some("application/octet-stream"),
     });
     assert!(matches!(
@@ -1972,6 +1988,7 @@ async fn upload_with_unaccepted_media_type_is_rejected_before_sending() {
     call.options.dry_run = true;
     call.upload = Some(UploadSource {
         path: &file_path,
+        given: &file_path,
         content_type: None,
     });
     assert!(matches!(
@@ -1990,6 +2007,7 @@ async fn upload_with_unaccepted_media_type_is_rejected_before_sending() {
         let mut call = Call::new(&d, "create", &server);
         call.upload = Some(UploadSource {
             path: &file_path,
+            given: &file_path,
             content_type: Some(explicit),
         });
         call.run(&Emitter::capturing()).await.unwrap();
@@ -2003,6 +2021,7 @@ async fn upload_with_unaccepted_media_type_is_rejected_before_sending() {
     let mut call = Call::new(&d, "create", &server);
     call.upload = Some(UploadSource {
         path: &eml_path,
+        given: &eml_path,
         content_type: None,
     });
     call.run(&Emitter::capturing()).await.unwrap();
@@ -2020,6 +2039,7 @@ async fn unparseable_discovery_max_size_fails_loudly() {
     let mut call = Call::new(&d, "create", &server);
     call.upload = Some(UploadSource {
         path: &file_path,
+        given: &file_path,
         content_type: None,
     });
     let err = call.run(&Emitter::capturing()).await.unwrap_err();
