@@ -157,9 +157,16 @@ impl Shutdown {
 
 static SHUTDOWN: Shutdown = Shutdown::new();
 
+/// Set once the running command handles SIGINT/SIGTERM itself
+/// ([`listen_for_shutdown`]). Until then, a signal that arrives after
+/// [`clean_up_on_signal`] removes the unfinished output files and ends the
+/// process.
+static SIGNAL_HANDLED_BY_COMMAND: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
 /// Install the SIGINT/SIGTERM (Ctrl+C elsewhere) handlers that feed
-/// [`shutdown_signal`], if they are not installed yet. Must run inside the
-/// Tokio runtime.
+/// [`shutdown_signal`], if they are not installed yet, and leave the signal
+/// to the command. Must run inside the Tokio runtime.
 ///
 /// A command that creates resources before it first waits for a signal
 /// (`events +subscribe` and `gmail +watch` set up Pub/Sub resources, then
@@ -171,6 +178,36 @@ static SHUTDOWN: Shutdown = Shutdown::new();
 /// On Unix the handlers are installed synchronously, and they stay active
 /// for the lifetime of the process.
 pub(crate) fn listen_for_shutdown() {
+    SIGNAL_HANDLED_BY_COMMAND.store(true, std::sync::atomic::Ordering::SeqCst);
+    install_signal_handlers();
+}
+
+/// Make a SIGINT/SIGTERM remove the temporary files of unfinished output
+/// files ([`crate::output_file::AtomicFile`]) before the process exits with
+/// the signal's code (130 or 143). Without handlers the signal meets the
+/// default disposition, which kills the process and leaves them behind. A
+/// command that handles the signal itself ([`listen_for_shutdown`]) keeps
+/// doing so, and drops its unfinished files as it stops. Does nothing
+/// outside a Tokio runtime.
+pub(crate) fn clean_up_on_signal() {
+    if tokio::runtime::Handle::try_current().is_err() {
+        tracing::debug!("no async runtime: signals keep their default disposition");
+        return;
+    }
+    install_signal_handlers();
+}
+
+/// What a received signal does: latch it for [`shutdown_signal`] and,
+/// unless the command handles it, clean up and exit.
+fn on_signal(received: ShutdownSignal) {
+    SHUTDOWN.request(received);
+    if !SIGNAL_HANDLED_BY_COMMAND.load(std::sync::atomic::Ordering::SeqCst) {
+        crate::output_file::remove_unfinished();
+        std::process::exit(i32::from(received.exit_code()));
+    }
+}
+
+fn install_signal_handlers() {
     use std::sync::Once;
 
     static LISTEN: Once = Once::new();
@@ -204,7 +241,7 @@ pub(crate) fn listen_for_shutdown() {
                         ShutdownSignal::Interrupt
                     }
                 };
-                SHUTDOWN.request(received);
+                on_signal(received);
             });
         }
         #[cfg(not(unix))]
@@ -213,7 +250,7 @@ pub(crate) fn listen_for_shutdown() {
                 if let Err(e) = tokio::signal::ctrl_c().await {
                     tracing::error!("could not listen for Ctrl+C: {e}; shutting down");
                 }
-                SHUTDOWN.request(ShutdownSignal::Interrupt);
+                on_signal(ShutdownSignal::Interrupt);
             });
         }
     });
