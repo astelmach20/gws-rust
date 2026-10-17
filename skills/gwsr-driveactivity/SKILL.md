@@ -2,7 +2,7 @@
 name: gwsr-driveactivity
 description: "Google Drive Activity: Query activity on Drive files and folders."
 metadata:
-  version: 0.23.0
+  version: 0.24.0
   openclaw:
     category: "productivity"
     requires:

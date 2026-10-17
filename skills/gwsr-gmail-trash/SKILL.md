@@ -2,7 +2,7 @@
 name: gwsr-gmail-trash
 description: "Gmail: Move messages or threads to Trash."
 metadata:
-  version: 0.23.0
+  version: 0.24.0
   openclaw:
     category: "productivity"
     requires:

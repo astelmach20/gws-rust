@@ -2,7 +2,7 @@
 name: gwsr-people
 description: "Google People: Manage contacts and profiles."
 metadata:
-  version: 0.23.0
+  version: 0.24.0
   openclaw:
     category: "productivity"
     requires:

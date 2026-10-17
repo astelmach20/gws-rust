@@ -1515,7 +1515,7 @@ dependencies = [
 
 [[package]]
 name = "gws-rust"
-version = "0.23.0"
+version = "0.24.0"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -1580,7 +1580,7 @@ dependencies = [
 
 [[package]]
 name = "gws-rust-core"
-version = "0.23.0"
+version = "0.24.0"
 dependencies = [
  "anyhow",
  "bytes",

@@ -2,7 +2,7 @@
 name: gwsr-calendar-update
 description: "Google Calendar: Change fields of an existing event."
 metadata:
-  version: 0.23.0
+  version: 0.24.0
   openclaw:
     category: "productivity"
     requires:
