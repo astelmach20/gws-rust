@@ -781,8 +781,9 @@ EXAMPLES:
 TIPS:
   One-click unsubscribe is performed only when the message advertises
     List-Unsubscribe-Post: List-Unsubscribe=One-Click with an https URL and
-    Gmail verified its DKIM signature. Otherwise the available unsubscribe
-    links are printed and nothing is sent.
+    Gmail verified its DKIM signature. Otherwise nothing is sent: the command
+    fails with exit code 3, and its error message lists the available
+    unsubscribe links (https and mailto) to use by hand.
   With --sanitize, the unsubscribe URL is screened before the POST (block mode:
     a match or a Model Armor failure sends nothing).
   --dry-run loads no credentials and reads nothing: it shows the metadata
@@ -1064,6 +1065,21 @@ mod tests {
         ] {
             assert!(names.contains(&expected), "missing {expected}");
         }
+    }
+
+    /// When one-click is not possible `+unsubscribe` fails (exit 3) and its
+    /// error lists the manual links; the help must not promise printed
+    /// output (stdout) for that case.
+    #[test]
+    fn test_unsubscribe_help_says_it_fails_without_one_click() {
+        let help = unsubscribe_cmd()
+            .get_after_help()
+            .map(|h| h.to_string())
+            .unwrap_or_default();
+        let flat = help.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(!flat.contains("links are printed"), "{flat}");
+        assert!(flat.contains("fails with exit code 3"), "{flat}");
+        assert!(flat.contains("error message lists"), "{flat}");
     }
 
     /// `+triage` describes what its default query finds: `is:unread` searches
