@@ -38,14 +38,64 @@ fn exists_error(path: &Path) -> GwsError {
     ))
 }
 
+/// The temporary files of the [`AtomicFile`]s still being written.
+///
+/// Dropping an [`AtomicFile`] deletes its temporary file, but a signal ends
+/// the process without running destructors; [`remove_unfinished`] deletes
+/// them then (see [`crate::helpers::clean_up_on_signal`]).
+static UNFINISHED: std::sync::Mutex<Vec<PathBuf>> = std::sync::Mutex::new(Vec::new());
+
+fn unfinished() -> std::sync::MutexGuard<'static, Vec<PathBuf>> {
+    // The list stays usable after a panic elsewhere: it only holds paths.
+    UNFINISHED
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Delete the temporary file of every [`AtomicFile`] still being written.
+/// Called just before the process exits on a signal.
+pub(crate) fn remove_unfinished() {
+    for path in unfinished().drain(..) {
+        match std::fs::remove_file(&path) {
+            Ok(()) => {}
+            // Committed (renamed into place) or removed in the meantime.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => crate::output::eprint_line(&format!(
+                "warning: could not remove the partial file '{}': {e}",
+                crate::output::sanitize_for_terminal(&path.display().to_string())
+            )),
+        }
+    }
+}
+
+/// Lists a temporary file in [`UNFINISHED`] for as long as it lives.
+struct Unfinished(PathBuf);
+
+impl Unfinished {
+    fn register(path: &Path) -> Self {
+        unfinished().push(path.to_path_buf());
+        Self(path.to_path_buf())
+    }
+}
+
+impl Drop for Unfinished {
+    fn drop(&mut self) {
+        let mut list = unfinished();
+        if let Some(i) = list.iter().position(|p| *p == self.0) {
+            list.swap_remove(i);
+        }
+    }
+}
+
 /// A file being written atomically; nothing is visible at the target until
 /// [`AtomicFile::commit`]. Dropping it without committing deletes the
-/// temporary file.
+/// temporary file, and so does a SIGINT/SIGTERM that ends the process.
 pub(crate) struct AtomicFile {
     file: tokio::fs::File,
     temp: tempfile::TempPath,
     target: PathBuf,
     overwrite: bool,
+    _unfinished: Unfinished,
 }
 
 impl AtomicFile {
@@ -75,6 +125,8 @@ impl AtomicFile {
                 dir.display()
             ))
         })?;
+        // From here on a signal removes the temporary file before exiting.
+        crate::helpers::clean_up_on_signal();
         let mut builder = tempfile::Builder::new();
         builder.prefix(".gwsr-output-");
         // Output files are ordinary user files: create them with the default
@@ -91,11 +143,13 @@ impl AtomicFile {
             ))
         })?;
         let (file, temp) = named.into_parts();
+        let unfinished = Unfinished::register(&temp);
         Ok(Self {
             file: tokio::fs::File::from_std(file),
             temp,
             target: target.to_path_buf(),
             overwrite,
+            _unfinished: unfinished,
         })
     }
 
@@ -154,6 +208,27 @@ pub(crate) async fn write_atomic(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A temporary file is listed for [`remove_unfinished`] while it is
+    /// written, and no longer once it is committed or dropped.
+    #[tokio::test]
+    async fn unfinished_files_are_listed_until_committed_or_dropped() {
+        let dir = tempfile::tempdir().unwrap();
+        let listed = |temp: &Path| unfinished().iter().any(|p| p == temp);
+
+        let committed = AtomicFile::create(&dir.path().join("a"), false).unwrap();
+        let temp = committed.temp.to_path_buf();
+        assert!(listed(&temp));
+        committed.commit().await.unwrap();
+        assert!(!listed(&temp));
+
+        let dropped = AtomicFile::create(&dir.path().join("b"), false).unwrap();
+        let temp = dropped.temp.to_path_buf();
+        assert!(listed(&temp));
+        drop(dropped);
+        assert!(!listed(&temp));
+        assert!(!temp.exists());
+    }
 
     #[tokio::test]
     async fn write_atomic_respects_overwrite() {
