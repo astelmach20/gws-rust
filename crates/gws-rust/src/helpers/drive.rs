@@ -2005,7 +2005,10 @@ async fn sync_walk(
         }
         // A download creates its directory, but a folder with no file to
         // download (empty, or only sub-folders and skipped items) must still
-        // be mirrored.
+        // be mirrored. Like a download (see `AtomicFile::create`), it is
+        // checked against `GWSR_RESTRICT_PATHS` first: a symlinked
+        // sub-directory of `--dir` must not carry it outside.
+        crate::validate::check_output_path(&local_dir)?;
         std::fs::create_dir_all(&local_dir).map_err(|e| {
             GwsError::other(anyhow::anyhow!(
                 "cannot create the directory '{}' for Drive folder '{id}': {e}",
