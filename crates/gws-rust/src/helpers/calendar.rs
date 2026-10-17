@@ -945,20 +945,40 @@ async fn freebusy(api: &Api, m: &ArgMatches, tz: &TzInfo) -> Result<Value, GwsEr
     // won't fix it, so one of them makes the whole run a permanent failure
     // even when other calendars only need a retry.
     let mut permanent = false;
-    for (id, info) in cals {
-        if let Some(errors) = info.get("errors").and_then(Value::as_array)
-            && !errors.is_empty()
-        {
-            let reasons: Vec<&str> = errors
+    // Records `info`'s errors, if any; true when it has some.
+    let mut failed = |id: &str, info: &Value| -> bool {
+        let Some(errors) = info
+            .get("errors")
+            .and_then(Value::as_array)
+            .filter(|e| !e.is_empty())
+        else {
+            return false;
+        };
+        let reasons: Vec<&str> = errors
+            .iter()
+            .filter_map(|e| e.get("reason").and_then(Value::as_str))
+            .collect();
+        // An error without a reason is not known to be transient.
+        permanent |= reasons.len() < errors.len()
+            || reasons
                 .iter()
-                .filter_map(|e| e.get("reason").and_then(Value::as_str))
-                .collect();
-            // An error without a reason is not known to be transient.
-            permanent |= reasons.len() < errors.len()
-                || reasons
-                    .iter()
-                    .any(|r| !matches!(*r, "backendError" | "internalError"));
-            failures.push(format!("{id} ({})", reasons.join(", ")));
+                .any(|r| !matches!(*r, "backendError" | "internalError"));
+        failures.push(format!("{id} ({})", reasons.join(", ")));
+        true
+    };
+    // A group Google could not expand (more members than it expands, or no
+    // such group) reports its errors here, and none of its members' busy
+    // times are in `calendars`: free slots without them would be wrong.
+    for (id, info) in resp
+        .get("groups")
+        .and_then(Value::as_object)
+        .into_iter()
+        .flatten()
+    {
+        failed(id, info);
+    }
+    for (id, info) in cals {
+        if failed(id, info) {
             continue;
         }
         for b in info
@@ -1919,6 +1939,94 @@ mod tests {
             assert_eq!(err.exit_code(), exit, "{calendars}: {err}");
             assert!(err.to_string().contains("b@x"), "{calendars}: {err}");
         }
+    }
+
+    /// A group that Google could not expand (too many members, say) has its
+    /// errors under `groups`, not `calendars`; its members' busy times are
+    /// missing, so free slots computed without them must not be reported.
+    #[tokio::test]
+    async fn freebusy_group_expansion_errors_fail_the_command() {
+        for (reason, exit) in [
+            ("groupTooBig", GwsError::EXIT_CODE_VALIDATION),
+            ("backendError", GwsError::EXIT_CODE_API_RETRYABLE),
+        ] {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/freeBusy"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                    "calendars": {"primary": {"busy": []}},
+                    "groups": {"team@example.com": {
+                        "errors": [{"domain": "global", "reason": reason}]
+                    }}
+                })))
+                .mount(&server)
+                .await;
+            let api = api(&server.uri(), "");
+            let m = parse(&[
+                "gwsr",
+                "+freebusy",
+                "--start",
+                "2026-01-05T09:00:00Z",
+                "--end",
+                "2026-01-05T17:00:00Z",
+                "--calendar-id",
+                "primary",
+                "--calendar-id",
+                "team@example.com",
+                "--slot",
+                "1h",
+            ]);
+            let err = freebusy(
+                &api,
+                m.subcommand_matches("+freebusy").unwrap(),
+                &tz("UTC", false),
+            )
+            .await
+            .unwrap_err();
+            assert!(err.to_string().contains("team@example.com"), "{err}");
+            assert!(err.to_string().contains(reason), "{err}");
+            assert_eq!(err.exit_code(), exit, "{reason}: {err}");
+        }
+    }
+
+    /// A group that expanded fine contributes its members' calendars.
+    #[tokio::test]
+    async fn freebusy_expanded_group_is_not_an_error() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/freeBusy"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "calendars": {"a@example.com": {"busy": [
+                    {"start": "2026-01-05T09:00:00Z", "end": "2026-01-05T10:00:00Z"}
+                ]}},
+                "groups": {"team@example.com": {"calendars": ["a@example.com"]}}
+            })))
+            .mount(&server)
+            .await;
+        let api = api(&server.uri(), "");
+        let m = parse(&[
+            "gwsr",
+            "+freebusy",
+            "--start",
+            "2026-01-05T09:00:00Z",
+            "--end",
+            "2026-01-05T11:00:00Z",
+            "--calendar-id",
+            "team@example.com",
+            "--slot",
+            "1h",
+        ]);
+        let v = freebusy(
+            &api,
+            m.subcommand_matches("+freebusy").unwrap(),
+            &tz("UTC", false),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            v["freeSlots"],
+            json!([{"start": "2026-01-05T10:00:00+00:00", "end": "2026-01-05T11:00:00+00:00"}])
+        );
     }
 
     /// A per-calendar `backendError`/`internalError` is a transient Google
