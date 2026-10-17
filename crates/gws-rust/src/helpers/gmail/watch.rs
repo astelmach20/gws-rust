@@ -264,10 +264,12 @@ impl GmailWatchStep<'_> {
                 Err(e) => return Err(StepError::from(e)),
             };
             // Fail closed: a sanitization error in block mode aborts this
-            // iteration before anything is emitted or acknowledged.
+            // iteration before anything is emitted or acknowledged. A
+            // permanent failure (an invalid template, a 403 or 404) is fatal;
+            // only a retryable one is retried.
             match sanitize_value(self.sanitize, msg)
                 .await
-                .map_err(StepError::Transient)?
+                .map_err(StepError::from)?
             {
                 Sanitized::Pass(v) => self.output(&id, &v).await?,
                 Sanitized::Blocked(result) => emit_diagnostic(
@@ -1263,6 +1265,20 @@ mod tests {
             mode: crate::helpers::modelarmor::SanitizeMode::Block,
         };
         let err = run_once(&server, &sanitize).await.unwrap_err();
-        assert!(err.to_string().contains("giving up"), "{err}");
+        // A permanent error (here an invalid template) stops the stream at
+        // once, keeping its class, instead of being retried as transient.
+        assert!(matches!(err, GwsError::Validation(_)), "{err:?}");
+        assert!(!err.to_string().contains("giving up"), "{err}");
+        let pulls = server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .filter(|r| r.url.path().ends_with(":pull"))
+            .count();
+        assert_eq!(
+            pulls, 1,
+            "a permanent sanitization error must not be retried"
+        );
     }
 }
