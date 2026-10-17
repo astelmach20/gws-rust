@@ -2352,6 +2352,33 @@ fn generate_skills_filters_are_exact_and_output_is_agent_safe() {
         .stderr(predicate::str::contains("--filter matched no skill: a"));
 }
 
+/// `--index` names a file: a directory (existing, or spelled `dir/`) is a
+/// validation error before any skill is written.
+#[test]
+fn generate_skills_index_must_be_a_file() {
+    let env = Env::new();
+    std::fs::create_dir(env.work_dir().join("docs")).unwrap();
+    for index in ["docs", "new/"] {
+        env.cmd()
+            .args([
+                "dev",
+                "generate-skills",
+                "--output-dir",
+                "out",
+                "--filter",
+                "shared",
+                "--index",
+                index,
+            ])
+            .assert()
+            .code(3)
+            .stdout("")
+            .stderr(predicate::str::contains("--index"))
+            .stderr(predicate::str::contains("directory"));
+        assert!(!env.work_dir().join("out").exists(), "{index}");
+    }
+}
+
 // ── Process hygiene ─────────────────────────────────────────────────────
 
 #[test]

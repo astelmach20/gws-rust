@@ -141,7 +141,8 @@ pub async fn handle_generate_skills(
     let output_path_buf = crate::validate::validate_safe_output_dir(&args.output_dir)?;
     let output_path = output_path_buf.as_path();
     let index_path = match &args.index {
-        Some(p) => Some(crate::validate::validate_safe_file_path(p, "--index")?),
+        // A file: a directory is refused before any skill is written.
+        Some(p) => Some(crate::validate::validate_output_file_path(p, "--index")?),
         None => None,
     };
     let filter = SkillFilter(args.filters.iter().map(|f| f.trim().to_string()).collect());
