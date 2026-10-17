@@ -121,6 +121,13 @@ pub enum AuthError {
     /// The user or a Workspace policy denied the authorization request.
     #[error("{0}")]
     Denied(String),
+    /// The interactive sign-in did not finish within `--timeout`. No
+    /// credentials were obtained, so this is an auth failure, not a
+    /// configuration one.
+    #[error(
+        "timed out after {secs}s waiting for the browser sign-in (use --timeout to wait longer)"
+    )]
+    SignInTimedOut { secs: u64 },
     /// Unusable interactive input (e.g. a pasted callback URL).
     #[error("{0}")]
     Input(String),
@@ -200,7 +207,8 @@ impl Category {
             | AuthError::InvalidGrant { .. }
             | AuthError::InvalidScope { .. }
             | AuthError::TokenEndpoint(_)
-            | AuthError::Denied(_) => Category::Credential,
+            | AuthError::Denied(_)
+            | AuthError::SignInTimedOut { .. } => Category::Credential,
             AuthError::Config(_) => Category::Config,
             AuthError::Keystore(_) => Category::Store,
             AuthError::Storage(_) => Category::Store,
@@ -900,6 +908,7 @@ mod tests {
                 "tokenEndpointError",
             ),
             (AuthError::Denied("access_denied".into()), 2, "authError"),
+            (AuthError::SignInTimedOut { secs: 1 }, 2, "authError"),
             (AuthError::Config("bad file".into()), 8, "configError"),
             (
                 AuthError::Keystore(KeystoreError::KeyUnavailable("locked".into())),

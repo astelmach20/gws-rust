@@ -299,9 +299,11 @@ fn install_output(global: &GlobalArgs, settings: &Settings) -> Result<(), CliErr
         .as_deref()
         .map(jq::JqFilter::compile)
         .transpose()?;
+    let default_format = effective_format(global, settings)?;
+    formatter::check_columns_format(global.columns.as_deref(), default_format)?;
     formatter::install_settings(OutputSettings {
         json_style,
-        default_format: effective_format(global, settings)?,
+        default_format,
         columns: global.columns.clone(),
         jq,
         terminal,
