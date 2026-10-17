@@ -892,6 +892,40 @@ fn upload_rejects_paths_outside_cwd() {
     );
 }
 
+/// The upload is typed after the path as given, not the file a symlink
+/// resolves to: `notes.csv -> blob` is a CSV, which `--convert` turns into
+/// a Sheet.
+#[cfg(unix)]
+#[test]
+fn upload_types_a_symlink_by_its_own_name() {
+    let dir = setup();
+    std::fs::write(dir.path().join("blob"), "a,b\n1,2\n").unwrap();
+    std::os::unix::fs::symlink("blob", dir.path().join("notes.csv")).unwrap();
+    let out = gwsr(dir.path())
+        .args([
+            "drive",
+            "+upload",
+            "--file",
+            "notes.csv",
+            "--convert",
+            "--dry-run",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let plan = stdout_json(&out).to_string();
+    assert!(plan.contains("text/csv"), "{plan}");
+    assert!(
+        plan.contains("application/vnd.google-apps.spreadsheet"),
+        "{plan}"
+    );
+    assert!(plan.contains("notes.csv"), "{plan}");
+}
+
 #[test]
 fn upload_convert_of_unconvertible_type_is_a_validation_error_before_auth() {
     // No credentials exist here: `--convert` of a type no Google format

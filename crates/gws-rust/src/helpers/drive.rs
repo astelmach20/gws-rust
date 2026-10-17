@@ -430,10 +430,16 @@ impl UploadArgs {
                 check_mime_type(t)?;
                 t.to_string()
             }
-            None => mime_guess2::from_path(&path)
-                .first()
-                .map(|m| m.to_string())
-                .unwrap_or_else(|| "application/octet-stream".to_string()),
+            // Typed after the path as given, not the file a symlink
+            // resolves to: `report.pdf -> blobs/9f3a` is a PDF. A path
+            // ending in `..` has no name of its own; use the resolved one.
+            None => mime_guess2::from_path(match Path::new(raw).file_name() {
+                Some(_) => Path::new(raw),
+                None => path.as_path(),
+            })
+            .first()
+            .map(|m| m.to_string())
+            .unwrap_or_else(|| "application/octet-stream".to_string()),
         };
         let convert_to = if flag(m, "convert")? {
             Some(conversion_target(&content_type).ok_or_else(|| {

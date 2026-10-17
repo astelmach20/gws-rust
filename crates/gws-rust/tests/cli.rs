@@ -2053,6 +2053,34 @@ fn cache_clear_reports_removed_documents() {
     assert!(!env.seeded_drive_path().exists());
 }
 
+/// `--upload` is typed after the path as given, not the file a symlink
+/// resolves to: `notes.csv -> blob` is sent as `text/csv`.
+#[cfg(unix)]
+#[test]
+fn upload_content_type_comes_from_the_given_name_not_the_symlink_target() {
+    let env = Env::new();
+    let doc: Value =
+        serde_json::from_str(include_str!("fixtures/discovery/drive_v3.json")).unwrap();
+    env.seed_doc(&doc);
+    std::fs::write(env.work_dir().join("blob"), "a,b\n1,2\n").unwrap();
+    std::os::unix::fs::symlink("blob", env.work_dir().join("notes.csv")).unwrap();
+    let out = env
+        .cmd()
+        .args([
+            "drive",
+            "files",
+            "create",
+            "--upload",
+            "notes.csv",
+            "--dry-run",
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    let plan: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(plan["upload"]["contentType"], "text/csv", "{plan}");
+}
+
 #[test]
 fn man_pages_are_generated() {
     let env = Env::new();
