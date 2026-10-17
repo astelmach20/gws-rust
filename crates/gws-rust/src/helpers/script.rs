@@ -485,16 +485,23 @@ fn local_path_for(name: &str, file_type: &str) -> Result<PathBuf, GwsError> {
 /// replace the other, or two directories would merge and `+push` would
 /// rename files. The name maps back to the path on `+push`, so the file
 /// cannot simply be renamed on disk.
+///
+/// A path claimed once as a file and once as a directory (`a`, written as
+/// `a.gs`, and `a.gs/b`), or twice as a file, is refused too: both cannot be
+/// written, and finding out at the write would leave the files before it on
+/// disk.
 fn claim_case_insensitively(
-    claimed: &mut HashMap<String, PathBuf>,
+    claimed: &mut HashMap<String, (PathBuf, bool)>,
     relative: &Path,
 ) -> Result<(), GwsError> {
     let mut prefix = PathBuf::new();
-    for component in relative.components() {
+    let mut components = relative.components().peekable();
+    while let Some(component) = components.next() {
         prefix.push(component);
+        let is_dir = components.peek().is_some();
         let key = crate::helpers::http::case_insensitive_key(&prefix.to_string_lossy());
         match claimed.get(&key) {
-            Some(existing) if *existing != prefix => {
+            Some((existing, _)) if *existing != prefix => {
                 return Err(GwsError::Validation(format!(
                     "Apps Script files '{}' and '{}' differ only in case (or Unicode \
                      normalization) and would overwrite each other on a case-insensitive disk; rename one in the \
@@ -503,9 +510,16 @@ fn claim_case_insensitively(
                     prefix.display()
                 )));
             }
-            Some(_) => {}
+            Some((_, true)) if is_dir => {}
+            Some(_) => {
+                return Err(GwsError::Validation(format!(
+                    "more than one Apps Script file needs the local path '{}' (as a file or as \
+                     a directory); rename one in the Apps Script editor (nothing was written)",
+                    prefix.display()
+                )));
+            }
             None => {
-                claimed.insert(key, prefix.clone());
+                claimed.insert(key, (prefix.clone(), is_dir));
             }
         }
     }
@@ -525,8 +539,9 @@ async fn pull(api: &Api, script_id: &str, dir: &Path, overwrite: bool) -> Result
         .and_then(Value::as_array)
         .ok_or_else(|| http::other_err(anyhow::anyhow!("Project content has no files")))?;
     let mut planned = Vec::new();
-    // Case-folded path prefix -> the spelling that claimed it first.
-    let mut claimed: HashMap<String, PathBuf> = HashMap::new();
+    // Case-folded path prefix -> the spelling that claimed it first, and
+    // whether it is a directory.
+    let mut claimed: HashMap<String, (PathBuf, bool)> = HashMap::new();
     for f in files {
         let name = f.get("name").and_then(Value::as_str).unwrap_or("");
         let file_type = f.get("type").and_then(Value::as_str).unwrap_or("");
@@ -1180,6 +1195,36 @@ mod tests {
                 fs::read_dir(dir.path()).unwrap().count(),
                 0,
                 "nothing written"
+            );
+        }
+    }
+
+    /// `a` (written as `a.gs`) and `a.gs/b` (in a directory `a.gs`) are
+    /// distinct Apps Script names that need one local path to be both a file
+    /// and a directory (or a name listed twice). Refuse before writing, as
+    /// for a case clash, rather than failing part-way with one of them on
+    /// disk.
+    #[tokio::test]
+    async fn pull_refuses_a_file_and_a_directory_at_the_same_path() {
+        for names in [["a", "a.gs/b"], ["a.gs/b", "a"], ["a", "a"]] {
+            let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .and(path("/v1/projects/S_1/content"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({"files": [
+                    {"name": names[0], "type": "SERVER_JS", "source": "var first;"},
+                    {"name": names[1], "type": "SERVER_JS", "source": "var second;"}
+                ]})))
+                .mount(&server)
+                .await;
+            let api = api(&server.uri(), "");
+            let dir = tempdir().unwrap();
+            let err = pull(&api, "S_1", dir.path(), true).await.unwrap_err();
+            assert!(matches!(err, GwsError::Validation(_)), "{names:?}: {err:?}");
+            assert!(err.to_string().contains("nothing was written"), "{err}");
+            assert_eq!(
+                fs::read_dir(dir.path()).unwrap().count(),
+                0,
+                "{names:?}: nothing written"
             );
         }
     }
