@@ -238,7 +238,9 @@ async fn list(
     )))
     .query("maxResults", "100")
     .query("showCompleted", show_completed.to_string())
-    .query("showHidden", show_completed.to_string());
+    .query("showHidden", show_completed.to_string())
+    // Tasks assigned to the user from Docs or Chat are left out by default.
+    .query("showAssigned", "true");
     let page = api.paginate(req, "items", limit).await?;
     Ok(page.into_json("tasks"))
 }
@@ -345,6 +347,30 @@ mod tests {
             .await;
         let api = api(&server.uri(), "");
         assert_eq!(list(&api, "L1", true, None).await.unwrap()["count"], 1);
+    }
+
+    #[tokio::test]
+    async fn list_includes_tasks_assigned_to_the_user() {
+        // tasks.list leaves out tasks assigned from Docs or Chat unless
+        // showAssigned is true, with or without --show-completed.
+        for show_completed in [false, true] {
+            let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .and(path("/tasks/v1/lists/L1/tasks"))
+                .and(query_param("showAssigned", "true"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({"items": [
+                    {"id": "a"},
+                    {"id": "b", "assignmentInfo": {"surfaceType": "DOCUMENT"}}
+                ]})))
+                .expect(1)
+                .mount(&server)
+                .await;
+            let api = api(&server.uri(), "");
+            assert_eq!(
+                list(&api, "L1", show_completed, None).await.unwrap()["count"],
+                2
+            );
+        }
     }
 
     #[tokio::test]

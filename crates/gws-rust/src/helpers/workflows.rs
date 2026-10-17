@@ -382,10 +382,12 @@ fn next_meeting_query(time_min: &str) -> Vec<(&'static str, String)> {
     ]
 }
 
-/// Query of `tasks.list` for the open tasks of the default list.
+/// Query of `tasks.list` for the open tasks of the default list, including
+/// those assigned to the user from Docs or Chat (left out by default).
 fn open_tasks_query() -> Vec<(&'static str, String)> {
     vec![
         ("showCompleted", "false".to_string()),
+        ("showAssigned", "true".to_string()),
         ("maxResults", "100".to_string()),
     ]
 }
@@ -1214,6 +1216,32 @@ mod tests {
         let printed =
             crate::formatter::format_value(&out, &crate::formatter::OutputFormat::Json).unwrap();
         assert!(serde_json::from_str::<Value>(&printed).is_ok());
+    }
+
+    #[tokio::test]
+    async fn standup_includes_tasks_assigned_to_the_user() {
+        // tasks.list leaves out tasks assigned from Docs or Chat unless
+        // showAssigned is true; they are open tasks too.
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/calendar/v3/calendars/primary/events"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/tasks/v1/lists/@default/tasks"))
+            .and(query_param("showAssigned", "true"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"items": [
+                {"title": "Mine"},
+                {"title": "Review the doc", "assignmentInfo": {"surfaceType": "DOCUMENT"}}
+            ]})))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let out = standup_report(&rest(&server), &bases(&server), "a", "b", "2026-01-01")
+            .await
+            .unwrap();
+        assert_eq!(out["taskCount"], 2);
     }
 
     #[tokio::test]
