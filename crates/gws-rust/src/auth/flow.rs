@@ -508,11 +508,8 @@ pub async fn run(
     opts: &LoginOptions,
     on_url: &dyn Fn(&str) -> Result<(), AuthError>,
 ) -> Result<LoginTokens, AuthError> {
-    let timeout_err = || {
-        AuthError::Config(format!(
-            "timed out after {}s waiting for the browser sign-in (use --timeout to wait longer)",
-            opts.timeout.as_secs()
-        ))
+    let timeout_err = || AuthError::SignInTimedOut {
+        secs: opts.timeout.as_secs(),
     };
     match opts.mode {
         RedirectMode::Loopback => {
@@ -753,6 +750,27 @@ mod tests {
         let mut out = String::new();
         s.read_to_string(&mut out).await.unwrap();
         out
+    }
+
+    #[tokio::test]
+    async fn loopback_sign_in_timeout_is_an_auth_error() {
+        let opts = LoginOptions {
+            scopes: vec!["https://www.googleapis.com/auth/drive.readonly".into()],
+            mode: RedirectMode::Loopback,
+            open_browser: false,
+            timeout: Duration::from_millis(50),
+            login_hint: None,
+            login_command: "gwsr auth login".into(),
+        };
+        let err = run(&client(), &Endpoints::default(), &opts, &|_| Ok(()))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, AuthError::SignInTimedOut { .. }),
+            "unexpected error: {err}"
+        );
+        assert!(err.to_string().contains("--timeout"), "{err}");
+        assert_eq!(crate::error::GwsError::from(err).exit_code(), 2);
     }
 
     #[tokio::test]
