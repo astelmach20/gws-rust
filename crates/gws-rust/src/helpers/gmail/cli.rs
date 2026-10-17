@@ -131,12 +131,25 @@ pub(super) fn parse_optional_mailboxes(
     matches: &ArgMatches,
     name: &str,
 ) -> Result<Option<Vec<Mailbox>>, GwsError> {
-    let Some(value) = parse_optional_trimmed(matches, name)? else {
+    optional_mailboxes(crate::args::optional(matches, name)?, name)
+}
+
+/// [`parse_optional_mailboxes`] for an argument that some commands sharing
+/// the code do not define (`--remove`, only on `+reply-all`).
+pub(super) fn parse_optional_mailboxes_if_defined(
+    matches: &ArgMatches,
+    name: &str,
+) -> Result<Option<Vec<Mailbox>>, GwsError> {
+    optional_mailboxes(crate::args::optional_if_defined(matches, name)?, name)
+}
+
+fn optional_mailboxes(value: Option<&str>, name: &str) -> Result<Option<Vec<Mailbox>>, GwsError> {
+    let Some(value) = value.map(str::trim).filter(|s| !s.is_empty()) else {
         return Ok(None);
     };
     let flag = format!("--{name}");
-    reject_dangerous_header_chars(&value, &flag)?;
-    let mailboxes = Mailbox::parse_list(&value);
+    reject_dangerous_header_chars(value, &flag)?;
+    let mailboxes = Mailbox::parse_list(value);
     reject_invisible_in_addresses(&mailboxes, &flag)?;
     Ok(Some(mailboxes).filter(|v| !v.is_empty()))
 }

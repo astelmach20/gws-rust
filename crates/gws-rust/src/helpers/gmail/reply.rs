@@ -442,15 +442,12 @@ fn format_quoted_original_html(original: &OriginalMessage) -> String {
 
 // --- Argument parsing ---
 
-use super::cli::{parse_optional_mailboxes, required_str};
+use super::cli::{parse_optional_mailboxes, parse_optional_mailboxes_if_defined, required_str};
 
 fn parse_reply_args(matches: &ArgMatches) -> Result<ReplyConfig, GwsError> {
-    // +reply does not define --remove (only +reply-all does).
-    let remove = crate::args::optional_if_defined(matches, "remove")?
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(Mailbox::parse_list)
-        .filter(|v| !v.is_empty());
+    // +reply does not define --remove (only +reply-all does). It is checked
+    // like the other address flags.
+    let remove = parse_optional_mailboxes_if_defined(matches, "remove")?;
 
     Ok(ReplyConfig {
         message_id: super::cli::required_message_id(matches)?,
@@ -852,6 +849,46 @@ mod tests {
         assert!(config.extra_to.is_none());
         assert!(config.cc.is_none());
         assert!(config.bcc.is_none());
+    }
+
+    /// `--remove` is validated like the other address flags: control
+    /// characters and invisible Unicode are refused, not silently stripped or
+    /// left to match nobody.
+    #[test]
+    fn test_parse_reply_args_rejects_hidden_characters_in_remove() {
+        for bad in [
+            "carol\u{200B}@example.com",
+            "Carol <carol\u{200C}@example.com>",
+            "carol@example.com\r\nBcc: eve@example.com",
+            "carol@\u{202E}example.com",
+        ] {
+            let matches = make_reply_matches(&[
+                "test",
+                "--message-id",
+                "abc123",
+                "--body",
+                "Reply",
+                "--remove",
+                bad,
+            ]);
+            let Err(err) = parse_reply_args(&matches) else {
+                panic!("--remove {bad:?} was accepted");
+            };
+            assert!(matches!(err, GwsError::Validation(_)), "{bad:?}: {err:?}");
+            assert!(err.to_string().contains("--remove"), "{bad:?}: {err}");
+        }
+        // A display name may still use zero-width joiners, as for --cc.
+        let matches = make_reply_matches(&[
+            "test",
+            "--message-id",
+            "abc123",
+            "--body",
+            "Reply",
+            "--remove",
+            "Fam\u{200D}ily <carol@example.com>",
+        ]);
+        let config = parse_reply_args(&matches).unwrap();
+        assert_eq!(config.remove.unwrap()[0].email, "carol@example.com");
     }
 
     #[test]
