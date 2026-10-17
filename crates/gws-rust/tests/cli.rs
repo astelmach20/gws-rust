@@ -3987,6 +3987,35 @@ fn restrict_paths_confines_dev_man_and_auth_export() {
     assert!(env.work_dir().join("man").join("gwsr.1").exists());
 }
 
+/// `auth export --unmasked --output` refuses a path that names a directory
+/// before reading any credentials: `newdir/` used to resolve to `newdir`,
+/// so the secrets were written to a file of that name.
+#[test]
+fn auth_export_output_naming_a_directory_is_refused() {
+    let env = Env::new();
+    std::fs::create_dir(env.work_dir().join("existing")).unwrap();
+    for output in ["newdir/", "newdir/.", "existing"] {
+        let out = env
+            .cmd()
+            .args([
+                "auth",
+                "export",
+                "--unmasked",
+                "--yes-i-understand-this-exposes-secrets",
+                "--output",
+                output,
+            ])
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(3), "{output}: {out:?}");
+        assert!(out.stdout.is_empty(), "{output}: {out:?}");
+        let err: Value = serde_json::from_slice(&out.stderr).unwrap();
+        let message = err["error"]["message"].as_str().unwrap();
+        assert!(message.contains("directory"), "{output}: {message}");
+    }
+    assert!(!env.work_dir().join("newdir").exists());
+}
+
 // ── -o/--output and long-running operations ─────────────────────────────
 
 /// `-o` waits for a long-running operation automatically, but only for a
