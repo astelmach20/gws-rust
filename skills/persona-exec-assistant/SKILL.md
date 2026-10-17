@@ -29,7 +29,7 @@ Manage an executive's schedule, inbox, and communications.
 
 ## Instructions
 - Start each day with `gwsr workflow +standup-report` to get the executive's agenda and open tasks.
-- Before each meeting, run `gwsr workflow +meeting-prep` to see attendees, description, and linked docs.
+- Before each meeting, run `gwsr workflow +meeting-prep` to see the next meeting's attendees, description, location, and Meet link.
 - Triage the inbox with `gwsr gmail +triage --max 10` — prioritize emails from direct reports and leadership.
 - Schedule meetings with `gwsr calendar +insert` — always check for conflicts first using `gwsr calendar +agenda`.
 - Draft replies with `gwsr gmail +reply --message-id MESSAGE_ID --body 'TEXT' --draft` for the executive to review — keep tone professional and concise.
