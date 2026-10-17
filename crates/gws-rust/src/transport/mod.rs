@@ -301,9 +301,14 @@ impl Transport {
     ) -> Result<Sent, GwsError> {
         let url = self.shared.endpoints.check(url)?;
         let mut refreshed = false;
+        // What the attempts before a 401 refresh did: the returned `Sent`
+        // describes the whole request, so a retry note still counts them and
+        // still says when one of them may have been applied.
+        let mut earlier_attempts: u32 = 0;
+        let mut earlier_unknown = false;
         loop {
             let token = self.current_token()?;
-            let sent = gws_rust_core::client::send(policy, idempotency, || {
+            let mut sent = gws_rust_core::client::send(policy, idempotency, || {
                 let mut rb = self.shared.client.request(method.clone(), url.clone());
                 if let Some(token) = &token {
                     rb = rb.bearer_auth(token);
@@ -314,6 +319,8 @@ impl Transport {
                 customize(rb)
             })
             .await?;
+            sent.attempts = sent.attempts.saturating_add(earlier_attempts);
+            sent.earlier_attempt_unknown |= earlier_unknown;
             // A 401 means the server rejected the credential before doing any
             // work, so re-sending (even a POST) cannot duplicate an effect.
             if sent.response.status() == StatusCode::UNAUTHORIZED
@@ -327,6 +334,8 @@ impl Transport {
                 logged.set_fragment(None);
                 tracing::debug!(url = %logged, "HTTP 401; refreshing access token and retrying once");
                 refreshed = true;
+                earlier_attempts = sent.attempts;
+                earlier_unknown = sent.earlier_attempt_unknown;
                 self.refresh_token().await?;
                 continue;
             }
@@ -801,6 +810,59 @@ mod tests {
                 .contains("Request had invalid authentication credentials."),
             "{err}"
         );
+    }
+
+    /// A DELETE whose first attempt got a 503 (it may have been applied) and
+    /// whose retry got a 401 is sent once more with a fresh token. When that
+    /// finds nothing, the error must still say the earlier attempt may have
+    /// deleted it, and count every attempt: the refresh used to start the
+    /// retry history afresh.
+    #[tokio::test]
+    async fn retry_history_survives_a_401_refresh() {
+        struct Provider;
+        #[async_trait::async_trait]
+        impl AccessTokenProvider for Provider {
+            async fn refresh_access_token(&self) -> anyhow::Result<String> {
+                Ok("fresh-token".to_string())
+            }
+        }
+        let server = MockServer::start().await;
+        for status in [503, 401] {
+            Mock::given(method("DELETE"))
+                .respond_with(ResponseTemplate::new(status))
+                .up_to_n_times(1)
+                .mount(&server)
+                .await;
+        }
+        Mock::given(method("DELETE"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+        let t = Transport::new(
+            &Credentials::Refreshable {
+                token: "stale-token".to_string(),
+                provider: Arc::new(Provider),
+            },
+            Transport::for_test(&server.uri()).retry,
+            EndpointPolicy::with_override(&server.uri()).unwrap(),
+            None,
+        )
+        .unwrap();
+        let sent = t
+            .send(
+                Method::DELETE,
+                &format!("{}/v1/x", server.uri()),
+                Idempotency::FromMethod,
+                |rb| rb,
+            )
+            .await
+            .unwrap();
+        assert_eq!(sent.response.status(), StatusCode::NOT_FOUND);
+        assert_eq!(server.received_requests().await.unwrap().len(), 3);
+        assert_eq!(sent.attempts, 3);
+        let note = sent.retry_note().unwrap_or_default();
+        assert!(note.contains("may already have deleted it"), "{note:?}");
+        assert!(note.contains("attempt 3"), "{note:?}");
     }
 
     /// The 401 refresh is logged at debug (which file logs always record)
