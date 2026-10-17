@@ -34,16 +34,33 @@ use crate::error::GwsError;
 /// which are preserved for readability) and dangerous Unicode characters
 /// (bidi overrides, zero-width chars, line/paragraph separators).
 pub(crate) fn sanitize_for_terminal(text: &str) -> String {
+    text.chars().filter(|&c| terminal_safe(c)).collect()
+}
+
+/// Whether [`sanitize_for_terminal`] keeps `c`.
+fn terminal_safe(c: char) -> bool {
+    if c == '\n' || c == '\t' {
+        return true;
+    }
+    if c.is_control() {
+        return false;
+    }
+    !is_dangerous_unicode(c)
+}
+
+/// Zero-width non-joiner and joiner (U+200C, U+200D): invisible, but part of
+/// ordinary text (Persian and Indic scripts, emoji sequences such as 👨‍👩‍👧).
+/// They neither move the cursor nor reorder text.
+pub(crate) fn is_joiner(c: char) -> bool {
+    matches!(c, '\u{200C}' | '\u{200D}')
+}
+
+/// [`sanitize_for_terminal`] for natural-language API text printed as data
+/// (table and CSV cells, raw `--jq` strings): the zero-width joiners such
+/// text uses ([`is_joiner`]) are kept.
+pub(crate) fn sanitize_text_for_terminal(text: &str) -> String {
     text.chars()
-        .filter(|&c| {
-            if c == '\n' || c == '\t' {
-                return true;
-            }
-            if c.is_control() {
-                return false;
-            }
-            !is_dangerous_unicode(c)
-        })
+        .filter(|&c| is_joiner(c) || terminal_safe(c))
         .collect()
 }
 
@@ -311,6 +328,20 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_str(&escaped).unwrap();
         assert_eq!(parsed, value);
         assert!(escaped.contains("日本語 café\\tαβγ"), "{escaped}");
+    }
+
+    #[test]
+    fn text_sanitizer_keeps_joiners_only() {
+        let family = "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}";
+        let persian = "\u{0645}\u{06CC}\u{200C}\u{062E}\u{0648}\u{0627}\u{0645}";
+        assert_eq!(sanitize_text_for_terminal(family), family);
+        assert_eq!(sanitize_text_for_terminal(persian), persian);
+        assert_eq!(
+            sanitize_text_for_terminal("a\u{200B}b\u{202E}c\u{1b}[2Jd\u{9b}e\u{200D}f"),
+            "abc[2Jde\u{200D}f"
+        );
+        // The general sanitizer still removes them.
+        assert_eq!(sanitize_for_terminal(family), "\u{1F468}\u{1F469}\u{1F467}");
     }
 
     #[test]
