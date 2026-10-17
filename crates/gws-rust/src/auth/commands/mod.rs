@@ -230,8 +230,7 @@ pub(crate) fn parse_or_help(
                     | clap::error::ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand
             ) =>
         {
-            e.print()
-                .map_err(|io| GwsError::Validation(format!("failed to print help: {io}")))?;
+            crate::print_display(&e)?;
             Ok(None)
         }
         Err(e) => Err(GwsError::Validation(e.to_string())),
@@ -305,12 +304,7 @@ pub async fn handle_auth_command(
         Some((other, _)) => Err(GwsError::Validation(format!(
             "unknown auth subcommand '{other}'"
         ))),
-        None => {
-            auth_command()
-                .print_help()
-                .map_err(|e| GwsError::Validation(format!("failed to print help: {e}")))?;
-            Ok(())
-        }
+        None => crate::print_help(&mut auth_command()),
     }
 }
 

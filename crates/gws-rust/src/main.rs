@@ -212,26 +212,47 @@ fn is_display_request(e: &clap::Error) -> bool {
 }
 
 /// Print help/version text to stdout (exit status 0).
-fn print_display(e: &clap::Error) -> Result<(), CliError> {
-    let text = display_text(
-        e,
+///
+/// Written through [`output::emit`], so a reader that closed stdout
+/// (`gwsr ... --help | head`) is a clean exit, not an error.
+pub(crate) fn print_display(e: &clap::Error) -> Result<(), GwsError> {
+    print_styled(&e.render())
+}
+
+/// Print `cmd`'s help to stdout, like [`print_display`].
+pub(crate) fn print_help(cmd: &mut clap::Command) -> Result<(), GwsError> {
+    print_styled(&cmd.render_help())
+}
+
+fn print_styled(styled: &clap::builder::StyledStr) -> Result<(), GwsError> {
+    let text = styled_text(
+        styled,
         output::stdout_is_terminal(),
         output::no_color(),
         output::console_renders_ansi,
     );
-    output::emit(text.trim_end()).map_err(CliError::from)
+    output::emit(text.trim_end())
 }
 
 /// Help/version text, styled only for a terminal that renders ANSI codes
 /// (not a Windows console without virtual terminal processing, which would
 /// print them as `←[1m`) and without `NO_COLOR`.
+#[cfg(test)]
 fn display_text(
     e: &clap::Error,
     terminal: bool,
     no_color: bool,
     renders_ansi: impl FnOnce() -> bool,
 ) -> String {
-    let styled = e.render();
+    styled_text(&e.render(), terminal, no_color, renders_ansi)
+}
+
+fn styled_text(
+    styled: &clap::builder::StyledStr,
+    terminal: bool,
+    no_color: bool,
+    renders_ansi: impl FnOnce() -> bool,
+) -> String {
     if output::color_enabled(terminal, no_color, renders_ansi) {
         styled.ansi().to_string()
     } else {
@@ -562,7 +583,7 @@ async fn run_service(
     let repeat_check = cli_args::may_repeat_globals(&cmd, &argv).then(|| cmd.clone());
     let matches = match cmd.try_get_matches_from(&argv) {
         Ok(m) => m,
-        Err(e) if is_display_request(&e) => return print_display(&e),
+        Err(e) if is_display_request(&e) => return Ok(print_display(&e)?),
         Err(e) => return Err(e.into()),
     };
     if let Some(cmd) = repeat_check {

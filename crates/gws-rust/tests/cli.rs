@@ -2376,6 +2376,41 @@ fn closed_stdout_is_a_clean_exit() {
     assert_eq!(out.status.code(), Some(0), "{stderr}");
 }
 
+/// `auth` prints its own help; a reader that closed stdout (`| head`) is a
+/// clean exit there too, not a validation error.
+#[test]
+fn auth_help_to_a_closed_stdout_is_a_clean_exit() {
+    let env = Env::new();
+    for args in [
+        &["auth"][..],
+        &["auth", "--help"],
+        &["auth", "login", "--help"],
+        &["auth", "setup", "--help"],
+        &["help", "auth", "status"],
+    ] {
+        let (reader, writer) = std::io::pipe().unwrap();
+        // Nobody reads: every write to stdout fails with a broken pipe.
+        drop(reader);
+        let out = std::process::Command::new(assert_cmd::cargo::cargo_bin("gwsr"))
+            .args(args)
+            .env_clear()
+            .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+            .env("HOME", env.root.path().join("home"))
+            .env("GWSR_CONFIG_DIR", env.config_dir())
+            .env("GWSR_CACHE_DIR", env.cache_dir())
+            .env("GWSR_KEYRING_BACKEND", "file")
+            .env("NO_COLOR", "1")
+            .current_dir(env.work_dir())
+            .stdout(writer)
+            .stderr(std::process::Stdio::piped())
+            .output()
+            .unwrap();
+        let stderr = stderr_of(&out);
+        assert_eq!(out.status.code(), Some(0), "{args:?}: {stderr}");
+        assert!(stderr.is_empty(), "{args:?}: {stderr}");
+    }
+}
+
 #[cfg(unix)]
 #[test]
 fn non_utf8_arguments_do_not_panic() {
