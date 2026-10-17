@@ -238,6 +238,36 @@ fn drafting_instructions_pass_draft() {
     );
 }
 
+/// `workflow +meeting-prep` shows the next meeting's time, attendees,
+/// description, location and links (Meet, Calendar); it does not open or list
+/// documents or attachments. Text citing it must not promise them.
+#[test]
+fn meeting_prep_text_claims_only_what_it_shows() {
+    let mut failures = Vec::new();
+    for (file, src) in [("recipes.toml", RECIPES), ("personas.toml", PERSONAS)] {
+        let doc: toml::Value = toml::from_str(src).unwrap();
+        let mut texts = Vec::new();
+        strings(&doc, &mut texts);
+        for t in texts
+            .iter()
+            .filter(|t| t.contains("+meeting-prep ") || t.contains("+meeting-prep`"))
+        {
+            let lower = t.to_lowercase();
+            if ["doc", "attachment", "file"]
+                .iter()
+                .any(|w| lower.contains(w))
+            {
+                failures.push(format!("{file}: {t:?}"));
+            }
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "text promises +meeting-prep output it does not have:\n{}",
+        failures.join("\n")
+    );
+}
+
 #[test]
 fn validator_rejects_known_bad_commands() {
     for bad in [
