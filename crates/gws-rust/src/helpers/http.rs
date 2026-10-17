@@ -503,7 +503,12 @@ impl Api {
             return self.emit(matches, &Value::Null).await;
         }
         self.screen_text(text).await?;
-        print_text(text)
+        // The text is printed whole, followed by one more newline, even when
+        // it ends with its own (`emit` would not add one then).
+        if text.is_empty() {
+            return Ok(());
+        }
+        print_text(&format!("{text}\n"))
     }
 
     /// Dry-run plan recorded so far (tests).

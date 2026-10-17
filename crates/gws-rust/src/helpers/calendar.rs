@@ -1178,6 +1178,15 @@ async fn update(api: &Api, m: &ArgMatches, tz: &TzInfo) -> Result<Value, GwsErro
 
     if !add.is_empty() || !remove.is_empty() {
         let mut attendees: Vec<Value> = match &current {
+            // The PATCH replaces the whole guest list, so writing back a
+            // partial one would uninvite every guest left out of it.
+            Some(c) if attendees_omitted(c) => {
+                return Err(GwsError::Validation(format!(
+                    "Event {event_id} does not show its whole guest list to you \
+                     (attendeesOmitted); --add-attendee/--remove-attendee would remove the \
+                     hidden guests, so nothing was changed"
+                )));
+            }
             Some(c) => c
                 .get("attendees")
                 .and_then(Value::as_array)
@@ -1270,15 +1279,21 @@ async fn rsvp(
             me["comment"] = json!(c);
         }
     };
-    let attendees = if api.is_dry_run() {
+    let body = if api.is_dry_run() {
         api.send(ApiRequest::get(url.clone())).await?;
         // The real PATCH carries the event's whole guest list, fetched by the
         // GET above; only your entry changes.
         let mut me = json!({ "self": true });
         respond(&mut me);
-        json!(["<every other attendee of the event, unchanged>", me])
+        api.plan_note(json!({"note": "if the event hides its guest list (attendeesOmitted), only your entry is sent, with attendeesOmitted: true"}))?;
+        json!({ "attendees": ["<every other attendee of the event, unchanged>", me] })
     } else {
         let event = api.send(ApiRequest::get(url.clone())).await?;
+        // A partial guest list (hidden from you, or capped) must not be
+        // written back as the whole list: that would uninvite every guest
+        // left out. `attendeesOmitted: true` tells the API the list is
+        // partial, so only your response is updated.
+        let omitted = attendees_omitted(&event);
         let mut attendees = event
             .get("attendees")
             .and_then(Value::as_array)
@@ -1293,14 +1308,25 @@ async fn rsvp(
                 ))
             })?;
         respond(me);
-        Value::Array(attendees)
+        if omitted {
+            let me = me.clone();
+            json!({ "attendees": [me], "attendeesOmitted": true })
+        } else {
+            json!({ "attendees": attendees })
+        }
     };
     api.send(
         ApiRequest::patch(url)
             .query("sendUpdates", send_updates)
-            .json(json!({ "attendees": attendees })),
+            .json(body),
     )
     .await
+}
+
+/// Whether the event's `attendees` may be incomplete (`attendeesOmitted`),
+/// e.g. because the organizer hid the guest list from you.
+fn attendees_omitted(event: &Value) -> bool {
+    event.get("attendeesOmitted").and_then(Value::as_bool) == Some(true)
 }
 
 #[cfg(test)]
@@ -2544,9 +2570,16 @@ mod tests {
             .unwrap();
         let plan = api.planned();
         assert_eq!(plan[0]["method"], "GET");
-        assert_eq!(plan[1]["method"], "PATCH");
+        assert!(
+            plan[1]["note"]
+                .as_str()
+                .unwrap()
+                .contains("attendeesOmitted"),
+            "{plan:?}"
+        );
+        assert_eq!(plan[2]["method"], "PATCH");
         assert_eq!(
-            plan[1]["body"],
+            plan[2]["body"],
             json!({"attendees": [
                 "<every other attendee of the event, unchanged>",
                 {"self": true, "responseStatus": "accepted"}
@@ -2558,8 +2591,80 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(
-            api.planned()[1]["body"]["attendees"][1],
+            api.planned()[2]["body"]["attendees"][1],
             json!({"self": true, "responseStatus": "declined", "comment": "busy"})
+        );
+    }
+
+    /// When the guest list is hidden from you, the event lists only your own
+    /// entry and sets `attendeesOmitted`. Writing that list back would
+    /// uninvite every hidden guest; the PATCH must say the list is partial
+    /// (`attendeesOmitted: true`), so only your response is updated.
+    #[tokio::test]
+    async fn rsvp_with_omitted_attendees_updates_only_your_response() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/calendars/primary/events/E1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "attendeesOmitted": true,
+                "attendees": [{"email": "me@x", "self": true}]
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("PATCH"))
+            .and(path("/calendars/primary/events/E1"))
+            .and(body_partial_json(json!({
+                "attendeesOmitted": true,
+                "attendees": [{"email": "me@x", "responseStatus": "accepted"}]
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id": "E1"})))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let api = api(&server.uri(), "");
+        rsvp(&api, "primary", "E1", "accepted", None, "all")
+            .await
+            .unwrap();
+    }
+
+    /// `+update` cannot add or remove guests of an event whose guest list is
+    /// partial: the PATCH replaces the whole list, so the hidden guests would
+    /// be removed. It refuses, and nothing is sent.
+    #[tokio::test]
+    async fn update_attendees_of_event_with_omitted_attendees_is_refused() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/calendars/primary/events/E1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "attendeesOmitted": true,
+                "attendees": [{"email": "me@x", "self": true}]
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("PATCH"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+            .expect(0)
+            .mount(&server)
+            .await;
+        let api = api(&server.uri(), "");
+        let m = parse(&[
+            "gwsr",
+            "+update",
+            "--event-id",
+            "E1",
+            "--add-attendee",
+            "c@x",
+        ]);
+        let err = update(
+            &api,
+            m.subcommand_matches("+update").unwrap(),
+            &tz("UTC", false),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(&err, GwsError::Validation(m) if m.contains("attendeesOmitted")),
+            "{err:?}"
         );
     }
 
