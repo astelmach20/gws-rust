@@ -444,11 +444,26 @@ fn boundary_of(content_type: &str) -> Option<String> {
 }
 
 /// Split `text` into its header block and body at the first blank line.
+/// Lines may end in `\r\n` or `\n`, mixed within one part, so the split is
+/// at the earliest blank line of either kind, never at a later `\r\n\r\n`
+/// inside the body.
 fn split_headers(text: &str) -> (&str, &str) {
-    for sep in ["\r\n\r\n", "\n\n"] {
-        if let Some(i) = text.find(sep) {
-            return (&text[..i], &text[i + sep.len()..]);
-        }
+    let bytes = text.as_bytes();
+    for (i, _) in text.match_indices('\n') {
+        let rest = &bytes[i + 1..];
+        let body_start = if rest.starts_with(b"\n") {
+            i + 2
+        } else if rest.starts_with(b"\r\n") {
+            i + 3
+        } else {
+            continue;
+        };
+        let header_end = if i > 0 && bytes[i - 1] == b'\r' {
+            i - 1
+        } else {
+            i
+        };
+        return (&text[..header_end], &text[body_start..]);
     }
     (text, "")
 }
@@ -1192,6 +1207,26 @@ mod tests {
         assert_eq!(parts[2].status, 204);
         assert_eq!(parts[2].body, Value::Null);
         assert!(parse_batch_response("application/json", "").is_err());
+    }
+
+    /// Headers end at the first blank line, whichever line ending it uses: a
+    /// `\r\n\r\n` later in a part (inside its JSON body) must not be taken
+    /// as the end of `\n`-terminated headers.
+    #[test]
+    fn splits_headers_at_the_first_blank_line_with_mixed_line_endings() {
+        let body = "--resp\nContent-Type: application/http\nContent-ID: <response-item-a>\n\n\
+                    HTTP/1.1 200 OK\nContent-Type: application/json\n\n{\"id\":\"1\",\r\n\r\n\"n\":2}\n\
+                    --resp\r\nContent-ID: <response-item-b>\r\n\n\
+                    HTTP/1.1 404 Not Found\n\r\n{\"error\":{}}\r\n--resp--\r\n";
+        let parts = parse_batch_response("multipart/mixed; boundary=resp", body).unwrap();
+        assert_eq!(parts.len(), 2);
+        assert_eq!(parts[0].content_id.as_deref(), Some("response-item-a"));
+        assert_eq!(parts[0].status, 200);
+        assert_eq!(parts[0].body, json!({"id": "1", "n": 2}));
+        assert_eq!(parts[1].content_id.as_deref(), Some("response-item-b"));
+        assert_eq!(parts[1].status, 404);
+        assert_eq!(parts[1].body, json!({"error": {}}));
+        assert_eq!(split_headers("A: 1\r\nB: 2"), ("A: 1\r\nB: 2", ""));
     }
 
     #[test]
