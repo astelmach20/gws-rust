@@ -67,7 +67,7 @@ fn main() -> ExitCode {
     match completions::complete_if_requested() {
         Ok(true) => return ExitCode::SUCCESS,
         Ok(false) => {}
-        Err(e) => return finish(Err(CliError::from(e)), false),
+        Err(e) => return finish(Err(completion_error(e)), false),
     }
 
     install_broken_pipe_hook();
@@ -144,6 +144,27 @@ fn main() -> ExitCode {
     code
 }
 
+/// The error of a failed completion callback. clap reports a failed write of
+/// the candidates or the registration script as an `Io` error; that is a
+/// stdout failure like any other command's ([`output::stdout_error`]: a
+/// closed pipe is a quiet exit, anything else exit 5), not bad input.
+///
+/// clap keeps only the I/O error's text, so a closed pipe is recognized by
+/// its OS error number, as in [`is_stdout_broken_pipe_panic`].
+fn completion_error(e: clap::Error) -> CliError {
+    if e.kind() != clap::error::ErrorKind::Io {
+        return CliError::from(e);
+    }
+    let rendered = e.to_string();
+    let message = rendered.trim().trim_start_matches("error: ").to_string();
+    let kind = if is_broken_pipe_message(&message) {
+        std::io::ErrorKind::BrokenPipe
+    } else {
+        std::io::ErrorKind::Other
+    };
+    output::stdout_error(std::io::Error::new(kind, message)).into()
+}
+
 /// True when the effective output format is a human one (not JSON):
 /// `--format` flag > `fallback` (the validated `GWSR_FORMAT`, or the resolved
 /// settings once the config file is loaded) > JSON.
@@ -194,10 +215,15 @@ fn install_broken_pipe_hook() {
 }
 
 fn is_stdout_broken_pipe_panic(message: &str) -> bool {
-    message.starts_with("failed printing to stdout")
-        && (message.contains("Broken pipe")
-            || message.contains("os error 32)")
-            || message.contains("os error 232)"))
+    message.starts_with("failed printing to stdout") && is_broken_pipe_message(message)
+}
+
+/// True for the text of an EPIPE I/O error (`ERROR_NO_DATA`, 232, on
+/// Windows).
+fn is_broken_pipe_message(message: &str) -> bool {
+    message.contains("Broken pipe")
+        || message.contains("os error 32)")
+        || message.contains("os error 232)")
 }
 
 /// True for clap "errors" that are really requests to print help/version.
@@ -858,6 +884,20 @@ mod tests {
             "failed printing to stdout: No space left on device (os error 28)"
         ));
         assert!(!is_stdout_broken_pipe_panic("index out of bounds"));
+    }
+
+    /// A completion callback's I/O error is a stdout failure (exit 5), not
+    /// bad input; other clap errors keep their meaning.
+    #[test]
+    fn completion_io_errors_are_stdout_errors() {
+        let full = clap::Error::raw(
+            clap::error::ErrorKind::Io,
+            "No space left on device (os error 28)",
+        );
+        let err = completion_error(full);
+        assert_eq!(err.exit_code(), GwsError::EXIT_CODE_OTHER, "{err:?}");
+        let usage = clap::Error::raw(clap::error::ErrorKind::InvalidValue, "bad value");
+        assert!(matches!(completion_error(usage), CliError::Clap(_)));
     }
 
     #[test]
