@@ -446,7 +446,8 @@ fn http_client() -> Result<reqwest::Client, GwsError> {
 }
 
 /// Whether `err` is a request that got no response within the configured
-/// response timeout.
+/// response timeout: no headers in time, or a body that stopped arriving for
+/// that long.
 pub(crate) fn is_timeout(err: &GwsError) -> bool {
     use gws_rust_core::client::SendError;
     let (GwsError::Network(e) | GwsError::Other(e)) = err else {
@@ -456,10 +457,13 @@ pub(crate) fn is_timeout(err: &GwsError) -> bool {
     // A connect timeout is a connection that could not be made: the request
     // was never sent, so it is not "no response within the timeout".
     let no_response = |e: &reqwest::Error| e.is_timeout() && !e.is_connect();
-    std::iter::successors(Some(root), |e| e.source()).any(|e| match e.downcast_ref::<SendError>() {
-        Some(SendError::Timeout { .. }) => true,
-        Some(SendError::Transport { source, .. }) => no_response(source),
-        _ => e.downcast_ref::<reqwest::Error>().is_some_and(no_response),
+    std::iter::successors(Some(root), |e| e.source()).any(|e| {
+        e.is::<BodyIdleTimeout>()
+            || match e.downcast_ref::<SendError>() {
+                Some(SendError::Timeout { .. }) => true,
+                Some(SendError::Transport { source, .. }) => no_response(source),
+                _ => e.downcast_ref::<reqwest::Error>().is_some_and(no_response),
+            }
     })
 }
 
@@ -495,6 +499,13 @@ pub(crate) async fn read_body(
     Ok(body)
 }
 
+/// No bytes of a response body arrived within the idle limit. [`is_timeout`]
+/// counts it as "no response within the timeout", like a wait for headers
+/// that times out.
+#[derive(Debug, thiserror::Error)]
+#[error("no data received for {}s while reading the response body (see --timeout)", .0.as_secs())]
+pub(crate) struct BodyIdleTimeout(Duration);
+
 /// Next chunk of a body stream with an idle timeout.
 pub(crate) async fn next_chunk<S>(
     stream: &mut S,
@@ -506,15 +517,7 @@ where
     let next = match idle {
         Some(limit) => tokio::time::timeout(limit, stream.next())
             .await
-            .map_err(|_| {
-                GwsError::Network(
-                    format!(
-                        "no data received for {}s while reading the response body (see --timeout)",
-                        limit.as_secs()
-                    )
-                    .into(),
-                )
-            })?,
+            .map_err(|_| GwsError::Network(Box::new(BodyIdleTimeout(limit))))?,
         None => stream.next().await,
     };
     next.transpose().map_err(|e| {

@@ -871,6 +871,39 @@ mod tests {
         assert!(got.is_empty());
     }
 
+    /// An idle long-poll whose headers arrive but whose body then stalls past
+    /// the timeout is "no messages yet", the same as a wait for headers that
+    /// times out: unacknowledged messages are redelivered, and the stall must
+    /// not count against `--max-failures`.
+    #[tokio::test]
+    async fn pull_body_stall_means_no_messages() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 4096];
+            let read = socket.read(&mut buf).await.unwrap();
+            assert!(read > 0, "no request arrived");
+            // Promise 100 bytes, send 1, then go silent with the socket open.
+            socket
+                .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 100\r\n\r\n{")
+                .await
+                .unwrap();
+            std::future::pending::<()>().await;
+            drop(socket);
+        });
+        let client = PubSubClient::with_base(&Transport::for_test(&base), &base);
+        let got = tokio::time::timeout(
+            Duration::from_secs(5),
+            client.pull("s", 1, Duration::from_millis(100)),
+        )
+        .await
+        .expect("pull ignored its timeout while reading the body");
+        assert!(matches!(got, Ok(ref v) if v.is_empty()), "{got:?}");
+        server.abort();
+    }
+
     /// A failed deletion is an API outcome with its own class (a refused
     /// permission exits 1), not an internal error (5); every failure is
     /// still named.
