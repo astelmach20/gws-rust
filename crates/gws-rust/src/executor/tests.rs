@@ -2912,6 +2912,64 @@ async fn batch_results_follow_input_order_when_parts_are_reordered() {
     assert_eq!(ids, vec![json!("a"), json!("b")]);
 }
 
+/// A batch response that lacks the part for one call still answers the
+/// others: those calls were applied, so their results are printed and only
+/// the call without a part is reported as having no result. Discarding them
+/// all made the caller re-send calls that had already been applied.
+#[tokio::test]
+async fn batch_prints_the_parts_a_response_has_when_one_is_missing() {
+    let server = MockServer::start().await;
+    let response_body = "--b\r\nContent-Type: application/http\r\nContent-ID: <response-item-c>\r\n\r\n\
+                         HTTP/1.1 404 Not Found\r\n\r\n{\"error\":{\"code\":404}}\r\n\
+                         --b\r\nContent-Type: application/http\r\nContent-ID: <response-item-a>\r\n\r\n\
+                         HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{\"id\":\"1\"}\r\n--b--\r\n";
+    Mock::given(method("POST"))
+        .and(path("/batch/drive/v3"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_raw(response_body, "multipart/mixed; boundary=b"),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    let d = doc(&server.uri());
+    let opts = options(&server);
+    let input: String = ["a", "b", "c"]
+        .iter()
+        .map(|id| {
+            format!(
+                "{{\"id\":\"{id}\",\"method\":\"files.get\",\"params\":{{\"fileId\":\"{id}\"}}}}\n"
+            )
+        })
+        .collect();
+    let calls = batch::parse_calls(&d, &input, &opts).unwrap();
+    let em = Emitter::capturing();
+    let err = batch::run_batch(
+        &d,
+        &calls,
+        Some(Credentials::Static("tok".into())),
+        &opts,
+        &SanitizeConfig::default(),
+        &em,
+    )
+    .await
+    .unwrap_err();
+    let printed: Vec<(Value, Value)> = lines(&em)
+        .iter()
+        .map(|l| (l["id"].clone(), l["status"].clone()))
+        .collect();
+    assert_eq!(
+        printed,
+        vec![(json!("a"), json!(200)), (json!("c"), json!(404))],
+        "{err}"
+    );
+    let msg = err.to_string();
+    assert!(
+        msg.contains("no result for call(s) b (the batch response had no part for them"),
+        "{msg}"
+    );
+    assert!(!msg.contains("a, b") && !msg.contains("b, c"), "{msg}");
+}
+
 #[test]
 #[serial_test::serial]
 fn batch_ids_must_be_unique() {
