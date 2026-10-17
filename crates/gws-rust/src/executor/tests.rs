@@ -2872,6 +2872,47 @@ async fn batch_posts_to_the_discovery_batch_path() {
     );
 }
 
+/// MIME parameter names are case-insensitive: a batch response whose
+/// Content-Type spells the parameter `Boundary` (quoted or not) is still a
+/// multipart response, not "no multipart boundary" after the calls were
+/// applied.
+#[tokio::test]
+async fn batch_reads_a_response_whose_boundary_parameter_is_capitalized() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/batch/drive/v3"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_raw(batch_parts(1, 1), "multipart/mixed; Boundary=\"b\""),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    let d = doc(&server.uri());
+    let opts = options(&server);
+    let calls = batch::parse_calls(
+        &d,
+        "{\"method\":\"files.get\",\"params\":{\"fileId\":\"1\"}}",
+        &opts,
+    )
+    .unwrap();
+    let em = Emitter::capturing();
+    let result = batch::run_batch(
+        &d,
+        &calls,
+        Some(Credentials::Static("tok".into())),
+        &opts,
+        &SanitizeConfig::default(),
+        &em,
+    )
+    .await;
+    assert!(result.is_ok(), "{result:?}");
+    assert_eq!(
+        lines(&em),
+        vec![json!({"id": "1", "status": 200, "body": {"id": "1"}})]
+    );
+}
+
 #[tokio::test]
 async fn batch_results_follow_input_order_when_parts_are_reordered() {
     // Parts are matched by Content-ID; Google does not promise to return them

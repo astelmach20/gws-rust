@@ -435,11 +435,21 @@ pub(crate) struct PartResponse {
     pub body: Value,
 }
 
+/// The `boundary` parameter of a multipart Content-Type. Parameter names
+/// are case-insensitive (RFC 2045 §5.1), so `Boundary=` counts too; the
+/// value may be quoted. An empty boundary is no boundary.
 fn boundary_of(content_type: &str) -> Option<String> {
-    content_type.split(';').find_map(|p| {
-        let p = p.trim();
-        p.strip_prefix("boundary=")
-            .map(|b| b.trim_matches('"').to_string())
+    content_type.split(';').skip(1).find_map(|p| {
+        let (name, value) = p.split_once('=')?;
+        if !name.trim().eq_ignore_ascii_case("boundary") {
+            return None;
+        }
+        let value = value.trim();
+        let value = value
+            .strip_prefix('"')
+            .and_then(|v| v.strip_suffix('"'))
+            .unwrap_or(value);
+        (!value.is_empty()).then(|| value.to_string())
     })
 }
 
@@ -1207,6 +1217,28 @@ mod tests {
         assert_eq!(parts[2].status, 204);
         assert_eq!(parts[2].body, Value::Null);
         assert!(parse_batch_response("application/json", "").is_err());
+    }
+
+    /// The boundary parameter's name is case-insensitive and its value may
+    /// be quoted or surrounded by spaces; an empty one is refused.
+    #[test]
+    fn finds_the_boundary_parameter_in_any_case() {
+        for (content_type, boundary) in [
+            ("multipart/mixed; boundary=b1", Some("b1")),
+            ("multipart/mixed; Boundary=b1", Some("b1")),
+            ("multipart/mixed;BOUNDARY=\"b1\"", Some("b1")),
+            ("multipart/mixed; charset=utf-8; boundary = b1 ", Some("b1")),
+            ("multipart/mixed; boundary=\"\"", None),
+            ("multipart/mixed; boundary=", None),
+            ("multipart/mixed; xboundary=b1", None),
+            ("multipart/mixed", None),
+        ] {
+            assert_eq!(
+                boundary_of(content_type).as_deref(),
+                boundary,
+                "{content_type}"
+            );
+        }
     }
 
     /// Headers end at the first blank line, whichever line ending it uses: a
