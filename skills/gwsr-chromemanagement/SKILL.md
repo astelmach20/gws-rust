@@ -26,6 +26,7 @@ gwsr chromemanagement <resource> <method> [flags]
 
 ### customers
 
+  - `getSubscriptionInfo` — Gets the aggregated subscription and license information for a given customer as a singleton resource. Note: Because the data is snapshotted for ChromeOS devices, the exact numbers can be delayed by up to 10 seconds.
   - `apps` — Operations on the 'apps' resource
   - `certificateProvisioningProcesses` — Operations on the 'certificateProvisioningProcesses' resource
   - `chromeBrowsers` — Operations on the 'chromeBrowsers' resource
